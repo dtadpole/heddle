@@ -29,7 +29,17 @@ pub struct CompactionOutcome {
     pub tokens: Option<u64>,
     /// The summary's sequence number in the session log.
     pub summary_seq: Option<u64>,
+    /// A turn of the session is running, or another compaction of it is: nothing was attempted.
+    pub busy: bool,
+    /// A summary was written and refused (it did not shrink the history), with the reason recorded in the log.
+    pub refused: Option<String>,
 }
+
+/// DSH's `/compact` answer for an agent that is not idle (dsh-command-compact, `busy`).
+pub const COMPACT_BUSY: &str = "Compaction is unavailable because this process has an active compaction, or the agent is not idle.";
+/// DSH's `/compact` answer for a summary that could not be made smaller (dsh-command-compact, `summary`).
+pub const COMPACT_REFUSED: &str =
+    "Compaction could not produce a useful summary. The attempt is recorded in the session log.";
 
 /// The compaction `/compact` asks for: summarise the session's older history now. An `Err` is the sentence
 /// naming why it could not.
@@ -53,6 +63,15 @@ pub fn compact_command(host: Arc<dyn CompactionHost>) -> CommandDefinition {
                     return Ok(CommandResult::error("Usage: /compact (no arguments)"));
                 }
                 let outcome = host.compact_now(&context.session).await?;
+                // DSH refuses a manual compaction while the session has an open turn or a compaction (`busy`),
+                // and reports a summary that could not be made smaller as an error, not as nothing to compact
+                // (#132).
+                if outcome.busy {
+                    return Ok(CommandResult::error(COMPACT_BUSY));
+                }
+                if outcome.refused.is_some() {
+                    return Ok(CommandResult::error(COMPACT_REFUSED));
+                }
                 if !outcome.compacted {
                     return Ok(CommandResult::success_text("No compactable history yet."));
                 }
@@ -436,6 +455,7 @@ mod tests {
                     items: Some(12),
                     tokens: Some(3400),
                     summary_seq: Some(7),
+                    ..CompactionOutcome::default()
                 }),
                 Ok(CompactionOutcome::default()),
                 Ok(CompactionOutcome {
@@ -467,6 +487,35 @@ mod tests {
         assert_eq!(
             run(&registry, &fixture, "/compact").await,
             success("Compacted older history.")
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_answers_dsh_errors_for_a_busy_session_and_a_refused_summary() {
+        let fixture = Fixture::new("compact-busy-refused");
+        let host = Arc::new(Outcomes {
+            outcomes: Mutex::new(vec![
+                Ok(CompactionOutcome {
+                    busy: true,
+                    ..CompactionOutcome::default()
+                }),
+                Ok(CompactionOutcome {
+                    refused: Some("the summary is not smaller (310 >= 233)".to_owned()),
+                    ..CompactionOutcome::default()
+                }),
+            ]),
+            calls: AtomicUsize::new(0),
+        });
+        let registry = CommandRegistry::new();
+        registry.register(compact_command(host)).unwrap();
+        assert_eq!(
+            run(&registry, &fixture, "/compact").await,
+            error(COMPACT_BUSY)
+        );
+        assert_eq!(
+            run(&registry, &fixture, "/compact").await,
+            error(COMPACT_REFUSED),
+            "a refused summary is not \"No compactable history yet.\""
         );
     }
 
