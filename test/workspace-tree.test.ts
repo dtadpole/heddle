@@ -233,3 +233,22 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
 })
+
+test('the first-use workspace reads as Default workspace while it keeps its automatic title', () => {
+  /**
+   * DSH's workspaceDisplayTitle (dsh-api-workspace-controller lib/types/default-workspace.js): the stored title stays
+   * the folder name, default-workspace, and the browser labels it with the default name; any other title, including
+   * one a person typed, reads verbatim.
+   */
+  const label = new Function(`${page.slice(begin, end)}\nreturn typeof workspaceDisplayTitle === 'function' ? workspaceDisplayTitle : undefined`)() as
+    | ((title: string) => string)
+    | undefined
+  assert.equal(typeof label, 'function', 'the block carries the label rule')
+  assert.equal(label?.('default-workspace'), 'Default workspace')
+  assert.equal(label?.('Default workspace'), 'Default workspace')
+  assert.equal(label?.('notes'), 'notes')
+  const [group] = tree.deriveGroups([workspace('w-default', '/h/default-workspace', { title: 'default-workspace' })], [])
+  assert.equal(group?.label, 'Default workspace', 'the row shows the default name')
+  const [renamed] = tree.deriveGroups([workspace('w-default', '/h/default-workspace', { title: 'Mine' })], [])
+  assert.equal(renamed?.label, 'Mine', 'and a rename wins')
+})
