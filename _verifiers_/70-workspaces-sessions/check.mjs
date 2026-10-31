@@ -1470,6 +1470,130 @@ test('a turn cut by a server restart reads as interrupted at once, and is closed
   }
 })
 
+test('a session log that is not a readable log is left out after a restart, and the server still starts whole (#130)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #130, by its own steps: register a folder, make sessions there (one with a turn, the rest blank), stop the
+   * server, replace one blank session's log with 64 random bytes and another's with the line {"not":"zstd"}, start
+   * again. Measured before the fix: the TypeScript server's start stopped at the first unreadable log after its listener
+   * was up, so every session answered 500, the tree and the workspaces 503, and no login line was printed; the Rust
+   * server started but still listed both damaged sessions while answering 404 for them. Neither named the file.
+   *
+   * DSH's rule (dsh-session-persistence-jsonl README, "Reading the logs"): "Unreadable or unsupported headers,
+   * including corrupt Zstandard header frames, are omitted from discovery and list(). Direct access to a corrupt
+   * compressed header still rejects." So the damaged sessions drop out of the list and are refused when named, every
+   * other session lists and opens, and the start completes. DSH says nothing when it omits one; heddle prints one
+   * line naming the file, and this check asks for the path in the server's output.
+   */
+  const h = harness('unreadable-log')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  const env = { ...h.env, HOME: h.home }
+  const randomBytes = Buffer.from('79ac1a9d5df6abd7a1b2c3d4e5f60718293a4b5c6d7e8f9011223344556677889900aabbccddeeff00112233445566778899aabbccddeeff0011223344556677', 'hex')
+  const plainLine = Buffer.from('{"not":"zstd"}\n')
+  let live
+  try {
+    const connect = async () => {
+      const origin = new URL(live.url).origin
+      const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+      return (path, init = {}) => fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    }
+    live = await startServer(serverArgs, env)
+    let call = await connect()
+    const registered = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: h.work }) })
+    assert.equal(registered.status, 200, `the folder was registered\n${await registered.text()}`)
+    const ids = []
+    for (let index = 0; index < 4; index += 1) {
+      const made = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: h.work }) })
+      const body = await made.text()
+      assert.equal(made.status, 200, `session ${index + 1} was created\n${body}`)
+      ids.push(JSON.parse(body).session)
+    }
+    const [turned, blank, random, plain] = ids
+    const turn = await call('/api/turn', { method: 'POST', body: JSON.stringify({ session: turned, prompt: 'remember this' }) })
+    const stream = await turn.text()
+    assert.equal(turn.status, 200, `the first session ran a turn\n${stream}`)
+    assert.ok(stream.includes('a remembered answer'), `and was answered\n${stream}`)
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 300))
+
+    const randomLog = transcriptFile(join(h.home, 'sessions', random))
+    const plainLog = transcriptFile(join(h.home, 'sessions', plain))
+    writeFileSync(randomLog, randomBytes)
+    writeFileSync(plainLog, plainLine)
+
+    try {
+      live = await startServer(serverArgs, env)
+    } catch (error) {
+      assert.fail(`the restarted server printed its login line (heddle web: http://…?token=…)\n${error.message}`)
+    }
+    call = await connect()
+    const listing = await call('/api/sessions')
+    const listed = await listing.text()
+    assert.equal(listing.status, 200, `the sessions are listed\n${listed}`)
+    const listedIds = JSON.parse(listed).map((meta) => meta.id)
+    assert.ok(listedIds.includes(turned) && listedIds.includes(blank), `every healthy session is listed\n${listed}`)
+    assert.ok(!listedIds.includes(random), `the session whose log holds random bytes is left out of the list, as DSH omits an unreadable header\n${listed}`)
+    assert.ok(!listedIds.includes(plain), `and so is the one whose log is a plain JSON line\n${listed}`)
+
+    const opened = await call(`/api/sessions/${turned}`)
+    const view = await opened.text()
+    assert.equal(opened.status, 200, `the healthy session with a turn opens\n${view}`)
+    assert.ok(view.includes('a remembered answer'), `and shows its answer\n${view}`)
+    const empty = await call(`/api/sessions/${blank}`)
+    assert.equal(empty.status, 200, `the healthy blank session opens\n${await empty.text()}`)
+    for (const id of [random, plain]) {
+      const refused = await call(`/api/sessions/${id}`)
+      const body = await refused.text()
+      assert.equal(refused.status, 404, `direct access to a damaged session is refused as no session\n${body}`)
+      assert.equal(JSON.parse(body).error, `no session ${id}`, 'with the words an unknown id gets')
+      /**
+       * A turn into it is refused the same way, before anything runs (developer-six on #130: the Rust turn route
+       * answered with the store's absolute path, and the page offered a live composer on the row).
+       */
+      const refusedTurn = await call('/api/turn', { method: 'POST', body: JSON.stringify({ session: id, prompt: 'are you there?' }) })
+      const answer = await refusedTurn.text()
+      assert.equal(refusedTurn.status, 404, `a turn into a damaged session is refused as no session\n${answer}`)
+      assert.deepEqual(JSON.parse(answer), { error: `no session ${id}`, code: 'session/not-found' }, 'with the turn route\'s answer for an unknown id')
+      assert.ok(!answer.includes(h.home), `and without the store's path on disk\n${answer}`)
+    }
+
+    const workspaces = await call('/api/workspaces')
+    const shown = await workspaces.text()
+    assert.equal(workspaces.status, 200, `the workspace plugin is loaded and answers\n${shown}`)
+    assert.ok(JSON.parse(shown).workspaces?.some((workspace) => workspace.path === realpathSync(h.work) || workspace.path === h.work), `and lists the folder\n${shown}`)
+    const tree = await call(`/api/tree?path=${encodeURIComponent(h.work)}`)
+    const level = await tree.text()
+    assert.equal(tree.status, 200, `the tree answers for the folder\n${level}`)
+    /**
+     * The tree draws a session from the definition it wrote into the folder (_sessions_/<name>/session.json), not from
+     * the store, so after the store dropped the damaged sessions their rows still opened on a 404. They are gone from
+     * the folder's level and from the roots' level; the healthy ones keep theirs.
+     */
+    assert.ok(level.includes(turned) && level.includes(blank), `the healthy sessions keep their rows in the folder\n${level}`)
+    const roots = await call('/api/tree')
+    const top = await roots.text()
+    assert.equal(roots.status, 200, `the roots' level answers\n${top}`)
+    for (const id of [random, plain]) {
+      assert.ok(!level.includes(id), `a damaged session has no row in the folder's tree\n${level}`)
+      assert.ok(!top.includes(id), `nor at the roots' level\n${top}`)
+    }
+    assert.ok(readFileSync(randomLog).equals(randomBytes) && readFileSync(plainLog).equals(plainLine), 'and neither damaged file was rewritten')
+
+    for (let waited = 0; waited < 2_000 && ![randomLog, plainLog].every((log) => live.output().includes(log)); waited += 100) {
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const output = live.output()
+    for (const log of [randomLog, plainLog]) {
+      assert.ok(output.split('\n').some((line) => line.includes(log) && /skipped/i.test(line)), `a line of the server's log names the skipped file ${log}\n${output}`)
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a turn into a one-shot subagent\'s session is refused the way DSH refuses it, and the child is left as it was', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   /**
@@ -1704,7 +1828,7 @@ function startServer(args, env) {
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
-          resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL') })
+          resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL'), output: () => output })
         }
       }
       child.stdout.on('data', onData)
