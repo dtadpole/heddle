@@ -512,6 +512,12 @@ async function runTurnBody(
          * sending the same too-long request again would fail identically, which is why the loop
          * re-derives the request before trying.
          */
+        /**
+         * A stopped request is a cancellation, not a request failure (#99): it is not offered to the recovery
+         * listener, which would otherwise log a `compaction/recovery` decision for a call that never failed. The
+         * Rust turn checks its stop first the same way, and DSH's loop treats an abort as its own end.
+         */
+        if (signal?.aborted === true) throw error
         const failure = modelFailure(error)
         if (failure === undefined || attempt >= maxOverflowRetries) throw error
         const action = await ctx.waterfall(
