@@ -258,9 +258,6 @@ fn attribute_at(html: &str, start: usize) -> Option<(String, char, usize)> {
     Some((name, quote, index + 1))
 }
 
-/// Where `/vendor/purify.js` is read from, first existing wins: each root in `roots` joined with
-/// [`PURIFY_RELATIVE_PATH`]. The binary passes the repository it was built from and the working
-/// directory; a build without the package answers `404 the sanitiser is not installed`.
 /// DOMPurify as the binary carries it: the same file as the installed `dompurify` package the TypeScript build serves
 /// (3.4.16, pinned by package-lock.json), with its licence header, embedded as `page.html` is.
 ///
@@ -270,6 +267,9 @@ fn attribute_at(html: &str, start: usize) -> Option<(String, char, usize)> {
 /// serves this copy when no installed one is found; a unit test keeps it equal to the installed package.
 pub const EMBEDDED_PURIFY: &str = include_str!("../assets/purify.min.js");
 
+/// Where `/vendor/purify.js` is read from, first existing wins: each root in `roots` joined with
+/// [`PURIFY_RELATIVE_PATH`]. The binary passes the repository it was built from and the working
+/// directory; a build without the package serves [`EMBEDDED_PURIFY`].
 pub fn purify_path(roots: &[PathBuf]) -> Option<PathBuf> {
     roots
         .iter()
