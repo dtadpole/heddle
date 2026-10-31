@@ -1,0 +1,69 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { test } from 'node:test'
+
+/**
+ * The sidebar's subagent rules, judged out of the page that runs them.
+ *
+ * DSH hides a subagent's child from every sidebar listing (`sessionVisible`, dsh-client-ui-workspace `lib/client.js:964`)
+ * and gives a one-shot child a read-only record instead of a composer (`selectReadOnlySubagent`, dsh-client-ui-subagent
+ * `lib/client.js:944`). Phase A measured heddle hiding the child from the tree only: the flat list and the search listed
+ * it, a reload opened it as the newest session, and its composer was writable (R-developer-eight-1, -26, -28, -2). The
+ * pure block that now decides the listing and the composer lives in `page.html` between two markers and is loaded here.
+ * Which session a reload opens (DSH's `restoreSelection`, `:1605`), a saved child included and never a hidden child on
+ * its own, is the tree block's `restoreChoice`, judged in `test/workspace-tree.test.ts`.
+ */
+
+const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
+const begin = page.indexOf('/* session-rules:begin */')
+const end = page.indexOf('/* session-rules:end */')
+
+interface Meta {
+  id: string
+  [key: string]: unknown
+}
+
+interface Rules {
+  subagentMode: (meta: unknown) => 'one-shot' | 'continuable' | null
+  sidebarSessions: (sessions: unknown) => Meta[]
+  composerReadOnly: (meta: unknown) => boolean
+}
+
+/** A page without the block yields no rules, so every test below fails by name rather than the file failing to load. */
+const rules = (begin > 0 && end > begin ? new Function(`${page.slice(begin, end)}\nreturn SessionRules`)() : {}) as Rules
+
+/** `/api/sessions` as the phase-A store answered it: newest first, the delegated child newest of all. */
+const parent = { id: 'session-parent', cwd: '/w/beta', title: 'parent prompt', turns: 1 }
+const child = { id: 'session-child', cwd: '/w/beta', title: 'child task', turns: 1, parentSession: 'session-parent', origin: 'subagent', delegationDepth: 1 }
+const teammate = { id: 'session-mate', cwd: '/w/beta', title: 'teammate reviewer', turns: 1, parentSession: 'session-lead', origin: 'subagent', delegationDepth: 1, teamId: 'session-lead' }
+const beta = { id: 'session-beta', cwd: '/w/beta', title: 'Beta notes', turns: 2 }
+const old = { id: 'session-old', cwd: '/w/alpha', title: 'archived one', turns: 1, archived: true }
+const listed = [child, teammate, parent, beta, old]
+
+test('the block is in the page, between its markers', () => {
+  assert.ok(begin > 0 && end > begin, 'both markers are present, in order')
+  assert.equal(typeof rules.sidebarSessions, 'function')
+  assert.equal(typeof rules.composerReadOnly, 'function')
+})
+
+test('a subagent\'s child is never a sidebar row: the flat list and the search read only the others', () => {
+  assert.deepEqual(
+    rules.sidebarSessions(listed).map((meta) => meta.id),
+    ['session-parent', 'session-beta', 'session-old'],
+    'the delegated child and the teammate are dropped, the order and the archived row are left to the filters after it',
+  )
+  assert.deepEqual(rules.sidebarSessions(null), [], 'an answer that is not a list lists nothing')
+  assert.deepEqual(rules.sidebarSessions([null, 'x', { title: 'no id' }, parent]).map((meta) => meta.id), ['session-parent'])
+})
+
+test('a one-shot child\'s composer is read-only; a teammate is continuable and keeps it; anything else is writable', () => {
+  assert.equal(rules.subagentMode(child), 'one-shot')
+  assert.equal(rules.subagentMode(teammate), 'continuable')
+  assert.equal(rules.subagentMode(parent), null)
+  assert.equal(rules.subagentMode(undefined), null)
+  assert.equal(rules.composerReadOnly(child), true, 'the delegated child is a record')
+  assert.equal(rules.composerReadOnly(teammate), false, 'a continuable child keeps Send and Stop')
+  assert.equal(rules.composerReadOnly(beta), false)
+  assert.equal(rules.composerReadOnly(undefined), false, 'a session the list has not named yet is not locked')
+})

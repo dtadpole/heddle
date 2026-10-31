@@ -145,6 +145,24 @@ test('bytes queued behind a stalled peer are not progress: a heartbeat a minute 
   assert.deepEqual(watch.sweep([paused], 2000), [paused], 'still dead after two intervals')
 })
 
+test('after the server itself stood still, no peer is judged on that time: a live stream survives a stall (#19)', () => {
+  /**
+   * Measured on a scratch server: a 4.5 s event-loop stall (a long answer rendered on the server's thread) ended with
+   * the first heartbeat sweep destroying the live turn's stream and a page's pending response — the bytes the server
+   * queued after the stall had not had a moment to leave, and the activity stamp was from before it. A peer cannot
+   * have read bytes during time the server did not run, so a sweep that comes a whole deadline late re-stamps
+   * everyone instead of judging anyone.
+   */
+  const watch = new StallWatch(1000)
+  const live = socket(0, 100)
+  watch.sweep([live], 0)
+  live.waiting = 8192 // the server, running again, queued what the stall held back
+  assert.deepEqual(watch.sweep([live], 7000), [], 'the stream that was live before the stall is kept')
+  assert.equal(live.destroyed, false)
+  assert.deepEqual(watch.sweep([live], 8000), [], 'one interval of the new clock is not yet dead')
+  assert.deepEqual(watch.sweep([live], 9000), [live], 'a peer that really stopped is still cut, two intervals after the stall')
+})
+
 test('ready carries the follow fields after DSH\'s keys, in the order the Rust server writes them', () => {
   const frame = readyFrame('abc123', '/home/owner', { cursor: 'e1-7', resumed: true, heartbeatMs: 2000 })
   assert.equal(
