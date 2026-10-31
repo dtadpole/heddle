@@ -277,13 +277,37 @@ pub struct PlannedWrite {
     pub ns: String,
 }
 
-/// A field name that holds a credential: `apiKey`, `apiToken`, `token`, `secret`, `password`,
-/// whatever the case. Such a field is a secret slot even when written literally.
+/// A field name that holds a credential, whatever the case and separators (issue #118), so the settings view never
+/// returns what `/api/endpoints` hides. The name is matched with its case folded and its separators dropped
+/// (`api_key`, `API-Key` and `apiKey` are one name), by what it ends with (`…key`, `…token`, `…secret`, `…password`,
+/// or a key, token or secret file such as `apiKeyFile`, whose path names the account holding the key), or by
+/// holding `password`, `authorization` or `credential` anywhere. `maxOutputTokens` ends in `tokens` and stays
+/// readable. Such a field is a secret slot even when written literally. The twin of `src/config/settings.ts`'s.
 pub fn is_secret_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().as_str(),
-        "apikey" | "apitoken" | "token" | "secret" | "password"
-    )
+    const ENDINGS: [&str; 8] = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "keyfile",
+        "tokenfile",
+        "secretfile",
+    ];
+    const PARTS: [&str; 3] = ["password", "authorization", "credential"];
+    let name: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ENDINGS.iter().any(|ending| name.ends_with(ending))
+        || PARTS.iter().any(|part| name.contains(part))
+}
+
+/// A field whose every value is a credential though its names are not: an endpoint's `headers` (issue #118), where
+/// an `Authorization: Bearer …` goes. The view keeps one secret slot per header, as `/api/endpoints` keeps the names.
+pub fn is_secret_container(key: &str) -> bool {
+    key.eq_ignore_ascii_case("headers")
 }
 
 /// Every entry's form for a run booted from `layers`, re-reading the target from disk.
@@ -1085,6 +1109,17 @@ fn walk_secrets(
                         path: path.clone(),
                         set: !matches!(child, LayerValue::Null),
                     });
+                } else if let (true, LayerValue::Mapping(headers)) =
+                    (is_secret_container(key), child)
+                {
+                    for (name, header) in headers {
+                        path.push(name.clone());
+                        slots.push(SecretSlot {
+                            path: path.clone(),
+                            set: !matches!(header, LayerValue::Null),
+                        });
+                        path.pop();
+                    }
                 } else {
                     walk_secrets(child, path, env, slots);
                 }
@@ -1159,13 +1194,28 @@ fn apply_write(
                 "a settings write names a field, not the whole config".to_string(),
             ));
         }
+        let into_headers = path[..path.len() - 1]
+            .iter()
+            .any(|segment| is_secret_container(segment))
+            || path.last().is_some_and(|last| {
+                is_secret_container(last)
+                    && value
+                        .is_some_and(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+            });
         if path.iter().any(|segment| is_secret_key(segment))
+            || into_headers
             || secrets
                 .iter()
                 .any(|secret| path.starts_with(secret) || secret.starts_with(path))
         {
             return Err(SettingsError::Rejected(format!(
                 "'{}' is a secret: credentials come from the environment or the machine file, not the profile",
+                path.join(".")
+            )));
+        }
+        if value.is_some_and(holds_secret) {
+            return Err(SettingsError::Rejected(format!(
+                "the value for '{}' holds a credential field; credentials come from the environment or the machine file, not the profile",
                 path.join(".")
             )));
         }
@@ -1233,6 +1283,20 @@ fn secret_paths(raw: &LayerValue) -> Vec<Vec<String>> {
         .into_iter()
         .map(|slot| slot.path)
         .collect()
+}
+
+/// Whether a written value carries a credential field or header value anywhere inside it (issue #118).
+fn holds_secret(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(holds_secret),
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            is_secret_key(key)
+                || (is_secret_container(key)
+                    && child.as_object().is_some_and(|headers| !headers.is_empty()))
+                || holds_secret(child)
+        }),
+        _ => false,
+    }
 }
 
 fn holds_reference(value: &Value) -> bool {
@@ -1338,6 +1402,61 @@ fn unset_path(value: &mut LayerValue, path: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_names_are_secret_by_ending_or_part_and_headers_hold_only_secrets() {
+        for name in [
+            "apiKey",
+            "api_key",
+            "API-Key",
+            "apiToken",
+            "token",
+            "accessToken",
+            "refreshToken",
+            "secret",
+            "clientSecret",
+            "password",
+            "dbPassword",
+            "privateKey",
+            "apiKeyFile",
+            "authorization",
+            "credentials",
+        ] {
+            assert!(is_secret_key(name), "{name} is a credential name");
+        }
+        for name in [
+            "maxOutputTokens",
+            "contextWindow",
+            "model",
+            "baseUrl",
+            "keyboard",
+            "headers",
+        ] {
+            assert!(!is_secret_key(name), "{name} is not");
+        }
+        assert!(is_secret_container("headers") && !is_secret_container("header"));
+        let raw = LayerValue::from(serde_json::json!({
+            "endpoints": [{
+                "name": "one",
+                "apiKeyFile": "/srv/keys/one.txt",
+                "clientSecret": "s3",
+                "headers": { "Authorization": "Bearer abc", "X-Trace": "on" },
+            }],
+        }));
+        let paths: Vec<String> = secret_slots(&raw, &Env::default())
+            .into_iter()
+            .map(|slot| slot.path.join("."))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "endpoints.0.apiKeyFile",
+                "endpoints.0.clientSecret",
+                "endpoints.0.headers.Authorization",
+                "endpoints.0.headers.X-Trace",
+            ]
+        );
+    }
     use crate::{Schema, StaticCatalog, default_layers};
     use serde_json::json;
 

@@ -5,16 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { compose, defaultLayers, type NamedLayer } from '../src/config/schema.ts'
-import {
-  handleSettingsRequest,
-  SETTINGS_BEGIN,
-  SETTINGS_END,
-  SettingsError,
-  SettingsService,
-  settingsTarget,
-  type LayerOptions,
-  type SettingsWrite,
-} from '../src/config/settings.ts'
+import { handleSettingsRequest, SETTINGS_BEGIN, SETTINGS_END, SettingsError, SettingsService, settingsTarget, type LayerOptions, type SettingsWrite, isSecretKey, isSecretContainer } from '../src/config/settings.ts'
 import type { ValidationResult } from '../src/config/validate.ts'
 
 /**
@@ -269,4 +260,12 @@ test('a write the running tree refuses is still written and says so', async () =
   const plain = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf)
   assert.equal((await plain.describe()).namespaces.find((entry) => entry.ns === 'tools')?.applies, 'restart', 'without an applier the next boot applies a write')
   f.done()
+})
+
+test('credential names are secret by ending or part, and headers hold only secrets (issue #118)', () => {
+  for (const name of ['apiKey', 'api_key', 'API-Key', 'apiToken', 'token', 'accessToken', 'refreshToken', 'secret', 'clientSecret', 'password', 'dbPassword', 'privateKey', 'apiKeyFile', 'authorization', 'credentials']) {
+    assert.ok(isSecretKey(name), `${name} is a credential name`)
+  }
+  for (const name of ['maxOutputTokens', 'contextWindow', 'model', 'baseUrl', 'keyboard', 'headers']) assert.ok(!isSecretKey(name), `${name} is not`)
+  assert.ok(isSecretContainer('headers') && !isSecretContainer('header'))
 })
