@@ -21,6 +21,7 @@ import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
+import { type InventoryLoader, readPluginInventory } from '../config/plugin-inventory.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
@@ -117,6 +118,12 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * The module name each configured row declared, by loader entry id, for `GET /api/plugin-inventory`
+   * (`declaredModuleNames` in `../config/plugin-inventory.ts`). Without it an entry shows the name the loader
+   * holds, which for a relative row is the `file://` URL `boot` resolved it to.
+   */
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
 }
 
 export interface WebServer {
@@ -263,6 +270,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
         try {
@@ -385,6 +393,7 @@ interface RequestState {
   readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
 }
 
 /** One request, routed and fenced. */
@@ -767,6 +776,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return window === undefined ? entry : { ...entry, contextWindow: window, contextWindowSource: 'provider-models' }
     })
     respond(response, 200, 'application/json', `${JSON.stringify({ ...described, endpoints: withWindows }, null, 2)}\n`)
+    return
+  }
+
+  /**
+   * The plugin inventory, DSH's read-only `pluginInventory/list`: every non-group loader entry, in loader order,
+   * with its declared module name, whether it is enabled and its fiber's phase, read from the loader now. No
+   * `managementAvailable`, because nothing here can change the profile.
+   */
+  if (url.pathname === '/api/plugin-inventory' && request.method === 'GET') {
+    const loader = (ctx as unknown as { readonly loader?: InventoryLoader }).loader
+    respond(response, 200, 'application/json', `${JSON.stringify(readPluginInventory(loader, state.pluginModuleNames), null, 2)}\n`)
     return
   }
 
