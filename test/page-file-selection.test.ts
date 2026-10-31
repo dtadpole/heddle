@@ -29,6 +29,7 @@ function harness() {
     fileBody: body, fileHead: head, htmlView: frame, fileHtml: pane,
     PREVIEW_TAGS: [], PREVIEW_ATTRS: [],
     document: { getElementById: () => ({ setAttribute() {} }) },
+    closeSchedulesPage() {},
     chooseSelected() {}, renderRing() {}, showView: async () => {}, humanBytes: () => '10 B',
     loadPurifier: () => { purifierStarted.resolve(); return purifier.promise },
     fetch: async (url: string) => {
