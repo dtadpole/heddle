@@ -31,13 +31,13 @@ import { escapeHtml, renderMarkdown } from './markdown.ts'
  */
 
 /** What the file panel should do with a file. */
-export type RendererName = 'markdown' | 'html' | 'code' | 'text'
+export type RendererName = 'markdown' | 'html' | 'image' | 'code' | 'text'
 
 /** A decision about one file, and the markup when there is any. */
 export interface Rendered {
   readonly renderer: RendererName
   readonly language?: string
-  /** Present for `markdown` and `code`; absent for `text`, which the panel shows verbatim. */
+  /** Present for `markdown` and `code`; absent for raw-image, HTML-frame, and verbatim-text previews. */
   readonly html?: string
 }
 
@@ -109,6 +109,8 @@ export function rendererFor(path: string): { readonly renderer: RendererName; re
    * the route that rewrites the document's relative resources.
    */
   if (extension === '.html' || extension === '.htm') return { renderer: 'html' }
+  // PNG only: bytes are served by the existing authenticated, workspace-authorized raw route.
+  if (extension === '.png') return { renderer: 'image' }
   const language = LANGUAGES[extension]
   return language === undefined ? { renderer: 'text' } : { renderer: 'code', language }
 }
@@ -257,8 +259,8 @@ export function renderSource(path: string, text: string): Rendered {
    * Measured: without this branch the decision fell through to `text`, so an HTML file was previewed by reading it out
    * as plain text — a page shown as its own source, which is the behaviour this was meant to replace.
    */
-  if (decision.renderer === 'html') {
-    return { renderer: 'html' }
+  if (decision.renderer === 'html' || decision.renderer === 'image') {
+    return { renderer: decision.renderer }
   }
   return { renderer: 'text' }
 }

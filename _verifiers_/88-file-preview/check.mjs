@@ -139,6 +139,70 @@ async function supportsWeb() {
   return /web/.test(help.stdout)
 }
 
+// #126: offline HTTP + headless browser regression, run against either CLI via HEDDLE_BIN.
+// PNG only; deliberately no claim for other image formats or zoom controls.
+test('standalone PNG decodes in the File panel behind the existing authorization boundary', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('png-preview')
+  const work = fixtureDir('png-preview')
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64')
+  const path = join(work, 'pixel & snow.PNG')
+  const broken = join(work, 'broken.png')
+  writeFileSync(path, png)
+  writeFileSync(broken, 'not a PNG')
+  const outside = join(home, 'outside.png')
+  writeFileSync(outside, png)
+  const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+  let browser
+  try {
+    const cookie = await handshakeCookie(server.url)
+    const origin = new URL(server.url).origin
+    await fetch(`${origin}/api/workspaces`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ path: work }) })
+    const fileUrl = `${origin}/api/file?path=${encodeURIComponent(path)}`
+    assert.equal((await fetch(fileUrl, { redirect: 'manual' })).status, 401)
+    const metadata = await fetch(fileUrl, { headers: { cookie } })
+    assert.equal(metadata.status, 200, '#126: PNG must not be refused by the text reader with 415')
+    const body = await metadata.json()
+    assert.equal(body.renderer, 'image')
+    assert.equal(body.image.mediaType, 'image/png')
+    assert.equal(body.image.src, `/api/raw?path=${encodeURIComponent(path)}`)
+    assert.equal(body.text, undefined)
+    const rawUrl = origin + body.image.src
+    assert.equal((await fetch(rawUrl, { redirect: 'manual' })).status, 401)
+    const raw = await fetch(rawUrl, { headers: { cookie } })
+    assert.equal(raw.headers.get('content-type'), 'image/png')
+    assert.equal(raw.headers.get('x-content-type-options'), 'nosniff')
+    assert.deepEqual(Buffer.from(await raw.arrayBuffer()), png)
+    assert.equal((await fetch(`${origin}/api/file?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 400)
+    assert.equal((await fetch(`${origin}/api/raw?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 404)
+    assert.equal((await fetch(`${origin}/api/file?path=${encodeURIComponent(join(work, 'missing.png'))}`, { headers: { cookie } })).status, 404)
+    browser = await openBrowser({ width: 1400, height: 900 })
+    await browser.goto(server.url)
+    await browser.waitFor('typeof showFile === "function" && document.querySelectorAll("#tree .row").length > 0', 20_000)
+    await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find(x => x.querySelector('.label')?.textContent === ${JSON.stringify(work.split('/').pop())})
+      if (row?.closest('li').getAttribute('aria-expanded') === 'false') row.click()
+    })()`)
+    assert.ok(await browser.waitFor('[...document.querySelectorAll("#tree .row")].some(x => x.querySelector(".label")?.textContent === "pixel & snow.PNG")', 20_000), 'PNG appears in the workspace tree')
+    await browser.evaluate('[...document.querySelectorAll("#tree .row")].find(x => x.querySelector(".label")?.textContent === "pixel & snow.PNG").click()')
+    assert.ok(await browser.waitFor('(() => { const img = document.querySelector("#file-body img"); return img && !img.hidden && img.complete && img.naturalWidth === 1 })()', 20_000), 'PNG actually decodes, not just an img tag')
+    const preview = JSON.parse(await browser.evaluate('JSON.stringify({alt: document.querySelector("#file-body img").alt, referrer: document.querySelector("#file-body img").referrerPolicy, head: document.getElementById("file-head").textContent, frameHidden: document.getElementById("file-html").hidden})'))
+    assert.match(preview.alt, /Image preview: pixel/)
+    assert.equal(preview.referrer, 'no-referrer')
+    assert.ok(preview.frameHidden)
+    assert.doesNotMatch(preview.head, /undefined|lines/)
+    await browser.evaluate(`showFile({path: ${JSON.stringify(broken)}})`)
+    assert.ok(await browser.waitFor('document.querySelector("#file-body [role=alert]")?.textContent.includes("could not be displayed")', 20_000), 'decode failure is accessible and visible')
+  } finally {
+    if (browser) await browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 test('the server renders each file type, and the page offers no second surface', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   const home = isolatedHome('preview-api')
