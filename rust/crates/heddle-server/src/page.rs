@@ -33,9 +33,6 @@ pub fn page_marker(html: &str) -> String {
     out
 }
 
-/// The document with its build marker filled in: the first `<meta name="heddle-page" ...>` element is
-/// replaced by one whose `content` is [`page_marker`] of the **unmarked** document. A document without
-/// the element is returned unchanged.
 /// The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`
 /// (the TypeScript `inlineScripts`).
 pub fn inline_scripts(html: &str) -> Vec<&str> {
@@ -133,6 +130,9 @@ pub fn page_policy_with_browser(html: &str, browser_enabled: bool) -> String {
     .join("; ")
 }
 
+/// The document with its build marker filled in: the first `<meta name="heddle-page" ...>` element is
+/// replaced by one whose `content` is [`page_marker`] of the **unmarked** document. A document without
+/// the element is returned unchanged.
 pub fn marked_page(html: &str) -> String {
     const OPEN: &str = "<meta name=\"heddle-page\"";
     let Some(start) = html.find(OPEN) else {
