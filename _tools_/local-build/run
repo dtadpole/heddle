@@ -4,12 +4,15 @@
 #   _tools_/local-build/run test -p heddle-config
 #   _tools_/local-build/run build --release
 #   _tools_/local-build/run status
+#   _tools_/local-build/run --ts -- npm test     # a TypeScript test run, in a ts slot
+#   _tools_/local-build/run --ts status
 #
 # Each slot is a directory under $LOCAL_BUILD_SLOT_ROOT. A slot directory is created
 # atomically with mkdir and removed when the command ends, so two seats never build at
 # once in the same slot. A slot whose owner process is gone, or whose stamp is older
 # than an hour, is reclaimed. The command runs from the caller's working directory, so
-# run it from inside your own worktree.
+# run it from inside your own worktree. Waiting runs are served first come, first served
+# from a ticket queue, not by whoever polls first (queue.md).
 set -eu
 
 SLOTS=${LOCAL_BUILD_SLOTS:-3}
@@ -18,6 +21,40 @@ ROOT=${LOCAL_BUILD_SLOT_ROOT:-$HOME/.hd-build-slots}
 WAIT=${LOCAL_BUILD_WAIT_SECONDS:-1800}
 STALE=${LOCAL_BUILD_STALE_SECONDS:-3600}
 CARGO=${CARGO:-$HOME/.cargo/bin/cargo}
+
+# Two slot classes share the root and the rules. A cargo command takes a "slot-N"; a
+# command after --ts (a TypeScript test run, which starts several node processes) takes a
+# "ts-slot-N" from a pool of its own, capped at two by default, and every node it starts
+# runs its tests at most $LOCAL_BUILD_TS_CONCURRENCY files at a time (ts-slots.md).
+CLASS=cargo
+PREFIX=slot
+LABEL=slot
+CHILD=cargo
+CAPNAME=cap
+CAP_DEFAULT=$SLOTS
+if [ "${1-}" = "--ts" ]; then
+    CLASS=ts
+    PREFIX=ts-slot
+    LABEL="ts slot"
+    CHILD=cmd
+    CAPNAME=ts-cap
+    SLOTS=${LOCAL_BUILD_TS_SLOTS:-4}
+    CAP_DEFAULT=2
+    if [ "$SLOTS" -lt 2 ]; then
+        CAP_DEFAULT=$SLOTS
+    fi
+    shift
+    if [ "${1-}" = "--" ]; then
+        shift
+    fi
+fi
+TS_CONCURRENCY=${LOCAL_BUILD_TS_CONCURRENCY:-4}
+case "$TS_CONCURRENCY" in
+    '' | *[!0-9]* | 0)
+        echo "local-build: LOCAL_BUILD_TS_CONCURRENCY must be a whole number from 1; using 4" >&2
+        TS_CONCURRENCY=4
+        ;;
+esac
 
 # The profile settings keep target directories small: this Mac has one disk shared by
 # every seat, and an unreleased binary never needs debug symbols.
@@ -29,7 +66,7 @@ export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_RELEASE_DEBUG CARGO_INCREMENTAL
 stamp() { date +%s; }
 
 usage() {
-    echo "usage: $0 <cargo args...> | $0 status" >&2
+    echo "usage: $0 <cargo args...> | $0 status | $0 --ts -- <command...> | $0 --ts status" >&2
     echo "  LOCAL_BUILD_SLOTS=$SLOTS LOCAL_BUILD_JOBS=$JOBS LOCAL_BUILD_SLOT_ROOT=$ROOT" >&2
     exit 64
 }
@@ -37,14 +74,15 @@ usage() {
 mkdir -p "$ROOT"
 
 # The coordinator can cut the Mac to fewer usable slots in one write:
-#   echo 2 > $LOCAL_BUILD_SLOT_ROOT/cap
-# The default is every slot. A cap that is not a whole number between 1 and $SLOTS is
+#   echo 2 > $LOCAL_BUILD_SLOT_ROOT/cap       (cargo; the default is every slot)
+#   echo 1 > $LOCAL_BUILD_SLOT_ROOT/ts-cap    (TypeScript runs; the default is two)
+# A cap that is not a whole number between 1 and $SLOTS is
 # ignored with a warning rather than silently stopping work.
-CAP=$SLOTS
+CAP=$CAP_DEFAULT
 CAP_SOURCE=default
 read_cap() {
-    capfile="$ROOT/cap"
-    CAP=$SLOTS
+    capfile="$ROOT/$CAPNAME"
+    CAP=$CAP_DEFAULT
     CAP_SOURCE=default
     if [ ! -f "$capfile" ]; then
         return 0
@@ -134,7 +172,9 @@ is_old() {
 reclaim() {
     d=$1
     before=$(owner_line "$d")
-    t=$(mktemp -d "$ROOT/.trash.XXXXXX") || return 1
+    # The trash sits beside the directory (a second argument names its parent), so the
+    # rename never crosses a volume and stays atomic.
+    t=$(mktemp -d "${2:-$ROOT}/.trash.XXXXXX") || return 1
     if ! mv "$d" "$t/slot" 2>/dev/null; then
         rm -rf "$t" 2>/dev/null || true
         return 1
@@ -156,7 +196,7 @@ reclaim() {
 
 take() {
     i=$1
-    d="$ROOT/slot-$i"
+    d="$ROOT/$PREFIX-$i"
     mkdir "$d" 2>/dev/null || return 1
     if ! printf '%s %s 0 %s\n' "$$" "$(stamp)" "$PWD" > "$d/owner" 2>/dev/null; then
         rm -rf "$d" 2>/dev/null || true
@@ -166,27 +206,136 @@ take() {
     return 0
 }
 
-# Clean up after killed owners first, so a dead slot never lingers; then take a free
-# one; only when every slot is busy, break an hour-old stamp.
+# Waiters are served first come, first served (queue.md). Each waiting run holds one ticket,
+# $ROOT/<class>.queue/<ms>-<pid>, holding "<pid> <epoch> <seat> <tree>", and touches it on
+# every poll. A ticket whose run is gone, or that has not been touched for $TICKET_STALE
+# seconds, is dropped. A waiter silent for $HEAD_GRACE seconds is passed over but keeps its
+# place. $ROOT/<class>.next, written by the coordinator, puts the waiter it names first.
+QUEUE="$ROOT/$PREFIX.queue"
+NEXT_FILE="$ROOT/$PREFIX.next"
+HEAD_GRACE=${LOCAL_BUILD_HEAD_GRACE_SECONDS:-60}
+TICKET_STALE=${LOCAL_BUILD_TICKET_SECONDS:-300}
+NEXT_STALE=${LOCAL_BUILD_NEXT_SECONDS:-1800}
+POLL=${LOCAL_BUILD_POLL_SECONDS:-3}
+TICKET=
+SEAT=${HD_SEAT:--}
+case "$SEAT" in '' | *[!a-z0-9-]*) SEAT=- ;; esac
+TREE=$(git rev-parse --show-toplevel 2>/dev/null) || TREE=$PWD
+
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+ms_now() { perl -MTime::HiRes=time -e 'printf "%013d\n", time * 1000' 2>/dev/null || printf '%s000\n' "$(stamp)"; }
+
+# The waiter the .next file names, while the file is younger than $NEXT_STALE: a seat key or
+# a tree. It matches a ticket's seat, its tree, the tree's folder name, or a folder named
+# "<repo>--<key>" or "<repo>--<key>-<suffix>", so a seat key covers every worktree of the seat.
+next_token() {
+    [ -f "$NEXT_FILE" ] || return 0
+    [ $(( $(stamp) - $(mtime "$NEXT_FILE") )) -le "$NEXT_STALE" ] || return 0
+    n_tok=
+    read -r n_tok < "$NEXT_FILE" 2>/dev/null || true
+    printf '%s' "$n_tok"
+}
+names_waiter() {
+    [ -n "$1" ] && [ "$1" != - ] || return 1
+    case "$1" in
+        "$2" | "$3" | "${3##*/}") return 0 ;;
+    esac
+    case "${3##*/}" in
+        *"--$1" | *"--$1-"*) return 0 ;;
+    esac
+    return 1
+}
+
+join_queue() {
+    mkdir -p "$QUEUE"
+    TICKET="$QUEUE/$(ms_now)-$$"
+    # Written aside and renamed, so no reader ever sees a ticket without its pid.
+    printf '%s %s %s %s\n' "$$" "$(stamp)" "$SEAT" "$TREE" > "$QUEUE/.new-$$"
+    mv "$QUEUE/.new-$$" "$TICKET"
+}
+leave_queue() {
+    if [ -n "$TICKET" ]; then
+        rm -f "$TICKET" 2>/dev/null || true
+        TICKET=
+    fi
+}
+
+# Walk the tickets oldest first: drop dead ones, then set POS to this
+# run's place among the waiters that are not passed over, with the .next waiter first.
+# QLEN counts those waiters; Q_HEAD names the first of them.
+scan_queue() {
+    POS=0; QLEN=0; Q_HEAD=; s_first=; s_pri=; s_mine_at=0; s_pri_at=0; s_pri_mine=0
+    [ -d "$QUEUE" ] || return 0
+    s_now=$(stamp)
+    s_tok=$(next_token)
+    for f in "$QUEUE"/*; do
+        [ -f "$f" ] || continue
+        q_pid=0; q_ts=0; q_seat=-; q_tree=
+        read -r q_pid q_ts q_seat q_tree < "$f" 2>/dev/null || true
+        case "$q_pid" in '' | *[!0-9]*) q_pid=0 ;; esac
+        q_quiet=$(( s_now - $(mtime "$f") ))
+        if [ "$f" != "$TICKET" ]; then
+            if [ "$q_pid" = 0 ] || ! kill -0 "$q_pid" 2>/dev/null || [ "$q_quiet" -gt "$TICKET_STALE" ]; then
+                rm -f "$f" 2>/dev/null || true
+                continue
+            fi
+            [ "$q_quiet" -le "$HEAD_GRACE" ] || continue
+        fi
+        QLEN=$((QLEN + 1))
+        [ "$QLEN" = 1 ] && s_first="pid $q_pid in $q_tree"
+        if [ "$s_pri_at" = 0 ] && names_waiter "$s_tok" "$q_seat" "$q_tree"; then
+            s_pri_at=$QLEN
+            s_pri="pid $q_pid in $q_tree (named by $NEXT_FILE)"
+            [ "$f" = "$TICKET" ] && s_pri_mine=1
+        fi
+        [ "$f" = "$TICKET" ] && s_mine_at=$QLEN
+    done
+    Q_HEAD=${s_pri:-$s_first}
+    # Moving the .next waiter to the front shifts everyone who queued before it back by one.
+    if [ "$s_mine_at" = 0 ]; then
+        POS=0
+    elif [ "$s_pri_mine" = 1 ]; then
+        POS=1
+    elif [ "$s_pri_at" -gt "$s_mine_at" ]; then
+        POS=$((s_mine_at + 1))
+    else
+        POS=$s_mine_at
+    fi
+}
+
+# Clean up after killed owners first, so a dead slot never lingers. Then this run may take a
+# free slot only when its place in the queue is within the number of free slots; only the
+# head, when every slot is busy, may break an hour-old stamp.
 try_acquire() {
     i=0
     while [ "$i" -lt "$SLOTS" ]; do
-        d="$ROOT/slot-$i"
+        d="$ROOT/$PREFIX-$i"
         if is_dead "$d"; then
             reclaim "$d" || true
         fi
         i=$((i + 1))
     done
-    i=0
+    touch -c "$TICKET" 2>/dev/null || true
+    [ -f "$TICKET" ] || join_queue
+    scan_queue
+    free=0; i=0
     while [ "$i" -lt "$CAP" ]; do
-        if take "$i"; then
-            return 0
-        fi
+        [ -d "$ROOT/$PREFIX-$i" ] || free=$((free + 1))
         i=$((i + 1))
     done
+    if [ "$POS" -ge 1 ] && [ "$POS" -le "$free" ]; then
+        i=0
+        while [ "$i" -lt "$CAP" ]; do
+            if take "$i"; then
+                return 0
+            fi
+            i=$((i + 1))
+        done
+    fi
+    [ "$POS" = 1 ] || return 1
     i=0
     while [ "$i" -lt "$CAP" ]; do
-        d="$ROOT/slot-$i"
+        d="$ROOT/$PREFIX-$i"
         if is_old "$d"; then
             if reclaim "$d"; then
                 if take "$i"; then
@@ -199,31 +348,87 @@ try_acquire() {
     return 1
 }
 
+# The queue in serving order, without changing it: every ticket, with why a waiter is skipped.
+show_queue() {
+    v_tok=$(next_token)
+    if [ -n "$v_tok" ]; then
+        printf 'next: %s (from %s; that waiter goes first, once)\n' "$v_tok" "$NEXT_FILE"
+    else
+        printf 'next: none\n'
+    fi
+    v_now=$(stamp)
+    v_n=0; v_lines=; v_pri=
+    if [ -d "$QUEUE" ]; then
+        for f in "$QUEUE"/*; do
+            [ -f "$f" ] || continue
+            q_pid=0; q_ts=0; q_seat=-; q_tree=
+            read -r q_pid q_ts q_seat q_tree < "$f" 2>/dev/null || true
+            case "$q_pid" in '' | *[!0-9]*) q_pid=0 ;; esac
+            case "$q_ts" in '' | *[!0-9]*) q_ts=$v_now ;; esac
+            q_quiet=$(( v_now - $(mtime "$f") ))
+            note=
+            if [ "$q_pid" = 0 ] || ! kill -0 "$q_pid" 2>/dev/null; then
+                note=' (run gone; dropped on the next poll)'
+            elif [ "$q_quiet" -gt "$TICKET_STALE" ]; then
+                note=" (silent ${q_quiet}s; dropped on the next poll)"
+            elif [ "$q_quiet" -gt "$HEAD_GRACE" ]; then
+                note=" (silent ${q_quiet}s; passed over, keeps its place)"
+            fi
+            line="pid=$q_pid seat=$q_seat waiting=$((v_now - q_ts))s tree=$q_tree$note"
+            if [ -z "$v_pri" ] && [ -z "$note" ] && names_waiter "$v_tok" "$q_seat" "$q_tree"; then
+                v_pri="$line (named by next)"
+            else
+                v_lines="$v_lines$line
+"
+            fi
+            v_n=$((v_n + 1))
+        done
+    fi
+    if [ "$v_n" = 0 ]; then
+        printf 'queue: empty\n'
+        return 0
+    fi
+    printf 'queue: %s waiting, first come first served\n' "$v_n"
+    v_i=0
+    if [ -n "$v_pri" ]; then
+        v_i=1
+        printf '  1. %s\n' "$v_pri"
+    fi
+    printf '%s' "$v_lines" | while IFS= read -r line; do
+        v_i=$((v_i + 1))
+        printf '  %s. %s\n' "$v_i" "$line"
+    done
+}
+
 show_status() {
-    printf 'root: %s\nslots: %s  jobs: %s\n' "$ROOT" "$SLOTS" "$JOBS"
+    if [ "$CLASS" = ts ]; then
+        printf 'root: %s\nclass: ts  slots: %s  node test concurrency: %s\n' "$ROOT" "$SLOTS" "$TS_CONCURRENCY"
+    else
+        printf 'root: %s\nslots: %s  jobs: %s\n' "$ROOT" "$SLOTS" "$JOBS"
+    fi
     case "$CAP_SOURCE" in
-        file) printf 'cap: %s of %s slots (set by %s/cap)\n' "$CAP" "$SLOTS" "$ROOT" ;;
+        file) printf 'cap: %s of %s slots (set by %s/%s)\n' "$CAP" "$SLOTS" "$ROOT" "$CAPNAME" ;;
         ignored) printf 'cap: %s of %s slots (cap file ignored; see the warning)\n' "$CAP" "$SLOTS" ;;
         *) printf 'cap: %s of %s slots (default; no cap file)\n' "$CAP" "$SLOTS" ;;
     esac
     busy=0; stale=0; free=0; i=0
     while [ "$i" -lt "$SLOTS" ]; do
-        d="$ROOT/slot-$i"
+        d="$ROOT/$PREFIX-$i"
         if [ ! -d "$d" ]; then
-            printf 'slot %s: free%s\n' "$i" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
+            printf '%s %s: free%s\n' "$LABEL" "$i" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
             free=$((free + 1))
         elif [ ! -f "$d/owner" ]; then
-            printf 'slot %s: unclaimed (no owner file)\n' "$i"
+            printf '%s %s: unclaimed (no owner file)\n' "$LABEL" "$i"
             stale=$((stale + 1))
         else
             owner_fields "$d"
             now=$(stamp)
             age=$((now - o_ts))
             if owner_alive && [ "$age" -le "$STALE" ]; then
-                printf 'slot %s: busy pid=%s cargo=%s age=%ss cwd=%s%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
+                printf '%s %s: busy pid=%s %s=%s age=%ss cwd=%s%s\n' "$LABEL" "$i" "$o_pid" "$CHILD" "$o_cargo" "$age" "${o_cwd:-?}" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
                 busy=$((busy + 1))
             else
-                printf 'slot %s: stale pid=%s cargo=%s age=%ss cwd=%s%s\n' "$i" "$o_pid" "$o_cargo" "$age" "${o_cwd:-?}" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
+                printf '%s %s: stale pid=%s %s=%s age=%ss cwd=%s%s\n' "$LABEL" "$i" "$o_pid" "$CHILD" "$o_cargo" "$age" "${o_cwd:-?}" "$([ "$i" -ge "$CAP" ] && echo ' (beyond cap)')"
                 stale=$((stale + 1))
             fi
         fi
@@ -234,6 +439,7 @@ show_status() {
             printf 'trash: %s\n' "$t"
         fi
     done
+    show_queue
     printf 'summary: busy=%s stale=%s free=%s\n' "$busy" "$stale" "$free"
     if [ "$stale" -eq 0 ]; then
         return 0
@@ -252,7 +458,12 @@ if [ "$1" = "status" ]; then
     exit $?
 fi
 
-if [ ! -x "$CARGO" ]; then
+if [ "$CLASS" = ts ]; then
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "local-build: command not found: $1" >&2
+        exit 127
+    fi
+elif [ ! -x "$CARGO" ]; then
     echo "local-build: cargo not found at $CARGO (set CARGO or install the toolchain)" >&2
     exit 127
 fi
@@ -266,20 +477,47 @@ for arg in "$@"; do
     esac
 done
 
+# A waiting run leaves the queue however it ends; a signal becomes an exit so the trap runs.
+trap leave_queue EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 deadline=$(( $(stamp) + WAIT ))
+said_pos=0
 while ! try_acquire; do
     if [ "$(stamp)" -ge "$deadline" ]; then
-        echo "local-build: no free slot within ${WAIT}s; try again later or raise LOCAL_BUILD_WAIT_SECONDS" >&2
+        echo "local-build: no free $LABEL within ${WAIT}s (queue position $POS of $QLEN); try again later or raise LOCAL_BUILD_WAIT_SECONDS" >&2
         exit 75
     fi
-    sleep 3
+    if [ "$POS" != "$said_pos" ]; then
+        if [ "$POS" = 1 ]; then
+            echo "local-build: first in the queue for a $LABEL (cap $CAP); waiting for one to free" >&2
+        else
+            echo "local-build: queued for a $LABEL at position $POS of $QLEN (cap $CAP); first is ${Q_HEAD:-?}" >&2
+        fi
+        said_pos=$POS
+    fi
+    sleep "$POLL"
 done
+# The slot is ours: give up the ticket, and a .next turn that named this run is used.
+leave_queue
+if names_waiter "$(next_token)" "$SEAT" "$TREE"; then
+    rm -f "$NEXT_FILE" 2>/dev/null || true
+fi
 
 # Only remove the slot while it still names this process as its owner. A slot can be
 # reclaimed and re-acquired while a command runs (an hour-old stamp, a reused pid), and
 # this process must never delete the new occupant's directory.
 cleanup() {
-    d="$ROOT/slot-${SLOT:-none}"
+    leave_queue
+    if [ -n "${TREE_LOCK:-}" ] && [ -f "$TREE_LOCK/owner" ]; then
+        l_pid=0
+        read -r l_pid l_rest < "$TREE_LOCK/owner" 2>/dev/null || true
+        if [ "${l_pid:-}" = "$$" ]; then
+            rm -rf "$TREE_LOCK" 2>/dev/null || true
+        fi
+    fi
+    d="$ROOT/$PREFIX-${SLOT:-none}"
     [ -f "$d/owner" ] || return 0
     owner_fields "$d"
     if [ "${o_pid:-}" = "$$" ]; then
@@ -288,9 +526,85 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "local-build: slot $SLOT, cap $CAP of $SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
+if [ "$CLASS" = ts ]; then
+    echo "local-build: ts slot $SLOT, cap $CAP of $SLOTS, node test concurrency $TS_CONCURRENCY, cwd $PWD" >&2
+else
+    echo "local-build: slot $SLOT, cap $CAP of $SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
+fi
 
-if [ "$has_jobs" = 1 ]; then
+# Node refuses --test-concurrency in NODE_OPTIONS, so a TypeScript run gets a "node" first
+# on its PATH, inside its slot, that passes the flag to the real node. npm scripts and
+# "#!/usr/bin/env node" both find it; a caller's own --test-concurrency comes later on the
+# command line and wins. It goes with the slot when the command ends.
+if [ "$CLASS" = ts ]; then
+    real_node=$(command -v node 2>/dev/null || true)
+    if [ -n "$real_node" ]; then
+        shim="$ROOT/$PREFIX-$SLOT/bin"
+        mkdir -p "$shim"
+        printf '#!/bin/sh\nexec %s --test-concurrency=%s "$@"\n' "'$real_node'" "$TS_CONCURRENCY" > "$shim/node"
+        chmod +x "$shim/node"
+        PATH="$shim:$PATH"
+        export PATH
+    fi
+fi
+
+# A seat's worktrees may share one CARGO_TARGET_DIR to save the disk. Cargo does not key a
+# workspace crate by its checkout path, so a tree whose sources are older than another
+# tree's build there looks fresh, and its binary is the other tree's code. For a compiling
+# command into a CARGO_TARGET_DIR, the runner therefore holds the target's lock for the
+# whole command, and when another tree (or an unknown one) built there last, touches this
+# tree's Rust sources first so cargo rebuilds them (shared-target.md).
+TREE_LOCK=
+guard_shared_target() {
+    [ -n "${CARGO_TARGET_DIR:-}" ] || return 0
+    [ "${LOCAL_BUILD_TREE_GUARD:-1}" != 0 ] || return 0
+    case "${1-}" in
+        build | check | test | run | bench | doc | clippy | rustc | install | fix) ;;
+        *) return 0 ;;
+    esac
+    # Cargo reads a relative target from the caller's directory; spell it out for the messages.
+    case "$CARGO_TARGET_DIR" in
+        /*) td=$CARGO_TARGET_DIR ;;
+        *) td="$PWD/$CARGO_TARGET_DIR" ;;
+    esac
+    tree=$(git rev-parse --show-toplevel 2>/dev/null) || tree=$PWD
+    mkdir -p "$td"
+    lock="$td/.local-build-lock"
+    lock_deadline=$(( $(stamp) + WAIT ))
+    said=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        if is_dead "$lock"; then
+            reclaim "$lock" "$td" || true
+            continue
+        fi
+        if [ "$said" = 0 ]; then
+            echo "local-build: waiting for the build in ${o_cwd:-another tree} to finish with $td" >&2
+            said=1
+        fi
+        if [ "$(stamp)" -ge "$lock_deadline" ]; then
+            echo "local-build: $td stayed locked by ${o_cwd:-another tree} for ${WAIT}s; try again later" >&2
+            exit 75
+        fi
+        sleep 1
+    done
+    printf '%s %s 0 %s\n' "$$" "$(stamp)" "$tree" > "$lock/owner"
+    TREE_LOCK=$lock
+    last=
+    if [ -f "$td/.local-build-tree" ]; then
+        read -r last 2>/dev/null < "$td/.local-build-tree" || true
+    fi
+    if [ "$last" != "$tree" ]; then
+        n=$(cd "$tree" && git ls-files -z -co --exclude-standard -- '*.rs' 2>/dev/null | tr -cd '\000' | wc -c | tr -d ' ')
+        (cd "$tree" && git ls-files -z -co --exclude-standard -- '*.rs' 2>/dev/null | xargs -0 touch -c) || true
+        echo "local-build: $td was last built from ${last:-an unrecorded tree}; touched $n Rust sources in $tree so cargo rebuilds them" >&2
+        printf '%s\n' "$tree" > "$td/.local-build-tree"
+    fi
+}
+if [ "$CLASS" = cargo ]; then
+    guard_shared_target "$@"
+fi
+
+if [ "$CLASS" = ts ] || [ "$has_jobs" = 1 ]; then
     set -- "$@"
 else
     # -j belongs after the subcommand: `cargo -j 3 build` works, but `cargo -j 3 --version`
@@ -308,11 +622,21 @@ fi
 # Run cargo as a child rather than with exec, so the slot is released when the command
 # ends and on a signal. A signal is forwarded to cargo and the shell keeps waiting, so
 # the slot is never freed while cargo is still building.
-"$CARGO" "$@" &
+if [ "$CLASS" = ts ]; then
+    "$@" &
+else
+    "$CARGO" "$@" &
+fi
 cargo_pid=$!
-if [ -f "$ROOT/slot-$SLOT/owner" ]; then
-    owner_fields "$ROOT/slot-$SLOT"
-    printf '%s %s %s %s\n' "$$" "$o_ts" "$cargo_pid" "$PWD" > "$ROOT/slot-$SLOT/owner" 2>/dev/null || true
+if [ -f "$ROOT/$PREFIX-$SLOT/owner" ]; then
+    owner_fields "$ROOT/$PREFIX-$SLOT"
+    printf '%s %s %s %s\n' "$$" "$o_ts" "$cargo_pid" "$PWD" > "$ROOT/$PREFIX-$SLOT/owner" 2>/dev/null || true
+fi
+# The target's lock records cargo too, so a killed shell whose cargo still writes the target
+# keeps the lock until cargo exits.
+if [ -n "$TREE_LOCK" ] && [ -f "$TREE_LOCK/owner" ]; then
+    owner_fields "$TREE_LOCK"
+    printf '%s %s %s %s\n' "$$" "$o_ts" "$cargo_pid" "$o_cwd" > "$TREE_LOCK/owner" 2>/dev/null || true
 fi
 
 forward() {
@@ -330,7 +654,7 @@ while :; do
 done
 # After a successful build, drop the superseded heddle artifacts it left in target/*/deps (deps-sweep.md).
 # A failed or skipped sweep never changes the build's status.
-if [ "$rc" = 0 ] && [ "${LOCAL_BUILD_DEPS_SWEEP:-1}" != 0 ]; then
+if [ "$CLASS" = cargo ] && [ "$rc" = 0 ] && [ "${LOCAL_BUILD_DEPS_SWEEP:-1}" != 0 ]; then
     node "$(dirname "$0")/deps-sweep.mjs" --quiet --after-build -- "$@" >&2 || true
 fi
 exit "$rc"

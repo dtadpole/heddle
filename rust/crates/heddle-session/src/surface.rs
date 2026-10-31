@@ -54,9 +54,26 @@ pub fn is_surface_eligible(kind: &str) -> bool {
     SURFACE_EVENT_TYPES.contains(&kind)
 }
 
+/// Whether an event ends a model step for the fold: the next request, or the turn's retry or end.
+///
+/// A chunk run that never got its `done` (a stop, a failed stream) ends here, and a message held for the
+/// step boundary is placed (`endsStep` in the TypeScript build).
+pub fn ends_step(kind: &str) -> bool {
+    kind == "model/request" || kind.starts_with("turn/")
+}
+
 /// Fold a log into its surface.
 ///
-/// A `message` or `context/note` takes a position and closes any open chunk run; the first
+/// **A message that lands mid-step is placed at the step boundary** (#30). A steer, a settlement notice and
+/// a teammate's mail are written when they arrive, which can be while the model streams. Placed where it
+/// landed, such a message closed the run: the rest of the step became a second assistant node after it, the
+/// next request ended with that assistant message (read by the provider as a prefix to continue; refused in
+/// thinking mode for want of its reasoning), and the model never saw its own reply before the message. So a
+/// message that lands while a run is open is held, and placed when the run closes or, when the step called
+/// tools, once their results are placed; a new request, the turn's end or a replacement places whatever is
+/// still held, and so does the end of the log.
+///
+/// Otherwise a `message` or `context/note` takes a position; the first
 /// `assistant/chunk` of a run takes one and a `done` chunk closes the run; a replacement splices the
 /// positions between its endpoints (both must be on the surface, end not before start) and closes the
 /// run. A replacement the fold cannot place is [`SessionError::UnfoldableReplacement`] — a log that
@@ -67,10 +84,30 @@ pub fn fold_surface<E: Borrow<SessionEvent>>(events: &[E]) -> Result<SurfaceStat
     let mut content_generation: u64 = 0;
     let mut replace_generation: u64 = 0;
     let mut open_chunk: Option<u64> = None;
+    // The tool calls of the open run; the calls of the last closed run whose results are not all placed; and
+    // the messages that landed mid-step, in arrival order.
+    let mut run_calls: Vec<String> = Vec::new();
+    let mut awaiting: Vec<String> = Vec::new();
+    let mut held: Vec<u64> = Vec::new();
+    let release = |nodes: &mut Vec<u64>,
+                   held: &mut Vec<u64>,
+                   awaiting: &mut Vec<String>,
+                   generation: &mut u64| {
+        *generation += held.len() as u64;
+        nodes.append(held);
+        awaiting.clear();
+    };
 
     for event in events {
         let event = event.borrow();
         if let Some(SurfaceOp::Replace { start_seq, end_seq }) = event.surface_op() {
+            release(
+                &mut nodes,
+                &mut held,
+                &mut awaiting,
+                &mut content_generation,
+            );
+            run_calls.clear();
             let start_idx = nodes.iter().position(|seq| *seq == start_seq);
             let end_idx = nodes.iter().position(|seq| *seq == end_seq);
             let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) else {
@@ -100,12 +137,50 @@ pub fn fold_surface<E: Borrow<SessionEvent>>(events: &[E]) -> Result<SurfaceStat
             open_chunk = None;
             continue;
         }
+        if ends_step(&event.kind) {
+            open_chunk = None;
+            run_calls.clear();
+            release(
+                &mut nodes,
+                &mut held,
+                &mut awaiting,
+                &mut content_generation,
+            );
+            continue;
+        }
         if is_surface_eligible(&event.kind) && event.kind != "assistant/chunk" {
             // A `message` the person or the model produced, or a `context/note` the harness wrote: both
-            // take a position, and neither is a chunk run.
+            // take a position, and neither is a chunk run. Mid-step, the position is the step boundary.
+            if open_chunk.is_some() {
+                held.push(event.seq);
+                continue;
+            }
+            if !awaiting.is_empty() {
+                let message = event.get("message");
+                let role = message.and_then(|m| m.get("role")).and_then(Value::as_str);
+                let call = message
+                    .and_then(|m| m.get("toolCallId"))
+                    .and_then(Value::as_str);
+                match (role, call) {
+                    (Some("tool"), Some(id)) if awaiting.iter().any(|waiting| waiting == id) => {
+                        nodes.push(event.seq);
+                        content_generation += 1;
+                        awaiting.retain(|waiting| waiting != id);
+                        if awaiting.is_empty() {
+                            release(
+                                &mut nodes,
+                                &mut held,
+                                &mut awaiting,
+                                &mut content_generation,
+                            );
+                        }
+                    }
+                    _ => held.push(event.seq),
+                }
+                continue;
+            }
             nodes.push(event.seq);
             content_generation += 1;
-            open_chunk = None;
             continue;
         }
         if event.kind == "assistant/chunk" {
@@ -113,17 +188,41 @@ pub fn fold_surface<E: Borrow<SessionEvent>>(events: &[E]) -> Result<SurfaceStat
                 nodes.push(event.seq);
                 content_generation += 1;
                 open_chunk = Some(event.seq);
+                run_calls.clear();
             }
-            let done = event
-                .get("chunk")
+            let chunk = event.get("chunk");
+            let kind = chunk
                 .and_then(|chunk| chunk.get("type"))
-                .and_then(Value::as_str)
-                == Some("done");
-            if done {
+                .and_then(Value::as_str);
+            if kind == Some("tool-call")
+                && let Some(id) = chunk
+                    .and_then(|chunk| chunk.get("id"))
+                    .and_then(Value::as_str)
+            {
+                run_calls.push(id.to_owned());
+            }
+            if kind == Some("done") {
                 open_chunk = None;
+                if run_calls.is_empty() {
+                    release(
+                        &mut nodes,
+                        &mut held,
+                        &mut awaiting,
+                        &mut content_generation,
+                    );
+                } else {
+                    awaiting = std::mem::take(&mut run_calls);
+                }
             }
         }
     }
+    // The log may end mid-step: what is held is shown at the end, and the next fold places it.
+    release(
+        &mut nodes,
+        &mut held,
+        &mut awaiting,
+        &mut content_generation,
+    );
 
     Ok(SurfaceState {
         nodes,
@@ -177,7 +276,13 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
     let mut index = seq;
     while let Some(next) = by_seq.get(&index) {
         if next.kind != "assistant/chunk" {
-            break;
+            // A message held for the step boundary, an inbox splice or any other note written while the model
+            // streamed is not part of its step (#30): the step runs to its `done`, a new request or the turn's end.
+            if ends_step(&next.kind) {
+                break;
+            }
+            index += 1;
+            continue;
         }
         let chunk = next
             .get("chunk")
@@ -260,11 +365,96 @@ pub fn inherits_answer<E: Borrow<SessionEvent> + Clone>(
         .any(|event| E::borrow(event).kind == "assistant/completed"))
 }
 
+/// Whether a fork inherits an event of this type.
+///
+/// DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a
+/// child here inherits the same, except four kinds that belong to the **source** and that no fold here can tell
+/// apart as inherited (DSH hands every projection `inheritedEventCount`, dsh-session/lib/index.js:1418-1426):
+/// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file),
+/// `goal/change` (an active goal is armed whenever a process folds it, so an inherited one would run rounds in
+/// the branch, where DSH disarms it) and `team/*` (the journal names the source as its Lead, and the team fold
+/// refuses a foreign one). The TypeScript twin is `inheritedByFork` in `src/session/store.ts`.
+pub fn inherited_by_fork(kind: &str) -> bool {
+    kind != "session/created"
+        && kind != "transcript/repaired"
+        && kind != "goal/change"
+        && !kind.starts_with("team/")
+}
+
+/// The fields of a recorded event that name one other event by its seq (a compaction's own bookkeeping).
+const SEQ_FIELDS: [&str; 4] = ["fromSeq", "throughSeq", "summarySeq", "replacementSeq"];
+/// The fields that name several events by seq.
+const SEQ_LIST_FIELDS: [&str; 2] = ["sourceEventSeqs", "shadowedSeqs"];
+
+/// The events a fork's child is seeded with: the inherited ones, as recorded, numbered on from `first_seq`.
+///
+/// Each keeps its own `at` and its fields in written order, so the child's view, surface and model context are
+/// the source's (#52, #55). The child's `session/created` takes seq 0 as the source's did, so the seqs normally
+/// carry over and the events are copied unchanged. When an event is left out ([`inherited_by_fork`]) the later
+/// ones move down, and every field naming a seq moves with them, in place: a replacement's `surfaceOp` range,
+/// `sourceEventSeqs`, and the compaction records' `fromSeq`, `throughSeq`, `summarySeq`, `replacementSeq`,
+/// `shadowedSeqs` and `shadowedRange`. A seq naming no inherited event is left as written. The TypeScript twin is
+/// `forkSeed` in `src/session/store.ts`, and both write the same bytes.
+pub fn fork_seed<E: Borrow<SessionEvent>>(inherited: &[E], first_seq: u64) -> Vec<SessionEvent> {
+    let kept: Vec<&SessionEvent> = inherited
+        .iter()
+        .map(E::borrow)
+        .filter(|event| inherited_by_fork(&event.kind))
+        .collect();
+    let unchanged = kept
+        .iter()
+        .zip(first_seq..)
+        .all(|(event, seq)| event.seq == seq);
+    if unchanged {
+        return kept.into_iter().cloned().collect();
+    }
+    let renumbered: HashMap<u64, u64> = kept
+        .iter()
+        .zip(first_seq..)
+        .map(|(event, seq)| (event.seq, seq))
+        .collect();
+    let moved = |value: &mut Value| {
+        if let Some(seq) = value.as_u64().and_then(|old| renumbered.get(&old)) {
+            *value = Value::from(*seq);
+        }
+    };
+    let renumber = |object: &mut serde_json::Map<String, Value>, keys: &[&str]| {
+        for key in keys {
+            if let Some(value) = object.get_mut(*key) {
+                moved(value);
+            }
+        }
+    };
+    kept.into_iter()
+        .zip(first_seq..)
+        .map(|(event, seq)| {
+            let mut copy = event.clone();
+            copy.seq = seq;
+            renumber(&mut copy.fields, &SEQ_FIELDS);
+            for key in SEQ_LIST_FIELDS {
+                if let Some(Value::Array(list)) = copy.fields.get_mut(key) {
+                    list.iter_mut().for_each(&moved);
+                }
+            }
+            if let Some(Value::Object(op)) = copy.fields.get_mut("surfaceOp")
+                && op.get("op").and_then(Value::as_str) == Some("replace")
+            {
+                renumber(op, &["startSeq", "endSeq"]);
+            }
+            if let Some(Value::Object(range)) = copy.fields.get_mut("shadowedRange") {
+                renumber(range, &["start", "end"]);
+            }
+            copy
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::message::ToolCall;
     use serde_json::{Map, json};
+    use std::collections::HashMap;
 
     fn event(seq: u64, kind: &str, fields: &[(&str, Value)]) -> SessionEvent {
         let mut map = Map::new();
@@ -350,14 +540,112 @@ mod tests {
         );
     }
 
+    /// What the model would read: every node, derived, as role and text (#30's tests).
+    fn read(events: &[SessionEvent]) -> Vec<String> {
+        let by_seq: HashMap<u64, &SessionEvent> =
+            events.iter().map(|event| (event.seq, event)).collect();
+        fold_surface(events)
+            .unwrap()
+            .nodes
+            .iter()
+            .filter_map(|seq| derive_message(&by_seq, *seq))
+            .map(|message| {
+                let text: String = message
+                    .content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } | ContentPart::Reasoning { text } => {
+                            text.clone()
+                        }
+                        ContentPart::ToolCall(_) => "[tool-call]".to_string(),
+                        _ => String::new(),
+                    })
+                    .collect();
+                let role = format!("{:?}", message.role).to_lowercase();
+                format!("{role}:{text}")
+            })
+            .collect()
+    }
+
+    fn text_message(seq: u64, role: &str, text: &str) -> SessionEvent {
+        event(
+            seq,
+            "message",
+            &[(
+                "message",
+                json!({"role": role, "content": [{"type": "text", "text": text}]}),
+            )],
+        )
+    }
+
     #[test]
-    fn a_message_closes_an_open_run() {
+    fn a_message_written_mid_step_is_read_after_the_whole_step() {
+        // Before #30 this message closed the run, and the rest of the step became a second assistant node after it.
         let events = vec![
             chunk(0, json!({"type": "text-delta", "text": "a"})),
-            message(1, "user"),
+            text_message(1, "user", "NOTICE"),
             chunk(2, json!({"type": "text-delta", "text": "b"})),
+            chunk(3, json!({"type": "done", "finishReason": "stop"})),
         ];
-        assert_eq!(fold_surface(&events).unwrap().nodes, vec![0, 1, 2]);
+        assert_eq!(fold_surface(&events).unwrap().nodes, vec![0, 1]);
+        assert_eq!(read(&events), vec!["assistant:ab", "user:NOTICE"]);
+    }
+
+    #[test]
+    fn a_mid_step_message_is_read_after_the_step_s_tool_results() {
+        let call = json!({"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}"});
+        let result = || {
+            event(
+                5,
+                "message",
+                &[(
+                    "message",
+                    json!({"role": "tool", "toolCallId": "c1", "content": [{"type": "text", "text": "ok"}]}),
+                )],
+            )
+        };
+        let streaming = vec![
+            event(0, "model/request", &[]),
+            chunk(1, json!({"type": "text-delta", "text": "running "})),
+            text_message(2, "user", "STEER"),
+            chunk(3, call.clone()),
+            chunk(4, json!({"type": "done", "finishReason": "tool_calls"})),
+            result(),
+        ];
+        assert_eq!(
+            read(&streaming),
+            vec!["assistant:running [tool-call]", "tool:ok", "user:STEER"]
+        );
+        let while_the_tool_runs = vec![
+            event(0, "model/request", &[]),
+            chunk(1, call),
+            chunk(2, json!({"type": "done", "finishReason": "tool_calls"})),
+            text_message(3, "user", "STEER"),
+            result(),
+        ];
+        assert_eq!(
+            read(&while_the_tool_runs),
+            vec!["assistant:[tool-call]", "tool:ok", "user:STEER"]
+        );
+    }
+
+    #[test]
+    fn an_inbox_splice_inside_a_run_does_not_cut_the_step_and_a_turn_end_closes_a_run() {
+        let events = vec![
+            event(0, "model/request", &[]),
+            chunk(1, json!({"type": "text-delta", "text": "1 2 "})),
+            event(2, "agent/inbox/spliced", &[("target", json!("next-step"))]),
+            chunk(3, json!({"type": "text-delta", "text": "3"})),
+            chunk(4, json!({"type": "done", "finishReason": "stop"})),
+            event(5, "model/request", &[]),
+            chunk(6, json!({"type": "text-delta", "text": "cut"})),
+            event(7, "turn/completed", &[]),
+            text_message(8, "user", "next"),
+        ];
+        assert_eq!(
+            read(&events),
+            vec!["assistant:1 2 3", "assistant:cut", "user:next"]
+        );
     }
 
     #[test]
@@ -611,6 +899,77 @@ mod tests {
 
         let unanswered = vec![message(0, "user")];
         assert!(!inherits_answer(&unanswered).unwrap());
+    }
+
+    /// The same source and the same expected seed as `test/session-fork-seed.test.ts`, so both builds write a
+    /// fork's log with the same bytes.
+    const SEED_SOURCE: [&str; 12] = [
+        r#"{"seq":0,"at":"t0","type":"session/created","cwd":"/w"}"#,
+        r#"{"seq":1,"at":"t1","type":"goal/change","version":1}"#,
+        r#"{"seq":2,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
+        r#"{"seq":3,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}"#,
+        r#"{"seq":4,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}"#,
+        r#"{"seq":5,"at":"t5","type":"turn/completed","rounds":1}"#,
+        r#"{"seq":6,"at":"t6","type":"message","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+        r#"{"seq":7,"at":"t7","type":"compaction/start","fromSeq":2,"throughSeq":3,"shadowedSeqs":[2,3]}"#,
+        r#"{"seq":8,"at":"t8","type":"compaction/summary","fromSeq":2,"throughSeq":3,"summary":"s","shadowedSeqs":[2,3]}"#,
+        r#"{"seq":9,"at":"t9","type":"context/note","message":{"role":"user","content":[{"type":"text","text":"s"}]},"origin":"compaction","surfaceOp":{"op":"replace","startSeq":2,"endSeq":3},"sourceEventSeqs":[7,8,2,3]}"#,
+        r#"{"seq":10,"at":"t10","type":"compaction/end","fromSeq":2,"throughSeq":3,"summarySeq":8,"replacementSeq":9}"#,
+        r#"{"seq":11,"at":"t11","type":"compaction/prune","shadowedRange":{"start":6,"end":6},"shadowedSeqs":[6]}"#,
+    ];
+    const SEED_EXPECTED: [&str; 10] = [
+        r#"{"seq":1,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
+        r#"{"seq":2,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}"#,
+        r#"{"seq":3,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}"#,
+        r#"{"seq":4,"at":"t5","type":"turn/completed","rounds":1}"#,
+        r#"{"seq":5,"at":"t6","type":"message","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+        r#"{"seq":6,"at":"t7","type":"compaction/start","fromSeq":1,"throughSeq":2,"shadowedSeqs":[1,2]}"#,
+        r#"{"seq":7,"at":"t8","type":"compaction/summary","fromSeq":1,"throughSeq":2,"summary":"s","shadowedSeqs":[1,2]}"#,
+        r#"{"seq":8,"at":"t9","type":"context/note","message":{"role":"user","content":[{"type":"text","text":"s"}]},"origin":"compaction","surfaceOp":{"op":"replace","startSeq":1,"endSeq":2},"sourceEventSeqs":[6,7,1,2]}"#,
+        r#"{"seq":9,"at":"t10","type":"compaction/end","fromSeq":1,"throughSeq":2,"summarySeq":7,"replacementSeq":8}"#,
+        r#"{"seq":10,"at":"t11","type":"compaction/prune","shadowedRange":{"start":5,"end":5},"shadowedSeqs":[5]}"#,
+    ];
+
+    #[test]
+    fn a_fork_seed_renumbers_every_seq_after_an_event_it_leaves_behind() {
+        // #52, #55: the seed is the source's own log. A `goal/change` stays behind, so every later event moves
+        // down one, and so does every field that names a seq: the surface range, its sources, the records.
+        let source: Vec<SessionEvent> = SEED_SOURCE
+            .iter()
+            .map(|line| SessionEvent::from_line(line).unwrap())
+            .collect();
+        let seeded = fork_seed(&source, 1);
+        let lines: Vec<String> = seeded.iter().map(SessionEvent::to_line).collect();
+        assert_eq!(lines, SEED_EXPECTED.to_vec());
+        let mut child = vec![
+            SessionEvent::from_line(r#"{"seq":0,"at":"c","type":"session/created"}"#).unwrap(),
+        ];
+        child.extend(seeded);
+        let surface = fold_surface(&child).expect("the child's surface folds");
+        assert_eq!(
+            surface.nodes,
+            vec![8, 5],
+            "the summary stands where the first turn stood"
+        );
+    }
+
+    #[test]
+    fn a_fork_seed_is_the_source_unchanged_when_nothing_stays_behind() {
+        // The child's own `session/created` is seq 0, as the source's is, so the seqs carry over.
+        let source = vec![
+            event(0, "session/created", &[]),
+            message(1, "user"),
+            chunk(2, json!({"type": "text-delta", "text": "a"})),
+            chunk(3, json!({"type": "done", "finishReason": "stop"})),
+            event(4, "permission/mode", &[("mode", json!("read-only"))]),
+            event(5, "turn/completed", &[]),
+        ];
+        assert_eq!(fork_seed(&source, 1), source[1..].to_vec());
+        assert!(!inherited_by_fork("session/created"));
+        assert!(!inherited_by_fork("team/member"));
+        assert!(!inherited_by_fork("transcript/repaired"));
+        assert!(!inherited_by_fork("goal/change"));
+        assert!(inherited_by_fork("permission/mode"));
     }
 
     #[test]

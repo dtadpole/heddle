@@ -241,6 +241,77 @@ test('the reader hands back text, refuses what a viewer cannot show, and says wh
   }
 })
 
+/**
+ * Issue #78: the reader decoded its slice lossily and refused any text holding U+FFFD, so it refused a valid file whose
+ * last character the limit cut, and a valid file that holds a literal U+FFFD. Only bytes that are not UTF-8 are refused.
+ * Four controls, the same as the Rust port's `file.rs` tests; a small limit keeps the files tiny.
+ */
+function withFile(name: string, content: string | Buffer, body: (path: string) => void): void {
+  const root = scaffold([])
+  try {
+    writeFileSync(join(root, name), content)
+    body(join(root, name))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+const NOT_UTF8 = /is not UTF-8 text, so it has no text to show$/
+
+test('a limit at a character boundary keeps every byte it read', () => {
+  // "ab中cd": the three bytes of 中 are 2..4.
+  withFile('wide.txt', 'ab中cd', (path) => {
+    const aligned = readFileText(path, { limit: 5 })
+    assert.deepEqual([aligned.text, aligned.truncated, aligned.bytes], ['ab中', true, 7])
+  })
+})
+
+test('a limit that cuts a character keeps the whole characters before it, truncated rather than refused', () => {
+  withFile('wide.txt', 'ab中cd', (path) => {
+    for (const limit of [3, 4]) {
+      const cut = readFileText(path, { limit })
+      assert.equal(cut.text, 'ab', `a limit of ${limit} cuts 中, so the text is the whole characters before it`)
+      assert.equal(cut.truncated, true, 'and it says it is truncated rather than refusing the file')
+      assert.equal(cut.lines, 1)
+      assert.equal(cut.bytes, 7, 'the size is still the whole file')
+    }
+  })
+  withFile('accent.txt', 'abé!', (path) => {
+    const accent = readFileText(path, { limit: 3 })
+    assert.deepEqual([accent.text, accent.truncated], ['ab', true], 'a two-byte character cut after its first byte')
+  })
+  withFile('accent-only.txt', 'é', (path) => {
+    const nothing = readFileText(path, { limit: 1 })
+    assert.deepEqual([nothing.text, nothing.lines, nothing.truncated], ['', 0, true], 'nothing whole before the cut is an empty, truncated text')
+  })
+  // "😀" is four bytes, 1..4: cut after one, two or three of them.
+  withFile('emoji.txt', 'x😀y', (path) => {
+    for (const limit of [2, 3, 4]) {
+      const emoji = readFileText(path, { limit })
+      assert.deepEqual([emoji.text, emoji.truncated], ['x', true], `a four-byte character cut by a limit of ${limit}`)
+    }
+  })
+})
+
+test('a literal U+FFFD is text, not a sign of bytes that are not UTF-8', () => {
+  withFile('replacement.txt', 'a literal \uFFFD is a character\n', (path) => {
+    const literal = readFileText(path)
+    assert.deepEqual([literal.text, literal.truncated], ['a literal \uFFFD is a character\n', false])
+  })
+})
+
+test('bytes that are not UTF-8 are refused wherever they are', () => {
+  withFile('invalid.txt', Buffer.from([0x61, 0xff, 0x62, 0x0a]), (path) => {
+    assert.throws(() => readFileText(path), NOT_UTF8, 'a byte that is not UTF-8 is refused')
+    assert.throws(() => readFileText(path, { limit: 3 }), NOT_UTF8, 'inside a truncated slice as well')
+  })
+  withFile('ends-cut.txt', Buffer.from([0x61, 0x62, 0xe4, 0xb8]), (path) => {
+    assert.throws(() => readFileText(path), NOT_UTF8, 'a file that itself ends inside a character: no limit cut it')
+  })
+  withFile('bad-lead.txt', Buffer.from([0x61, 0x62, 0xe0, 0x80, 0x80]), (path) => {
+    assert.throws(() => readFileText(path, { limit: 4 }), NOT_UTF8, 'bytes at the cut that begin no character (E0 80) are refused, not dropped')
+  })
+})
+
 test('a _sessions_ folder is not a node, and its sessions come first in the branch they belong to', () => {
   const root = scaffold([
     '_tools_/some-tool',

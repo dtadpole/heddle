@@ -142,8 +142,11 @@ test('workspace-write confines the shell to the workspace, including its descend
       assert.equal(existsSync(h.outsidePath), false, 'the outside write left no file')
       assert.equal(existsSync(h.childPath), false, 'a descendant shell is confined with its parent')
       assert.ok(results.some((text) => /devnull-ok/.test(text)), '/dev/null stays writable, so a shell still works')
-      const signaturePrint = results.find((text) => text.includes('Operation not permitted'))
-      assert.ok(signaturePrint !== undefined, 'the false-positive command ran')
+      // The fifth call's own result, by position: a refused call now keeps what it printed below its error line
+      // (issue #82), so the real denial's result also contains the kernel's 'Operation not permitted', and a search by
+      // text would find that one instead of the command that only prints the sentence.
+      const signaturePrint = results[4]
+      assert.ok(signaturePrint?.includes('Operation not permitted'), `the false-positive command ran (${signaturePrint})`)
       assert.ok(
         !/file access denied/.test(signaturePrint),
         `a command that merely prints the denial sentence is not reported as denied (${signaturePrint})`,

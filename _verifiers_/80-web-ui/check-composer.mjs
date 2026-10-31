@@ -1748,3 +1748,105 @@ test('a queued message keeps its image through an edit and reaches the provider'
     await server.close()
   }
 })
+
+test('a queued message runs as a turn with Stop on offer, and a message typed meanwhile waits for it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue developer-ten-6 (P1, measured on 8082 on 2026-10-29): once the queue had sent its message as a turn of
+   * its own, the composer was drawn idle under that running turn: Send instead of Stop, so the turn could not be
+   * stopped, and a message typed then went out at once as a second turn beside it on the same session. DSH: "While a
+   * normal composer is running, its primary pointer action remains Stop when the draft is empty"; a turn started from
+   * the queue is a running turn like any other.
+   */
+  const server = await startServer('queued-stop', { holdOpenMs: 2500 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the panel is up')
+    await type(browser, 'first')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length >= 1), 'the first turn reached the endpoint')
+    await type(browser, 'queued one')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the second message waits in the dock')
+    assert.ok(await until(() => server.double.requests.length >= 2, 15_000), 'the first turn ended and the queue sent its message as a turn of its own')
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === true', 10_000), 'the dock has drained')
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        stop: !document.getElementById('stop').hidden,
+        send: !document.getElementById('send').hidden,
+        label: document.getElementById('send').getAttribute('aria-label'),
+      })`),
+    )
+    assert.deepEqual(state, { stop: true, send: false, label: 'Queue message' }, 'while the queued turn runs, the composer offers Stop and Enter queues')
+    const asked = server.double.requests.length
+    await type(browser, 'typed meanwhile')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 5_000), 'a message typed meanwhile waits in the dock')
+    assert.equal(server.double.requests.length, asked, 'and no second turn started beside the running one')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a message the server took is not put back or resent when the connection drops before its turn ends', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue #48 (2026-10-30): when the network dropped at the end of a turn, the answer had arrived in full, but the
+   * page said "the message could not be sent: Failed to fetch" and put the answered prompt back in the composer, so
+   * Enter sent it again as a duplicate turn. DSH restores a draft only for a failed submission. The drop is made
+   * deterministic in the page: the turn's response stream errors as a lost connection does, right after the answer's
+   * text has been read, while the model double still holds the stream open.
+   */
+  const server = await startServer('dropped-end', { holdOpenMs: 4000 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the panel is up')
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.fetch = async (input, init) => {
+        const response = await real(input, init)
+        if (!String(input).includes('/api/turn') || response.body === null) return response
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let seen = ''
+        let drop = false
+        const body = new ReadableStream({
+          async pull(controller) {
+            if (drop) { controller.error(new TypeError('Failed to fetch')); return }
+            const { value, done } = await reader.read()
+            if (done) { controller.close(); return }
+            controller.enqueue(value)
+            seen += decoder.decode(value, { stream: true })
+            if (seen.includes('the answer')) drop = true
+          },
+        })
+        return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
+      }
+    })()`)
+    await type(browser, 'only once')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("the answer")', 15_000), 'the answer arrived')
+    assert.ok(
+      await browser.waitFor(`[...document.querySelectorAll('#log .turn.denied')].length > 0`, 10_000),
+      'and the dropped connection is reported',
+    )
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        field: document.querySelector('textarea').value,
+        notes: [...document.querySelectorAll('#log .turn.denied')].map((note) => note.textContent),
+      })`),
+    )
+    assert.equal(state.field, '', `the delivered message is not put back in the composer (${JSON.stringify(state)})`)
+    assert.ok(!state.notes.some((note) => /could not be sent/.test(note)), `nor reported as unsent (${JSON.stringify(state.notes)})`)
+    assert.ok(state.notes.some((note) => /delivered/.test(note)), 'the note says the message was delivered')
+    assert.equal(server.double.requests.length, 1, 'and nothing was sent twice')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

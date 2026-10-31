@@ -44,7 +44,7 @@ use crate::layout::workspace_key;
 use crate::message::{Chunk, Message, RecordedMessage, Role};
 use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
 use crate::surface::{
-    SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface,
+    SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface, fork_seed,
     index_by_seq, is_surface_eligible,
 };
 use crate::title::SessionTitles;
@@ -493,6 +493,14 @@ impl SessionStore {
                 .into_owned(),
         };
 
+        // A title is cleaned as DSH cleans an accepted one (`title_text`); one with nothing visible left
+        // is not written.
+        let title = options
+            .title
+            .as_deref()
+            .map(crate::title_text::clean_session_title)
+            .filter(|title| !title.is_empty());
+
         // The record's key order is the TypeScript literal's: an absent option is not written.
         let mut record = Map::new();
         record.insert("id".to_string(), Value::String(id.clone()));
@@ -502,7 +510,7 @@ impl SessionStore {
             ("endpoint", options.endpoint.clone()),
             ("model", options.model.clone()),
             ("reasoningEffort", options.reasoning_effort.clone()),
-            ("title", options.title.clone()),
+            ("title", title),
             ("parentSession", options.parent_session.clone()),
         ] {
             if let Some(value) = value {
@@ -520,6 +528,9 @@ impl SessionStore {
         }
         if let Some(team) = options.team_id.clone() {
             record.insert("teamId".to_string(), Value::String(team));
+        }
+        if let Some(preset) = options.preset.clone() {
+            record.insert("preset".to_string(), Value::String(preset));
         }
         record.insert("turns".to_string(), Value::from(0u64));
         let meta = SessionMeta::from_value(Value::Object(record)).expect("the record has an id");
@@ -541,6 +552,10 @@ impl SessionStore {
     }
 
     /// Retitle a session; a blank title deletes the key. `Ok(None)` when there is no such session.
+    ///
+    /// The title is cleaned as DSH cleans an accepted one first (`title_text`, `dsh-session-title`
+    /// `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80
+    /// UTF-8 bytes; one with nothing visible left clears, as a blank one does (the route refuses it).
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
         let _meta = self.meta_guard();
         self.rename_locked(id, title)
@@ -569,13 +584,41 @@ impl SessionStore {
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(None);
         };
-        let trimmed = title.trim();
+        let cleaned = crate::title_text::clean_session_title(title);
         let mut next = current;
-        if trimmed.is_empty() {
+        if cleaned.is_empty() {
             next.remove("title");
         } else {
-            next.set("title", Value::String(trimmed.to_string()));
+            next.set("title", Value::String(cleaned));
         }
+        let Some(meta_path) = self.meta_file(id) else {
+            return Ok(None);
+        };
+        write_text(&meta_path, &next.to_file_text())?;
+        Ok(Some(next))
+    }
+
+    /// Record the agent preset a session runs under, **only when it has none** (inventory A96).
+    ///
+    /// A session keeps its preset, so this never replaces one: it is how a session created before presets, or by a
+    /// path that named none, takes the current default once and then keeps it. The preset is trimmed, and a blank
+    /// one writes nothing. Answers the record as it now is; `Ok(None)` for an unknown session.
+    pub fn record_preset(
+        &self,
+        id: &str,
+        preset: &str,
+    ) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
+        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+            return Ok(None);
+        };
+        // `current.preset !== undefined`: a record that carries the key keeps it, whatever it holds.
+        let trimmed = preset.trim();
+        if current.as_map().contains_key("preset") || trimmed.is_empty() {
+            return Ok(Some(current));
+        }
+        let mut next = current;
+        next.set("preset", Value::String(trimmed.to_string()));
         let Some(meta_path) = self.meta_file(id) else {
             return Ok(None);
         };
@@ -623,9 +666,16 @@ impl SessionStore {
         Ok(Some(next))
     }
 
-    /// Copy a session's **projected** messages, cut at its last completed turn and without system
-    /// messages, into a new session that inherits its `cwd`, endpoint, model and reasoning level.
-    /// `Ok(None)` when the source does not exist.
+    /// Seed a new session with a session's **log** up to its last completed turn, in a session that
+    /// inherits its `cwd`, endpoint, model and reasoning level. `Ok(None)` when the source does not exist.
+    ///
+    /// DSH's `session/fork` cuts at `latestCompletedPrefixBoundary` and seeds the child with that exact
+    /// event prefix (dsh-api-session-controller/lib/index.js:724-733 and 870-872, `buildForkSeed` in
+    /// dsh-session/lib/types/fork.js:18-27). This copied the projection instead, one `message` per surface
+    /// node, and the child read differently from its source: a streamed answer's reasoning was drawn glued in
+    /// front of the answer and a tool call lost its name (#52), and a compacted source handed over only its
+    /// summary and live turns (#55). The seed is [`fork_seed`]; the harness's notes come along as the notes they
+    /// were, at the positions they held, so the child's next round writes no second copy.
     pub fn fork(
         &self,
         source: &str,
@@ -651,41 +701,81 @@ impl SessionStore {
             origin: attribution.origin,
             delegation_depth: attribution.delegation_depth,
             team_id: attribution.team_id.clone(),
+            // The store's fork copies no preset, as the TypeScript one does not: the service's fork and a team's
+            // teammate record the source's with `record_preset` (inventory A96).
+            preset: None,
             id: attribution.id.clone(),
         })?;
 
         // The fork inherits what the source had **finished**: a dangling user message is not carried.
         let events = self.read(&from)?;
         let inherited = completed_prefix(events.as_slice());
-        let by_seq = index_by_seq(&inherited);
-        for seq in fold_surface(&inherited)?.nodes {
-            let Some(message) = derive_message(&by_seq, seq) else {
-                continue;
-            };
-            if message.role == Role::System {
-                continue;
-            }
-            if let Some(node) = by_seq.get(&seq).filter(|node| node.kind == "context/note") {
-                // A note the harness wrote stays a **note**, as DSH's fork seed keeps the source's own
-                // events (dsh-session/lib/types/fork.js:18-27): re-appended as a `message`, a runtime-context
-                // snapshot became a user bubble and one turn too many in the child (R-developer-eight-15).
-                // Origin and identity come along; the source's surface positions name seqs the child lacks.
-                let mut fields = node.fields.clone();
-                fields.shift_remove("surfaceOp");
-                fields.shift_remove("sourceEventSeqs");
-                self.append(
-                    &handle,
-                    NewEvent {
-                        kind: node.kind.clone(),
-                        fields,
-                    },
-                    AppendOptions::default(),
-                )?;
-                continue;
-            }
-            self.message(&handle, message)?;
-        }
+        self.seed(&handle, &inherited)?;
         Ok(Some(handle))
+    }
+
+    /// Write a fork's inherited events ([`fork_seed`]) into its new log, after the child's own
+    /// `session/created`.
+    ///
+    /// One append, and **not published**: the seed is history the child starts from, so neither the listener
+    /// (the live stream, the goal and reminder drivers) nor the title coordinator hears its `model/request` and
+    /// `turn/completed` as a turn happening now. DSH's seeded session pushes its seed into the log after checking
+    /// each event against the surface, and its live events start after them (dsh-session/lib/index.js:1399-1411).
+    /// The result is folded before anything is written, because a seed whose replacements missed the child's
+    /// surface would leave a log nothing can read. The meta counts the inherited user messages as turns.
+    fn seed(
+        &self,
+        handle: &SessionHandle,
+        inherited: &[Arc<SessionEvent>],
+    ) -> Result<(), SessionError> {
+        let turns = {
+            let mut state = self.state.lock().expect("the store lock is never poisoned");
+            self.claim_locked(&mut state, handle)?;
+            self.load_locked(&mut state, handle)?;
+            let loaded = state
+                .loaded
+                .get_mut(&handle.id)
+                .expect("the log was just loaded");
+            let records: Vec<Arc<SessionEvent>> = fork_seed(inherited, loaded.events.len() as u64)
+                .into_iter()
+                .map(Arc::new)
+                .collect();
+            if records.is_empty() {
+                return Ok(());
+            }
+            let mut whole: Vec<Arc<SessionEvent>> = loaded.events.iter().cloned().collect();
+            whole.extend(records.iter().cloned());
+            fold_surface(&whole)?;
+            let mut bytes = Vec::new();
+            for record in &records {
+                let line = format!("{}\n", record.to_line());
+                if loaded.framed {
+                    bytes.extend(encode_frame(&line));
+                } else {
+                    bytes.extend(line.into_bytes());
+                }
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&handle.transcript)
+                .and_then(|mut file| file.write_all(&bytes))
+                .map_err(|error| SessionError::io(&handle.transcript, error))?;
+            Arc::make_mut(&mut loaded.events).extend(records.iter().cloned());
+            records
+                .iter()
+                .filter(|record| {
+                    record.kind == "message"
+                        && record
+                            .get("message")
+                            .and_then(|message| message.get("role"))
+                            .and_then(Value::as_str)
+                            == Some("user")
+                })
+                .count() as u64
+        };
+        self.touch_counting(handle, turns);
+        Ok(())
     }
 
     /// Record which endpoint and model a session runs with, replacing the previous selection.
@@ -1327,6 +1417,12 @@ impl SessionStore {
     /// write. A meta file that cannot be read or written is ignored: losing the count must never lose
     /// the event that was just appended.
     pub fn touch(&self, handle: &SessionHandle, bump_turns: bool) {
+        self.touch_counting(handle, u64::from(bump_turns));
+    }
+
+    /// [`SessionStore::touch`], counting `turns` user turns in the same write: a fork's seed counts every
+    /// inherited user message at once.
+    fn touch_counting(&self, handle: &SessionHandle, turns: u64) {
         let _meta = self.meta_guard();
         let Ok(text) = std::fs::read_to_string(&handle.meta) else {
             return;
@@ -1338,8 +1434,8 @@ impl SessionStore {
             return;
         };
         meta.set("updated", Value::String(iso_now()));
-        if bump_turns {
-            meta.set("turns", Value::from(meta.turns() + 1));
+        if turns > 0 {
+            meta.set("turns", Value::from(meta.turns() + turns));
         }
         let _ = crate::fsio::write_atomic(&handle.meta, meta.to_file_text());
     }
@@ -1744,6 +1840,65 @@ mod tests {
         assert!(!text.contains("reasoningEffort"));
     }
 
+    /// Inventory A96: the preset is written at creation after `teamId` and before `turns`, the TypeScript literal's
+    /// order.
+    #[test]
+    fn a_created_session_records_its_preset_before_its_turns() {
+        let (_dir, store) = store();
+        let handle = store
+            .create(CreateOptions {
+                team_id: Some("session-lead".to_string()),
+                preset: Some("reader".to_string()),
+                ..CreateOptions::default()
+            })
+            .unwrap();
+        let meta = store.meta(&handle.id).unwrap();
+        assert_eq!(meta.preset(), Some("reader"));
+        let keys: Vec<&str> = meta.as_map().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["id", "created", "cwd", "teamId", "preset", "turns"]);
+    }
+
+    /// Inventory A96: `record_preset` writes a preset only when the session has none — trimmed, never replacing one,
+    /// and a blank one is a no-op — and answers the record as it now is.
+    #[test]
+    fn record_preset_writes_only_when_the_session_has_none_and_never_replaces() {
+        let (_dir, store) = store();
+        let handle = store.create(CreateOptions::default()).unwrap();
+        let unchanged = store.record_preset(&handle.id, "   ").unwrap().unwrap();
+        assert_eq!(unchanged.preset(), None, "a blank preset writes nothing");
+        assert!(!read_text(&handle.meta).contains("preset"));
+
+        let recorded = store
+            .record_preset(&handle.id, "  standard ")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.preset(), Some("standard"), "trimmed");
+        let keys: Vec<String> = store
+            .meta(&handle.id)
+            .unwrap()
+            .as_map()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys.last().map(String::as_str),
+            Some("preset"),
+            "a new key is appended, as the spread appends it"
+        );
+
+        let kept = store.record_preset(&handle.id, "reader").unwrap().unwrap();
+        assert_eq!(
+            kept.preset(),
+            Some("standard"),
+            "a session keeps its preset"
+        );
+        assert_eq!(store.meta(&handle.id).unwrap().preset(), Some("standard"));
+        assert_eq!(
+            store.record_preset("session-nobody", "reader").unwrap(),
+            None
+        );
+    }
+
     fn note(role: &str, text: &str) -> NewEvent {
         NewEvent::new("context/note").field(
             "message",
@@ -2057,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_copies_the_projection_and_records_its_parent() {
+    fn a_fork_copies_the_completed_log_and_records_its_parent() {
         let (_dir, store) = store();
         let source = store
             .create(CreateOptions {
@@ -2235,19 +2390,25 @@ mod tests {
             .iter()
             .filter(|event| event.kind == "context/note")
             .collect();
-        assert_eq!(notes.len(), 1, "the snapshot came across as one note");
-        assert_eq!(notes[0].get("origin"), Some(&json!("runtime-context")));
-        assert_eq!(notes[0].get("identity"), Some(&json!(SNAPSHOT)));
         assert_eq!(
-            notes[0].get("surfaceOp"),
-            None,
-            "the source's positions stay behind"
+            notes.len(),
+            2,
+            "the system prompt and the snapshot came across as notes"
         );
-        assert!(
-            !events
+        assert_eq!(notes[1].get("origin"), Some(&json!("runtime-context")));
+        assert_eq!(notes[1].get("identity"), Some(&json!(SNAPSHOT)));
+        assert_eq!(
+            notes[1].get("surfaceOp"),
+            Some(&json!("append")),
+            "with the surface marker it was written with"
+        );
+        assert_eq!(
+            events
                 .iter()
-                .any(|event| event.to_line().contains("you are heddle")),
-            "the system prompt is not inherited"
+                .filter(|event| event.to_line().contains("you are heddle"))
+                .count(),
+            1,
+            "the system prompt comes along once, as the note it was (#52, #55)"
         );
 
         let texts: Vec<String> = store
@@ -2259,6 +2420,7 @@ mod tests {
         assert_eq!(
             texts,
             vec![
+                "you are heddle",
                 "first question",
                 SNAPSHOT,
                 "answer one",
@@ -2654,5 +2816,411 @@ mod tests {
         let env = Env::from_pairs([("HOME", "/tmp/hd-user")]);
         let store = SessionStore::new("~/sessions", &env);
         assert_eq!(store.root(), "/tmp/hd-user/sessions");
+    }
+
+    /// Append one event written as the TypeScript literal, with its surface marker when it has one.
+    fn put(store: &SessionStore, handle: &SessionHandle, value: Value) -> Arc<SessionEvent> {
+        put_with(store, handle, value, AppendOptions::default())
+    }
+
+    fn put_with(
+        store: &SessionStore,
+        handle: &SessionHandle,
+        value: Value,
+        options: AppendOptions,
+    ) -> Arc<SessionEvent> {
+        store
+            .append(handle, NewEvent::try_from(value).unwrap(), options)
+            .unwrap()
+    }
+
+    /// A turn as the loop records it: the prompt, the request, the streamed reasoning and answer, the end.
+    fn streamed_turn(
+        store: &SessionStore,
+        handle: &SessionHandle,
+        prompt: &str,
+        reasoning: &[&str],
+        answer: &[&str],
+    ) {
+        store.message(handle, user(prompt)).unwrap();
+        put(
+            store,
+            handle,
+            json!({"type": "model/request", "endpoint": "scripted", "messages": 2, "tools": []}),
+        );
+        for text in reasoning {
+            put(
+                store,
+                handle,
+                json!({"type": "assistant/chunk", "chunk": {"type": "reasoning-delta", "text": text}}),
+            );
+        }
+        for text in answer {
+            put(
+                store,
+                handle,
+                json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": text}}),
+            );
+        }
+        put(
+            store,
+            handle,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+        );
+        put(
+            store,
+            handle,
+            json!({"type": "assistant/completed", "text": answer.concat(), "finishReason": "stop", "rounds": 1}),
+        );
+        put(
+            store,
+            handle,
+            json!({"type": "turn/completed", "rounds": 1}),
+        );
+    }
+
+    /// A compaction as heddle-context records it: every surface node but the newest `keep` is shadowed.
+    fn compact(store: &SessionStore, handle: &SessionHandle, keep: usize) {
+        let nodes = store.surface(handle).unwrap().nodes.clone();
+        let shadowed = nodes[..nodes.len() - keep].to_vec();
+        let (from, through) = (shadowed[0], *shadowed.last().unwrap());
+        let start = put(
+            store,
+            handle,
+            json!({"type": "compaction/start", "fromSeq": from, "throughSeq": through, "shadowedSeqs": shadowed}),
+        );
+        let text =
+            "<compacted-summary>\nthe briefing: the code word is WALRUS-9\n</compacted-summary>";
+        let summary = put(
+            store,
+            handle,
+            json!({"type": "compaction/summary", "fromSeq": from, "throughSeq": through, "summary": text, "shadowedSeqs": shadowed}),
+        );
+        let mut sources = vec![start.seq, summary.seq];
+        sources.extend(&shadowed);
+        let replacement = put_with(
+            store,
+            handle,
+            json!({"type": "context/note", "message": {"role": "user", "content": [{"type": "text", "text": text}]}, "origin": "compaction"}),
+            AppendOptions {
+                surface_op: Some(SurfaceOp::Replace {
+                    start_seq: from,
+                    end_seq: through,
+                }),
+                source_event_seqs: Some(sources),
+            },
+        );
+        put(
+            store,
+            handle,
+            json!({"type": "compaction/end", "fromSeq": from, "throughSeq": through, "summarySeq": summary.seq, "replacementSeq": replacement.seq}),
+        );
+    }
+
+    fn fork_of(store: &SessionStore, source: &SessionHandle) -> SessionHandle {
+        store
+            .fork(
+                &source.id,
+                ForkAttribution {
+                    parent_session: Some(source.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .expect("the source exists")
+    }
+
+    fn prompts_of(events: &[Arc<SessionEvent>]) -> Vec<String> {
+        events
+            .iter()
+            .filter(|event| event.kind == "message")
+            .filter_map(|event| {
+                let message = event.get("message")?;
+                (message.get("role") == Some(&json!("user"))).then(|| {
+                    message["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string()
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_fork_replays_a_reasoning_turn_and_a_tool_turn_as_the_source_recorded_them() {
+        // #52: the fork copied one assistant `message` per turn, so the view drew the reasoning glued in front of
+        // the answer ("17 × 23 = 391.391") and a tool call without its name. DSH seeds the child with the source's
+        // own events (dsh-session/lib/types/fork.js:18-27), chunks included.
+        let (_dir, store) = store();
+        let source = store.create(CreateOptions::default()).unwrap();
+        streamed_turn(
+            &store,
+            &source,
+            "What is 17 times 23?",
+            &["17", " × 23", " = 391."],
+            &["39", "1"],
+        );
+        store.message(&source, user("Use the bash tool.")).unwrap();
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "tool-call", "id": "call-1", "name": "bash", "arguments": "{\"command\":\"echo FORKTOOL-77\"}"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "tool_calls"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "message", "message": {"role": "tool", "toolCallId": "call-1", "content": [{"type": "text", "text": "FORKTOOL-77\n"}]}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "done"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "turn/completed", "rounds": 2}),
+        );
+
+        let fork = fork_of(&store, &source);
+        let child = store.read(&fork).unwrap();
+        let reasoning: String = child
+            .iter()
+            .filter(|event| {
+                event.get("chunk").and_then(|chunk| chunk.get("type"))
+                    == Some(&json!("reasoning-delta"))
+            })
+            .map(|event| event.fields["chunk"]["text"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            reasoning, "17 × 23 = 391.",
+            "the reasoning is still a reasoning block, not part of an answer"
+        );
+        assert!(
+            !child.iter().any(|event| event.kind == "message"
+                && event.get("message").and_then(|message| message.get("role"))
+                    == Some(&json!("assistant"))),
+            "and no answer was folded into an assistant message"
+        );
+        assert!(
+            child.iter().any(
+                |event| event.get("chunk").and_then(|chunk| chunk.get("name"))
+                    == Some(&json!("bash"))
+            ),
+            "the call keeps its name and command"
+        );
+        assert_eq!(
+            store.messages(&fork).unwrap(),
+            store.messages(&source).unwrap(),
+            "the model reads what the source's read"
+        );
+    }
+
+    #[test]
+    fn a_fork_of_a_compacted_session_keeps_the_turns_before_the_compaction() {
+        // #55: the fork copied the compacted surface (the summary and the live turns), so the branch started
+        // mid-conversation. The seed is the log, so every turn comes along and the summary stands in for the
+        // early ones in the model's context only.
+        let (_dir, store) = store();
+        let source = store.create(CreateOptions::default()).unwrap();
+        streamed_turn(
+            &store,
+            &source,
+            "Remember the code word WALRUS-9.",
+            &["Noting it."],
+            &["noted."],
+        );
+        streamed_turn(
+            &store,
+            &source,
+            "Write about bridges, part 1",
+            &["Part 1."],
+            &["Bridges, part one."],
+        );
+        store
+            .message(&source, user("Write about bridges, part 2"))
+            .unwrap();
+        compact(&store, &source, 1);
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "Bridges, part two."}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "turn/completed", "rounds": 1}),
+        );
+
+        let fork = fork_of(&store, &source);
+        let child = store.read(&fork).unwrap();
+        assert_eq!(
+            prompts_of(&child),
+            vec![
+                "Remember the code word WALRUS-9.",
+                "Write about bridges, part 1",
+                "Write about bridges, part 2"
+            ],
+            "the branch starts where its source started"
+        );
+        for record in ["compaction/start", "compaction/summary", "compaction/end"] {
+            assert!(
+                child.iter().any(|event| event.kind == record),
+                "the branch carries the source's {record}"
+            );
+        }
+        let context = store.messages(&fork).unwrap();
+        assert!(
+            crate::message::text_of(&context[0].content).contains("WALRUS-9"),
+            "its model reads the summary first"
+        );
+        assert_eq!(
+            context,
+            store.messages(&source).unwrap(),
+            "exactly as the source's model does"
+        );
+        let turns = |id: &str| {
+            store
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == id)
+                .unwrap()
+                .turns()
+        };
+        assert_eq!(
+            turns(&fork.id),
+            turns(&source.id),
+            "and it counts as many turns"
+        );
+    }
+
+    #[test]
+    fn a_fork_seed_keeps_the_source_bytes_and_times_and_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap().to_string();
+        let heard: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder = heard.clone();
+        let listener: EventListener = Arc::new(move |handle, event| {
+            recorder
+                .lock()
+                .unwrap()
+                .push((handle.id.clone(), event.kind.clone()));
+        });
+        let store = SessionStore::with_listener(&root, &Env::default(), listener);
+        let source = store.create(CreateOptions::default()).unwrap();
+        streamed_turn(&store, &source, "a prompt", &["a thought"], &["an answer"]);
+
+        let fork = fork_of(&store, &source);
+        let lines = |handle: &SessionHandle| -> Vec<String> {
+            store
+                .read(handle)
+                .unwrap()
+                .iter()
+                .skip(1)
+                .map(|event| event.to_line())
+                .collect()
+        };
+        assert_eq!(
+            lines(&fork),
+            lines(&source),
+            "every inherited event is the source line, seq and time included"
+        );
+        let published: Vec<String> = heard
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, _)| *id == fork.id)
+            .map(|(_, kind)| kind.clone())
+            .collect();
+        assert_eq!(
+            published,
+            vec!["session/created"],
+            "the seed is history, not a turn happening now"
+        );
+    }
+
+    #[test]
+    fn a_fork_leaves_the_source_records_behind_and_renumbers_what_names_a_seq() {
+        let (_dir, store) = store();
+        let source = store.create(CreateOptions::default()).unwrap();
+        put(
+            &store,
+            &source,
+            json!({"type": "goal/change", "version": 1, "operation": "create"}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "team/member", "version": 1, "teamId": source.id}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "transcript/repaired", "droppedBytes": 3}),
+        );
+        streamed_turn(&store, &source, "first", &["one"], &["one."]);
+        streamed_turn(&store, &source, "second", &["two"], &["two."]);
+        store.message(&source, user("third")).unwrap();
+        compact(&store, &source, 1);
+        streamed_turn(&store, &source, "fourth", &["four"], &["four."]);
+
+        let fork = fork_of(&store, &source);
+        let child = store.read(&fork).unwrap();
+        assert!(
+            child
+                .iter()
+                .enumerate()
+                .all(|(index, event)| event.seq == index as u64),
+            "the seqs run on without a hole"
+        );
+        assert!(
+            !child.iter().any(|event| event.kind == "goal/change"
+                || event.kind.starts_with("team/")
+                || event.kind == "transcript/repaired"),
+            "none of the source's own records came along"
+        );
+        let by_seq: HashMap<u64, &Arc<SessionEvent>> =
+            child.iter().map(|event| (event.seq, event)).collect();
+        let end = child
+            .iter()
+            .find(|event| event.kind == "compaction/end")
+            .unwrap();
+        let named = |key: &str| by_seq[&end.fields[key].as_u64().unwrap()];
+        assert_eq!(named("summarySeq").kind, "compaction/summary");
+        let replacement = named("replacementSeq");
+        assert_eq!(replacement.get("origin"), Some(&json!("compaction")));
+        assert_eq!(
+            replacement.fields["surfaceOp"]["startSeq"],
+            end.fields["fromSeq"]
+        );
+        let first = named("fromSeq");
+        assert_eq!(
+            first.fields["message"]["content"][0]["text"],
+            json!("first"),
+            "the range starts at the child's first prompt"
+        );
+        assert_eq!(
+            by_seq[&replacement.fields["sourceEventSeqs"][0].as_u64().unwrap()].kind,
+            "compaction/start"
+        );
+        assert_eq!(
+            store.messages(&fork).unwrap(),
+            store.messages(&source).unwrap()
+        );
     }
 }

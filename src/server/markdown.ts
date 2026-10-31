@@ -165,6 +165,104 @@ function imageSource(target: string): string | null {
 }
 
 /**
+ * The deepest container nesting one line may open: markdown-it's default `maxNesting`.
+ *
+ * Live issues developer-two-15 (P0) and -16 (2026-10-29): a line of 5,000 `>` overflowed the Rust renderer's stack and
+ * aborted the server, again on every open of the session whose answer held it; this build answered from about 2,000
+ * levels with `marked`'s own "Maximum call stack size exceeded", so the session view and the file preview failed. A
+ * container nested this deep carries nothing a reader can follow, so the levels past it are rendered as their text.
+ */
+export const MAX_NESTING = 100
+
+/**
+ * Each line opens at most `MAX_NESTING` containers (block quotes and list items); a marker past that is escaped, so it
+ * reads as its own character. **Every** line is bounded, code included, and the Rust `bound_nesting` writes the same.
+ *
+ * Indentation is bounded too (`boundIndent`). A first version skipped the lines of a code fence by its own fence test, which was looser than CommonMark's: `    ```
+ * ` (four spaces, an indented code block) and `` ``` a`b `` (a backtick in a backtick fence's info string, a paragraph)
+ * opened a "fence" for it but not for the parser, so every later line reached the parser unbounded (developer-three's
+ * review, 2026-10-30). Bounding code too fails safe; a line of real code with more than a hundred nested markers, which
+ * nobody writes, shows one backslash.
+ */
+export function boundNesting(markdown: string): string {
+  return markdown.split('\n').map((line) => boundLine(boundIndent(line))).join('\n')
+}
+
+/**
+ * The widest indentation a line keeps, in columns (a tab reaching the next multiple of four): two for each level of
+ * `MAX_NESTING`, the least a nested list item indents by.
+ *
+ * Lists also nest by indentation, one marker per line, which counting markers does not see (developer-three's review
+ * material): an indented list of 1,000 levels, about 1 MB, took 2 s and 386 MB in `marked`, and 1,500 levels ran this
+ * build out of heap, which no catch survives. A line indented past this is drawn at this indentation.
+ */
+export const MAX_INDENT = 2 * MAX_NESTING
+
+function boundIndent(line: string): string {
+  let at = 0
+  let column = 0
+  while (line[at] === ' ' || line[at] === '\t') {
+    column = line[at] === '\t' ? column + 4 - (column % 4) : column + 1
+    at += 1
+  }
+  return column > MAX_INDENT ? `${' '.repeat(MAX_INDENT)}${line.slice(at)}` : line
+}
+
+/** A list item's marker at a given index: a bullet, or a number of up to nine digits and its `.` or `)`. */
+const LIST_MARKER = /(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)/y
+
+function boundLine(line: string): string {
+  let at = 0
+  let depth = 0
+  for (;;) {
+    while (line[at] === ' ' || line[at] === '\t') at += 1
+    if (line[at] === '>') {
+      depth += 1
+      if (depth > MAX_NESTING) return `${line.slice(0, at)}\\${line.slice(at)}`
+      at += 1
+      continue
+    }
+    LIST_MARKER.lastIndex = at
+    const list = LIST_MARKER.exec(line)
+    if (list === null) return line
+    depth += 1
+    if (depth > MAX_NESTING) {
+      /** A bullet is escaped itself; a number keeps its digits and escapes its `.` or `)`. */
+      const escapeAt = /\d/.test(line[at] ?? '') ? at + list[0].length - 1 : at
+      return `${line.slice(0, escapeAt)}\\${line.slice(escapeAt)}`
+    }
+    at += list[0].length
+  }
+}
+
+/**
+ * What a text that could not be rendered is shown as: its own words, escaped, so nothing is lost and nothing runs.
+ *
+ * The last guard behind `boundNesting`: a structure it does not bound (deep inline nesting) can still exhaust the
+ * parser's stack, and in JavaScript that is a `RangeError` this build can catch, where it used to fail the whole
+ * session view (live issue developer-two-16).
+ */
+/**
+ * Conservative parser work budget, shared with Rust. Recursive inline parsing can exhaust a stack or heap before
+ * an exception is recoverable. Over-budget documents remain readable as escaped original text, without parsing.
+ * Count syntax even in code: recognizing code first would itself require trusting a parser on hostile input.
+ */
+export const MAX_PARSE_BYTES = 64 * 1024
+export const MAX_INLINE_MARKERS = 512
+export function withinParseBudget(text: string): boolean {
+  if (text.length > MAX_PARSE_BYTES || Buffer.byteLength(text, 'utf8') > MAX_PARSE_BYTES) return false
+  let markers = 0
+  for (const character of text) {
+    if ('*_[]`~'.includes(character) && ++markers > MAX_INLINE_MARKERS) return false
+  }
+  return true
+}
+
+function unrendered(text: string): string {
+  return `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`
+}
+
+/**
  * A leading `_` is escaped, so a name is a name.
  *
  * Measured, and it is a defect this repository hits everywhere: `# _tools_` rendered as `<em>tools</em>`, so the
@@ -280,12 +378,17 @@ export function renderInline(text: string): string {
   /** An inline span is never a document's preview: its images follow an answer's rule, whatever parsed last. */
   imageBase = undefined
   remoteImagesAllowed = false
-  return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(String(text ?? ''))) as string, {
-    url: (value, at) => {
-      const safe = safeUrl(value)
-      return safe !== null && at.tag === 'img' ? imageSource(safe) : safe
-    },
-  })
+  if (!withinParseBudget(String(text ?? ''))) return escapeHtml(String(text ?? ''))
+  try {
+    return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(boundNesting(String(text ?? '')))) as string, {
+      url: (value, at) => {
+        const safe = safeUrl(value)
+        return safe !== null && at.tag === 'img' ? imageSource(safe) : safe
+      },
+    })
+  } catch {
+    return escapeHtml(String(text ?? ''))
+  }
 }
 
 /**
@@ -299,13 +402,20 @@ export function renderMarkdown(source: string, options: { readonly base?: string
   /** Only a document's preview asks for remote images; an answer, which has no `base`, never does. */
   remoteImagesAllowed = options.remoteImages === true
   const text = String(source ?? '').replace(/\r\n?/g, '\n')
+  if (!withinParseBudget(text)) return unrendered(text)
   const front = /^---\n([\s\S]*?)\n---\n?/.exec(text)
   const body = front === null ? text : text.slice(front[0].length)
   const frontHtml =
     front === null
       ? ''
       : `<section class="frontmatter"><h2>frontmatter</h2><pre><code>${escapeHtml((front[1] ?? '').trim())}</code></pre></section>\n`
-  return sanitizeHtml(frontHtml + (marked.parse(escapeLeadingUnderscores(body)) as string), {
+  let parsed: string
+  try {
+    parsed = marked.parse(escapeLeadingUnderscores(boundNesting(body))) as string
+  } catch {
+    return unrendered(text)
+  }
+  return sanitizeHtml(frontHtml + parsed, {
     /**
      * One rule for a subresource, **wherever the tag came from**.
      *

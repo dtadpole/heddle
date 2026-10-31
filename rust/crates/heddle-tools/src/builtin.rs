@@ -21,6 +21,8 @@ use crate::upstream::{SandboxMode, SandboxOutcome, ToolSpec};
 pub struct BuiltinOptions {
     /// Default wall time of a `bash` call, in milliseconds; a call may name its own `timeoutMs`.
     pub bash_timeout_ms: u64,
+    /// The most a call's own `timeoutMs` may ask for ([`BASH_MAX_TIMEOUT_MS`] by default).
+    pub bash_max_timeout_ms: u64,
     /// Characters of a `bash` call's combined output kept for the model ([`BASH_OUTPUT_LIMIT`] by default).
     pub bash_output_limit: usize,
 }
@@ -29,6 +31,7 @@ impl Default for BuiltinOptions {
     fn default() -> Self {
         Self {
             bash_timeout_ms: 30_000,
+            bash_max_timeout_ms: BASH_MAX_TIMEOUT_MS,
             bash_output_limit: BASH_OUTPUT_LIMIT,
         }
     }
@@ -37,6 +40,40 @@ impl Default for BuiltinOptions {
 /// The default for `bashOutputLimit`: the most combined output a `bash` result carries before it is cut, in
 /// characters.
 pub const BASH_OUTPUT_LIMIT: usize = 20_000;
+
+/// The default for `bashMaxTimeoutMs`: the most wall time a `bash` call may ask for, DSH's `maxTimeoutMs` (ten
+/// minutes, `dsh-bash-local`).
+pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// The longest delay one Node timer can hold (2^31-1 ms). The TypeScript build cannot wait longer, so neither does this
+/// one: the setting refuses a larger `bashMaxTimeoutMs` and the wall time is cut to it (developer-five's review of #13).
+pub const MAX_TIMER_DELAY_MS: u64 = 2_147_483_647;
+
+/// The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
+///
+/// DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the
+/// default; a value that is not a finite positive number is refused, never turned into an instant kill or an
+/// unbounded wait; a larger one is cut to the cap. Live-testing issue #13 measured `0`, `-5` and `3000000000` killing
+/// the command at once on the TypeScript build and the last one honoured for 34 days here.
+fn bash_wall_time(
+    requested: Option<&serde_json::Value>,
+    default_ms: u64,
+    max_ms: u64,
+) -> Result<u64, String> {
+    let cap = |milliseconds: u64| milliseconds.min(max_ms).min(MAX_TIMER_DELAY_MS);
+    match requested {
+        None | Some(serde_json::Value::Null) => Ok(cap(default_ms)),
+        Some(value) => match value.as_f64() {
+            // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
+            Some(milliseconds) if milliseconds.is_finite() && milliseconds > 0.0 => {
+                Ok(cap(milliseconds.round().max(1.0) as u64))
+            }
+            _ => Err(format!(
+                "invalid timeoutMs: expected a positive number, got {value}"
+            )),
+        },
+    }
+}
 
 /// Build the four standard tools around one sandbox, in the order `heddle tools` lists them:
 /// `write_file`, `read_file`, `list_dir`, `bash`.
@@ -54,6 +91,7 @@ pub fn builtin_tools(sandbox: Arc<dyn SandboxGate>, options: BuiltinOptions) -> 
         bash_tool(
             sandbox,
             options.bash_timeout_ms,
+            options.bash_max_timeout_ms.min(MAX_TIMER_DELAY_MS),
             options.bash_output_limit,
             escalation,
         ),
@@ -90,8 +128,11 @@ pub fn escalation_fields(sandbox: &dyn SandboxGate) -> serde_json::Map<String, s
     ])
 }
 
-/// Cut a command's combined output at [`BASH_OUTPUT_LIMIT`] characters, marking the cut with
-/// `"\n… truncated"`.
+/// The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB).
+pub const BASH_SPILL_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// What the model is shown of a command's combined output at [`BASH_OUTPUT_LIMIT`] characters: see
+/// [`truncate_output_at`].
 ///
 /// The TypeScript build counts UTF-16 code units; this counts `char`s, so a cut never splits a character.
 /// The two agree on every ASCII output, which is what the verifiers produce.
@@ -99,14 +140,69 @@ pub fn truncate_output(combined: &str) -> String {
     truncate_output_at(combined, BASH_OUTPUT_LIMIT)
 }
 
-/// [`truncate_output`] at `limit` characters, the row's `bashOutputLimit`.
+/// All of `combined` within `limit` characters (the row's `bashOutputLimit`), otherwise its **end** and the path of a
+/// file holding the whole of it: `[output truncated; full output: <path>]`, or `(unavailable)` when no file could be
+/// written.
+///
+/// Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long
+/// command's closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream
+/// and names its spill file (`dsh-tool-bash` streamText). Stated differences: the combined stdout and stderr are cut,
+/// by characters, where DSH cuts each stream at 64,000 bytes.
 pub fn truncate_output_at(combined: &str, limit: usize) -> String {
-    if combined.chars().count() <= limit {
+    truncate_output_spilling(combined, limit, BASH_SPILL_MAX_BYTES)
+}
+
+/// [`truncate_output_at`] with the full-output file capped at `spill_max_bytes`.
+pub fn truncate_output_spilling(combined: &str, limit: usize, spill_max_bytes: usize) -> String {
+    let total = combined.chars().count();
+    if total <= limit {
         return combined.to_owned();
     }
-    let mut cut: String = combined.chars().take(limit).collect();
-    cut.push_str("\n… truncated");
-    cut
+    let start = combined
+        .char_indices()
+        .nth(total - limit)
+        .map_or(combined.len(), |(index, _)| index);
+    let path =
+        spill_output(combined, spill_max_bytes).unwrap_or_else(|| "(unavailable)".to_owned());
+    format!(
+        "{}\n[output truncated; full output: {path}]",
+        &combined[start..]
+    )
+}
+
+/// Write a command's whole output to a private temporary file and return its path, or `None`.
+///
+/// Only a complete copy is ever named: an output over `spill_max_bytes` gets no file, and a write that fails removes
+/// what it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the
+/// marker never points at a partial file (developer-five's review of #83). A completed file stays in the temporary
+/// directory, as DSH's do.
+fn spill_output(full: &str, spill_max_bytes: usize) -> Option<String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    if full.len() > spill_max_bytes {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let name = format!(
+        "heddle-bash-output-{}-{nanos:x}-{}.txt",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&path).ok()?;
+    if file.write_all(full.as_bytes()).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(path.display().to_string())
 }
 
 /// The argument a tool requires as a string; empty when absent, which is what makes the refusal sentence.
@@ -210,6 +306,30 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     )
 }
 
+/// DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and
+/// normalised unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model
+/// can tell which of several reads failed (live-testing issue #4: this build named no file at all).
+fn requested_display_path(cwd: &std::path::Path, path: &str) -> String {
+    let raw = if std::path::Path::new(path).is_absolute() {
+        path.to_owned()
+    } else {
+        format!("{}/{path}", cwd.display())
+    };
+    if raw.split(['/', '\\']).any(|part| part == "..") {
+        return raw;
+    }
+    let normalised: String = raw
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .flat_map(|part| ["/", part])
+        .collect();
+    if normalised.is_empty() {
+        "/".to_owned()
+    } else {
+        normalised
+    }
+}
+
 fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     let read = Arc::clone(&sandbox);
     tool_fn(
@@ -238,6 +358,30 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     ));
                 }
                 let target = sandbox.assert_readable(&path, context.mode())?;
+                // A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
+                // `resolveRegularReadTarget`), not reported as the platform's raw error (live-testing issue #4).
+                let shown = requested_display_path(&context.cwd, &path);
+                match tokio::fs::metadata(&target).await {
+                    Ok(info) if info.is_file() => {}
+                    Ok(_) => {
+                        return Ok(ToolResult::refused(
+                            codes::FS_NOT_REGULAR_FILE,
+                            format!("cannot read \"{shown}\": not a regular file"),
+                        ));
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        return Ok(ToolResult::refused(
+                            codes::FS_NOT_FOUND,
+                            format!("cannot read \"{shown}\": not found"),
+                        ));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 let text = tokio::fs::read_to_string(&target).await?;
                 let data = serde_json::Map::from_iter([
                     ("path".to_owned(), json!(target)),
@@ -321,6 +465,7 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
 fn bash_tool(
     sandbox: Arc<dyn SandboxGate>,
     default_timeout_ms: u64,
+    max_timeout_ms: u64,
     output_limit: usize,
     escalation: serde_json::Map<String, serde_json::Value>,
 ) -> Arc<dyn Tool> {
@@ -332,7 +477,7 @@ fn bash_tool(
             ),
             (
                 "timeoutMs".to_owned(),
-                json!({ "type": "number", "description": format!("Wall time before the command is killed; default {default_timeout_ms}.") }),
+                json!({ "type": "number", "description": format!("Wall time before the command is killed, in milliseconds; default {default_timeout_ms}, at most {max_timeout_ms}.") }),
             ),
         ]);
         properties.extend(escalation);
@@ -359,6 +504,12 @@ fn bash_tool(
                 if command.is_empty() {
                     return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
                 }
+                let limit =
+                    match bash_wall_time(args.get("timeoutMs"), default_timeout_ms, max_timeout_ms)
+                    {
+                        Ok(milliseconds) => milliseconds,
+                        Err(message) => return Ok(ToolResult::refused(codes::BAD_ARGS, message)),
+                    };
                 let mode = context.mode();
                 let confined = if mode == SandboxMode::DangerFullAccess {
                     None
@@ -390,13 +541,6 @@ fn bash_tool(
                     },
                     |confined| confined.argv.clone(),
                 );
-                // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
-                let limit = args
-                    .get("timeoutMs")
-                    .and_then(serde_json::Value::as_f64)
-                    .filter(|milliseconds| *milliseconds > 0.0)
-                    .map(|milliseconds| milliseconds.round() as u64)
-                    .unwrap_or(default_timeout_ms);
                 run_command(
                     sandbox.as_ref(),
                     &argv,
@@ -431,10 +575,20 @@ async fn run_command(
         .args(&argv[1..])
         .current_dir(&context.cwd)
         .env("NO_COLOR", "1")
+        // No input to give, so stdin is /dev/null and a reader gets end-of-file at once, as DSH's shell leaves it
+        // closed (#97). Left unset, `spawn` inherited the server's own stdin: EOF when a daemon started it with
+        // /dev/null, but an open pipe or a terminal otherwise, where `read` waits for the wall time.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The command leads its own process group, so a Stop or the wall time reaches everything it started, as DSH's
+    // launcher does (`detached`, then a signal to `-pid`). `kill_on_drop` alone stops only the shell, and the
+    // shell's children kept running orphaned (live-testing draft developer-five-5).
+    #[cfg(unix)]
+    process.process_group(0);
     let child = process.spawn()?;
+    let leader = child.id();
 
     let facts = || match confined {
         None => sandbox_facts(mode, false),
@@ -466,8 +620,12 @@ async fn run_command(
 
     match output {
         None => {
-            // The child was killed for its wall time or by the caller's Stop. It is dropped here, which
-            // kills it (`kill_on_drop`); whatever it printed before that is still worth reporting.
+            // The child was killed for its wall time or by the caller's Stop: dropping it killed the shell
+            // (`kill_on_drop`), and the group signal stops whatever the shell had started, which outlives the
+            // shell as long as one member of the group is left.
+            if let Some(Err(error)) = leader.map(heddle_sandbox::kill_process_group) {
+                tracing::warn!(%error, ?leader, "the command's process group could not be stopped");
+            }
             let stopped = context.is_cancelled();
             let message = if stopped {
                 "the command was stopped before it finished".to_owned()
@@ -790,6 +948,108 @@ mod tests {
         assert!(result.output.contains("out") && result.output.contains("err"));
     }
 
+    #[test]
+    fn requested_display_path_is_dshs_spelling() {
+        let cwd = std::path::Path::new("/work");
+        assert_eq!(
+            requested_display_path(cwd, "notes/missing.txt"),
+            "/work/notes/missing.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "./notes//missing.txt"),
+            "/work/notes/missing.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "/elsewhere/./x.txt"),
+            "/elsewhere/x.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "../outside/x.txt"),
+            "/work/../outside/x.txt",
+            "a walk up is kept as written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shell_read_gets_end_of_file_at_once() {
+        // Live-testing issue #97: stdin is /dev/null, not the server's own stdin, so `read` cannot wait for input.
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let started = std::time::Instant::now();
+        let result = bash
+            .run(
+                args(json!({
+                    "command": "if read -r line; then printf input; else printf eof; fi",
+                    "timeoutMs": 2000
+                })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.output, "eof");
+        assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_is_fs_not_found_and_names_the_file() {
+        // Live-testing issue #4: the raw OS error named no file.
+        let root = tempdir();
+        let read = tool("read_file", sandbox(root.path()));
+        for path in ["notes/missing.txt", "plain.txt/inner"] {
+            std::fs::write(root.path().join("plain.txt"), "x").unwrap();
+            let result = read
+                .run(
+                    args(json!({ "path": path })),
+                    context_in(root.path(), SandboxMode::DangerFullAccess),
+                )
+                .await
+                .unwrap();
+            let error = result.error.as_ref().expect("refused");
+            assert_eq!(error.code, codes::FS_NOT_FOUND, "{path}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "cannot read \"{}/{path}\": not found",
+                    root.path().display()
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_directory_is_fs_not_regular_file_and_a_file_still_reads() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/here.txt"), "hello").unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "notes" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_REGULAR_FILE);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot read \"{}/notes\": not a regular file",
+                root.path().display()
+            )
+        );
+        let result = read
+            .run(
+                args(json!({ "path": "notes/here.txt" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none());
+        assert_eq!(result.output, "hello");
+    }
+
     #[tokio::test]
     async fn a_command_that_times_out_is_killed_and_reports_timeout() {
         let root = tempdir();
@@ -804,6 +1064,114 @@ mod tests {
             .unwrap();
         assert_eq!(result.error.as_ref().unwrap().code, codes::TIMEOUT);
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn the_wall_time_rule_is_dshs_default_refusal_and_cap() {
+        // Live-testing issue #13; DSH: dsh-tool-bash validateBashArgs and dsh-timeout clampTimeout.
+        assert_eq!(bash_wall_time(None, 30_000, 600_000), Ok(30_000));
+        assert_eq!(
+            bash_wall_time(Some(&json!(null)), 30_000, 600_000),
+            Ok(30_000)
+        );
+        for (value, shown) in [
+            (json!(0), "0"),
+            (json!(-5), "-5"),
+            (json!("5000"), "\"5000\""),
+            (json!(true), "true"),
+        ] {
+            assert_eq!(
+                bash_wall_time(Some(&value), 30_000, 600_000),
+                Err(format!(
+                    "invalid timeoutMs: expected a positive number, got {shown}"
+                )),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            bash_wall_time(Some(&json!(3_000_000_000_u64)), 30_000, 600_000),
+            Ok(600_000),
+            "cut to the cap"
+        );
+        assert_eq!(
+            bash_wall_time(Some(&json!(1500.4)), 30_000, 600_000),
+            Ok(1500),
+            "a fractional millisecond rounds"
+        );
+        assert_eq!(
+            bash_wall_time(Some(&json!(0.2)), 30_000, 600_000),
+            Ok(1),
+            "a tiny positive value is still a timer"
+        );
+        assert_eq!(
+            bash_wall_time(None, 900_000, 600_000),
+            Ok(600_000),
+            "a default above the cap is cut too"
+        );
+        assert_eq!(BASH_MAX_TIMEOUT_MS, 600_000, "DSH's ten minutes");
+        // A cap beyond one Node timer still yields at most one timer, as the TypeScript build must.
+        assert_eq!(
+            bash_wall_time(Some(&json!(3_000_000_000_u64)), 30_000, 3_000_000_000),
+            Ok(MAX_TIMER_DELAY_MS)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_positive_timeout_is_refused_and_the_command_does_not_run() {
+        let root = tempdir();
+        let marker = root.path().join("ran.marker");
+        let bash = tool("bash", sandbox(root.path()));
+        let result = bash
+            .run(
+                args(json!({ "command": format!("touch '{}'", marker.display()), "timeoutMs": 0 })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::BAD_ARGS);
+        assert_eq!(
+            error.message,
+            "invalid timeoutMs: expected a positive number, got 0"
+        );
+        assert!(!marker.exists(), "the command did not run");
+    }
+
+    #[tokio::test]
+    async fn the_cap_bounds_what_a_call_may_ask_for_and_the_schema_says_so() {
+        let root = tempdir();
+        let bash = builtin_tools(
+            sandbox(root.path()),
+            BuiltinOptions {
+                bash_max_timeout_ms: 300,
+                ..BuiltinOptions::default()
+            },
+        )
+        .into_iter()
+        .find(|tool| tool.spec().name == "bash")
+        .expect("bash");
+        let described = bash.spec().parameters["properties"]["timeoutMs"]["description"].clone();
+        assert_eq!(
+            described,
+            json!(
+                "Wall time before the command is killed, in milliseconds; default 30000, at most 300."
+            )
+        );
+        let started = std::time::Instant::now();
+        let result = bash
+            .run(
+                args(json!({ "command": "sleep 3", "timeoutMs": 5000 })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        let error = result.error.as_ref().expect("timed out");
+        assert_eq!(error.code, codes::TIMEOUT);
+        assert_eq!(error.message, "the command exceeded 300ms and was killed");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stopped at the cap"
+        );
     }
 
     #[tokio::test]
@@ -893,25 +1261,54 @@ mod tests {
         );
     }
 
+    /// The kept tail and the spill path of a cut output: issue #83's head probe, filler and tail probe.
+    fn cut_parts(cut: &str) -> (&str, std::path::PathBuf) {
+        let (kept, marker) = cut
+            .rsplit_once("\n[output truncated; full output: ")
+            .expect("the cut is marked with the spill path");
+        let path = marker.strip_suffix(']').expect("the marker closes");
+        (kept, std::path::PathBuf::from(path))
+    }
+
     #[test]
-    fn a_long_output_is_cut_at_the_limit_and_marked() {
+    fn a_long_output_keeps_its_end_and_names_a_file_with_all_of_it() {
+        // Issue #83: the head was kept and the tail, often the summary, was lost with nothing to recover it.
         let inside = "a".repeat(BASH_OUTPUT_LIMIT);
         assert_eq!(truncate_output(&inside), inside, "no cut at the limit");
-        let outside = "a".repeat(BASH_OUTPUT_LIMIT + 10);
+        let outside = format!("HEAD-PROBE{}TAIL-PROBE", "x".repeat(BASH_OUTPUT_LIMIT));
         let cut = truncate_output(&outside);
+        let (kept, path) = cut_parts(&cut);
+        assert_eq!(kept.chars().count(), BASH_OUTPUT_LIMIT);
+        assert!(kept.ends_with("TAIL-PROBE") && !kept.contains("HEAD-PROBE"));
         assert_eq!(
-            cut.chars().count(),
-            BASH_OUTPUT_LIMIT + "\n… truncated".chars().count()
+            std::fs::read_to_string(&path).expect("the spill file"),
+            outside
         );
-        assert!(cut.ends_with("\n… truncated"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_output_beyond_the_spill_cap_names_no_file() {
+        // developer-five's review of #83: DSH discards a spill past its cap, so no marker names a partial copy.
+        assert_eq!(
+            truncate_output_spilling(&"x".repeat(100), 10, 50),
+            format!(
+                "{}\n[output truncated; full output: (unavailable)]",
+                "x".repeat(10)
+            )
+        );
     }
 
     #[test]
     fn a_configured_output_limit_cuts_there() {
+        let cut = truncate_output_at(&format!("{}é-end", "a".repeat(500)), 50);
+        let (kept, path) = cut_parts(&cut);
         assert_eq!(
-            truncate_output_at(&"a".repeat(500), 50),
-            format!("{}\n… truncated", "a".repeat(50))
+            kept,
+            format!("{}é-end", "a".repeat(45)),
+            "the last 50 characters, whole"
         );
+        let _ = std::fs::remove_file(path);
         assert_eq!(
             truncate_output_at(&"b".repeat(500), 500),
             "b".repeat(500),
