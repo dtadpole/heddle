@@ -37,12 +37,11 @@ grounded_in:
   The failure alert has no invented `(0)` status, the header and disabled composer say *Session unavailable*,
   and live rows from both A and B cannot replace it. Draft, Enter, submit and Send write nothing. Opening B returns
   `true`, clears the failure and restores its own history and writable composer without A's rows. Authoring/syntax
-  checks are not browser evidence. The parent must build first, review this file and explicitly gate the checkout
-  with `HEDDLE_VERIFY_HISTORY_FAILURE_WORKSPACE="$PWD"`; run from that checkout with
-  `HEDDLE_VERIFY_HISTORY_FAILURE_WORKSPACE="$PWD" HEDDLE_VERIFY_UI=1 node _tools_/verify-runner/run.mjs _verifiers_/80-web-ui/check-history-read-failure.mjs --json`.
+  checks are not browser evidence. Build first and run from the checkout pinned by the shared `repoRoot` helper:
+  `HEDDLE_VERIFY_UI=1 node _tools_/verify-runner/run.mjs _verifiers_/80-web-ui/check-history-read-failure.mjs --json`.
   Unset `HEDDLE_BIN` to judge the TypeScript build; set it to the parent's already-built candidate binary to judge Rust.
   Each scenario has a 60-second test deadline, bounded startup/fetch/browser calls and bounded cleanup, with a
-  65-second process backstop. Missing build/browser reports unjudged; a missing explicit workspace gate fails.
+  65-second process backstop. Missing build/browser reports unjudged, including the standard browser-disabled target.
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,

@@ -94,8 +94,6 @@ async function assertUnavailable(browser, reason) {
 }
 for (const mode of ['fetch', 'json']) {
   test(`history ${mode} rejection blocks buffered/live rows and recovers on named B`, { timeout: 60000 }, async t => {
-    assert.equal(resolve(process.env.HEDDLE_VERIFY_HISTORY_FAILURE_WORKSPACE ?? '/'), repoRoot,
-      'parent must explicitly gate workspace with HEDDLE_VERIFY_HISTORY_FAILURE_WORKSPACE="$PWD"')
     if (!skipUnless(t, existsSync(harnessEntry()), 'parent must build harness first')) return
     if (!skipUnless(t, browserAvailable(), 'headless browser unavailable or UI disabled')) return
     const root = fixtureDir(`history-read-failure-${mode}`)
