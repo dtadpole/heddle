@@ -158,6 +158,14 @@ export interface SessionMeta {
    * inside a teammate's turn finds it.
    */
   readonly teamId?: SessionId
+  /**
+   * The agent preset this session runs under (inventory A96), recorded when it is created and never changed.
+   *
+   * DSH's rule: a session keeps the preset it was created with, so editing a preset or the default affects sessions
+   * created afterwards. A session from before presets has none until its next turn records the current default
+   * (`recordPreset`), after which it keeps that one too.
+   */
+  readonly preset?: string
 }
 
 /** The default root, overridable so a check can use a scratch directory. */
@@ -735,6 +743,8 @@ export class SessionStore {
       readonly origin?: 'subagent'
       readonly delegationDepth?: number
       readonly teamId?: SessionId
+      /** The agent preset the session runs under; absent until a turn records the default. */
+      readonly preset?: string
       /** An id chosen by the caller, so a journal entry can name a session before it is created. */
       readonly id?: SessionId
     } = {},
@@ -760,6 +770,7 @@ export class SessionStore {
           ...(options.origin !== undefined ? { origin: options.origin } : {}),
           ...(options.delegationDepth !== undefined ? { delegationDepth: options.delegationDepth } : {}),
           ...(options.teamId !== undefined ? { teamId: options.teamId } : {}),
+          ...(options.preset !== undefined ? { preset: options.preset } : {}),
           turns: 0,
         },
         null,
@@ -787,6 +798,24 @@ export class SessionStore {
       ...(trimmed.length > 0 ? { title: trimmed } : {}),
     }
     if (trimmed.length === 0) delete (next as { title?: string }).title
+    const meta = this.metaFile(id)
+    if (meta === null) return null
+    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    return next
+  }
+
+  /**
+   * Record the agent preset a session runs under, **only when it has none** (inventory A96).
+   *
+   * A session keeps its preset, so this never replaces one: it is how a session created before presets, or by a path
+   * that named none, takes the current default once and then keeps it. Answers the record as it now is, or null for an
+   * unknown session.
+   */
+  recordPreset(id: SessionId, preset: string): SessionMeta | null {
+    const current = this.list().find((meta) => meta.id === id)
+    if (current === undefined) return null
+    if (current.preset !== undefined || preset.trim().length === 0) return current
+    const next: SessionMeta = { ...current, preset: preset.trim() }
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
