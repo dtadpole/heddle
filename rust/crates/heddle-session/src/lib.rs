@@ -42,11 +42,13 @@ pub mod layout;
 pub mod message;
 pub mod meta;
 pub mod mode;
+pub mod search;
 pub mod service;
 pub mod store;
 pub mod surface;
 pub mod title;
 pub mod transcript;
+pub mod unicode61;
 
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
@@ -67,6 +69,11 @@ pub use meta::{
     under_archived_session,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
+pub use search::{
+    SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
+    SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,
+    SessionSearchPage, SessionSearchQueryError, normalize_search_query,
+};
 pub use service::{
     CreateAtOptions, ForkOutcome, ModeChange, OpenAtOptions, SessionConfig, SessionService,
     StartOptions, fork_title, title_from,

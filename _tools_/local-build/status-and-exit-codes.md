@@ -1,9 +1,9 @@
 ---
 title: Local build status and exit codes
 created: 2026-10-24T05:01:03Z
-modified: 2026-10-24T05:01:03Z
+modified: 2026-10-31T02:30:00Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: What the status report of the slot runner looks like and what each exit code of the runner means.
 status: unverified
 grounded_in:
@@ -34,5 +34,5 @@ A run's exit status is cargo's, apart from the runner's own three:
 | Code | Meaning |
 |---:|---|
 | `64` | a usage error |
-| `75` | no free slot within the wait ([slots.md](slots.md)) |
+| `75` | no free slot within the wait ([slots.md](slots.md)), or a shared target still locked by another tree ([shared-target.md](shared-target.md)) |
 | `127` | cargo not found |

@@ -215,6 +215,14 @@ pub trait SessionService: Send + Sync {
 
     /// The folder the session belongs to, if it has one.
     fn folder(&self, id: &str) -> Option<PathBuf>;
+
+    /// Content search (`GET /api/sessions/search`): the sessions whose user or assistant messages hold the query
+    /// as a phrase, ranked, at most 20, with snippets (`heddle_session::SessionSearchIndex`). The route has already
+    /// refused a query DSH refuses; `Err` is a failure it answers `500`. A store without search says so.
+    fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+        let _ = query;
+        Err(ServiceError::new("session search is unavailable"))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------

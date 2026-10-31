@@ -54,9 +54,26 @@ pub fn is_surface_eligible(kind: &str) -> bool {
     SURFACE_EVENT_TYPES.contains(&kind)
 }
 
+/// Whether an event ends a model step for the fold: the next request, or the turn's retry or end.
+///
+/// A chunk run that never got its `done` (a stop, a failed stream) ends here, and a message held for the
+/// step boundary is placed (`endsStep` in the TypeScript build).
+pub fn ends_step(kind: &str) -> bool {
+    kind == "model/request" || kind.starts_with("turn/")
+}
+
 /// Fold a log into its surface.
 ///
-/// A `message` or `context/note` takes a position and closes any open chunk run; the first
+/// **A message that lands mid-step is placed at the step boundary** (#30). A steer, a settlement notice and
+/// a teammate's mail are written when they arrive, which can be while the model streams. Placed where it
+/// landed, such a message closed the run: the rest of the step became a second assistant node after it, the
+/// next request ended with that assistant message (read by the provider as a prefix to continue; refused in
+/// thinking mode for want of its reasoning), and the model never saw its own reply before the message. So a
+/// message that lands while a run is open is held, and placed when the run closes or, when the step called
+/// tools, once their results are placed; a new request, the turn's end or a replacement places whatever is
+/// still held, and so does the end of the log.
+///
+/// Otherwise a `message` or `context/note` takes a position; the first
 /// `assistant/chunk` of a run takes one and a `done` chunk closes the run; a replacement splices the
 /// positions between its endpoints (both must be on the surface, end not before start) and closes the
 /// run. A replacement the fold cannot place is [`SessionError::UnfoldableReplacement`] — a log that
@@ -67,10 +84,30 @@ pub fn fold_surface<E: Borrow<SessionEvent>>(events: &[E]) -> Result<SurfaceStat
     let mut content_generation: u64 = 0;
     let mut replace_generation: u64 = 0;
     let mut open_chunk: Option<u64> = None;
+    // The tool calls of the open run; the calls of the last closed run whose results are not all placed; and
+    // the messages that landed mid-step, in arrival order.
+    let mut run_calls: Vec<String> = Vec::new();
+    let mut awaiting: Vec<String> = Vec::new();
+    let mut held: Vec<u64> = Vec::new();
+    let release = |nodes: &mut Vec<u64>,
+                   held: &mut Vec<u64>,
+                   awaiting: &mut Vec<String>,
+                   generation: &mut u64| {
+        *generation += held.len() as u64;
+        nodes.append(held);
+        awaiting.clear();
+    };
 
     for event in events {
         let event = event.borrow();
         if let Some(SurfaceOp::Replace { start_seq, end_seq }) = event.surface_op() {
+            release(
+                &mut nodes,
+                &mut held,
+                &mut awaiting,
+                &mut content_generation,
+            );
+            run_calls.clear();
             let start_idx = nodes.iter().position(|seq| *seq == start_seq);
             let end_idx = nodes.iter().position(|seq| *seq == end_seq);
             let (Some(start_idx), Some(end_idx)) = (start_idx, end_idx) else {
@@ -100,12 +137,50 @@ pub fn fold_surface<E: Borrow<SessionEvent>>(events: &[E]) -> Result<SurfaceStat
             open_chunk = None;
             continue;
         }
+        if ends_step(&event.kind) {
+            open_chunk = None;
+            run_calls.clear();
+            release(
+                &mut nodes,
+                &mut held,
+                &mut awaiting,
+                &mut content_generation,
+            );
+            continue;
+        }
         if is_surface_eligible(&event.kind) && event.kind != "assistant/chunk" {
             // A `message` the person or the model produced, or a `context/note` the harness wrote: both
-            // take a position, and neither is a chunk run.
+            // take a position, and neither is a chunk run. Mid-step, the position is the step boundary.
+            if open_chunk.is_some() {
+                held.push(event.seq);
+                continue;
+            }
+            if !awaiting.is_empty() {
+                let message = event.get("message");
+                let role = message.and_then(|m| m.get("role")).and_then(Value::as_str);
+                let call = message
+                    .and_then(|m| m.get("toolCallId"))
+                    .and_then(Value::as_str);
+                match (role, call) {
+                    (Some("tool"), Some(id)) if awaiting.iter().any(|waiting| waiting == id) => {
+                        nodes.push(event.seq);
+                        content_generation += 1;
+                        awaiting.retain(|waiting| waiting != id);
+                        if awaiting.is_empty() {
+                            release(
+                                &mut nodes,
+                                &mut held,
+                                &mut awaiting,
+                                &mut content_generation,
+                            );
+                        }
+                    }
+                    _ => held.push(event.seq),
+                }
+                continue;
+            }
             nodes.push(event.seq);
             content_generation += 1;
-            open_chunk = None;
             continue;
         }
         if event.kind == "assistant/chunk" {
@@ -113,17 +188,41 @@ pub fn fold_surface<E: Borrow<SessionEvent>>(events: &[E]) -> Result<SurfaceStat
                 nodes.push(event.seq);
                 content_generation += 1;
                 open_chunk = Some(event.seq);
+                run_calls.clear();
             }
-            let done = event
-                .get("chunk")
+            let chunk = event.get("chunk");
+            let kind = chunk
                 .and_then(|chunk| chunk.get("type"))
-                .and_then(Value::as_str)
-                == Some("done");
-            if done {
+                .and_then(Value::as_str);
+            if kind == Some("tool-call")
+                && let Some(id) = chunk
+                    .and_then(|chunk| chunk.get("id"))
+                    .and_then(Value::as_str)
+            {
+                run_calls.push(id.to_owned());
+            }
+            if kind == Some("done") {
                 open_chunk = None;
+                if run_calls.is_empty() {
+                    release(
+                        &mut nodes,
+                        &mut held,
+                        &mut awaiting,
+                        &mut content_generation,
+                    );
+                } else {
+                    awaiting = std::mem::take(&mut run_calls);
+                }
             }
         }
     }
+    // The log may end mid-step: what is held is shown at the end, and the next fold places it.
+    release(
+        &mut nodes,
+        &mut held,
+        &mut awaiting,
+        &mut content_generation,
+    );
 
     Ok(SurfaceState {
         nodes,
@@ -177,7 +276,13 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
     let mut index = seq;
     while let Some(next) = by_seq.get(&index) {
         if next.kind != "assistant/chunk" {
-            break;
+            // A message held for the step boundary, an inbox splice or any other note written while the model
+            // streamed is not part of its step (#30): the step runs to its `done`, a new request or the turn's end.
+            if ends_step(&next.kind) {
+                break;
+            }
+            index += 1;
+            continue;
         }
         let chunk = next
             .get("chunk")
@@ -265,6 +370,7 @@ mod tests {
     use super::*;
     use crate::message::ToolCall;
     use serde_json::{Map, json};
+    use std::collections::HashMap;
 
     fn event(seq: u64, kind: &str, fields: &[(&str, Value)]) -> SessionEvent {
         let mut map = Map::new();
@@ -350,14 +456,112 @@ mod tests {
         );
     }
 
+    /// What the model would read: every node, derived, as role and text (#30's tests).
+    fn read(events: &[SessionEvent]) -> Vec<String> {
+        let by_seq: HashMap<u64, &SessionEvent> =
+            events.iter().map(|event| (event.seq, event)).collect();
+        fold_surface(events)
+            .unwrap()
+            .nodes
+            .iter()
+            .filter_map(|seq| derive_message(&by_seq, *seq))
+            .map(|message| {
+                let text: String = message
+                    .content
+                    .iter()
+                    .map(|part| match part {
+                        ContentPart::Text { text } | ContentPart::Reasoning { text } => {
+                            text.clone()
+                        }
+                        ContentPart::ToolCall(_) => "[tool-call]".to_string(),
+                        _ => String::new(),
+                    })
+                    .collect();
+                let role = format!("{:?}", message.role).to_lowercase();
+                format!("{role}:{text}")
+            })
+            .collect()
+    }
+
+    fn text_message(seq: u64, role: &str, text: &str) -> SessionEvent {
+        event(
+            seq,
+            "message",
+            &[(
+                "message",
+                json!({"role": role, "content": [{"type": "text", "text": text}]}),
+            )],
+        )
+    }
+
     #[test]
-    fn a_message_closes_an_open_run() {
+    fn a_message_written_mid_step_is_read_after_the_whole_step() {
+        // Before #30 this message closed the run, and the rest of the step became a second assistant node after it.
         let events = vec![
             chunk(0, json!({"type": "text-delta", "text": "a"})),
-            message(1, "user"),
+            text_message(1, "user", "NOTICE"),
             chunk(2, json!({"type": "text-delta", "text": "b"})),
+            chunk(3, json!({"type": "done", "finishReason": "stop"})),
         ];
-        assert_eq!(fold_surface(&events).unwrap().nodes, vec![0, 1, 2]);
+        assert_eq!(fold_surface(&events).unwrap().nodes, vec![0, 1]);
+        assert_eq!(read(&events), vec!["assistant:ab", "user:NOTICE"]);
+    }
+
+    #[test]
+    fn a_mid_step_message_is_read_after_the_step_s_tool_results() {
+        let call = json!({"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}"});
+        let result = || {
+            event(
+                5,
+                "message",
+                &[(
+                    "message",
+                    json!({"role": "tool", "toolCallId": "c1", "content": [{"type": "text", "text": "ok"}]}),
+                )],
+            )
+        };
+        let streaming = vec![
+            event(0, "model/request", &[]),
+            chunk(1, json!({"type": "text-delta", "text": "running "})),
+            text_message(2, "user", "STEER"),
+            chunk(3, call.clone()),
+            chunk(4, json!({"type": "done", "finishReason": "tool_calls"})),
+            result(),
+        ];
+        assert_eq!(
+            read(&streaming),
+            vec!["assistant:running [tool-call]", "tool:ok", "user:STEER"]
+        );
+        let while_the_tool_runs = vec![
+            event(0, "model/request", &[]),
+            chunk(1, call),
+            chunk(2, json!({"type": "done", "finishReason": "tool_calls"})),
+            text_message(3, "user", "STEER"),
+            result(),
+        ];
+        assert_eq!(
+            read(&while_the_tool_runs),
+            vec!["assistant:[tool-call]", "tool:ok", "user:STEER"]
+        );
+    }
+
+    #[test]
+    fn an_inbox_splice_inside_a_run_does_not_cut_the_step_and_a_turn_end_closes_a_run() {
+        let events = vec![
+            event(0, "model/request", &[]),
+            chunk(1, json!({"type": "text-delta", "text": "1 2 "})),
+            event(2, "agent/inbox/spliced", &[("target", json!("next-step"))]),
+            chunk(3, json!({"type": "text-delta", "text": "3"})),
+            chunk(4, json!({"type": "done", "finishReason": "stop"})),
+            event(5, "model/request", &[]),
+            chunk(6, json!({"type": "text-delta", "text": "cut"})),
+            event(7, "turn/completed", &[]),
+            text_message(8, "user", "next"),
+        ];
+        assert_eq!(
+            read(&events),
+            vec!["assistant:1 2 3", "assistant:cut", "user:next"]
+        );
     }
 
     #[test]
