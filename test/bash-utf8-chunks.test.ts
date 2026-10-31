@@ -47,5 +47,13 @@ test('Chinese and an emoji printed one byte at a time arrive whole on stdout', a
 
 test('the same on stderr', async () => {
   const result = await bash(`{ ${bytewise('é🙂')}; } >&2`)
+  assert.equal(result.error, undefined)
   assert.equal(result.output, 'é🙂')
+})
+
+test('a character left unfinished at the end is flushed as one replacement character, not dropped', async () => {
+  // The first two of 你's three bytes, then the command ends: the decoder's end() must emit what it held.
+  const result = await bash("printf 'ok'; printf '\\344'; sleep 0.02; printf '\\275'")
+  assert.equal(result.error, undefined)
+  assert.equal(result.output, 'ok\ufffd')
 })
