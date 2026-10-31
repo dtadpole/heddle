@@ -3649,6 +3649,8 @@ const MESSAGES = Object.freeze({
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
+    'commands.model.label': 'Model',
+    'commands.model.description': 'Select the model for this conversation',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3660,6 +3662,8 @@ const MESSAGES = Object.freeze({
     'settings.models': '模型',
     'settings.workspaces': '工作区',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
+    'commands.model.label': '模型',
+    'commands.model.description': '选择本会话使用的模型',
   }),
 })
 
@@ -7341,7 +7345,16 @@ window.heddlePage = {
     log.append(node)
     followChatTail()
   },
-  openModelMenu: () => document.getElementById('model-trigger').click(),
+  /**
+   * `/model` (A103): DSH's command opens a searchable list of the session's models (its `popupSelect`), so the menu
+   * opens on its model pane, search focused, rather than on the Model and Effort rows the seat's own click shows.
+   */
+  openModelMenu: () => {
+    document.getElementById('model-trigger').click()
+    if (!modelMenu.hidden && modelPane !== 'model') drillModelPane('model')
+  },
+  /** DSH offers `/model` only where the model can be chosen: not in an addressed subagent's session. */
+  modelSelectable: () => current === null || !subagentSessions.has(current),
   openFilePicker: () => document.getElementById('attach-file').click(),
   openAccessMenu: () => document.getElementById('access').click(),
   /** One mode chip after the access chip; the same id re-applies, another replaces it, null removes it. */
@@ -7391,6 +7404,7 @@ const slashReady = import('/commands/menu.js')
       addRow: (node) => window.heddlePage.addRow('command', node),
       notice: (text) => add('denied', text),
       openModelMenu: window.heddlePage.openModelMenu,
+      modelSelectable: window.heddlePage.modelSelectable,
       openFilePicker: window.heddlePage.openFilePicker,
       openAccessMenu: window.heddlePage.openAccessMenu,
       setModeChip: window.heddlePage.setModeChip,
@@ -12858,6 +12872,16 @@ const watermarks = new Map()
 const definitionOf = new Map()
 /** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
 let listedSessions = new Set()
+/** The sessions a subagent runs (origin `subagent`, or a parent session), as the last session list named them (A103). */
+const subagentSessions = new Set()
+function noteSubagentSessions(metas) {
+  subagentSessions.clear()
+  for (const meta of Array.isArray(metas) ? metas : []) {
+    if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && (meta.origin === 'subagent' || typeof meta.parentSession === 'string')) {
+      subagentSessions.add(meta.id)
+    }
+  }
+}
 
 /* order-modes:begin */
 /**
@@ -14565,6 +14589,7 @@ async function renderTree() {
     }
     workspaces = (await workspaceResponse.json()).workspaces ?? []
     sessions = sessionResponse.ok ? await sessionResponse.json() : []
+    noteSubagentSessions(sessions)
   } catch (error) {
     setNote('could not read the workspaces: ' + (error && error.message))
     return
