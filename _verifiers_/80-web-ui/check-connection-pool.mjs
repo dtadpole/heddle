@@ -200,13 +200,26 @@ test('five turns running from one tab leave its other requests answering, a sixt
     /**
      * A turn in a new session of its own, sent from the composer the way a person sends it.
      *
-     * The page opens a fresh New session on load (stack 2's restoreSelection, #17), and New session reuses a blank one,
-     * so the first press may make no session. The evidence that each turn has a session of its own is the model's
-     * count of held turns instead: a message sent to a session whose turn still runs would wait behind it, not reach
-     * the model.
+     * The message is typed only once the session New session made is the one shown. The session shown before the
+     * click is idle too, since its turn went to the session before it, so "Send is offered" alone does not say the new
+     * one is open. On the Rust build New session's answer came late often enough that each message landed one session
+     * early, and the sixth session was shown empty at the end (stack 2's first-visit session opens on load, #17).
      */
+    const sessionIds = async () => (await (await at.api('/api/sessions')).json()).map((row) => row.id)
+    const shownIs = (id) =>
+      `[...document.querySelectorAll('#tree li[data-kind=session]')].some((row) => row.dataset.sessionId === ${JSON.stringify(id)} && (row.getAttribute('aria-selected') === 'true' || row.classList.contains('selected')))`
     const sendInNewSession = async (turn) => {
+      const before = new Set(await sessionIds())
       await browser.evaluate(`document.getElementById('new-session').click()`)
+      let made
+      assert.ok(
+        await until(async () => {
+          made = (await sessionIds()).find((id) => !before.has(id))
+          return made !== undefined
+        }, 15_000),
+        `New session ${turn} made a session`,
+      )
+      assert.ok(await browser.waitFor(shownIs(made), 15_000).catch(() => false), `the session New session ${turn} made is the one shown`)
       assert.ok(
         await browser.waitFor(`document.getElementById('stop').hidden === true && document.querySelector('#prompt textarea') !== null`, 15_000),
         `session ${turn} is shown with Send, not the running turn before it`,
@@ -221,10 +234,18 @@ test('five turns running from one tab leave its other requests answering, a sixt
     assert.deepEqual(statuses, [200, 200, 200, 200, 200], 'with each more turn running, a request from the page is still answered within 2 s')
     await sendInNewSession(6)
     at.double.release()
-    assert.ok(
-      await browser.waitFor(`document.getElementById('log').innerText.includes('held for: HOLD turn 6') && document.getElementById('stop').hidden === true`, 30_000),
-      'the shown turn ends on the page: its answer is whole and Send is back',
-    )
+    const ended = await browser.waitFor(`document.getElementById('log').innerText.includes('held for: HOLD turn 6') && document.getElementById('stop').hidden === true`, 30_000).catch(() => false)
+    const state = ended
+      ? ''
+      : await browser.evaluate(`JSON.stringify({ answer: document.getElementById('log').innerText.includes('held for: HOLD turn 6'), stopHidden: document.getElementById('stop').hidden, running: [...globalThis.runningSessions.keys()].length, connection: document.body.dataset.connection, feed: document.body.dataset.feed, logHidden: document.getElementById('log').hidden, loadError: document.querySelector('#log .load-error')?.textContent ?? null, title: document.getElementById('session-title')?.textContent ?? null, empty: !(document.getElementById('empty-state')?.hidden ?? true), tail: document.getElementById('log').textContent.slice(-300) })`)
+    const where = ended
+      ? ''
+      : JSON.stringify({
+          selected: await browser.evaluate(`[...document.querySelectorAll('#tree li[data-kind=session]')].filter((row) => row.classList.contains('selected') || row.getAttribute('aria-selected') === 'true' || row.querySelector('[aria-current]')).map((row) => row.dataset.sessionId)`),
+          sessions: (await (await at.api('/api/sessions')).json()).map((row) => ({ id: String(row.id).slice(8, 16), title: row.title ?? null, running: row.running ?? null })),
+          prompts: at.double.prompts.slice(-3),
+        })
+    assert.ok(ended, `the shown turn ends on the page: its answer is whole and Send is back ${state} ${where}`)
     const sentBefore = at.double.prompts.length
     await browser.evaluate(type('NEXT after the held turns'))
     assert.ok(await until(() => at.double.prompts.length > sentBefore, 15_000), 'and the next message is sent, not left queued')
