@@ -139,3 +139,110 @@ test('Rename and Delete workspace name the workspace by its id, as DSH does, wha
   assert.equal(folder.routeKey({ path: '/work/gone', group: { workspace: { id: 'w-9' } } }, workspaces), 'w-9', 'the drawn row\'s own id when the list no longer has it (another client removed it, #49)')
   assert.equal(folder.routeKey({ path: '/work/older' }, []), '/work/older', 'and the path only when nothing names an id')
 })
+
+/**
+ * developer-ten's N1 on stack-4: the tree route answers `404 {code: 'workspace-file/not-found'}` for a folder that is gone
+ * under a root, and the page did not know the code when the folder went **after** the page read it — a folder deleted
+ * after its level was drawn, or a workspace's folder gone after `/api/workspaces` was read. Those said "could not read X:
+ * the tree answered 404" in the tree's note, over "nothing inside". DSH draws one failed line under the directory in its
+ * own words for that code (`failureLine`, dsh-client-ui-sidebar-files lib/client.js:483-489, words at :770).
+ */
+class FakeNode {
+  tagName: string
+  className = ''
+  textContent = ''
+  isConnected = true
+  children: FakeNode[] = []
+  readonly dataset: Record<string, string> = {}
+  readonly attributes = new Map<string, string>()
+  readonly properties = new Map<string, string>()
+  readonly style = {
+    setProperty: (name: string, value: string) => this.properties.set(name, value),
+    getPropertyValue: (name: string) => this.properties.get(name) ?? '',
+  }
+
+  constructor(tagName: string) {
+    this.tagName = tagName
+  }
+
+  setAttribute(name: string, value: unknown): void {
+    this.attributes.set(name, String(value))
+  }
+
+  append(...nodes: FakeNode[]): void {
+    this.children.push(...nodes)
+  }
+}
+
+/** A top-level function of the page, from its `function` line to the first line that is a lone `}`; `''` when absent. */
+const pageFunction = (name: string): string => {
+  const start = page.search(new RegExp(`\\n(?:async )?function ${name}\\(`))
+  if (start < 0) return ''
+  return page.slice(start + 1, page.indexOf('\n}', start + 1) + 2)
+}
+
+/** `loadChildren` with the tree's drawing stood in for, against a tree route that answers `reply`. */
+function childrenPage(reply: { status: number; body: unknown }) {
+  const notes: string[] = []
+  const requests: string[] = []
+  const env = {
+    document: { createElement: (tag: string) => new FakeNode(tag) },
+    fetch: async (url: string) => {
+      requests.push(url)
+      return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => reply.body }
+    },
+    setNote: (text: string) => notes.push(text),
+  }
+  const load = new Function(
+    'env',
+    `const { document, fetch, setNote } = env
+    ${block('workspace-folder')}
+    const archiveQuery = () => ''
+    const markSelection = () => undefined
+    const paintSessionRows = () => undefined
+    const groupRow = () => document.createElement('li')
+    const folderRows = (children) => children
+    const nodeRow = (child) => Object.assign(document.createElement('li'), { textContent: child.label })
+    ${pageFunction('paintGoneFolder')}
+    ${pageFunction('paintGoneLine')}
+    ${pageFunction('loadChildren')}
+    return loadChildren`,
+  )(env) as (node: unknown, li: FakeNode) => Promise<void>
+  return { load, notes, requests }
+}
+
+const goneAnswer = { status: 404, body: { error: 'no entry at "/work/w/gone"', code: 'workspace-file/not-found' } }
+/** What a drawn level reads as: each child's text, and a failed line as `failed:<code>:<text>`. */
+const shown = (group: FakeNode | undefined) =>
+  (group?.children ?? []).map((child) => (child.dataset.filesRow === 'failed' ? `failed:${child.dataset.filesCode}:${child.textContent}` : child.textContent))
+
+test("N1: a folder deleted after its level was drawn says DSH's gone line under it, not \"the tree answered 404\"", async () => {
+  const { load, notes, requests } = childrenPage(goneAnswer)
+  const li = new FakeNode('li')
+  li.style.setProperty('--tree-depth', '2')
+  await load({ kind: 'folder', path: '/work/w/gone', label: 'gone', children: null }, li)
+  assert.equal(requests.length, 1, 'the folder was asked for')
+  assert.deepEqual(shown(li.children[0]), ['failed:workspace-file/not-found:That directory is gone. It may have been moved or deleted.'], 'one failed line, in DSH\'s words, with the code')
+  assert.deepEqual(notes, [], 'and no "could not read" note')
+})
+
+test("N1: a workspace whose folder went after the list was read says DSH's gone line under its Files heading", async () => {
+  const { load, notes } = childrenPage(goneAnswer)
+  const li = new FakeNode('li')
+  li.style.setProperty('--tree-depth', '0')
+  const group = { workspace: { id: 'w-1', status: 'ok' }, children: [], sessions: [] }
+  await load({ kind: 'workspace', path: '/work/w', label: 'w', group }, li)
+  assert.deepEqual(shown(li.children[0]), ['Files', 'failed:workspace-file/not-found:That directory is gone. It may have been moved or deleted.'], 'the shape a folder the list calls gone is drawn with')
+  assert.deepEqual(notes, [])
+})
+
+test('N1: any other failure still says what the tree answered', async () => {
+  const { load, notes } = childrenPage({ status: 500, body: { error: 'internal' } })
+  const li = new FakeNode('li')
+  await load({ kind: 'folder', path: '/work/w/x', label: 'x', children: null }, li)
+  assert.deepEqual(notes, ['could not read x: the tree answered 500'])
+  const answered = childrenPage({ status: 200, body: { children: [{ kind: 'folder', path: '/work/w/x/y', label: 'y', children: null }] } })
+  const opened = new FakeNode('li')
+  await answered.load({ kind: 'folder', path: '/work/w/x', label: 'x', children: null }, opened)
+  assert.deepEqual(shown(opened.children[0]), ['y'], 'and a folder that answers is drawn as before')
+})

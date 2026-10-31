@@ -15905,6 +15905,15 @@ const WorkspaceFolder = (() => {
   }
 
   /**
+   * Whether a tree answer says the folder is not there: DSH's `failureLine` reads the code alone
+   * (dsh-client-ui-sidebar-files lib/client.js:483-489). For a folder that went after the page read it — after its level
+   * was drawn, or after `/api/workspaces` called it `ok` — which the list's `status` cannot know (N1).
+   */
+  function goneAnswer(body) {
+    return body !== null && typeof body === 'object' && body.code === NOT_FOUND
+  }
+
+  /**
    * What Rename and Delete workspace put in `/api/workspaces/<key>`: the workspace's id — the one the server lists for
    * the row's path, else the drawn row's own (another client may have removed it, #49) — and its path only when nothing
    * names an id. A path is resolved through the file system, which a folder that is gone cannot be.
@@ -15916,7 +15925,7 @@ const WorkspaceFolder = (() => {
     return typeof drawn === 'string' && drawn.length > 0 ? drawn : node.path
   }
 
-  return { NOT_FOUND, GONE_LINE, gone, routeKey }
+  return { NOT_FOUND, GONE_LINE, gone, goneAnswer, routeKey }
 })()
 /* workspace-folder:end */
 
@@ -15931,12 +15940,18 @@ function paintGoneFolder(group, depth) {
   heading.setAttribute('role', 'none')
   heading.style.setProperty('--tree-depth', String(depth + 1))
   heading.textContent = 'Files'
+  group.append(heading)
+  paintGoneLine(group)
+}
+
+/** DSH's one failed line for a directory that is not there, under the folder whose level it is (N1). */
+function paintGoneLine(group) {
   const line = document.createElement('div')
   line.className = 'empty'
   line.dataset.filesRow = 'failed'
   line.dataset.filesCode = WorkspaceFolder.NOT_FOUND
   line.textContent = WorkspaceFolder.GONE_LINE
-  group.append(heading, line)
+  group.append(line)
   markSelection()
 }
 
@@ -17097,7 +17112,14 @@ async function loadChildren(node, li) {
       if (WorkspaceFolder.gone(node.group)) return paintGoneFolder(group, depth)
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-        if (!response.ok) throw new Error('the tree answered ' + response.status)
+        if (!response.ok) {
+          /** Gone since `/api/workspaces` called it there (N1): the same line, in DSH's words, as one the list calls gone. */
+          if (WorkspaceFolder.goneAnswer(await response.json().catch(() => null))) {
+            if (group.isConnected) paintGoneFolder(group, depth)
+            return
+          }
+          throw new Error('the tree answered ' + response.status)
+        }
         files = folderRows((await response.json()).children ?? [])
       } catch (error) {
         setNote('could not read ' + node.label + ': ' + (error && error.message))
@@ -17132,7 +17154,17 @@ async function loadChildren(node, li) {
        * every reopened branch replaced it with the unfiltered list — the row existed and could not be seen.
        */
       const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-      if (!response.ok) throw new Error('the tree answered ' + response.status)
+      if (!response.ok) {
+        /**
+         * Deleted or moved since its level was drawn (N1): DSH's one failed line under it (dsh-client-ui-sidebar-files
+         * lib/client.js:483-489, :770), not "the tree answered 404" over "nothing inside".
+         */
+        if (WorkspaceFolder.goneAnswer(await response.json().catch(() => null))) {
+          if (group.isConnected) paintGoneLine(group)
+          return
+        }
+        throw new Error('the tree answered ' + response.status)
+      }
       children = (await response.json()).children ?? []
     } catch (error) {
       setNote('could not read ' + node.label + ': ' + (error && error.message))
