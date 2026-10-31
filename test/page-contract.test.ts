@@ -404,9 +404,9 @@ test("a session is renamed in DSH's Rename session dialog, opened by the menu, t
    * is the removal detector underneath it.
    */
   assert.match(page, /<dialog id="session-rename" class="ws-dialog" aria-labelledby="session-rename-title">/, 'the dialog exists')
-  assert.match(page, /<h2 id="session-rename-title">Rename session<\/h2>/, "and carries DSH's title")
+  assert.match(page, /<h2 id="session-rename-title"[^>]*>Rename session<\/h2>/, "and carries DSH's title")
   assert.match(page, /<input type="text" id="session-rename-input" aria-label="Session name"/, "with DSH's field name")
-  assert.match(page, /<button type="button" id="session-rename-confirm" class="ws-primary" disabled>Rename<\/button>/, 'and its Rename button')
+  assert.match(page, /<button type="button" id="session-rename-confirm" class="ws-primary"[^>]* disabled>Rename<\/button>/, 'and its Rename button')
   assert.match(page, /input\.value = node\.session\.title \?\? ''/, 'the field starts with the stored title, empty for an unnamed session')
   assert.match(page, /\.disabled = sessionRenameTarget\.busy \|\| trimmed === ''/, 'only an empty draft (or one in flight) is refused, so an unchanged title can pin')
   assert.match(page, /label\.addEventListener\('dblclick', \(event\) => \{\s*event\.stopPropagation\(\)\s*renameSession\(node\)/, 'a double-click on the title opens it')

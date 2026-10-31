@@ -3535,55 +3535,55 @@
 -->
 <dialog id="workspace-picker" class="ws-dialog wide" aria-labelledby="workspace-picker-title">
   <div class="ws-head">
-    <h2 id="workspace-picker-title">Select Workspace Directory</h2>
-    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+    <h2 id="workspace-picker-title" data-i18n="picker.title">Select Workspace Directory</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </div>
   <form id="workspace-picker-form" class="ws-path-row">
-    <input type="text" id="workspace-picker-path" aria-label="Folder path" spellcheck="false" autocomplete="off">
-    <button type="submit" id="workspace-picker-go">Go</button>
+    <input type="text" id="workspace-picker-path" aria-label="Folder path" data-i18n-aria-label="picker.path" spellcheck="false" autocomplete="off">
+    <button type="submit" id="workspace-picker-go" data-i18n="picker.go">Go</button>
   </form>
-  <nav id="workspace-picker-crumbs" aria-label="Folder location"></nav>
-  <ul id="workspace-picker-list" aria-label="Folders"></ul>
+  <nav id="workspace-picker-crumbs" aria-label="Folder location" data-i18n-aria-label="picker.crumbs"></nav>
+  <ul id="workspace-picker-list" aria-label="Folders" data-i18n-aria-label="picker.list"></ul>
   <div class="ws-meta">
-    <label><input type="checkbox" id="workspace-picker-hidden"> Show hidden folders</label>
-    <span id="workspace-picker-truncated" hidden>Only the first 1,000 folders are listed.</span>
+    <label><input type="checkbox" id="workspace-picker-hidden"> <span data-i18n="picker.hidden">Show hidden folders</span></label>
+    <span id="workspace-picker-truncated" data-i18n="picker.truncated" hidden>Only the first 1,000 folders are listed.</span>
   </div>
   <form id="workspace-picker-new" class="ws-new-row" hidden>
-    <input type="text" id="workspace-picker-new-name" aria-label="New folder name" placeholder="New folder name" spellcheck="false" autocomplete="off">
-    <button type="submit" id="workspace-picker-new-create">Create</button>
+    <input type="text" id="workspace-picker-new-name" aria-label="New folder name" placeholder="New folder name" data-i18n-aria-label="picker.newName" data-i18n-placeholder="picker.newName" spellcheck="false" autocomplete="off">
+    <button type="submit" id="workspace-picker-new-create" data-i18n="picker.create">Create</button>
   </form>
   <p id="workspace-picker-error" class="ws-error" role="alert" hidden></p>
   <div class="ws-actions">
-    <button type="button" id="workspace-picker-new-folder">New folder</button>
-    <button type="button" id="workspace-picker-native" hidden>System dialog…</button>
+    <button type="button" id="workspace-picker-new-folder" data-i18n="picker.newFolder">New folder</button>
+    <button type="button" id="workspace-picker-native" data-i18n="picker.native" hidden>System dialog…</button>
     <span class="ws-spacer"></span>
-    <button type="button" data-ws-close>Cancel</button>
-    <button type="button" id="workspace-picker-add" class="ws-primary">Add workspace</button>
+    <button type="button" data-ws-close data-i18n="dialog.cancel">Cancel</button>
+    <button type="button" id="workspace-picker-add" class="ws-primary" data-i18n="picker.add">Add workspace</button>
   </div>
 </dialog>
 <dialog id="workspace-rename" class="ws-dialog" aria-labelledby="workspace-rename-title">
   <div class="ws-head">
-    <h2 id="workspace-rename-title">Rename workspace</h2>
-    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+    <h2 id="workspace-rename-title" data-i18n="dialog.renameWorkspace">Rename workspace</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </div>
-  <input type="text" id="workspace-rename-input" aria-label="Workspace name" spellcheck="false" autocomplete="off">
+  <input type="text" id="workspace-rename-input" aria-label="Workspace name" data-i18n-aria-label="dialog.workspaceName" spellcheck="false" autocomplete="off">
   <p id="workspace-rename-error" class="ws-error" role="alert" hidden></p>
   <div class="ws-actions">
-    <button type="button" data-ws-close>Cancel</button>
-    <button type="button" id="workspace-rename-confirm" class="ws-primary" disabled>Rename</button>
+    <button type="button" data-ws-close data-i18n="dialog.cancel">Cancel</button>
+    <button type="button" id="workspace-rename-confirm" class="ws-primary" data-i18n="tree.rename" disabled>Rename</button>
   </div>
 </dialog>
 <dialog id="workspace-delete" class="ws-dialog" aria-labelledby="workspace-delete-title">
   <div class="ws-head">
-    <h2 id="workspace-delete-title">Delete workspace</h2>
-    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+    <h2 id="workspace-delete-title" data-i18n="tree.deleteWorkspace">Delete workspace</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </div>
   <p id="workspace-delete-desc" class="ws-desc"></p>
-  <p id="workspace-delete-status" class="ws-status" role="status" hidden>Deleting workspace…</p>
+  <p id="workspace-delete-status" class="ws-status" role="status" data-i18n="dialog.deleting" hidden>Deleting workspace…</p>
   <p id="workspace-delete-error" class="ws-error" role="alert" hidden></p>
   <div class="ws-actions">
-    <button type="button" data-ws-close>Cancel</button>
-    <button type="button" id="workspace-delete-confirm" class="ws-danger">Delete workspace</button>
+    <button type="button" data-ws-close data-i18n="dialog.cancel">Cancel</button>
+    <button type="button" id="workspace-delete-confirm" class="ws-danger" data-i18n="tree.deleteWorkspace">Delete workspace</button>
   </div>
 </dialog>
 <!--
@@ -3593,14 +3593,14 @@
 -->
 <dialog id="session-rename" class="ws-dialog" aria-labelledby="session-rename-title">
   <div class="ws-head">
-    <h2 id="session-rename-title">Rename session</h2>
-    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+    <h2 id="session-rename-title" data-i18n="dialog.renameSession">Rename session</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </div>
-  <input type="text" id="session-rename-input" aria-label="Session name" spellcheck="false" autocomplete="off">
+  <input type="text" id="session-rename-input" aria-label="Session name" data-i18n-aria-label="dialog.sessionName" spellcheck="false" autocomplete="off">
   <p id="session-rename-error" class="ws-error" role="alert" hidden></p>
   <div class="ws-actions">
-    <button type="button" data-ws-close>Cancel</button>
-    <button type="button" id="session-rename-confirm" class="ws-primary" disabled>Rename</button>
+    <button type="button" data-ws-close data-i18n="dialog.cancel">Cancel</button>
+    <button type="button" id="session-rename-confirm" class="ws-primary" data-i18n="tree.rename" disabled>Rename</button>
   </div>
 </dialog>
 <!-- DSH's task deletion confirmation (dsh-client-ui-schedule `TaskDetail`), its texts verbatim, as a native dialog. -->
@@ -3726,6 +3726,27 @@ const MESSAGES = Object.freeze({
     'tree.fork': 'Fork session',
     'tree.archive': 'Archive session',
     'tree.unarchive': 'Unarchive session',
+    'picker.title': 'Select Workspace Directory',
+    'picker.path': 'Folder path',
+    'picker.go': 'Go',
+    'picker.crumbs': 'Folder location',
+    'picker.list': 'Folders',
+    'picker.hidden': 'Show hidden folders',
+    'picker.truncated': 'Only the first 1,000 folders are listed.',
+    'picker.newName': 'New folder name',
+    'picker.create': 'Create',
+    'picker.newFolder': 'New folder',
+    'picker.native': 'System dialog…',
+    'picker.add': 'Add workspace',
+    'dialog.cancel': 'Cancel',
+    'dialog.renameWorkspace': 'Rename workspace',
+    'dialog.workspaceName': 'Workspace name',
+    'dialog.deleting': 'Deleting workspace…',
+    'dialog.deleteKept': 'This removes “{name}” from the workspace list. The folder and session logs will be kept. ',
+    'dialog.deleteUngrouped': 'Its sessions will appear under Ungrouped.',
+    'dialog.deleteHeir': 'Its sessions will appear under “{heir}”.',
+    'dialog.renameSession': 'Rename session',
+    'dialog.sessionName': 'Session name',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3814,6 +3835,27 @@ const MESSAGES = Object.freeze({
     'tree.fork': '分叉会话',
     'tree.archive': '归档会话',
     'tree.unarchive': '取消归档',
+    'picker.title': '选择工作区目录',
+    'picker.path': '文件夹路径',
+    'picker.go': '前往',
+    'picker.crumbs': '文件夹位置',
+    'picker.list': '文件夹',
+    'picker.hidden': '显示隐藏文件夹',
+    'picker.truncated': '仅列出前 1,000 个文件夹。',
+    'picker.newName': '新文件夹名称',
+    'picker.create': '创建',
+    'picker.newFolder': '新建文件夹',
+    'picker.native': '系统对话框…',
+    'picker.add': '添加工作区',
+    'dialog.cancel': '取消',
+    'dialog.renameWorkspace': '重命名工作区',
+    'dialog.workspaceName': '工作区名称',
+    'dialog.deleting': '正在删除工作区…',
+    'dialog.deleteKept': '将把“{name}”从工作区列表中移除。文件夹与会话记录会保留，',
+    'dialog.deleteUngrouped': '其会话将显示在“未分组”下。',
+    'dialog.deleteHeir': '其会话将显示在“{heir}”下。',
+    'dialog.renameSession': '重命名会话',
+    'dialog.sessionName': '会话名称',
   }),
 })
 
@@ -15907,8 +15949,8 @@ async function openDeleteWorkspace(node) {
   const name = workspaceDisplayTitle(own?.title ?? node.label)
   deleteTarget = { path: node.path, busy: false }
   document.getElementById('workspace-delete-desc').textContent =
-    `This removes “${name}” from the workspace list. The folder and session logs will be kept. ` +
-    (heir === null ? 'Its sessions will appear under Ungrouped.' : `Its sessions will appear under “${workspaceDisplayTitle(heir.title)}”.`)
+    t('dialog.deleteKept', { name }) +
+    (heir === null ? t('dialog.deleteUngrouped') : t('dialog.deleteHeir', { heir: workspaceDisplayTitle(heir.title) }))
   document.getElementById('workspace-delete-status').hidden = true
   dialogError('workspace-delete-error', '')
   document.getElementById('workspace-delete-confirm').disabled = false
