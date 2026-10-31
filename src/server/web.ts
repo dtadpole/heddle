@@ -1661,7 +1661,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     /**
      * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
-     * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     * stop. Here the turn's stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
      *
      * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
      * `details.activity`): the turn in progress, the session's live background jobs, its running subagent descendants and
@@ -1670,15 +1670,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * teammate's, a notice's), because a session the page did not start can still be working. The jobs are also listed
      * as `jobs`, the jobs row's own field (`sessionJobActivity`), which the page's older confirm reads.
      *
-     * With `stop: true` the jobs are killed with `session archived` and the reminders removed once the archive is
-     * written, which is DSH's order for every family: the archive set first, then each `workspace/session-stop`
-     * listener, awaited (`dsh-workspace/lib/index.js:527-541`, `:621-628`). The turn and the subagents are still
-     * stopped before the write (a known difference, `SESSION_ACTIONS.md`).
+     * With `stop: true` every family is stopped only once the archive is written, which is DSH's order: the archive set
+     * first, then each `workspace/session-stop` listener, awaited (`dsh-workspace/lib/index.js:527-541`, `:621-628`).
+     * The turn and its running subagents are aborted with `session archived`, the jobs killed with the same reason and
+     * the reminders removed. A write that is refused (`409`), finds no session (`404`) or fails stops nothing, as a
+     * throwing `setState` in DSH never reaches `stopSessionActivity`.
      */
     const rows = { jobs: ctx.get('jobs') as JobRegistry | undefined, schedule: ctx.get('schedule') as ScheduleService | undefined }
-    const stopRows = archived === true && body.stop === true
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    /** The sessions a successful write stops: the session and the subagents its activity named. Empty without stop: true. */
+    let stopSessions: string[] = []
     if (archived === true) {
-      const turns = ctx.get('turns') as TurnRegistry | undefined
       const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
       const work = await rowActivity(rows, id)
       const activity = sessionActivity(id, ctx.session.list(), isRunning, work)
@@ -1698,12 +1700,10 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
           )
           return
         }
-        for (const sessionId of activitySessions(id, activity)) {
-          abortSession(state.controllers, sessionId)
-          turns?.abort(sessionId, 'session archived')
-        }
+        stopSessions = activitySessions(id, activity)
       }
     }
+    const stopRows = archived === true && body.stop === true
     let meta
     try {
       meta = ctx.session.flags(id, {
@@ -1726,6 +1726,10 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     if (meta === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
+    }
+    for (const sessionId of stopSessions) {
+      abortSession(state.controllers, sessionId)
+      turns?.abort(sessionId, 'session archived')
     }
     if (stopRows) await stopRowActivity(rows, id, (message) => ctx.logger.warn(message))
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)

@@ -1687,6 +1687,15 @@ test('a goal round into an archived session blocks its goal as DSH does (prompt-
   }
 })
 
+/**
+ * A session's record file, beside its log in either layout: `<folder>/<id>.json` next to `<folder>/<id>.v2.jsonl.zstd`, or
+ * `meta.json` in the old layout's own `<root>/<id>/` directory. Both builds file it there.
+ */
+function recordFile(root, id) {
+  const log = transcriptFile(join(root, id))
+  return basename(dirname(log)) === id ? join(dirname(log), 'meta.json') : join(dirname(log), `${id}.json`)
+}
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
@@ -5907,6 +5916,25 @@ test('archiving a session with running work is refused with the work named, and 
     const untouched = (await metas()).find((meta) => meta.id === running.id)
     assert.equal(untouched?.running, true, 'the refusal stops nothing')
     assert.notEqual(untouched?.archived, true, 'and archives nothing')
+    /**
+     * stop: true stops the work only once the archive is written, as DSH writes the archive set and then asks the
+     * workspace/session-stop listeners (dsh-workspace lib/index.js:527-541): a write that fails stops nothing. Both
+     * builds stopped the turn first, so a refused write killed it and archived nothing (developer-ten's F1 on stack-2).
+     * The write is made to fail the way the store refuses one: the record is marked archived on disk, as another writer
+     * could leave it, and { archived: true, pinned: true } asks to pin an archived session. The turn writes no record
+     * during its bash step, so the mark holds until it is taken back.
+     */
+    const record = recordFile(join(h.home, 'sessions'), running.id)
+    writeFileSync(record, `${JSON.stringify({ ...JSON.parse(readFileSync(record, 'utf8')), archived: true }, null, 2)}\n`)
+    const refusedWrite = await post(`/api/sessions/${running.id}/flags`, { archived: true, pinned: true, stop: true })
+    const refusedBody = await refusedWrite.json()
+    assert.equal(refusedWrite.status, 409, `a stop-and-archive whose write is refused\n${JSON.stringify(refusedBody)}`)
+    assert.equal(refusedBody.code, 'archived', `is refused by the store\n${JSON.stringify(refusedBody)}`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const stillRunning = (await metas()).find((meta) => meta.id === running.id)
+    assert.equal(stillRunning?.running, true, `and stops nothing: the turn still runs\nsaw: ${JSON.stringify(stillRunning)}`)
+    const { archived: _marked, ...unmarked } = JSON.parse(readFileSync(record, 'utf8'))
+    writeFileSync(record, `${JSON.stringify(unmarked, null, 2)}\n`)
     const stopped = await post(`/api/sessions/${running.id}/flags`, { archived: true, stop: true })
     assert.equal(stopped.status, 200, 'stop: true is the caller agreeing to stop it')
     assert.equal((await stopped.json()).archived, true, 'and the session is archived')

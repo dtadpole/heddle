@@ -1,6 +1,6 @@
 ---
 title: Session actions — pin, archive and fork
-version: 1.2.0
+version: 1.3.0
 description: What the reference implementation means by pinning, archiving and forking a session — read from the installed DSH packages — and how this project's backend and UI implement the same three, row by row.
 grounded_in:
   - source: human-authored reading of the installed DSH packages on 2026-10-17
@@ -243,12 +243,18 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   archive set first and then awaits every stop listener (`dsh-workspace/lib/index.js:527-541`, `:621-628`). A failing
   removal is logged (`workspace: stopping session '<id>' for archive failed: …`), never a reason to keep the session
   visible.
-- **Known difference: the turn and the subagents stop before the write.** DSH writes the archive set first and only
+- **Every family stops after the write** (developer-ten's F1 on stack-2). DSH writes the archive set first and only
   then asks every `workspace/session-stop` listener — the turn's cancel and the subagents' included — so the stops'
-  wakes already meet its `agent/pre-step` gate (`dsh-workspace/lib/index.js:527-541`). Both heddle servers abort the
-  session's turn and its running subagents *before* they write the archive flag, and stop only the rows' work (the
-  reminders, and the jobs) after it. Not changed here; a failing write after those aborts leaves the work stopped and
-  the session unarchived, where DSH would have stopped nothing.
+  wakes already meet its `agent/pre-step` gate, and a `setState` that throws reaches no stop at all
+  (`dsh-workspace/lib/index.js:527-541`). Both heddle servers used to abort the session's turn and its running subagents
+  *before* the archive flag was written, so a refused write (`409`, say a pin on an archived session), an unknown session
+  (`404`) or a failed write left the work stopped and the session unarchived, and in Rust a cancelled child's settlement
+  notice could start a parent turn before the flag was on disk. Now the activity is still read before the write (and
+  refuses without `stop: true`), but the turn, the subagents, the jobs and the reminders are stopped only once the
+  write has succeeded: next to `stopRowActivity` in `src/server/web.ts`, inside `Ok(Some(meta))` next to the port's
+  stop in `heddle-server`'s `flags_session`. Judged by `test/session-archive-stop-after-write.test.ts`, the
+  `heddle-server` test `a_stop_and_archive_whose_write_is_refused_or_finds_no_session_stops_nothing` and verifier 70's
+  archive check on both builds. This ends the known difference recorded here before.
 - **The order is DSH's.** `workspace/session-activity` is a Cordis waterfall: listeners run in registration order
   (`cordis/lib/index.js:317-325`, pushed at `:335-345`) and each answers `[own, ...rest]`, so the first registered
   family comes first. They register in this order:
