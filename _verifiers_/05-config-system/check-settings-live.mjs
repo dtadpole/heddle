@@ -103,7 +103,7 @@ test('a settings write to the model row applies to the next turn without a resta
   }
 })
 
-test('a settings write of the presets default is the next new session\'s, and an existing session keeps its own (A96)', async () => {
+test('a settings write of the presets default is the next new session\'s; an existing session keeps its preset id, whose definition follows the roster (A96)', async () => {
   const home = isolatedHome('settings-live-presets')
   const double = await chatDouble({ content: 'ok' })
   let server
@@ -144,6 +144,22 @@ test('a settings write of the presets default is the next new session\'s, and an
     const again = await call(server, 'POST', '/api/turn', { prompt: 'again', session: existing })
     assert.equal(again.status, 200, `the existing session runs on\n${JSON.stringify(again.body).slice(0, 300)}`)
     assert.equal(await presetOf(existing), 'standard', 'and keeps the preset it recorded')
+
+    // A session keeps the preset's id, not a frozen copy of it: a later write that changes what the preset offers
+    // reaches that session's next turn, as both loaders resolve the recorded id against the roster in force.
+    const toolsOf = (request) => (JSON.parse(request.body).tools ?? []).map((tool) => tool.function?.name ?? tool.name)
+    const narrowed = await call(server, 'GET', '/api/settings/presets')
+    const rewritten = await call(server, 'POST', '/api/settings/presets', {
+      update: { presets: [{ id: 'standard', name: 'Standard' }, { id: 'reader', name: 'Reader', tools: ['list_dir'] }] },
+      expectedRevision: narrowed.body.revision,
+    })
+    assert.equal(rewritten.status, 200, `the roster rewrite is accepted\n${JSON.stringify(rewritten.body).slice(0, 300)}`)
+    assert.equal(rewritten.body.applyError, undefined)
+    const seen = double.requests.length
+    const onward = await call(server, 'POST', '/api/turn', { prompt: 'onward', session: fresh })
+    assert.equal(onward.status, 200)
+    assert.equal(await presetOf(fresh), 'reader', 'the session still runs the preset it recorded')
+    assert.deepEqual(toolsOf(double.requests[seen]), ['list_dir'], 'and its next turn is offered what that preset offers now')
   } finally {
     server?.kill()
     await double.close()
