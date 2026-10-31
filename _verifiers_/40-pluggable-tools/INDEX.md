@@ -20,6 +20,9 @@ a display or a window.
 ## What decides it
 
 `check-tools.mjs` lists and calls the built-in tools, and `check-plugins.mjs` adds a fixture tool through a layer file.
+`check-bash-timeout.mjs` holds a bash call's own `timeoutMs` to DSH's rule: a value that is not a finite positive number
+is refused and the command does not run, a larger one is cut to the tools row's `bashMaxTimeoutMs` (DSH's `maxTimeoutMs`,
+ten minutes by default; live-testing issue #13).
 `check-failed-output.mjs` holds a failed bash call to keeping what it printed: the error line first, then its stdout
 and stderr, as DSH's renderResult keeps the body of a non-zero exit (live-testing issue #82).
 

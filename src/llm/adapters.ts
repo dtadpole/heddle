@@ -194,7 +194,13 @@ export function openAiChatAdapter(
   return (async function* chat() {
     const result = await post({
       url: `${baseUrlFor(endpoint, request.model)}/chat/completions`,
-      body: { ...body, stream: streaming },
+      /**
+       * A stream asks for its usage (#69). DSH's OpenAI-completions layer sends `stream_options.include_usage`
+       * unless a model's compat says the provider cannot (pi-ai `supportsUsageInStreaming`). DeepSeek reports
+       * usage unasked, but an OpenAI-shaped gateway reports none without it, so GPT turns recorded no usage.
+       * It is sent only on a stream, since a non-streamed call refuses `stream_options`.
+       */
+      body: { ...body, stream: streaming, ...(streaming ? { stream_options: { include_usage: true } } : {}) },
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
       ...(endpoint.headers !== undefined ? { headers: endpoint.headers } : {}),
       ...(endpoint.timeoutMs !== undefined ? { timeoutMs: endpoint.timeoutMs } : {}),
@@ -210,6 +216,12 @@ export function openAiChatAdapter(
     }
 
     const calls = new Map<number, PartialToolCall>()
+    /**
+     * The finish reason of a finish frame that carried no usage. With `include_usage`, an OpenAI-shaped stream
+     * reports usage in its own last frame, `choices: []`, after the finish frame and before `[DONE]`, so `done`
+     * waits for that frame, `[DONE]` or the end (#69).
+     */
+    let finished: string | undefined
     for await (const event of readSse(result.stream)) {
       if (event.data === '[DONE]') break
       let parsed: {
@@ -226,6 +238,14 @@ export function openAiChatAdapter(
       try {
         parsed = JSON.parse(event.data)
       } catch {
+        continue
+      }
+      if (finished !== undefined) {
+        const usage = openaiChatUsage(parsed.usage)
+        if (usage !== undefined) {
+          yield { type: 'done', finishReason: finished, usage }
+          return
+        }
         continue
       }
       const choice = parsed.choices?.[0]
@@ -255,15 +275,17 @@ export function openAiChatAdapter(
         for (const call of calls.values()) {
           yield { type: 'tool-call', id: call.id || `call-${call.name}`, name: call.name, arguments: call.arguments }
         }
-        yield {
-          type: 'done',
-          finishReason: canonicalFinishReason(choice.finish_reason, calls.size),
-          ...(openaiChatUsage(parsed.usage) !== undefined ? { usage: openaiChatUsage(parsed.usage) } : {}),
+        const reason = canonicalFinishReason(choice.finish_reason, calls.size)
+        const usage = openaiChatUsage(parsed.usage)
+        // DeepSeek puts usage on the finish frame itself: done at once, as before.
+        if (usage !== undefined) {
+          yield { type: 'done', finishReason: reason, usage }
+          return
         }
-        return
+        finished = reason
       }
     }
-    yield { type: 'done', finishReason: 'stop' }
+    yield { type: 'done', finishReason: finished ?? 'stop' }
   })()
 }
 

@@ -108,7 +108,7 @@ export function groupConsoleMessages(messages) {
 
 /** Messages of the live document, or of the last few documents too when preserved. */
 export function currentConsoleMessages(page, includePreserved) {
-  const current = page.browser.navigationEpoch
+  const current = page.navigationEpoch
   const minimum = current - (includePreserved ? 3 : 0)
   return page.console.filter((message) => message.navigation >= minimum && (includePreserved || message.navigation === current || message.navigation === undefined))
 }
@@ -147,7 +147,7 @@ export function formatNetworkRequest(entry) {
 
 /** The network requests of the live document, or of the last few documents too when preserved. */
 export function currentNetworkRequests(page, includePreserved) {
-  const current = page.browser.navigationEpoch
+  const current = page.navigationEpoch
   const minimum = current - (includePreserved ? 3 : 0)
   return page.network.filter((entry) => (includePreserved ? entry.navigation >= minimum : entry.navigation === current || entry.navigation === undefined))
 }
