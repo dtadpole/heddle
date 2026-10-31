@@ -6727,7 +6727,11 @@ async function showSession(id) {
   renderScheduleDrawer()
   void refreshScheduleList()
   void refreshScheduleCatalog()
-  return true
+  /**
+   * Whether the session asked for is the one shown. An open of another session may have started while the goal and the
+   * todo were read, and then this one did not end shown (developer-ten's N3); the flat row marks itself selected on true.
+   */
+  return current === id
 }
 
 /** Each session's record as `/api/sessions` last listed it — what tells the composer that the open one is a one-shot child. */
