@@ -64,6 +64,8 @@ function harness(created: string): Run {
     const rememberCurrent = () => {}
     const chooseWorkspace = () => {}
     const adoptSession = (id) => { adopted.push(id) }
+    /** What was queued behind the message moves with the session it created (here, nothing was queued). */
+    const adoptLooseQueue = () => {}
     const fetchSessionAccess = async () => {}
     const stopTurn = async () => {}
     /** The page's own open: it ends an unavailable session's state, makes the session current and redraws it (here, records that it was asked). */

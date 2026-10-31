@@ -8676,18 +8676,36 @@ function queueOf(key = composerKey) {
  */
 function adoptSession(id) {
   if (typeof id !== 'string' || id.length === 0 || id === composerKey) return
-  if (composerKey === QUEUE_KEY_NONE) {
-    const loose = queues.get(QUEUE_KEY_NONE)
-    if (loose !== undefined) {
-      const existing = queues.get(id)
-      if (existing === undefined) queues.set(id, loose)
-      else existing.unshift(...loose.splice(0, loose.length))
-      queues.delete(QUEUE_KEY_NONE)
-    }
-  }
+  /**
+   * While the loose turn that will create a session is still out, the loose queue waits for that session, which the
+   * turn's `session` frame adopts (`adoptLooseQueue`), not for whatever the panel opens meanwhile. The boot's restore
+   * opening the saved session X while the first message from the blank composer was on its way took the loose queue
+   * onto X, so a message queued behind that first one went into X instead of the session it created (N1's case).
+   */
+  if (composerKey === QUEUE_KEY_NONE && !looseTurnOut()) adoptLooseQueue(id)
   composerKey = id
   renderQueue()
   void pumpQueue(id)
+}
+
+/** Whether a turn sent with no session (a direct send, or the pump's) is still out: its session does not exist yet. */
+function looseTurnOut() {
+  const loose = queues.get(QUEUE_KEY_NONE)
+  return loose !== undefined && ((directTurnsByQueue.get(loose) ?? 0) > 0 || queueTurnOut.has(loose))
+}
+
+/**
+ * Move what was queued with no session onto session `id`, as the **same array** while `id` has none of its own, so a
+ * pump already holding it keeps working on the right list (`pumpQueue`). Called by `adoptSession`, and by a loose turn's
+ * own `session` frame for the session it created, whatever the panel shows by then.
+ */
+function adoptLooseQueue(id) {
+  const loose = queues.get(QUEUE_KEY_NONE)
+  if (loose === undefined) return
+  const existing = queues.get(id)
+  if (existing === undefined) queues.set(id, loose)
+  else existing.unshift(...loose.splice(0, loose.length))
+  queues.delete(QUEUE_KEY_NONE)
 }
 
 function sessionRunning() {
@@ -9360,6 +9378,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          */
         if (target === null && adopted === null) {
           adopted = payload.session
+          /** What was queued behind this message waited for this session, whatever the panel shows now (N1's case). */
+          adoptLooseQueue(payload.session)
           /** The workspace the first message started its session in is where this browser works now (#142). */
           if (fresh) rememberWorkspace(folder)
           /**
