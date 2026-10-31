@@ -322,20 +322,27 @@ impl ModelService {
         &self.model_lists
     }
 
-    /// The request a call would send after the `model/request` waterfall, without sending it.
+    /// The request a call sends after the `model/request` waterfall, without sending it (issue #14).
     ///
     /// The turn loop records each model request before the call, and the record must name what the call sends:
     /// a selection policy on this waterfall (the server's running-turn rule) may move a step to another endpoint,
-    /// model or level (issue #14). [`ModelService::stream`] applies the same waterfall again on the way to the
-    /// adapter, so a listener must leave a request it already rewrote as it is, which the selection rule does.
+    /// model or level. The loop resolves once, records the answer, and hands it to [`ModelService::stream_resolved`],
+    /// so the waterfall runs **once per call**: a listener may rewrite or have effects, and running it again could
+    /// send something other than what was recorded. `NO_ENDPOINT` when the request names no configured endpoint.
     pub fn resolve(&self, request: &GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        self.adapter_for(&request.endpoint)?;
         self.request_through_hooks(request)
     }
 
-    /// Call one endpoint and stream the answer (`stream`). `NO_ENDPOINT` is returned before any stream exists.
+    /// Call one endpoint and stream the answer (`stream`): [`ModelService::resolve`], then
+    /// [`ModelService::stream_resolved`]. `NO_ENDPOINT` is returned before any stream exists.
     pub fn stream(&self, request: GenerateRequest) -> Result<ChunkStream, ModelError> {
-        self.adapter_for(&request.endpoint)?;
-        let effective = self.request_through_hooks(&request)?;
+        let effective = self.resolve(&request)?;
+        self.stream_resolved(effective)
+    }
+
+    /// Stream a request [`ModelService::resolve`] already answered; the `model/request` waterfall is not run again.
+    pub fn stream_resolved(&self, effective: GenerateRequest) -> Result<ChunkStream, ModelError> {
         let resolved = self.adapter_for(&effective.endpoint)?;
         // The provider boundary drops assistant turns that carry only reasoning. Applied after the request hook,
         // so a policy listener sees the request as it was recorded.
@@ -876,6 +883,59 @@ mod tests {
             .await
             .expect_err("the inner failure wins");
         assert_eq!(error.code, "HOOK_FAILED");
+    }
+
+    /// A hook that is not idempotent: it counts its calls and sends the n-th to `a` or `b` by parity.
+    struct Alternate {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModelHooks for Alternate {
+        fn request(
+            &self,
+            _service: &ModelService,
+            _request: &GenerateRequest,
+            next: &mut dyn FnMut() -> Result<GenerateRequest, ModelError>,
+        ) -> Result<GenerateRequest, ModelError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut effective = next()?;
+            effective.endpoint = if call.is_multiple_of(2) { "a" } else { "b" }.into();
+            Ok(effective)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resolved_request_streams_without_running_the_request_hooks_again() {
+        // Issue #14: the loop resolves once, records that request, and streams it; a second pass through a
+        // non-idempotent hook would send the call somewhere other than what was recorded.
+        let fixture = Fixture::new();
+        let service = ModelService::new(vec![
+            fixture.endpoint("a", json!({ "steps": [{ "text": "from a" }] })),
+            fixture.endpoint("b", json!({ "steps": [{ "text": "from b" }] })),
+        ])
+        .expect("registers");
+        let hook = Arc::new(Alternate {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        service.add_hooks(hook.clone());
+        let resolved = service.resolve(&ask("b")).expect("resolves");
+        assert_eq!(resolved.endpoint, "a", "the first pass sends it to a");
+        let mut stream = service.stream_resolved(resolved).expect("streams");
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let Ok(Chunk::TextDelta { text: delta }) = chunk {
+                text.push_str(&delta);
+            }
+        }
+        assert_eq!(
+            text, "from a",
+            "the call went where the one resolution said"
+        );
+        assert_eq!(
+            hook.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the hook ran once"
+        );
     }
 
     #[tokio::test]
