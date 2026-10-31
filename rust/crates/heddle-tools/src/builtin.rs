@@ -434,7 +434,13 @@ async fn run_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The command leads its own process group, so a Stop or the wall time reaches everything it started, as DSH's
+    // launcher does (`detached`, then a signal to `-pid`). `kill_on_drop` alone stops only the shell, and the
+    // shell's children kept running orphaned (live-testing draft developer-five-5).
+    #[cfg(unix)]
+    process.process_group(0);
     let child = process.spawn()?;
+    let leader = child.id();
 
     let facts = || match confined {
         None => sandbox_facts(mode, false),
@@ -466,8 +472,14 @@ async fn run_command(
 
     match output {
         None => {
-            // The child was killed for its wall time or by the caller's Stop. It is dropped here, which
-            // kills it (`kill_on_drop`); whatever it printed before that is still worth reporting.
+            // The child was killed for its wall time or by the caller's Stop: dropping it killed the shell
+            // (`kill_on_drop`), and the group signal stops whatever the shell had started, which outlives the
+            // shell as long as one member of the group is left.
+            if let Some(leader) = leader {
+                if let Err(error) = heddle_sandbox::kill_process_group(leader) {
+                    tracing::warn!(%error, leader, "the command's process group could not be stopped");
+                }
+            }
             let stopped = context.is_cancelled();
             let message = if stopped {
                 "the command was stopped before it finished".to_owned()
