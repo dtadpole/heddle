@@ -356,6 +356,8 @@ test('after a server restart, a message the page queued behind the cut-off turn 
       `the queued message reached the restarted server (prompts: ${JSON.stringify(at.double.prompts)})`,
     )
     assert.ok(await at.browser.waitFor(`${LOG_TEXT}.includes('answer to: QUEUED behind the turn')`, 15_000), 'and its answer is shown')
+    assert.ok(await at.browser.waitFor(`document.getElementById('stop').hidden === true`, 15_000), 'and Send is back once it ends (developer-ten)')
+    assert.equal(at.double.prompts.filter((prompt) => prompt.includes('QUEUED behind the turn')).length, 1, 'sent once, not twice')
   } finally {
     await at.close()
   }
