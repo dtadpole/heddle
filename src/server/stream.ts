@@ -138,14 +138,28 @@ export class StallWatch {
     return this.intervalMs * 2
   }
 
-  /** Judge every socket once; returns the ones it destroyed. */
+  /** When the previous sweep ran, to tell a late sweep — the server's own stall — from a peer's. */
+  private lastSweepAt: number | undefined
+
+  /**
+   * Judge every socket once; returns the ones it destroyed.
+   *
+   * A sweep that runs a whole deadline after the previous one judges nobody (issue #19). The heartbeat timer runs on
+   * the event loop, so a late sweep means the **server** stood still — and during that time no peer could have
+   * taken a byte, while whatever the server queued as it resumed has not had a moment to leave. Judged as usual,
+   * that sweep destroyed every live stream after any stall longer than two intervals (measured: a 4.5 s stall cut the
+   * running turn's stream and a page's pending answer). Every socket is re-stamped instead, and one that really
+   * stopped reading is cut two intervals later.
+   */
   sweep(sockets: Iterable<WatchedSocket>, now: number): WatchedSocket[] {
     const ended: WatchedSocket[] = []
+    const late = this.lastSweepAt !== undefined && now - this.lastSweepAt > this.deadlineMs
+    this.lastSweepAt = now
     for (const socket of sockets) {
       if (socket.destroyed) continue
       const last = this.seen.get(socket)
       const bytes = socket.bytesWritten - socket.writableLength
-      if (last === undefined || socket.writableLength === 0 || bytes !== last.bytes) {
+      if (late || last === undefined || socket.writableLength === 0 || bytes !== last.bytes) {
         this.seen.set(socket, { bytes, activeAt: now })
         continue
       }
