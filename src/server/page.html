@@ -5786,6 +5786,11 @@ async function showLedger(id) {
     if (ticket !== ledgerFetches) return
       renderLedger(body, body.timeline ?? { spans: [], durationMs: 0 })
   } catch (error) {
+    /**
+     * A failure is drawn only by the newest request, like a success. An older read that fails after a newer one has
+     * drawn would otherwise append its error under the new ledger (developer-two, reproduced in a component run).
+     */
+    if (ticket !== ledgerFetches) return
     const note = document.createElement('div')
     note.className = 'turn denied'
     note.textContent = 'could not read the ledger: ' + (error && error.message)
