@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.4.0
+version: 1.5.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -62,6 +62,17 @@ and the session records `transcript/repaired` with how many bytes went. This is 
 frame walk stops at the first incomplete frame, so appending past one writes events nothing can ever
 read. Measured before the repair existed: a torn file plus one appended frame read back as one event
 instead of two, with the new event silently gone.
+
+**A log that is not a log is left out, and named** (issue #130). DSH lists a session by its header and omits one
+whose header is unreadable, a corrupt Zstandard header frame included (dsh-session-persistence-jsonl README, "Reading
+the logs"; `listArtifacts`, lib/index.js:3102-3138). A heddle log's header is its first record, so `list()` and `open()`
+judge that record (`judgeLogHeader` in [`transcript.ts`](transcript.ts)): a first frame that is malformed or does not
+decode, or a first line that is not JSON or not a session event, keeps the session out of the list, opens it as no
+session (`404 no session <id>`), and prints `heddle session: skipped unreadable log <path>: <reason>` once. DSH says
+nothing when it omits one; heddle names the file because it is the one thing a person has to find. An empty log, a
+missing one and a torn frame still read as before. Every later line must be an event too (the Rust reader's rule), and
+the server's startup sweeps leave out a log that does not read whole (`SessionStore.loads`): a throw there used to
+dispose every plugin after the listener was up and before the login line.
 
 **The file is read once per process** (`SessionStore.load`). Events are kept in memory and advanced
 on append, because a single turn used to re-read and re-parse the whole transcript twenty-one times:
