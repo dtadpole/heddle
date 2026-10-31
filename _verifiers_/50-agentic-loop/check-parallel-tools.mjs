@@ -2,11 +2,14 @@
 // tools.maxParallelToolCalls, and their results are answered in the order the model asked.
 //
 // What each test proves, by name:
-// - Scheduler concurrency, with no timing to race: a fixture tool `meet`, declared parallel-safe (DSH's
-//   isConcurrencySafe), marks that its call started and then waits, up to a bound, for the other call's mark. Two
-//   `meet` calls in one step both find each other only if the loop ran them together; at maxParallelToolCalls 1 the
-//   first waits out the bound alone and the second then finds the first's mark. The fixture is a TypeScript plugin
-//   on the TypeScript build and a process on a binary (rust/crates/heddle-tools/PROTOCOL.md, `concurrencySafe`).
+// - Scheduler concurrency, by a bounded handshake: a fixture tool `meet`, declared parallel-safe (DSH's
+//   isConcurrencySafe), marks that its call started and then waits for the other call's mark, with a 3 s timeout as
+//   the failure guard. Two `meet` calls in one step both find each other only if the loop ran them together; at
+//   maxParallelToolCalls 1 the first waits out the timeout alone and the second then finds the first's mark.
+// - Result order against completion order: once met, the first call also waits (same guard) for the second to
+//   finish, so the second call always completes first; the results must still be answered first call first.
+//   The fixture is a TypeScript plugin on the TypeScript build and a process on a binary
+//   (rust/crates/heddle-tools/PROTOCOL.md, `concurrencySafe`).
 // - read_file batching: two read_file calls of one step, on a regular file and on a missing one, are both answered,
 //   in the model's order. A regular-file read does not block, so this does not prove overlap; read_file keeps DSH's
 //   regular-file contract (dsh-tool-fs resolveRegularReadTarget), which is why the overlap proof no longer reads
@@ -23,7 +26,7 @@ import { heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, sessi
 
 const binaryUnderTest = typeof process.env.HEDDLE_BIN === 'string' && process.env.HEDDLE_BIN.length > 0
 
-/** How long a `meet` call waits for its partner before it answers `alone`. */
+/** The handshake's failure guard: how long a `meet` call waits for its partner's mark (or finish) before giving up. */
 const MEET_BOUND_MS = 3_000
 
 const MEET_SPEC = {
@@ -31,22 +34,36 @@ const MEET_SPEC = {
   description: 'Mark this call as started, then wait for the other named call to start.',
   parameters: {
     type: 'object',
-    properties: { name: { type: 'string' }, other: { type: 'string' }, dir: { type: 'string' } },
+    properties: { name: { type: 'string' }, other: { type: 'string' }, dir: { type: 'string' }, after: { type: 'boolean' } },
     required: ['name', 'other', 'dir'],
   },
 }
 
-/** The call itself, shared by both vehicles: mark, then wait for the partner's mark or the bound. */
+/**
+ * The call itself, shared by both vehicles: mark the start, wait (guarded) for the partner's start mark; a call with
+ * `after` set then also waits (guarded) for that partner's finish mark, so it completes second. Every call marks its
+ * finish as it returns.
+ */
 const MEET_RUN = `async (args) => {
   const { existsSync, writeFileSync } = await import('node:fs')
   const { join } = await import('node:path')
-  writeFileSync(join(args.dir, args.name + '.started'), '')
-  const deadline = Date.now() + ${MEET_BOUND_MS}
-  while (Date.now() < deadline) {
-    if (existsSync(join(args.dir, args.other + '.started'))) return { output: 'met ' + args.other }
-    await new Promise((resolve) => setTimeout(resolve, 25))
+  const mark = (name, kind) => join(args.dir, name + '.' + kind)
+  const wait = async (path) => {
+    const deadline = Date.now() + ${MEET_BOUND_MS}
+    while (Date.now() < deadline) {
+      if (existsSync(path)) return true
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    return false
   }
-  return { output: 'alone' }
+  writeFileSync(mark(args.name, 'started'), '')
+  let output = 'alone'
+  if (await wait(mark(args.other, 'started'))) {
+    output = 'met ' + args.other
+    if (args.after === true) output += (await wait(mark(args.other, 'finished'))) ? ', after ' + args.other + ' finished' : ', before ' + args.other + ' finished'
+  }
+  writeFileSync(mark(args.name, 'finished'), '')
+  return { output }
 }`
 
 /** The fixture as a TypeScript plugin, registered parallel-safe. */
@@ -172,20 +189,24 @@ const meetCalls = (home) => {
   const dir = join(home, 'marks')
   mkdirSync(dir, { recursive: true })
   return [
-    { name: 'meet', args: { name: 'a', other: 'b', dir } },
+    { name: 'meet', args: { name: 'a', other: 'b', dir, after: true } },
     { name: 'meet', args: { name: 'b', other: 'a', dir } },
   ]
 }
 
-test('the parallel-safe calls of one step run together, and their results keep the model order', async () => {
+test('the parallel-safe calls of one step run together, and the first is answered first though it finished last', async () => {
   const run = await turn('together', undefined, meetCalls)
-  assert.notEqual(run.code, 'timeout', run.output.slice(-600))
-  assert.deepEqual(run.results, ['met b', 'met a'], `each call found the other started: they ran together\n${run.output.slice(-600)}`)
+  assert.equal(run.code, 0, run.output.slice(-600))
+  assert.deepEqual(
+    run.results,
+    ['met b, after b finished', 'met a'],
+    `each call found the other started (they ran together), and the second finished first yet is answered second\n${run.output.slice(-600)}`,
+  )
 })
 
 test('maxParallelToolCalls 1 runs them one after the other', async () => {
   const run = await turn('serial', 1, meetCalls)
-  assert.notEqual(run.code, 'timeout', run.output.slice(-600))
+  assert.equal(run.code, 0, run.output.slice(-600))
   assert.deepEqual(run.results, ['alone', 'met a'], `the first waited out its bound alone, the second found it: one at a time\n${run.output.slice(-600)}`)
 })
 
@@ -197,7 +218,10 @@ test('the read_file calls of one step are all answered, in the order the model a
       { name: 'read_file', args: { path: join(home, 'missing.txt') } },
     ]
   })
-  assert.notEqual(run.code, 'timeout', run.output.slice(-600))
+  // `--turn` exits 1 when a call was refused or failed (any denial but UNKNOWN_TOOL, src/cli.ts and the binary alike),
+  // and the missing file's read is one. The turn itself completed: the model's final answer was printed.
+  assert.equal(run.code, 1, run.output.slice(-600))
+  assert.match(run.output, /all answered/, 'the turn completed after both answers')
   assert.equal(run.results.length, 2, `both calls were answered\n${run.output.slice(-600)}`)
   assert.equal(run.results[0], 'present content', 'the first answer is the first call’s')
   assert.match(run.results[1], /^error \(/, 'and the second is the missing file’s refusal')
