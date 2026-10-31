@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T08:45:00Z
+modified: 2026-10-31T17:15:00Z
 level: L3
-version: 1.4.0
+version: 1.5.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -129,6 +129,13 @@ grounded_in:
   the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
   shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
   composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
+- [`check-reconnect.mjs`](check-reconnect.mjs) — a change that reached the server just before the connection dropped
+  shows once it is back, as DSH's re-acquired baselines show it (#91): a session rename and a nested workspace's
+  *Delete workspace* whose answers arrive only after the browser went offline (DevTools' Offline, through the
+  protocol) are drawn once it is back online — the new title, the workspace gone and its session under its parent —
+  and a rename answered just before the server went away is drawn once the page's stream reconnects to it on the same
+  port. Each time the tree's "could not read the workspaces" note goes, the Deleting… line is not left set, and no
+  unhandled rejection reaches the console.
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every
