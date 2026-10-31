@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import { compose, defaultLayers, type NamedLayer } from '../src/config/schema.ts'
 import {
   handleSettingsRequest,
+  loopbackHost,
   SETTINGS_BEGIN,
   SETTINGS_END,
   SettingsError,
@@ -269,4 +270,33 @@ test('a write the running tree refuses is still written and says so', async () =
   const plain = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf)
   assert.equal((await plain.describe()).namespaces.find((entry) => entry.ns === 'tools')?.applies, 'restart', 'without an applier the next boot applies a write')
   f.done()
+})
+
+test('Open configuration file: only for a page on this machine, pathless, and an absent patch is created empty (A95)', async () => {
+  assert.equal(loopbackHost('127.0.0.1:8082'), true)
+  assert.equal(loopbackHost('localhost:3000'), true)
+  assert.equal(loopbackHost('[::1]:80'), true)
+  assert.equal(loopbackHost('heddle.example.com'), false)
+  assert.equal(loopbackHost('203.0.113.4:8082'), false)
+  assert.equal(loopbackHost(undefined), false)
+  const f = fixture('open-document')
+  try {
+    const opened: string[] = []
+    const opener = async (path: string) => {
+      opened.push(path)
+    }
+    const ask = (loopback: boolean, body: unknown) => handleSettingsRequest(f.service(), 'POST', '/api/settings', JSON.stringify(body), { loopback, opener })
+    assert.equal((await ask(false, { open: 'document' }))?.status, 403)
+    assert.equal((await ask(true, { open: 'folder' }))?.status, 400)
+    assert.deepEqual(opened, [], 'nothing opened for a refusal')
+    assert.equal(existsSync(f.patchFile), false)
+    assert.deepEqual(await ask(true, { open: 'document' }), { status: 200, body: { opened: true } })
+    assert.deepEqual(opened, [f.patchFile], 'the profile patch, resolved by the server')
+    assert.equal(readFileSync(f.patchFile, 'utf8'), '', 'created empty')
+    writeFileSync(f.patchFile, '- insert: []\n')
+    await ask(true, { open: 'document' })
+    assert.equal(readFileSync(f.patchFile, 'utf8'), '- insert: []\n', 'an existing patch is left alone')
+  } finally {
+    f.done()
+  }
 })

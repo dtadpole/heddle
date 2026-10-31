@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, rmSync, statSync, chmodSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, chmodSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 import { compose, ConfigError, defaultLayers, expandHome, readLayerText, referencesIn, resolveEnv, resolveProfile, type ComposedRow, type Layer, type NamedLayer } from './schema.ts'
@@ -205,6 +206,26 @@ export class SettingsService {
   }
 
   /** Every entry's form, the target re-read. */
+  /**
+   * Open the profile's patch with `opener`, creating it empty first when it is not there yet (an absent patch reads as
+   * empty, so the empty file changes nothing). A run without a profile patch has no document to open.
+   */
+  async openDocument(opener: (path: string) => Promise<void>): Promise<void> {
+    const target = this.target
+    if (target === undefined) {
+      throw new SettingsError('settings-rejected', 'this run has no profile patch to open (start it with --profile, or from a project without --patch)')
+    }
+    if (!existsSync(target.path)) {
+      mkdirSync(dirname(target.path), { recursive: true })
+      try {
+        writeFileSync(target.path, '', { flag: 'wx' })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+    }
+    await opener(target.path)
+  }
+
   async describe(): Promise<SettingsView> {
     const state = readState(this.layers, this.target, this.env)
     const rows = compose(state.current, this.env)
@@ -275,12 +296,86 @@ export function settingsServiceFor(
   return new SettingsService(layers, settingsTarget(options, layers, env), env, validateRows, rowSchemaJson, apply)
 }
 
-/** Answer `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`; `undefined` for any other path. */
+/**
+ * `POST /api/settings` `{"open": "document"}` (A95): open the profile's patch in the person's text editor, creating it
+ * empty when it is not there yet, as DSH's Host materialises an absent document. Pathless: the server resolves the
+ * file, so a page never names one. Only for a page on this machine; another host is refused.
+ */
+async function openDocumentRequest(
+  service: SettingsService,
+  body: string,
+  context: SettingsRequestContext,
+): Promise<{ readonly status: number; readonly body: unknown }> {
+  const fail = (status: number, code: string, error: string) => ({ status, body: { code, error } })
+  let request: unknown
+  try {
+    request = JSON.parse(body)
+  } catch {
+    request = undefined
+  }
+  if (request === null || typeof request !== 'object' || (request as Record<string, unknown>).open !== 'document') {
+    return fail(400, 'bad-request', 'send {"open": "document"} to open the configuration file')
+  }
+  if (context.loopback !== true) return fail(403, 'bad-request', 'the configuration file opens only from a page on this machine')
+  try {
+    await service.openDocument(context.opener ?? documentOpener(service.env))
+  } catch (error) {
+    if (error instanceof SettingsError) return fail(409, error.code, error.message)
+    return fail(500, 'settings-rejected', `could not open the configuration file: ${(error as Error).message}`)
+  }
+  return { status: 200, body: { opened: true } }
+}
+
+/**
+ * What opens a document in the person's text editor (A95, DSH's `settings/openSettingsDocument`): `open -t` on macOS,
+ * which bypasses a browser's claim on the file type, the desktop's association elsewhere (`xdg-open`, Windows'
+ * `start`). `HEDDLE_OPEN_COMMAND` names another program, given the path as its one argument (a check records it). It
+ * resolves once the program has started; what the editor does after that is the person's.
+ */
+export function documentOpener(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): (path: string) => Promise<void> {
+  const override = env.HEDDLE_OPEN_COMMAND
+  const [command, args]: [string, string[]] =
+    override !== undefined && override !== ''
+      ? [override, []]
+      : platform === 'darwin'
+        ? ['open', ['-t']]
+        : platform === 'win32'
+          ? ['cmd', ['/c', 'start', '""']]
+          : ['xdg-open', []]
+  return (path) =>
+    new Promise((resolvePromise, reject) => {
+      const child = spawn(command, [...args, path], { stdio: 'ignore', detached: true })
+      child.once('error', reject)
+      child.once('spawn', () => {
+        child.unref()
+        resolvePromise()
+      })
+    })
+}
+
+/** Whether a request's `Host` names this machine: a page on another host never gets the native open action (DSH). */
+export function loopbackHost(host: string | undefined): boolean {
+  if (host === undefined) return false
+  const name = host.startsWith('[') ? host.slice(1, host.indexOf(']')) : host.split(':')[0]
+  return name === 'localhost' || name === '::1' || /^127(?:\.\d{1,3}){3}$/.test(name ?? '')
+}
+
+/** What the route knows about the request beyond its path: whether it came from a page on this machine, and the opener. */
+export interface SettingsRequestContext {
+  readonly loopback?: boolean
+  readonly opener?: (path: string) => Promise<void>
+}
+
+/**
+ * Answer `GET /api/settings`, `GET /api/settings/{ns}`, `POST /api/settings/{ns}` and `POST /api/settings`
+ * `{"open": "document"}`; `undefined` for any other path.
+ */
 export async function handleSettingsRequest(
   service: SettingsService,
   method: string,
   path: string,
   body: string,
+  context: SettingsRequestContext = {},
 ): Promise<{ readonly status: number; readonly body: unknown } | undefined> {
   const pathname = path.split('?')[0] ?? path
   if (!pathname.startsWith('/api/settings')) return undefined
@@ -308,6 +403,7 @@ export async function handleSettingsRequest(
     const entry = view.namespaces.find((candidate) => candidate.ns === ns)
     return entry === undefined ? fail(404, 'settings-rejected', `no entry '${ns}'`) : { status: 200, body: entry }
   }
+  if (method === 'POST' && ns === undefined) return openDocumentRequest(service, body, context)
   if (method !== 'POST' || ns === undefined) return fail(405, 'bad-request', `${method} is not a settings method here`)
 
   let request: Record<string, unknown>

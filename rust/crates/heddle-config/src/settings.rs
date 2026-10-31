@@ -423,6 +423,34 @@ pub struct SettingsService {
 pub type SettingsApplier = Box<dyn Fn(&str, &Value) -> Result<(), String> + Send + Sync>;
 
 impl SettingsService {
+    /// Open the profile's patch with `opener`, creating it empty first when it is not there yet (an absent patch reads
+    /// as empty, so the empty file changes nothing). A run without a profile patch has no document to open.
+    ///
+    /// # Errors
+    ///
+    /// [`OpenDocumentError::NoTarget`] without a profile patch, else the creation's or the opener's failure.
+    pub fn open_document(&self, opener: &DocumentOpener<'_>) -> Result<(), OpenDocumentError> {
+        let Some(target) = self.target.as_ref() else {
+            return Err(OpenDocumentError::NoTarget);
+        };
+        if !target.path.exists() {
+            if let Some(parent) = target.path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| OpenDocumentError::Failed(error.to_string()))?;
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target.path)
+            {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(OpenDocumentError::Failed(error.to_string())),
+            }
+        }
+        opener(&target.path).map_err(OpenDocumentError::Failed)
+    }
+
     /// The surface for a run booted with `options` and the in-memory `overrides` the flags appended.
     pub fn new(
         options: &LayerOptions,
@@ -544,6 +572,84 @@ pub fn handle_settings_request(
     path: &str,
     body: &[u8],
 ) -> Option<SettingsResponse> {
+    handle_settings_request_with(
+        service,
+        method,
+        path,
+        body,
+        &SettingsRequestContext::default(),
+    )
+}
+
+/// Opens a document in the person's text editor; an error is a sentence.
+pub type DocumentOpener<'a> = dyn Fn(&std::path::Path) -> Result<(), String> + Send + Sync + 'a;
+
+/// What the route knows about a settings request beyond its path (A95): whether it came from a page on this machine,
+/// and what opens the configuration file (the platform's opener when `None`).
+#[derive(Default)]
+pub struct SettingsRequestContext<'a> {
+    pub loopback: bool,
+    pub opener: Option<&'a DocumentOpener<'a>>,
+}
+
+/// Whether a request's `Host` names this machine: a page on another host never gets the native open action (DSH).
+pub fn loopback_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    name == "localhost"
+        || name == "::1"
+        || name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// What opens a document in the person's text editor (A95, DSH's `settings/openSettingsDocument`): `open -t` on
+/// macOS, which bypasses a browser's claim on the file type, the desktop's association elsewhere (`xdg-open`,
+/// Windows' `start`). `HEDDLE_OPEN_COMMAND` names another program, given the path as its one argument. It returns
+/// once the program has started; what the editor does after that is the person's.
+///
+/// # Errors
+///
+/// The program could not be started.
+pub fn open_document(env: &Env, path: &std::path::Path) -> Result<(), String> {
+    let mut command = match env.non_empty("HEDDLE_OPEN_COMMAND") {
+        Some(program) => std::process::Command::new(program),
+        None if cfg!(target_os = "macos") => {
+            let mut command = std::process::Command::new("open");
+            command.arg("-t");
+            command
+        }
+        None if cfg!(windows) => {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/c", "start", "\"\""]);
+            command
+        }
+        None => std::process::Command::new("xdg-open"),
+    };
+    command
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// [`handle_settings_request`] with the request's [`SettingsRequestContext`], which `POST /api/settings`
+/// `{"open": "document"}` needs.
+pub fn handle_settings_request_with(
+    service: &SettingsService,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    context: &SettingsRequestContext<'_>,
+) -> Option<SettingsResponse> {
     let path = path.split('?').next().unwrap_or(path);
     let rest = path.strip_prefix("/api/settings")?;
     let ns = match rest {
@@ -625,12 +731,74 @@ pub fn handle_settings_request(
                 Err(error) => fail(422, error.code(), error.message()),
             }
         }
+        ("POST", None) => open_document_request(service, body, context),
         _ => fail(
             405,
             "bad-request",
             format!("{method} is not a settings method here"),
         ),
     })
+}
+
+/// `POST /api/settings` `{"open": "document"}` (A95): open the profile's patch in the person's text editor, creating
+/// it empty when it is not there yet, as DSH's Host materialises an absent document. Pathless: the server resolves
+/// the file, so a page never names one. Only for a page on this machine; another host is refused.
+fn open_document_request(
+    service: &SettingsService,
+    body: &[u8],
+    context: &SettingsRequestContext<'_>,
+) -> SettingsResponse {
+    let fail = |status: u16, code: &str, error: String| SettingsResponse {
+        status,
+        body: serde_json::json!({ "code": code, "error": error }),
+    };
+    let asked = serde_json::from_slice::<Value>(body)
+        .ok()
+        .is_some_and(|request| request.get("open").and_then(Value::as_str) == Some("document"));
+    if !asked {
+        return fail(
+            400,
+            "bad-request",
+            "send {\"open\": \"document\"} to open the configuration file".into(),
+        );
+    }
+    if !context.loopback {
+        return fail(
+            403,
+            "bad-request",
+            "the configuration file opens only from a page on this machine".into(),
+        );
+    }
+    let opened = match context.opener {
+        Some(opener) => service.open_document(opener),
+        None => service.open_document(&|path: &std::path::Path| open_document(&service.env, path)),
+    };
+    match opened {
+        Ok(()) => SettingsResponse {
+            status: 200,
+            body: serde_json::json!({ "opened": true }),
+        },
+        Err(OpenDocumentError::NoTarget) => fail(
+            409,
+            "settings-rejected",
+            "this run has no profile patch to open (start it with --profile, or from a project without --patch)"
+                .into(),
+        ),
+        Err(OpenDocumentError::Failed(error)) => fail(
+            500,
+            "settings-rejected",
+            format!("could not open the configuration file: {error}"),
+        ),
+    }
+}
+
+/// Why the configuration file did not open.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenDocumentError {
+    /// The run has no profile patch.
+    NoTarget,
+    /// The file could not be created, or the opener could not start.
+    Failed(String),
 }
 
 /// A path segment with `%XX` escapes decoded; `None` when an escape is malformed or the result is not
@@ -2055,5 +2223,74 @@ mod tests {
             405
         );
         assert!(handle_settings_request(&service, "GET", "/api/status", b"").is_none());
+    }
+    #[test]
+    fn the_configuration_file_opens_only_for_a_page_on_this_machine_and_is_created_when_absent() {
+        assert!(loopback_host(Some("127.0.0.1:8082")));
+        assert!(loopback_host(Some("localhost:3000")));
+        assert!(loopback_host(Some("[::1]:80")));
+        assert!(!loopback_host(Some("heddle.example.com")));
+        assert!(!loopback_host(Some("203.0.113.4:8082")));
+        assert!(!loopback_host(None));
+
+        let fixture = Fixture::new("open-document");
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap();
+        let patch = service
+            .target
+            .as_ref()
+            .expect("the fixture's profile patch")
+            .path
+            .clone();
+        let _ = std::fs::remove_file(&patch);
+        let opened = std::sync::Mutex::new(Vec::new());
+        let opener = |path: &std::path::Path| -> Result<(), String> {
+            opened.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        };
+        let ask = |loopback: bool, body: &str| {
+            handle_settings_request_with(
+                &service,
+                "POST",
+                "/api/settings",
+                body.as_bytes(),
+                &SettingsRequestContext {
+                    loopback,
+                    opener: Some(&opener),
+                },
+            )
+            .unwrap()
+        };
+        let remote = ask(false, r#"{"open": "document"}"#);
+        assert_eq!(remote.status, 403, "{}", remote.body);
+        assert!(
+            opened.lock().unwrap().is_empty(),
+            "nothing opened for another host"
+        );
+        assert_eq!(ask(true, r#"{"open": "folder"}"#).status, 400);
+        let answer = ask(true, r#"{"open": "document"}"#);
+        assert_eq!(answer.status, 200, "{}", answer.body);
+        assert_eq!(
+            *opened.lock().unwrap(),
+            vec![patch.clone()],
+            "the profile patch, resolved by the server"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&patch).unwrap(),
+            "",
+            "an absent patch is created empty"
+        );
+        std::fs::write(&patch, "- insert: []\n").unwrap();
+        assert_eq!(ask(true, r#"{"open": "document"}"#).status, 200);
+        assert_eq!(
+            std::fs::read_to_string(&patch).unwrap(),
+            "- insert: []\n",
+            "an existing patch is left as it is"
+        );
     }
 }

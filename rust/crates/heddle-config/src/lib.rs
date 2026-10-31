@@ -115,10 +115,12 @@ pub use retry::{
 };
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
 pub use settings::{
-    PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsApplier, SettingsError,
-    SettingsNamespace, SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService,
-    SettingsTarget, SettingsView, SettingsWrite, commit_settings_write, describe_settings,
-    handle_settings_request, is_secret_key, plan_settings_write, settings_target,
+    DocumentOpener, OpenDocumentError, PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot,
+    SettingsApplier, SettingsError, SettingsNamespace, SettingsPathOp, SettingsRequestContext,
+    SettingsResponse, SettingsRevisions, SettingsService, SettingsTarget, SettingsView,
+    SettingsWrite, commit_settings_write, describe_settings, handle_settings_request,
+    handle_settings_request_with, is_secret_key, loopback_host, open_document, plan_settings_write,
+    settings_target,
 };
 pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{
