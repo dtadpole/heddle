@@ -128,32 +128,45 @@ function clearSingleton(profile) {
   }
 }
 
-/** Start one browser process and read its endpoint, or throw with the stderr that explains it. */
-async function startOnce(executable, options) {
-  const profile = options.profile
-  mkdirSync(profile, { recursive: true })
+/**
+ * The command line one browser start gets.
+ *
+ * A browser given a profile it has seen before may restore the last session, which would put pages
+ * the caller never opened in front of the first `list_pages`. The crash bubble is suppressed because
+ * a window that says "restore pages?" is a window a person has to click, and this must run unattended.
+ *
+ * `--disable-default-apps` keeps a fresh profile from downloading Chrome's default apps (Google Docs
+ * Offline and Chrome Web Store Payments) within its first seconds. Chrome writes each download to the
+ * user TMPDIR as a hidden `.com.google.Chrome.XXXXXX` file, ignoring `$TMPDIR`, and a browser killed
+ * before the install finishes leaves it there: checks that SIGKILL their browser had piled up 30,000 of
+ * them, 5.3 GiB, by 31 October 2026.
+ */
+export function chromeArgs(options) {
   const width = options.width ?? 1280
   const height = options.height ?? 900
-  /**
-   * A browser given a profile it has seen before may restore the last session, which would put pages
-   * the caller never opened in front of the first `list_pages`. The crash bubble is suppressed because
-   * a window that says "restore pages?" is a window a person has to click, and this must run unattended.
-   */
-  const args = [
+  return [
     ...(options.headless === true ? ['--headless=new'] : ['--new-window']),
     '--disable-gpu',
     '--no-first-run',
     '--no-default-browser-check',
+    '--disable-default-apps',
     '--hide-crash-restore-bubble',
     '--disable-session-crashed-bubble',
     ...(options.noSandbox === true ? ['--no-sandbox'] : []),
     '--remote-debugging-port=0',
-    `--user-data-dir=${profile}`,
+    `--user-data-dir=${options.profile}`,
     `--window-size=${width},${height}`,
     ...(options.colorScheme === 'light' ? ['--force-light-mode'] : options.colorScheme === 'dark' ? ['--force-dark-mode'] : []),
     ...(options.args ?? []),
     'about:blank',
   ]
+}
+
+/** Start one browser process and read its endpoint, or throw with the stderr that explains it. */
+async function startOnce(executable, options) {
+  const profile = options.profile
+  mkdirSync(profile, { recursive: true })
+  const args = chromeArgs(options)
   const child = spawn(executable, args, { stdio: ['ignore', 'pipe', 'pipe'] })
   let stderr = ''
   child.stderr.on('data', (chunk) => {
@@ -288,12 +301,12 @@ export function releaseChromeOutput(child) {
  *
  * `Browser.close` is what flushes the profile and lets a page's `beforeunload` run, so it is tried
  * first; the signal is the fallback for a browser that is wedged, which is exactly when waiting on
- * politeness would hang.
+ * politeness would hang. The polite connect is bounded as tightly as the call, for the same reason.
  */
 export async function stopChrome(running) {
   if (running === undefined) return
   try {
-    const connection = await connect(running.wsUrl)
+    const connection = await connect(running.wsUrl, { timeoutMs: 2_000 })
     await connection.send('Browser.close', {}, { timeoutMs: 2_000 })
     connection.close()
   } catch {

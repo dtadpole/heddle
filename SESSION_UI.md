@@ -1,6 +1,6 @@
 ---
 title: Session UI, as DSH does it
-version: 1.1.0
+version: 1.1.1
 description: What DSH's session management looks like in use, what Heddle does today, and the plan to close the gap.
 level: L2
 status: unverified
@@ -118,7 +118,7 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Live state (a row still arriving) | a masked **shimmer sweep** over the row: `mask-image: linear-gradient(105deg, transparent 0, black 40%, black 60%, transparent 100%)` driven by a `shimmer-sweep` keyframe, at a slow rate | only a static caret (`▍`) | **fixed in cycle 3**: the same 105° masked sweep at 1.6s on a running assistant turn, the caret kept, and `prefers-reduced-motion` drops the sweep; measured `animation-name`, duration, mask and a settled row's `none`, then asserted |
 | Scroll state | the session tree scrolls natively (`overflow-y: auto`, `padding-bottom: 16px`, no scroll shadow, not scrollable when short) | the same, plain native scrolling | match |
 | Tree ARIA | `role="tree"` named "Sessions"; branch rows `aria-expanded`; session rows `aria-selected` and **no** `aria-expanded`; rows carry `draggable="true"` | `role="tree"`; branch rows `aria-expanded`; session and file rows `aria-selected` and no `aria-expanded` — **fixed this round**; rows are `tabindex="0"` | match on the state attributes, **difference kept** on `draggable` (drag-to-move is a feature) and on the label, which says "workspace folders" because this tree holds folders too |
-| Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
+| Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | each row is **one** Tab stop, its `.row` (the list item is not one, #92), and Enter/Space on it opens it; a key on a row's control is that control's (#98); no arrow keys in the tree, as in DSH | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
 
 ### The squashed session menu (2026-10-17)

@@ -17,6 +17,11 @@
 //!
 //! Then `assistant/completed` and `turn/completed` are written, with `ended` naming an abnormal finish or
 //! the round limit.
+//!
+//! Before the first step and before every later one, DSH's archived-session gate is asked: a session that is
+//! archived, or a subagent descendant of one, runs no step. At the first step the prompt is queued, claimed and
+//! dropped and only `turn/failed` with `reason: {"kind": "blocked"}` is written; at a later step the turn ends
+//! with `assistant/completed` (`finishReason: "blocked"`, [`ARCHIVED_BLOCKED`] in `ended`) and that same record.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -53,6 +58,23 @@ pub mod events {
     pub const ASSISTANT_COMPLETED: &str = "assistant/completed";
     /// The turn finished: `rounds`.
     pub const TURN_COMPLETED: &str = "turn/completed";
+    /// The turn ended without completing: `reason`. A turn the archived-session gate rejected writes it with DSH's
+    /// turn-end reason `{"kind": "blocked"}` (dsh-agent-loop lib/index.js:960-962) — not `turn/completed`, which is
+    /// the goal driver's edge to start another round, so a blocked turn that wrote it would re-trigger itself.
+    pub const TURN_FAILED: &str = "turn/failed";
+}
+
+/// Why a turn the archived-session gate rejected ended, in the loop's words (`ended`); the TypeScript
+/// `ARCHIVED_BLOCKED`.
+pub const ARCHIVED_BLOCKED: &str =
+    "blocked: an archived session runs no model step until it is unarchived";
+
+/// `turn/failed`'s fields for a blocked turn: `reason: {"kind": "blocked"}`.
+fn blocked_turn_end() -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([(
+        "reason".to_owned(),
+        serde_json::json!({ "kind": "blocked" }),
+    )])
 }
 
 /// Everything a turn runs with. Cheap to clone; a teammate's or a child's turn uses the same runtime.
@@ -241,6 +263,9 @@ pub struct BegunTurn {
     /// The session's event count before the prompt, so the result counts the turn's own writes.
     started: usize,
     live: Option<LiveTurn>,
+    /// The result of a turn the archived-session gate rejected at its first step: its record is already written,
+    /// and [`BegunTurn::run`] answers it without a step.
+    blocked: Option<TurnResult>,
     /// The agent preset the turn runs under, resolved before anything was written; `None` without a roster.
     preset: Option<PresetDefinition>,
 }
@@ -274,19 +299,26 @@ impl BegunTurn {
             cancel,
             started,
             live,
+            blocked,
             preset,
         } = self;
         let stopped = cancel.clone();
         let mut progress = TurnProgress::default();
-        let result = run_turn_body(
-            &runtime,
-            &options,
-            cancel,
-            started,
-            &mut progress,
-            preset.as_ref(),
-        )
-        .await;
+        // A turn the gate rejected at its first step has its record written already, and is answered without a step.
+        let result = match blocked {
+            Some(blocked) => Ok(blocked),
+            None => {
+                run_turn_body(
+                    &runtime,
+                    &options,
+                    cancel,
+                    started,
+                    &mut progress,
+                    preset.as_ref(),
+                )
+                .await
+            }
+        };
         if let Err(error) = &result {
             record_unfinished(
                 &runtime,
@@ -414,6 +446,56 @@ fn begin_registered(
             return Err(error);
         }
     };
+    // DSH's archived-session gate at the turn's first step (dsh-api-session-controller lib/index.js:2508-2541): a turn
+    // into an archived session, or into a subagent descendant of one, is accepted and blocked. The prompt is queued
+    // (DSH's `followup`), the step claims it with any pending steer, the gate rejects it before a model request, and
+    // the turn ends `blocked`; the claimed input is dropped, never written as a message. Every caller starts its turn
+    // here: the page's turn route, `--resume --turn`, a settlement notice, a goal round, a reminder, a teammate's mail.
+    if runtime.session.under_archived(&options.session) {
+        let prompt = (!options.answer_pending).then(|| {
+            let mut content = vec![ContentPart::text(options.prompt.clone())];
+            content.extend(options.attachments.iter().cloned());
+            (content, options.source.clone())
+        });
+        let recorded = runtime
+            .session
+            .claim_rejected(&options.session, prompt, true)
+            .and_then(|_| {
+                runtime
+                    .session
+                    .append(&options.session, events::TURN_FAILED, blocked_turn_end())
+            });
+        if let Err(error) = recorded {
+            if let Some(live) = &live {
+                live.settle();
+            }
+            return Err(TurnError::Port(error));
+        }
+        let blocked = TurnResult {
+            text: String::new(),
+            reasoning: String::new(),
+            tool_calls: Vec::new(),
+            denials: Vec::new(),
+            finish_reason: "blocked".to_owned(),
+            events: runtime
+                .session
+                .count(&options.session)
+                .saturating_sub(started),
+            rounds: 0,
+            context: None,
+            ended: vec![ARCHIVED_BLOCKED.to_owned()],
+            usage: None,
+        };
+        return Ok(BegunTurn {
+            runtime: runtime.clone(),
+            options,
+            cancel,
+            started,
+            live,
+            blocked: Some(blocked),
+            preset,
+        });
+    }
     // A steer a stopped turn left in the inbox is DSH's next-step input, and DSH's boundary claims next-step
     // input before the queued prompt, so it is written ahead of this turn's prompt.
     if let Err(error) = runtime.session.claim_pending_input(&options.session) {
@@ -443,6 +525,7 @@ fn begin_registered(
         cancel,
         started,
         live,
+        blocked: None,
         preset,
     })
 }
@@ -562,12 +645,27 @@ async fn run_turn_body(
     let mut rounds = 0u32;
     let mut last_context: Option<ContextSummary> = None;
     let mut ended: Vec<String> = Vec::new();
+    // Whether the archived-session gate rejected a later step of this turn.
+    let mut blocked = false;
     let stopped = || cancel.as_ref().is_some_and(CancellationToken::is_cancelled);
 
     for round in 0..max_rounds {
         // A stopped turn ends at the next boundary: a round between model calls has no connection to break.
         if stopped() {
             ended.push("stopped by the caller".to_owned());
+            break;
+        }
+        // The archived-session gate at a later step: a session archived while its turn ran (by another process, or a
+        // parent archived under a running child) runs no further step. The step's claim of pending steers is
+        // recorded and dropped, as DSH's rejected claim is, and the turn ends `blocked` below.
+        if round > 0 && runtime.session.under_archived(session) {
+            runtime.session.claim_rejected(session, None, false)?;
+            ended.push(ARCHIVED_BLOCKED.to_owned());
+            blocked = true;
+            // The turn's finish reason is `blocked`, not the previous step's (`tool_calls`, as a rule): DSH's loop
+            // sets `turnEnds = { kind: 'blocked' }` at a rejected step whatever the earlier steps proposed
+            // (dsh-agent-loop lib/index.js:956-963), so the answer record and the result say why the turn ended.
+            "blocked".clone_into(&mut finish_reason);
             break;
         }
         // The step boundary: the previous round's tool results are on disk, so a steer that arrived during
@@ -921,11 +1019,18 @@ async fn run_turn_body(
         .session
         .append(session, events::ASSISTANT_COMPLETED, completed)?;
     progress.completed = true;
-    runtime.session.append(
-        session,
-        events::TURN_COMPLETED,
-        serde_json::Map::from_iter([("rounds".to_owned(), serde_json::json!(rounds))]),
-    )?;
+    // A turn whose later step the gate rejected ends with DSH's `blocked` record, not as a completed turn.
+    if blocked {
+        runtime
+            .session
+            .append(session, events::TURN_FAILED, blocked_turn_end())?;
+    } else {
+        runtime.session.append(
+            session,
+            events::TURN_COMPLETED,
+            serde_json::Map::from_iter([("rounds".to_owned(), serde_json::json!(rounds))]),
+        )?;
+    }
 
     let events = runtime.session.count(session);
     Ok(TurnResult {
@@ -3492,6 +3597,391 @@ pub(crate) mod tests {
                 .next_step
                 .is_empty(),
             "nothing is left pending"
+        );
+    }
+
+    // ---- DSH's archived-session gate (issue #26), through the real store and the real port. ----
+    //
+    // DSH's `ArchivedSessionGate` (dsh-api-session-controller lib/index.js:2508-2541) answers `agent/pre-step` with
+    // `reject` while the agent's session, or one above it in its subagent lineage, is archived: the turn opens, its
+    // claimed input is discarded, no model request is made, and the turn ends `blocked`.
+
+    const BLOCKED: &str = "blocked: an archived session runs no model step until it is unarchived";
+
+    fn set_archived(sessions: &heddle_session::SessionService, id: &str, archived: bool) {
+        sessions
+            .flags(
+                id,
+                heddle_session::FlagPatch {
+                    pinned: None,
+                    archived: Some(archived),
+                },
+            )
+            .unwrap()
+            .expect("the session exists");
+    }
+
+    /// The events after `from`, as `type` or, for an inbox splice, `type target +inserted|-removed`.
+    fn shape_after(
+        sessions: &heddle_session::SessionService,
+        handle: &SessionHandle,
+        from: usize,
+    ) -> Vec<String> {
+        sessions
+            .events(handle)
+            .unwrap()
+            .iter()
+            .skip(from)
+            .map(|event| {
+                if event.kind != heddle_session::inbox::INBOX_SPLICED {
+                    return event.kind.clone();
+                }
+                let target = event.fields["target"].as_str().unwrap_or_default();
+                match event.fields.get("removedCount") {
+                    Some(removed) => format!("{} {target} -{removed}", event.kind),
+                    None => format!(
+                        "{} {target} +{}",
+                        event.kind,
+                        event.fields["inserted"].as_array().map_or(0, Vec::len)
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    fn count_of(
+        sessions: &heddle_session::SessionService,
+        handle: &SessionHandle,
+        kind: &str,
+    ) -> usize {
+        sessions
+            .events(handle)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == kind)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_turn_into_an_archived_session_is_blocked_before_any_model_request_and_discards_its_input()
+     {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("archived-gate");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let (runtime, _scripted) = real_runtime(
+            &sessions,
+            serde_json::json!([{ "text": "an answer" }]),
+            Vec::new(),
+        );
+        let first = run_turn(
+            &runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "before the archive"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.text, "an answer", "a live session runs");
+        // A steer left pending is next-step input the blocked turn claims and discards, as DSH's claim does.
+        heddle_session::inbox::queue_steer(
+            sessions.store(),
+            &handle,
+            vec![ContentPart::text("a steer left pending")],
+            None,
+        )
+        .unwrap();
+        set_archived(&sessions, &handle.id, true);
+        let before = sessions.events(&handle).unwrap().len();
+        let turns_before = sessions.meta(&handle.id).unwrap().turns();
+
+        let blocked = run_turn(
+            &runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "into the archive"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(blocked.finish_reason, "blocked", "the turn ends blocked");
+        assert_eq!(blocked.rounds, 0, "without a step");
+        assert_eq!(blocked.text, "", "and without an answer");
+        assert_eq!(blocked.ended, [BLOCKED], "saying why");
+        assert_eq!(
+            shape_after(&sessions, &handle, before),
+            [
+                "agent/inbox/spliced next-turn +1",
+                "agent/inbox/spliced next-step -1",
+                "agent/inbox/spliced next-turn -1",
+                "turn/failed",
+            ],
+            "DSH order: the prompt is queued, the step claims the steer and the queued prompt, the gate rejects"
+        );
+        let events = sessions.events(&handle).unwrap();
+        let added: Vec<_> = events.iter().skip(before).collect();
+        assert_eq!(
+            added[3].fields["reason"],
+            serde_json::json!({ "kind": "blocked" }),
+            "with DSH's turn-end reason"
+        );
+        assert_eq!(
+            added[0].fields["inserted"][0]["content"][0]["text"],
+            "into the archive"
+        );
+        assert!(
+            added[1..3]
+                .iter()
+                .all(|event| event.fields.get("outcome").is_none()),
+            "a claim delivers to the step; the rejection is what drops it"
+        );
+        let inbox = heddle_session::inbox::pending_inbox(sessions.store(), &handle).unwrap();
+        assert!(
+            inbox.next_step.is_empty() && inbox.next_turn.is_empty(),
+            "nothing is left pending"
+        );
+        let meta = sessions.meta(&handle.id).unwrap();
+        assert_eq!(
+            meta.turns(),
+            turns_before,
+            "the session records the same number of turns"
+        );
+        assert!(meta.archived(), "and stays archived");
+
+        set_archived(&sessions, &handle.id, false);
+        let restored = run_turn(
+            &runtime,
+            RunTurnOptions::new(handle.clone(), "scripted", "after the restore"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.text, "an answer", "unarchiving lifts the gate");
+    }
+
+    #[tokio::test]
+    async fn a_notice_to_an_archived_parent_and_a_subagent_child_of_one_open_no_step_while_a_fork_runs()
+     {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("archived-lineage");
+        let parent = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let (runtime, _scripted) = real_runtime(
+            &sessions,
+            serde_json::json!([
+                { "text": "ran" },
+                { "purpose": "subagent-notice", "text": "the parent read the notice" }
+            ]),
+            Vec::new(),
+        );
+        set_archived(&sessions, &parent.id, true);
+
+        let mut notice = RunTurnOptions::new(parent.clone(), "scripted", "child settled");
+        notice.purpose = Some("subagent-notice".to_owned());
+        notice.source = Some(
+            serde_json::json!({ "kind": "subagent", "form": "notice", "summary": "child settled" }),
+        );
+        assert_eq!(
+            run_turn(&runtime, notice.clone())
+                .await
+                .unwrap()
+                .finish_reason,
+            "blocked"
+        );
+        notice.answer_pending = true;
+        assert_eq!(
+            run_turn(&runtime, notice).await.unwrap().finish_reason,
+            "blocked"
+        );
+        assert_eq!(
+            count_of(&sessions, &parent, "model/request"),
+            0,
+            "the settlement asked no model"
+        );
+        assert_eq!(
+            count_of(&sessions, &parent, "message"),
+            0,
+            "nor wrote the notice"
+        );
+
+        let child_of = |parent: &SessionHandle, depth: u64| {
+            sessions
+                .store()
+                .create(heddle_session::CreateOptions {
+                    parent_session: Some(parent.id.clone()),
+                    origin: Some(heddle_session::SessionOrigin::Subagent),
+                    delegation_depth: Some(depth),
+                    ..heddle_session::CreateOptions::default()
+                })
+                .unwrap()
+        };
+        let child = child_of(&parent, 1);
+        let grandchild = child_of(&child, 2);
+        for handle in [&child, &grandchild] {
+            let result = run_turn(
+                &runtime,
+                RunTurnOptions::new(handle.clone(), "scripted", "child task"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result.finish_reason, "blocked",
+                "a subagent descendant of an archived session is blocked"
+            );
+            assert_eq!(count_of(&sessions, handle, "model/request"), 0);
+        }
+        let fork = sessions
+            .store()
+            .create(heddle_session::CreateOptions {
+                parent_session: Some(parent.id.clone()),
+                ..heddle_session::CreateOptions::default()
+            })
+            .unwrap();
+        let forked = run_turn(&runtime, RunTurnOptions::new(fork, "scripted", "fork task"))
+            .await
+            .unwrap();
+        assert_eq!(
+            forked.text, "ran",
+            "a fork of an archived session is an independent conversation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_archived_during_a_turn_is_blocked_at_its_next_step_and_its_claimed_steer_dropped()
+     {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("archived-mid-turn");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let archiving = {
+            let sessions = Arc::clone(&sessions);
+            let handle = handle.clone();
+            tool_fn(
+                ToolSpec {
+                    name: "slow_tool".into(),
+                    description: "stands for a long bash call".into(),
+                    parameters: serde_json::json!({}),
+                },
+                move |_args, _ctx| {
+                    let sessions = Arc::clone(&sessions);
+                    let handle = handle.clone();
+                    Box::pin(async move {
+                        heddle_session::inbox::queue_steer(
+                            sessions.store(),
+                            &handle,
+                            vec![ContentPart::text("steered into the archive")],
+                            None,
+                        )
+                        .unwrap();
+                        set_archived(&sessions, &handle.id, true);
+                        Ok(ToolResult::ok("tool finished"))
+                    })
+                },
+            )
+        };
+        let (runtime, _scripted) = real_runtime(
+            &sessions,
+            serde_json::json!([
+                { "toolCall": { "name": "slow_tool", "arguments": {} } },
+                { "text": "never asked" }
+            ]),
+            vec![archiving],
+        );
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "run the slow tool");
+        options.max_rounds = RoundLimit::Rounds(4);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(
+            count_of(&sessions, &handle, "model/request"),
+            1,
+            "only the step before the archive asked the model"
+        );
+        assert!(
+            result.ended.contains(&BLOCKED.to_owned()),
+            "{:?}",
+            result.ended
+        );
+        assert_eq!(
+            message_order(&sessions, &handle),
+            ["user:run the slow tool", "tool:tool finished"],
+            "the steer claimed at the blocked step was not written"
+        );
+        assert!(
+            heddle_session::inbox::pending_inbox(sessions.store(), &handle)
+                .unwrap()
+                .next_step
+                .is_empty(),
+            "and is not left pending"
+        );
+        let events = sessions.events(&handle).unwrap();
+        let last = events.last().unwrap();
+        assert_eq!(
+            last.kind, "turn/failed",
+            "the turn ends with the blocked record"
+        );
+        assert_eq!(
+            last.fields["reason"],
+            serde_json::json!({ "kind": "blocked" })
+        );
+        assert_eq!(
+            count_of(&sessions, &handle, "turn/completed"),
+            0,
+            "not as a completed turn"
+        );
+    }
+
+    // developer-five's review of cc4d7410: a step the gate rejects after the first used to leave the previous
+    // step's finish reason (`tool_calls`) in the result and the answer record. DSH's loop ends the turn
+    // `{ kind: 'blocked' }` at any rejected step (dsh-agent-loop lib/index.js:956-963).
+    #[tokio::test]
+    async fn a_step_the_gate_rejects_after_the_first_ends_the_turn_with_the_blocked_finish_reason()
+    {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("archived-finish");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let archiving = {
+            let sessions = Arc::clone(&sessions);
+            let handle = handle.clone();
+            tool_fn(
+                ToolSpec {
+                    name: "slow_tool".into(),
+                    description: "stands for a long bash call".into(),
+                    parameters: serde_json::json!({}),
+                },
+                move |_args, _ctx| {
+                    let sessions = Arc::clone(&sessions);
+                    let handle = handle.clone();
+                    Box::pin(async move {
+                        set_archived(&sessions, &handle.id, true);
+                        Ok(ToolResult::ok("tool finished"))
+                    })
+                },
+            )
+        };
+        let (runtime, _scripted) = real_runtime(
+            &sessions,
+            serde_json::json!([
+                { "toolCall": { "name": "slow_tool", "arguments": {} } },
+                { "text": "never asked" }
+            ]),
+            vec![archiving],
+        );
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "run the slow tool");
+        options.max_rounds = RoundLimit::Rounds(4);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(
+            result.finish_reason, "blocked",
+            "the result says blocked, not the first step's tool_calls"
+        );
+        let events = sessions.events(&handle).unwrap();
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "assistant/completed")
+            .collect();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(
+            completed[0].fields["finishReason"],
+            serde_json::json!("blocked"),
+            "and so does the turn's answer record"
         );
     }
 
