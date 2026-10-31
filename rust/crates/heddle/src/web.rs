@@ -199,11 +199,11 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
             .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
+        // The Browser tab and its frames are opt-in, as `runWeb` reads it: exactly `1` enables them (D-068, #86).
+        browser: invocation.env.get("HEDDLE_WEB_BROWSER") == Some("1"),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
         notes,
         shutdown: shutdown.clone(),
-        // The page's Browser tab is opt-in, as `runWeb` reads it: exactly `1` enables it (#86).
-        browser: invocation.env.get("HEDDLE_WEB_BROWSER") == Some("1"),
     };
     let web_args = heddle_server::command::Args {
         host: args.host.clone(),

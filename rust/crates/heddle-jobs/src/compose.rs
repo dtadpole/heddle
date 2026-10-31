@@ -193,9 +193,16 @@ impl JobsPlugin {
             listener.unsubscribe();
         }
         self.controller.detach();
-        self.registry.dispose_in_background();
+        // Outside a runtime (the binary's boot disposal) this waits for every job to settle, so each one's
+        // `job/settled` is in its session's log before the process exits (issue #129); inside one it cannot wait.
+        self.registry
+            .dispose_blocking(std::time::Duration::from_millis(DISPOSE_SETTLE_MS));
     }
 }
+
+/// How long the row's teardown waits for its jobs to settle: the producer's SIGTERM-to-SIGKILL grace (3000 ms) and a
+/// margin for the settle to reach the log.
+const DISPOSE_SETTLE_MS: u64 = crate::bash::DEFAULT_KILL_GRACE_MS + 2_000;
 
 /// Disposes the row when it is dropped — what the binary provides beside the row, so the boot's disposal (the
 /// TypeScript `ctx.effect` teardown) stops every live job.

@@ -520,6 +520,9 @@ async function runWeb(args: Args): Promise<void> {
     const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
       settings: settingsServiceFor(bootOptions(args)),
+      // Browser framing and the page's Browser tab are opt-in, as DSH's Web profile ships them (D-068, #86); exactly
+      // `1` enables them.
+      browser: process.env['HEDDLE_WEB_BROWSER'] === '1',
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
@@ -528,8 +531,6 @@ async function runWeb(args: Args): Promise<void> {
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
       // The plugin inventory reports each row's module name as the layer wrote it, not as `boot` resolved it.
       pluginModuleNames: declaredModuleNames(app),
-      // The page's Browser tab is opt-in, as DSH's Web profile ships it (#86); exactly `1` enables it.
-      browser: process.env.HEDDLE_WEB_BROWSER === '1',
     })
     /**
      * The sessions the startup sweeps read: every listed one whose log reads whole. A log that does not is named once

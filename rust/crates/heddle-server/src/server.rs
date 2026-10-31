@@ -142,8 +142,9 @@ pub struct ServerOptions {
     pub default_endpoint: Option<String>,
     /// Installation roots searched for `node_modules/dompurify` ([`crate::preview::purify_path`]).
     pub asset_roots: Vec<PathBuf>,
-    /// Whether the page may offer its Browser tab (#86; `HEDDLE_WEB_BROWSER=1`). Off by default, as
-    /// DSH's Web profile ships it. The server only reports the choice on `/api/status`; it never
+    /// D-068 explicit Browser capability (`HEDDLE_WEB_BROWSER=1`), off by default as DSH's Web profile
+    /// ships it: the page policy then allows HTTP(S) frames, and `/api/status` reports `browser: true`
+    /// so the page offers its Browser tab (#86). Default framing stays same-origin. The server never
     /// fetches, proxies or probes a page.
     pub browser: bool,
 }
@@ -820,7 +821,15 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
             let lang = page_language(&state, request.headers());
-            return respond::html(StatusCode::OK, page::with_language(page::page(), lang));
+            let html = page::with_language(page::page(), lang);
+            let policy = page::page_policy_with_browser(&html, state.options().browser);
+            let mut answer = respond::html(StatusCode::OK, html);
+            if let Ok(value) = axum::http::HeaderValue::from_str(&policy) {
+                answer
+                    .headers_mut()
+                    .insert("content-security-policy", value);
+            }
+            return answer;
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
