@@ -192,11 +192,17 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(primary.borders, true, 'with DSH\'s 16%-white border')
     assert.equal(primary.padding, '8px 12px', 'and its padding')
 
-    /** The act: a conversation starts in the selected workspace and the tree shows its row. */
+    /**
+     * The act: a conversation starts in the selected workspace and the tree shows its row, selected. The first visit's
+     * New session is already a row, so the press is judged by the open row changing to a session that was not open
+     * before: DSH's `New session` creates a fresh session on every press (`lib/client.js:1403-1406`, `:1520`).
+     */
+    const openRow = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const firstBlank = await browser.evaluate(openRow)
     await browser.evaluate(`document.getElementById('new-session').click()`)
     assert.ok(
-      await browser.waitFor('document.querySelectorAll("#tree li[data-kind=\\"session\\"]").length > 0', 20_000),
-      'clicking the primary action starts a session, visible in the tree',
+      await browser.waitFor(`(() => { const id = ${openRow}; return id !== null && id !== ${JSON.stringify(firstBlank)} })()`, 20_000),
+      'clicking the primary action starts a session, visible in the tree as the open row',
     )
     assert.notEqual(
       await browser.evaluate(`document.getElementById('session-title').textContent`),
@@ -220,7 +226,6 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * still empty, and DSH draws an empty session as a row only while it is the open one (`sessionVisible`,
      * dsh-client-ui-workspace lib/client.js:959-966), so the new row takes its place instead of adding to the count.
      */
-    const openRow = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
     const openBefore = await browser.evaluate(openRow)
     assert.equal(typeof openBefore, 'string', 'the clicked New session is the open row')
     await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', altKey: true, metaKey: true, bubbles: true }))`)
