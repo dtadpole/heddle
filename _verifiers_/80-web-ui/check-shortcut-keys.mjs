@@ -366,6 +366,64 @@ test('the session shortcuts fire on the physical key, with the key values the br
       assert.equal(await browser.evaluate(`localStorage.getItem('heddle.keybindings.v1')`), '{"version":1,"overrides":{}}', 'no override is left behind')
     })
 
+    await t.test('a row the search stops matching hands the keyboard to the search field, and another tab\u2019s change keeps it', async () => {
+      /**
+       * The search matches keys too, so a query for the old chord loses the row once its binding changes: recorded,
+       * restored, removed, or changed in another tab. The keyboard must stay in the dialog (developer-twelve, 31 Oct).
+       */
+      const retry = { code: 'KeyY', macKey: '¥', key: 'y', keyCode: 89, alt: true }
+      const byOldKeys = onMac ? '⇧' : 'Shift'
+      const byNewKeys = onMac ? '⌥⌘Y' : 'Ctrl+Alt+Y'
+      const search = (query) => browser.evaluate(`(() => { const field = document.getElementById('shortcut-reference-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+      const forkShown = () => browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"]') !== null`)
+      const focused = () =>
+        browser.evaluate(`(() => {
+          const active = document.activeElement
+          const row = active?.closest?.('#shortcut-reference .shortcut-row[data-action]') ?? null
+          if (row !== null) return active === row ? 'row ' + row.dataset.action : (active.dataset.bindingAction ?? 'other') + ' ' + row.dataset.action
+          return active?.id || active?.tagName?.toLowerCase() || null
+        })()`)
+      const click = (control) => browser.evaluate(`(() => { const button = document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"] button[data-binding-action="${control}"]'); button.focus(); button.click(); return true })()`)
+      const store = (overrides) => browser.evaluate(`(() => { localStorage.setItem('heddle.keybindings.v1', JSON.stringify({ version: 1, overrides: ${JSON.stringify(overrides)} })); window.dispatchEvent(new StorageEvent('storage', { key: 'heddle.keybindings.v1' })); return true })()`)
+      await press(browser, CHORDS.reference, { onMac })
+      await settle(400)
+      await search(byOldKeys)
+      assert.equal(await forkShown(), true, 'the old keys find Fork')
+      await browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"]').click()`)
+      await settle(200)
+      await press(browser, retry, { onMac })
+      await settle(300)
+      assert.equal(await forkShown(), false, 'once recorded, the old keys no longer find Fork')
+      assert.equal(await focused(), 'shortcut-reference-search', 'recording a row out of the list leaves the keyboard on the search field')
+      await search(byNewKeys)
+      await click('restore')
+      await settle(200)
+      assert.equal(await forkShown(), false, 'Restore default takes Fork out of a search for the recorded keys')
+      assert.equal(await focused(), 'shortcut-reference-search', 'and the keyboard goes to the search field')
+      await search(byOldKeys)
+      await click('remove')
+      await settle(200)
+      assert.equal(await forkShown(), false, 'Remove takes Fork out of a search for its keys')
+      assert.equal(await focused(), 'shortcut-reference-search', 'and the keyboard goes to the search field')
+      await search('')
+      await click('restore')
+      await settle(200)
+      assert.equal(await focused(), 'row fork', 'unfiltered, Restore default leaves the keyboard on its row')
+      await store({ fork: null })
+      await settle(200)
+      assert.equal(await focused(), 'row fork', 'another tab\u2019s change repaints the list and keeps the keyboard on the row')
+      await store({})
+      await search(byOldKeys)
+      await browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"]').focus()`)
+      await store({ fork: null })
+      await settle(200)
+      assert.equal(await forkShown(), false, 'another tab\u2019s Remove takes Fork out of the search')
+      assert.equal(await focused(), 'shortcut-reference-search', 'and the keyboard goes to the search field')
+      await store({})
+      await browser.evaluate(`document.querySelector('#shortcut-reference [data-ws-close]').click()`)
+      assert.equal(await browser.evaluate(`localStorage.getItem('heddle.keybindings.v1')`), '{"version":1,"overrides":{}}', 'no override is left behind')
+    })
+
     await t.test('two Escape presses within 500 ms stop the running turn; one press does not', async () => {
       const running = async () => (await sessions(browser)).find((s) => s.id === target)?.running === true
       const escape = async () => {
