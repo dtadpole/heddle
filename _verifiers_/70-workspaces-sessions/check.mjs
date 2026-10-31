@@ -1358,6 +1358,118 @@ test('a session one process is writing refuses a second writer, so its log never
   }
 })
 
+test('a turn cut by a server restart reads as interrupted at once, and is closed in the log before the next turn', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #5, reproduced without a model: the scripted turn calls bash with a long sleep, and the server is killed
+   * while the call runs (SIGKILL, the hardest form of a restart; the SIGTERM the issue used leaves the same log on both
+   * builds). The log then ends at the call: no tool result, no answer record, no turn end. Before the fix the view drew
+   * the call as running for good, after the restart and after every later turn.
+   *
+   * DSH closes such a turn when the session is next opened for writing, before anything else is appended: an
+   * interrupted result for each open call, then the step's end and the turn's end (dsh-agent-loop, on attach for
+   * writing; dsh-session openTurnClosers). Its cold read shows the same closers without writing them, so the page is
+   * right from the first read after the restart (dsh-session-query readColdSessionLog).
+   */
+  const h = harness('turn-closers')
+  const { script } = scriptedConfig({
+    home: h.home,
+    steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 20' } } }, { text: 'never reached' }],
+  })
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const id = parseJson(made.stdout)?.session
+    assert.ok(typeof id === 'string', `the session has an id\n${made.stdout}`)
+    const sessionDir = join(h.home, 'sessions', id)
+    const connect = async () => {
+      live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      return String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    }
+    const isCall = (event) => event.type === 'assistant/chunk' && event.chunk?.type === 'tool-call' && event.chunk?.name === 'bash'
+
+    /** The turn is started and not awaited: its request stays open while bash sleeps. */
+    let cookie = await connect()
+    const cut = fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: 'run the slow command, then say done' }),
+    }).then((response) => response.text()).catch(() => '')
+    let crashed = []
+    for (let waited = 0; waited < 15_000; waited += 100) {
+      crashed = readTranscript(sessionDir)
+      if (crashed.some(isCall)) break
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const callAt = crashed.findIndex(isCall)
+    assert.ok(callAt >= 0, `the turn reached its bash call\n${crashed.map((event) => event.type).join(' ')}`)
+    const callId = crashed[callAt].chunk.id
+    live.kill()
+    live = undefined
+    await cut
+    await new Promise((done) => setTimeout(done, 300))
+
+    /** The fixture is the issue's log: it ends inside the turn, with the call unanswered. */
+    crashed = readTranscript(sessionDir)
+    const answered = (events) => events.some((event) => event.type === 'message' && event.message?.role === 'tool' && event.message.toolCallId === callId)
+    assert.ok(!answered(crashed), `the killed server left the call unanswered\n${crashed.map((event) => event.type).join(' ')}`)
+    assert.ok(!crashed.slice(callAt).some((event) => event.type === 'turn/completed'), 'and the turn without an end')
+    const crashedBytes = readFileSync(transcriptFile(sessionDir))
+
+    /** After the restart, the first read already shows the call interrupted and the turn ended, and writes nothing. */
+    cookie = await connect()
+    const view = async () => {
+      const response = await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })
+      assert.equal(response.status, 200, 'the session is served')
+      return (await response.json()).turns ?? []
+    }
+    const describe = (turns) => turns.map((turn) => `${turn.kind}:${turn.state ?? ''}`).join(' ')
+    const first = await view()
+    const row = first.find((turn) => turn.kind === 'tool' && turn.toolCallId === callId)
+    assert.equal(row?.state, 'error', `after the restart the cut call is drawn as interrupted, not running\n${describe(first)}\n${JSON.stringify(row)}`)
+    assert.match(String(row?.result ?? ''), /^error \(INTERRUPTED\)/, 'and its result says the turn ended before it answered')
+    assert.ok(!first.some((turn) => turn.state === 'running'), `nothing is drawn as running\n${describe(first)}`)
+    assert.ok(first.some((turn) => Array.isArray(turn.ended) && turn.ended.length > 0), `the turn is drawn as ended, with its reason\n${describe(first)}`)
+    assert.ok(readFileSync(transcriptFile(sessionDir)).equals(crashedBytes), 'and reading the session wrote nothing to its log')
+
+    /** The next turn opens the session for writing: the closers are appended first, then the turn. */
+    writeFileSync(script, JSON.stringify({ steps: [{ text: 'it was interrupted' }] }))
+    const next = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: 'did the command finish?' }),
+    })
+    const stream = await next.text()
+    assert.equal(next.status, 200, `the follow-up turn ran\n${stream}`)
+    assert.ok(!stream.includes('event: error'), `and did not fail\n${stream}`)
+    const after = readTranscript(sessionDir)
+    assert.deepEqual(after.map((event) => event.seq), after.map((_, index) => index), 'every seq is written once, in order')
+    const closers = after.slice(crashed.length, crashed.length + 3)
+    assert.deepEqual(
+      closers.map((event) => event.type),
+      ['message', 'assistant/completed', 'turn/completed'],
+      `the log is closed right after the cut turn, before anything else\n${after.slice(crashed.length).map((event) => event.type).join(' ')}`,
+    )
+    assert.equal(closers[0].message?.role, 'tool', 'the first closer answers the call')
+    assert.equal(closers[0].message?.toolCallId, callId)
+    assert.match((closers[0].message?.content ?? []).map((part) => part.text ?? '').join(''), /^error \(INTERRUPTED\)/)
+    const asked = after.findIndex((event, index) => index >= crashed.length && event.type === 'message' && event.message?.role === 'user')
+    assert.ok(asked >= crashed.length + 3, 'and the follow-up prompt comes after the closers')
+    assert.equal(after.filter((event) => event.type === 'message' && event.message?.role === 'tool' && event.message.toolCallId === callId).length, 1, 'the call has one answer')
+
+    const later = await view()
+    assert.equal(later.find((turn) => turn.kind === 'tool' && turn.toolCallId === callId)?.state, 'error', `after a later turn the cut call is still drawn as interrupted\n${describe(later)}`)
+    assert.ok(!later.some((turn) => turn.state === 'running'), `and nothing as running\n${describe(later)}`)
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a turn into a one-shot subagent\'s session is refused the way DSH refuses it, and the child is left as it was', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   /**

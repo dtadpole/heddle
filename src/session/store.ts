@@ -19,6 +19,7 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
+import { interruptedTurnClosers } from './repair.ts'
 import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
@@ -673,12 +674,15 @@ function removeOwnLock(path: string): void {
  * file naming a pid that no longer exists, and that lock is removed and taken rather than blocking the session
  * forever. A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled writer's
  * resumed appends tear the log.
+ *
+ * Answers whether this process **took** the lock now (true) or already held it through another store (false): only a
+ * fresh take is a write-open after whatever wrote the session before, which is when an unfinished turn is closed.
  */
-function acquireWriterLock(path: string, id: string): void {
+function acquireWriterLock(path: string, id: string): boolean {
   const count = heldByProcess.get(path)
   if (count !== undefined) {
     heldByProcess.set(path, count + 1)
-    return
+    return false
   }
   const take = (): void => {
     heldByProcess.set(path, 1)
@@ -698,7 +702,7 @@ function acquireWriterLock(path: string, id: string): void {
         closeSync(fd)
       }
       take()
-      return
+      return true
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
@@ -714,7 +718,7 @@ function acquireWriterLock(path: string, id: string): void {
     const holder = lockHolder(text)
     if (holder === process.pid) {
       take()
-      return
+      return true
     }
     if (holder !== undefined && processAlive(holder)) throw new SessionOwnedError(id, holder)
     if (holder === undefined && Date.now() - modified < UNWRITTEN_LOCK_GRACE_MS) throw new SessionOwnedError(id)
@@ -1187,19 +1191,57 @@ export class SessionStore {
    * the session: what was read before may be behind the file, because the previous holder could have appended
    * and let go since, and a write counted from a stale fold is exactly the duplicate seq this lock exists to
    * prevent. Holding it again is free.
+   *
+   * Taking it **fresh** is DSH's write-open, so a turn the previous writer left unfinished is closed here, before the
+   * write that asked for the lock (`./repair.ts`, issue #5). A turn running in this process holds the lock already and
+   * never reaches this line.
    */
   claim(handle: SessionHandle): void {
     if (this.held.has(handle.id)) return
     const path = lockPath(handle)
-    acquireWriterLock(path, handle.id)
+    const fresh = acquireWriterLock(path, handle.id)
     this.held.set(handle.id, path)
     this.loaded.delete(handle.id)
     this.surfaceCache.delete(handle.id)
+    if (fresh) this.record(handle, interruptedTurnClosers(this.read(handle)))
+  }
+
+  /**
+   * Append events whose seq and time are already assigned, in one write, and without the side effects of `append`:
+   * no listener hears them and the meta's age does not move. The turn closers are the one caller — a repair of what the
+   * log already holds, not activity — and DSH seeds them into a resumed session rather than publishing them.
+   */
+  private record(handle: SessionHandle, records: readonly SessionEvent[]): void {
+    if (records.length === 0) return
+    const entry = this.load(handle)
+    const lines = records.map((record) => `${JSON.stringify(record)}\n`)
+    appendFileSync(handle.transcript, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    entry.events.push(...records)
   }
 
   /** Whether this store holds the session's writer lock. */
   holds(handle: SessionHandle): boolean {
     return this.held.has(handle.id)
+  }
+
+  /**
+   * Whether a live writer holds the session: this process (through any store), or the live process its lock names.
+   *
+   * A reader asks it before it shows a session's unfinished turn as closed (`SessionService.events`): a turn whose
+   * writer is alive may still be running, and one whose writer is gone never will. A lock naming this process that
+   * this process does not hold is a previous process's that had the same pid.
+   */
+  writerHeld(handle: SessionHandle): boolean {
+    const path = lockPath(handle)
+    if (heldByProcess.has(path)) return true
+    let text: string
+    try {
+      text = readFileSync(path, 'utf8')
+    } catch {
+      return false
+    }
+    const holder = lockHolder(text)
+    return holder !== undefined && holder !== process.pid && processAlive(holder)
   }
 
   /**
