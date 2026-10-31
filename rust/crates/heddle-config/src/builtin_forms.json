@@ -634,6 +634,97 @@
       }
     }
   },
+  "plugins/ui-theme": {
+    "uid": 11,
+    "refs": {
+      "1": {
+        "type": "const",
+        "meta": {},
+        "value": "light"
+      },
+      "2": {
+        "type": "const",
+        "meta": {},
+        "value": "dark"
+      },
+      "3": {
+        "type": "const",
+        "meta": {},
+        "value": "system"
+      },
+      "4": {
+        "type": "union",
+        "meta": {
+          "default": "system"
+        },
+        "list": [
+          1,
+          2,
+          3
+        ]
+      },
+      "5": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 10,
+          "max": 22,
+          "default": 14
+        }
+      },
+      "6": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 10,
+          "max": 16,
+          "default": 11
+        }
+      },
+      "7": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 10,
+          "max": 20,
+          "default": 13
+        }
+      },
+      "8": {
+        "type": "string",
+        "meta": {
+          "default": ""
+        }
+      },
+      "9": {
+        "type": "string",
+        "meta": {
+          "default": ""
+        }
+      },
+      "10": {
+        "type": "string",
+        "meta": {
+          "default": ""
+        }
+      },
+      "11": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "preference": 4,
+          "fontSize": 5,
+          "codeFontSize": 6,
+          "terminalFontSize": 7,
+          "textFontFamily": 8,
+          "codeFontFamily": 9,
+          "terminalFontFamily": 10
+        }
+      }
+    }
+  },
   "plugins/presets": {
     "uid": 13,
     "refs": {

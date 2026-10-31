@@ -38,6 +38,7 @@ export const BUILTIN_MODULES = [
   'plugins/todo-tool',
   'plugins/turns',
   'plugins/locale',
+  'plugins/ui-theme',
   'plugins/presets',
   'plugins/team',
   'plugins/schedule',
