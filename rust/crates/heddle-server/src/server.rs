@@ -989,6 +989,17 @@ fn requested_preset(state: &AppState, body: &JsonBody) -> Result<Option<String>,
     Ok(Some(wanted.to_owned()))
 }
 
+/// The `409` for another preset named for a session that recorded one: a session keeps the preset it was created with.
+fn preset_fixed(recorded: &str) -> Response {
+    respond::error_with_code(
+        StatusCode::CONFLICT,
+        format!(
+            "the session runs the preset '{recorded}'; a session keeps the preset it was created with"
+        ),
+        "session/preset-fixed",
+    )
+}
+
 /// The preset a new session is created under: the one the request named, else the profile's default (none for a
 /// profile without the `presets` row).
 fn new_session_preset(state: &AppState, named: Option<&str>) -> Option<String> {
@@ -1834,10 +1845,20 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let title: String = prompt.chars().take(60).collect();
     // A one-shot subagent's session takes no turn from here, refused before the session is opened so the child's log
     // gets nothing (web.ts asks `subagentTurnRefusal` at the same point).
-    if let Some(resume) = resume
-        && let Some(refusal) = subagent_turn_refusal(sessions.meta(resume).as_ref())
-    {
-        return respond::json_compact(StatusCode::CONFLICT, &refusal);
+    if let Some(resume) = resume {
+        let resumed = sessions.meta(resume);
+        if let Some(refusal) = subagent_turn_refusal(resumed.as_ref()) {
+            return respond::json_compact(StatusCode::CONFLICT, &refusal);
+        }
+        // A session keeps the preset it was created with (DSH): another one named for it is refused before it is
+        // opened.
+        if let (Some(named), Some(recorded)) = (
+            named_preset.as_deref(),
+            resumed.as_ref().and_then(|meta| meta.preset()),
+        ) && recorded != named
+        {
+            return preset_fixed(recorded);
+        }
     }
     let session = if let Some(resume) = resume {
         // A resumed session keeps the selection it recorded; only a session this request creates is
@@ -1880,27 +1901,16 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     {
         workspaces.ensure_owner(folder);
     }
-    // A session keeps the preset it was created with (DSH), so a request naming another one for an existing session is
-    // refused rather than silently ignored or applied. A session that recorded none takes the named one.
-    if let Some(named) = named_preset.as_deref() {
-        match sessions
-            .meta(&session)
-            .and_then(|meta| meta.preset().map(str::to_owned))
-        {
-            None => {
-                sessions.record_preset(&session, named);
-            }
-            Some(recorded) if recorded != named => {
-                return respond::error_with_code(
-                    StatusCode::CONFLICT,
-                    format!(
-                        "the session runs the preset '{recorded}'; a session keeps the preset it was created with"
-                    ),
-                    "session/preset-fixed",
-                );
-            }
-            Some(_) => {}
-        }
+    // The same rule for a folder's existing session, which is only known once it is opened: another preset named for
+    // it is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
+    // once the endpoint checks below have passed, so a refused turn records nothing.
+    let recorded_preset = sessions
+        .meta(&session)
+        .and_then(|meta| meta.preset().map(str::to_owned));
+    if let (Some(named), Some(recorded)) = (named_preset.as_deref(), recorded_preset.as_deref())
+        && recorded != named
+    {
+        return preset_fixed(recorded);
     }
 
     let meta = sessions.meta(&session);
@@ -1937,6 +1947,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             reasoning_effort: selection.reasoning_effort.clone(),
         };
         sessions.set_model(&session, &recorded_selection);
+    }
+    // The preset the request named, for a session that recorded none: now that nothing above refused the turn.
+    if let Some(named) = named_preset.as_deref()
+        && recorded_preset.is_none()
+    {
+        sessions.record_preset(&session, named);
     }
 
     let guard = state.runs().begin(&session);

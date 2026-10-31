@@ -739,16 +739,6 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
-   * What a session can be switched onto.
-   *
-   * The composer's model seat needs the list before it can offer anything, and the list is the model
-   * service's own — **never** the configuration file, because a machine's endpoints are resolved from
-   * several layers and a page that read the file would miss the environment overrides and the
-   * repository's defaults. `describeEndpoints` is the one function that knows what is safe to say, so
-   * the route reuses it: a key, a key *path* and a header value are all secrets that can live in an
-   * endpoint, and none of them may reach a browser.
-   */
-  /**
    * The agent presets (inventory A96): DSH's `agentPresets/list`, the roster and its default, for the new-session
    * picker and the Settings roster. Each preset says what it narrows: the tools its sessions are offered (absent means
    * every tool) and its persona. A profile without the `presets` row answers its one implicit preset, marked so.
@@ -765,6 +755,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  /**
+   * What a session can be switched onto.
+   *
+   * The composer's model seat needs the list before it can offer anything, and the list is the model
+   * service's own — **never** the configuration file, because a machine's endpoints are resolved from
+   * several layers and a page that read the file would miss the environment overrides and the
+   * repository's defaults. `describeEndpoints` is the one function that knows what is safe to say, so
+   * the route reuses it: a key, a key *path* and a header value are all secrets that can live in an
+   * endpoint, and none of them may reach a browser.
+   */
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
     const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
@@ -2246,14 +2246,6 @@ export function resolveTurnEffort(sources: {
   return undefined
 }
 
-/**
- * The selection a session's own record carries, as fields a model request may be given.
- *
- * The `model/request` waterfall's rule reduced to a pure function: a running turn reads the session's record
- * before **every** model call, so a switch made while the turn streams lands on its next step — DSH's own
- * running-turn behaviour. A record without an endpoint names no selection at all, because an endpoint is what
- * makes a model or an effort meaningful.
- */
 /** The `presets` service as the server reads it: optional, so a profile without the row offers the implicit roster. */
 interface PresetRegistry {
   list(): readonly PresetDefinition[]
@@ -2281,6 +2273,14 @@ function newSessionPreset(ctx: Context, named: string | undefined): string | und
   return (ctx.get('presets') as PresetRegistry | undefined)?.defaultId()
 }
 
+/**
+ * The selection a session's own record carries, as fields a model request may be given.
+ *
+ * The `model/request` waterfall's rule reduced to a pure function: a running turn reads the session's record
+ * before **every** model call, so a switch made while the turn streams lands on its next step — DSH's own
+ * running-turn behaviour. A record without an endpoint names no selection at all, because an endpoint is what
+ * makes a model or an effort meaningful.
+ */
 export function sessionRequestSelection(
   meta: SessionMeta | undefined,
 ): { readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } {
@@ -2384,9 +2384,16 @@ export function sessionRequestSelection(
    */
   if (typeof body.session === 'string' && body.session.length > 0) {
     const resumeId = body.session
-    const refusal = subagentTurnRefusal(ctx.session.list().find((entry) => entry.id === resumeId))
+    const resumed = ctx.session.list().find((entry) => entry.id === resumeId)
+    const refusal = subagentTurnRefusal(resumed)
     if (refusal !== null) {
       respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
+      return
+    }
+    /** A session keeps the preset it was created with (DSH): another one named for it is refused before it is opened. */
+    const recordedPreset = resumed?.preset
+    if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
+      respond(response, 409, 'application/json', `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`)
       return
     }
   }
@@ -2398,21 +2405,14 @@ export function sessionRequestSelection(
         : ctx.session.start({ cwd: process.cwd(), title: body.prompt.slice(0, 60), ...born })
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
   /**
-   * A session keeps the preset it was created with (DSH), so a request naming another one for an existing session is
-   * refused rather than silently ignored or applied. A session that recorded none takes the named one.
+   * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it
+   * is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
+   * once the endpoint checks below have passed, so a refused turn records nothing.
    */
-  if (namedPreset.preset !== undefined) {
-    const recordedPreset = ctx.session.list().find((entry) => entry.id === handle.id)?.preset
-    if (recordedPreset === undefined) ctx.session.store.recordPreset(handle.id, namedPreset.preset)
-    else if (recordedPreset !== namedPreset.preset) {
-      respond(
-        response,
-        409,
-        'application/json',
-        `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`,
-      )
-      return
-    }
+  const recordedPreset = ctx.session.list().find((entry) => entry.id === handle.id)?.preset
+  if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
+    respond(response, 409, 'application/json', `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`)
+    return
   }
   /**
    * Which endpoint answers: the request, then the session's own record, then the server's default, then the
@@ -2481,6 +2481,8 @@ export function sessionRequestSelection(
       ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
     })
   }
+  /** The preset the request named, for a session that recorded none: now that nothing above refused the turn. */
+  if (namedPreset.preset !== undefined && recordedPreset === undefined) ctx.session.store.recordPreset(handle.id, namedPreset.preset)
 
   /**
    * The session is marked running **before** the stream opens, and unmarked in the `finally` below.
