@@ -2855,6 +2855,114 @@ test('a session forks into a new one named after it, with its conversation and i
   }
 })
 
+/**
+ * Fork a session through the server and read both conversations as the chat draws them.
+ *
+ * The rows are compared on what a person reads — the kind, the text, a call's name and its result — so the claim is
+ * the one DSH makes: a fork is seeded with its source's own events (dsh-session fork.js buildForkSeed, cut at the last
+ * completed turn by the session controller), so the branch shows the source's turns as they were.
+ */
+async function forkAndRead(h, source) {
+  const live = await startServer(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+    { ...h.env, HOME: h.home },
+  )
+  try {
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const response = await fetch(new URL(`/api/sessions/${source}/fork`, live.url), { method: 'POST', headers: { cookie } })
+    assert.equal(response.status, 200, `the session forks\n${await response.clone().text()}`)
+    const forked = await response.json()
+    const rows = async (id) =>
+      ((await (await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })).json()).turns ?? []).map((turn) => ({
+        kind: turn.kind,
+        text: turn.text,
+        ...(turn.name !== undefined ? { name: turn.name } : {}),
+        ...(turn.result !== undefined ? { result: turn.result } : {}),
+      }))
+    return { fork: forked.session, source: await rows(source), forked: await rows(forked.session) }
+  } finally {
+    live.kill()
+  }
+}
+
+test("a fork of a reasoning turn shows the reasoning as its own row, the answer alone, and the call by name (#52)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-reasoning')
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    /** One turn of two rounds: reasoning and a tool call, then the answer — the shape a thinking model streams. */
+    scriptedConfig({
+      home: h.home,
+      steps: [{ reasoning: '17 × 23 = 391.', toolCall: { name: 'bash', arguments: { command: 'echo FORKTOOL-77' } } }, { text: '391' }],
+    })
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    const turn = await runCli(adminArgs(h, ['--resume', made.session, '--turn', 'What is 17 times 23? Think it through, then reply with the number only.']), { env: h.env, cwd: branch })
+    assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+
+    const read = await forkAndRead(h, made.session)
+    const kinds = read.source.map((row) => row.kind)
+    assert.deepEqual(kinds, ['user', 'reasoning', 'tool', 'assistant'], `the source shows a reasoning row, a call and an answer\nsaw: ${JSON.stringify(read.source)}`)
+    /**
+     * Measured on both builds before the fix: the fork drew one answer row "17 × 23 = 391.391" with no reasoning row,
+     * and the call as an empty answer row plus a tool row with no name or command.
+     */
+    assert.deepEqual(read.forked, read.source, `the fork shows the same rows\nsource: ${JSON.stringify(read.source)}\nfork:   ${JSON.stringify(read.forked)}`)
+    assert.equal(read.forked.find((row) => row.kind === 'assistant')?.text, '391', 'so its answer is the answer alone')
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a fork of a compacted session shows every turn of its source, not only the ones after the summary (#55)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-compacted')
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const steps = [
+      { reasoning: 'thinking about the part', text: `part answer ${'x'.repeat(2000)}` },
+      { purpose: 'compaction', text: 'the briefing: the code word is WALRUS-9' },
+    ]
+    scriptedConfig({ home: h.home, steps })
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    const say = async (prompt) => {
+      const turn = await runCli(adminArgs(h, ['--resume', made.session, '--turn', prompt]), { env: h.env, cwd: branch })
+      assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+    }
+    const first = 'Remember the code word WALRUS-9. Reply with only: noted.'
+    await say(first)
+    /**
+     * The window is set from what the first request measured, so the compaction lands a couple of turns later whatever
+     * the profile's tools and prompt weigh: the trigger is 80% of the endpoint's window, a little above the first request.
+     */
+    const measured = readTranscript(join(h.home, 'sessions', made.session)).find((event) => event.type === 'model/request')?.estimatedTokens
+    assert.ok(typeof measured === 'number' && measured > 0, 'the first request recorded what it weighed')
+    writeFileSync(h.config, `${JSON.stringify({ default: 'scripted', endpoints: [{ name: 'scripted', kind: 'scripted', baseUrl: join(h.home, 'script.json'), model: 'scripted', contextWindow: Math.ceil((measured + 1300) / 0.8) }] })}\n`)
+    for (const part of [1, 2, 3, 4]) await say(`Write about bridges, part ${part} ${'y'.repeat(1500)}`)
+    const events = readTranscript(join(h.home, 'sessions', made.session))
+    assert.ok(
+      events.some((event) => event.type === 'compaction/end'),
+      `the source was compacted, which is what this check is about\nrequests: ${JSON.stringify(events.filter((event) => event.type === 'model/request').map((event) => [event.estimatedTokens, event.thresholdTokens]))}`,
+    )
+
+    const read = await forkAndRead(h, made.session)
+    assert.equal(read.source[0]?.text, first, 'the source still shows its first turn')
+    /** Measured on both builds before the fix: the source showed 15 rows and the fork 4, starting at part 3. */
+    assert.equal(read.forked[0]?.text, first, `the fork starts where its source started\nfork: ${JSON.stringify(read.forked.map((row) => [row.kind, row.text.slice(0, 40)]))}`)
+    assert.deepEqual(read.forked, read.source, `and shows the same rows (${read.source.length} in the source, ${read.forked.length} in the fork)`)
+    const copied = readTranscript(join(h.home, 'sessions', read.fork))
+    assert.ok(copied.some((event) => event.type === 'compaction/end'), "the fork's log carries the compaction where it happened")
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test("a fork shows its source's turns and no more: the runtime-context note stays a note", async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
