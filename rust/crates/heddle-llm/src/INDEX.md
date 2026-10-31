@@ -1,8 +1,8 @@
 ---
 title: The heddle-llm sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T09:52:29Z
-version: 0.6.0
+modified: 2026-10-31T03:00:00Z
+version: 0.6.1
 description: The sources of the heddle-llm crate, one module per TypeScript concern, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -22,7 +22,7 @@ Unit tests sit in `#[cfg(test)]` modules beside the code.
 | [`sse.rs`](sse.rs) | `llm/adapters.ts` | the incremental event-stream parser |
 | [`http.rs`](http.rs) | `llm/http.ts` | the shared HTTP client |
 | [`adapter.rs`](adapter.rs) | `llm/adapters.ts` | the `Adapter` trait and the fold driver |
-| [`chat.rs`](chat.rs) | `llm/adapters.ts` | Chat Completions: request builder, message mapping, fold |
+| [`chat.rs`](chat.rs) | `llm/adapters.ts` | Chat Completions: request builder (a stream asks for its usage), message mapping (DeepSeek's reasoning replay), fold (usage from the finish frame or from OpenAI's own last frame) |
 | [`responses.rs`](responses.rs) | `llm/adapters.ts` | Responses: request builder, input list, finish reason, fold |
 | [`messages.rs`](messages.rs) | `llm/adapters.ts` | Anthropic's Messages API (`anthropic-messages`, kept by `heddle-config` as `EndpointKind::Other`): call builder, thinking form, JSON answer, adapter |
 | [`anthropic.rs`](anthropic.rs) | `llm/adapters.ts` | Anthropic publisher route: call builder, message mapping, the fold both Anthropic kinds share |
