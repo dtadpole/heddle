@@ -936,22 +936,30 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
     }
-    const node = tree(wanted === null || wanted.length === 0 ? null : wanted, {
-      roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
-      sessions: ctx.session.list(),
-      generated: workspaces.generated,
-      /**
-       * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
-       * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
-       * person may have bookmarked.
-       */
-      archived:
-        url.searchParams.get('archived') === 'only'
-          ? 'only'
-          : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
-            ? 'show'
-            : 'hide',
-    })
+    /** A folder the tree may not read is `400` with its code (#106), as the folder picker answers an unreadable one. */
+    let node
+    try {
+      node = tree(wanted === null || wanted.length === 0 ? null : wanted, {
+        roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
+        sessions: ctx.session.list(),
+        generated: workspaces.generated,
+        /**
+         * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
+         * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
+         * person may have bookmarked.
+         */
+        archived:
+          url.searchParams.get('archived') === 'only'
+            ? 'only'
+            : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
+              ? 'show'
+              : 'hide',
+      })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'workspace-file/unreadable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace-file/unreadable' })}\n`)
+      return
+    }
     respond(response, 200, 'application/json', `${JSON.stringify(node, null, 2)}\n`)
     return
   }
@@ -1883,10 +1891,19 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const preset = newSessionPreset(ctx, named.preset)
-    const { handle, definition } = ctx.session.createAt(wanted, {
-      ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
-      ...(preset !== undefined ? { preset } : {}),
-    })
+    /** A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. */
+    let created
+    try {
+      created = ctx.session.createAt(wanted, {
+        ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+        ...(preset !== undefined ? { preset } : {}),
+      })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'session/unwritable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+      return
+    }
+    const { handle, definition } = created
     respond(
       response,
       200,

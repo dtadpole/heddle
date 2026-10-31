@@ -487,7 +487,8 @@ impl SessionPort for SessionView {
             archived: heddle_workspace::ArchivedFilter::default(),
         };
         let wanted = wanted.map(|path| path.to_string_lossy().into_owned());
-        serde_json::to_value(heddle_workspace::tree(wanted.as_deref(), &input)).map_err(port_error)
+        let node = heddle_workspace::tree(wanted.as_deref(), &input).map_err(port_error)?;
+        serde_json::to_value(node).map_err(port_error)
     }
 
     fn read_file_text(&self, path: &std::path::Path) -> PortResult<Record> {
