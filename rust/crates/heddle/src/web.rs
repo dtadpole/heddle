@@ -141,12 +141,9 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.approvals = Some(Arc::new(Approvals { service }));
     }
-    if let Some(preference) = boot
+    harness.locale = boot
         .services
-        .get::<Arc<heddle_config::LocalePreference>>("locale")
-    {
-        harness.locale = Some(*preference);
-    }
+        .get::<Arc<heddle_config::LiveLocale>>("locale");
     harness
 }
 
@@ -366,7 +363,7 @@ fn settings_router(args: &Args, invocation: &Invocation, boot: &Boot) -> Option<
         Box::new(catalog),
     )
     .ok()?;
-    let service = with_model_live(service, boot);
+    let service = with_live_rows(service, boot);
     Some(
         axum::Router::new()
             .route("/api/settings", axum::routing::any(settings_answer))
@@ -375,31 +372,58 @@ fn settings_router(args: &Args, invocation: &Invocation, boot: &Boot) -> Option<
     )
 }
 
-/// The model row applies a write to the running tree as it lands, as DSH's settings do: its service re-reads the row's
-/// composition on the next request once the shared `model-row` source holds the written configuration. The other rows
-/// apply at the next boot (`applies: restart`) until their components can take a new configuration in place.
-fn with_model_live(
+/// The rows whose writes apply to the running tree as they land, as DSH's settings do; the other rows apply at the next
+/// boot (`applies: restart`) until their components can take a new configuration in place.
+///
+/// - The model row: its service re-reads the row's composition on the next request once the shared `model-row` source
+///   holds the written configuration.
+/// - The locale row (issue #80): the server's held preference is replaced, and the next page request reads it, so a
+///   language chosen in Settings is the `<html lang>` of the next page without a restart.
+fn with_live_rows(
     service: heddle_config::SettingsService,
     boot: &Boot,
 ) -> heddle_config::SettingsService {
-    let Some(source) = boot
+    let rows_of = |builtin: crate::builtins::Builtin| -> Vec<String> {
+        boot.rows
+            .iter()
+            .filter(|composed| {
+                crate::builtins::resolve_component(&composed.row.component(&boot.anchor))
+                    == crate::builtins::ComponentRef::Builtin(builtin)
+            })
+            .filter_map(|composed| composed.row.id.clone())
+            .collect()
+    };
+    let model = boot
         .services
         .get::<Arc<heddle_config::ModelRowSource>>("model-row")
-    else {
+        .map(|source| (rows_of(crate::builtins::Builtin::Model), source));
+    let locale = boot
+        .services
+        .get::<Arc<heddle_config::LiveLocale>>("locale")
+        .map(|live| (rows_of(crate::builtins::Builtin::Locale), live));
+    if model.is_none() && locale.is_none() {
         return service;
-    };
-    let live: Vec<String> = boot
-        .rows
+    }
+    let live: Vec<String> = model
         .iter()
-        .filter(|composed| {
-            crate::builtins::resolve_component(&composed.row.component(&boot.anchor))
-                == crate::builtins::ComponentRef::Builtin(crate::builtins::Builtin::Model)
-        })
-        .filter_map(|composed| composed.row.id.clone())
+        .flat_map(|(ids, _)| ids.clone())
+        .chain(locale.iter().flat_map(|(ids, _)| ids.clone()))
         .collect();
     service.with_live(
         live,
-        Box::new(move |_, config| source.set_row_config(config)),
+        Box::new(move |ns, config| {
+            if let Some((ids, source)) = &model
+                && ids.iter().any(|id| id == ns)
+            {
+                return source.set_row_config(config);
+            }
+            if let Some((ids, live)) = &locale
+                && ids.iter().any(|id| id == ns)
+            {
+                return live.set_config(config);
+            }
+            Ok(())
+        }),
     )
 }
 
@@ -1596,7 +1620,7 @@ mod tests {
         std::fs::create_dir_all(&profile).unwrap();
         std::fs::write(
             profile.join("cordis.yml"),
-            "- insert:\n    - id: model\n      name: ./src/plugins/model.ts\n    - id: tools\n      name: ./src/plugins/tools.ts\n",
+            "- insert:\n    - id: model\n      name: ./src/plugins/model.ts\n    - id: tools\n      name: ./src/plugins/tools.ts\n    - id: locale\n      name: ./src/plugins/locale.ts\n",
         )
         .unwrap();
         let machine = root.join("heddle.json");
@@ -1627,8 +1651,10 @@ mod tests {
             env.clone(),
         ));
         boot.services.provide("model-row", Arc::clone(&source));
+        let locale = Arc::new(heddle_config::LiveLocale::default());
+        boot.services.provide("locale", Arc::clone(&locale));
         let catalog = crate::builtins::BuiltinCatalog::new(env.clone(), root.clone());
-        let service = with_model_live(
+        let service = with_live_rows(
             heddle_config::SettingsService::new(&options, &[], env.clone(), Box::new(catalog))
                 .unwrap(),
             &boot,
@@ -1657,6 +1683,23 @@ mod tests {
             changed.nominated.as_deref(),
             Some("two"),
             "the next request takes the written default"
+        );
+        // The locale row (issue #80): a write replaces the held preference, which the next page request reads.
+        assert_eq!(applies("locale").as_deref(), Some("live"));
+        let mut fields = serde_json::Map::new();
+        fields.insert("preference".to_owned(), serde_json::json!("zh"));
+        let entry = service
+            .write(
+                "locale",
+                &heddle_config::SettingsWrite::Update(fields),
+                None,
+            )
+            .unwrap();
+        assert_eq!(entry.apply_error, None);
+        assert_eq!(
+            locale.get().for_request(Some("en-US")),
+            "zh",
+            "the next page is served in the language just written"
         );
         std::fs::remove_dir_all(&root).ok();
     }

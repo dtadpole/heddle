@@ -1109,7 +1109,9 @@ impl Component for LocaleComponent {
             heddle_config::locale_preference(Some(config)).map_err(|error| error.to_string())?;
         services.provide(
             "locale",
-            Arc::new(heddle_config::LocalePreference(preference)),
+            Arc::new(heddle_config::LiveLocale::new(
+                heddle_config::LocalePreference(preference),
+            )),
         );
         Ok(())
     }
