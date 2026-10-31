@@ -642,6 +642,7 @@ dependencies = [
  "heddle-context",
  "heddle-events",
  "heddle-goal",
+ "heddle-jobs",
  "heddle-llm",
  "heddle-sandbox",
  "heddle-schedule",
