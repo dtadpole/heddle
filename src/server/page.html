@@ -6270,17 +6270,6 @@ const queueTurnOut = new WeakSet()
 /** Stop retains queued work without automatically starting another turn (Refs #75; DSH keepInbox:true). */
 const stoppedQueues = new WeakSet()
 
-/**
- * Queues whose pump has a turn out: from the moment the pump sends a queued message until that turn's stream settles.
- *
- * `sendNow` holds `directTurnPending` for the whole of its turn, and the pump had no equivalent: its row counts as
- * running only while it is `sending`, and `retire` removes the row the moment the turn is accepted. From then until the
- * stream's `model/request` arrived nothing said running, and the composer was drawn idle under a running turn: Send
- * instead of Stop, and a message typed then went out at once as a **second** turn on the same session (live issue
- * developer-ten-6, measured on 8082 on 2026-10-29). Held per queue, not as a count, so a queue being pumped for another
- * session cannot show Stop on this one; `adoptSession` moves the same array to the session a fresh panel's turn created.
- */
-const queueTurnOut = new WeakSet()
 
 function anyRunning() {
   return directTurnsFor() > 0 || queueTurnOut.has(queueOf()) || turnInFlight() || sessionRunning()
