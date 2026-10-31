@@ -1850,3 +1850,46 @@ test('a message the server took is not put back or resent when the connection dr
     await server.close()
   }
 })
+
+
+test('a delayed old session read cannot overwrite the latest selected conversation', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('session-view-ticket')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const door = await fetch(server.url, { redirect: 'manual' })
+    const cookie = String(door.headers.get('set-cookie') ?? '').split(';')[0]
+    const headers = { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' }
+    const post = (path, body) => fetch(new URL(path, server.url), { method: 'POST', headers, body: JSON.stringify(body) }).then((response) => response.json())
+    await post('/api/workspaces', { path: server.work })
+    const a = (await post('/api/sessions', { branch: server.work })).session
+    const b = (await post('/api/sessions', { branch: server.work })).session
+    await post('/api/sessions/' + a + '/title', { title: 'OLD-A' })
+    await post('/api/sessions/' + b + '/title', { title: 'LATEST-B' })
+    await browser.goto(server.url)
+    const row = (id) => `document.querySelector('#tree li[data-session-id=${JSON.stringify(id)}] > .row')`
+    await browser.waitFor(`${row(a)} !== null && ${row(b)} !== null`, 15000)
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.__sessionWaiting = false
+      window.fetch = async (input, options) => {
+        const response = await real(input, options)
+        if (String(input) === ${JSON.stringify('/api/sessions/' + a)}) {
+          window.__sessionWaiting = true
+          await new Promise((resolve) => { window.__releaseSession = resolve })
+        }
+        return response
+      }
+    })()`)
+    await browser.evaluate(`${row(a)}.click()`)
+    await browser.waitFor('window.__sessionWaiting', 10000)
+    await browser.evaluate(`${row(b)}.click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent === 'LATEST-B'`, 10000)
+    await browser.evaluate('window.__releaseSession()')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(await browser.evaluate(`document.getElementById('session-title').textContent`), 'LATEST-B', 'Refs #120: late A title must not replace B')
+    assert.equal(await browser.evaluate(`document.querySelector('#tree li[data-session-id=${JSON.stringify(b)}]')?.getAttribute('aria-selected')`), 'true', 'late A caller must not move selection')
+  } finally { browser.close(); await server.close() }
+})
