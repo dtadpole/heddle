@@ -85,8 +85,9 @@ function spillOutput(full: string, spillMaxBytes: number): string | undefined {
   try {
     writeFileSync(path, bytes, { mode: 0o600, flag: 'wx' })
     return path
-  } catch {
-    rmSync(path, { force: true })
+  } catch (error) {
+    // 'wx' refuses a name that already exists; that file is not ours to remove.
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') rmSync(path, { force: true })
     return undefined
   }
 }
