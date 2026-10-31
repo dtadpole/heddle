@@ -143,6 +143,11 @@ function openChild(
     parentSession: parent.id,
     origin: 'subagent',
     delegationDepth: childDepth,
+    /**
+     * A child runs under its parent's agent preset (inventory A96), for the same reason it inherits the mode: a
+     * session narrowed to a preset's tools cannot widen itself by delegating to a child that has every tool.
+     */
+    ...(parentMeta?.preset !== undefined ? { preset: parentMeta.preset } : {}),
   })
   /** Delegation inherits the parent's mode, so a narrowed session cannot widen itself by spawning a child. */
   inheritRecordedMode(store, parent, child)

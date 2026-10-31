@@ -30,7 +30,8 @@ use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use heddle_tools::{LogSink, ToolArgs, ToolContext, ToolRegistry, ToolResult, codes};
+use heddle_config::{PresetDefinition, PresetResolution, PresetRoster, missing_preset_message};
+use heddle_tools::{LogSink, ToolArgs, ToolContext, ToolRegistry, ToolResult, ToolSpec, codes};
 
 use crate::ports::{
     ContextPort, HookFailure, ModelError, ModelPort, ModelRequestRecord, PortError, PreStep,
@@ -91,6 +92,10 @@ pub struct AgentRuntime {
     pub hooks: Arc<dyn TurnHooks>,
     /// The live-turn registry; optional, as in the TypeScript build, where a minimal profile has none.
     pub turns: Option<TurnRegistry>,
+    /// The agent presets (inventory A96), from the optional `presets` row: each turn runs under its session's preset,
+    /// which narrows the tools it is offered and the persona its system prompt is written from. `None` — a profile
+    /// without the row — runs every session with every tool and the caller's own system prompt, as before.
+    pub presets: Option<Arc<PresetRoster>>,
 }
 
 /// The cap on a turn's model-plus-tools rounds.
@@ -235,6 +240,11 @@ pub enum TurnError {
     /// A session or context write failed.
     #[error(transparent)]
     Port(#[from] PortError),
+    /// The session's recorded agent preset is no longer declared in this profile (inventory A96): the turn is
+    /// refused before anything is written, with [`missing_preset_message`]'s sentence, as DSH rejects a missing
+    /// definition rather than replacing it.
+    #[error("{0}")]
+    Preset(String),
 }
 
 /// One turn, whose live registration and prompt are already durable.
@@ -256,6 +266,8 @@ pub struct BegunTurn {
     /// The result of a turn the archived-session gate rejected at its first step: its record is already written,
     /// and [`BegunTurn::run`] answers it without a step.
     blocked: Option<TurnResult>,
+    /// The agent preset the turn runs under, resolved before anything was written; `None` without a roster.
+    preset: Option<PresetDefinition>,
 }
 
 impl std::fmt::Debug for BegunTurn {
@@ -288,13 +300,24 @@ impl BegunTurn {
             started,
             live,
             blocked,
+            preset,
         } = self;
         let stopped = cancel.clone();
         let mut progress = TurnProgress::default();
         // A turn the gate rejected at its first step has its record written already, and is answered without a step.
         let result = match blocked {
             Some(blocked) => Ok(blocked),
-            None => run_turn_body(&runtime, &options, cancel, started, &mut progress).await,
+            None => {
+                run_turn_body(
+                    &runtime,
+                    &options,
+                    cancel,
+                    started,
+                    &mut progress,
+                    preset.as_ref(),
+                )
+                .await
+            }
         };
         if let Err(error) = &result {
             record_unfinished(
@@ -411,6 +434,18 @@ fn begin_registered(
     };
     // Counted before the prompt, as the turn's own writes: the completed result reports what it added.
     let started = runtime.session.count(&options.session);
+    // The session's preset narrows what this turn offers: its tools, and the persona its system prompt is written from
+    // when the caller names none. Resolved before the inbox is claimed and the prompt is written, so a refused preset
+    // leaves nothing in the log.
+    let preset = match session_preset(runtime, &options.session) {
+        Ok(preset) => preset,
+        Err(error) => {
+            if let Some(live) = &live {
+                live.settle();
+            }
+            return Err(error);
+        }
+    };
     // DSH's archived-session gate at the turn's first step (dsh-api-session-controller lib/index.js:2508-2541): a turn
     // into an archived session, or into a subagent descendant of one, is accepted and blocked. The prompt is queued
     // (DSH's `followup`), the step claims it with any pending steer, the gate rejects it before a model request, and
@@ -458,6 +493,7 @@ fn begin_registered(
             started,
             live,
             blocked: Some(blocked),
+            preset,
         });
     }
     // A steer a stopped turn left in the inbox is DSH's next-step input, and DSH's boundary claims next-step
@@ -490,7 +526,56 @@ fn begin_registered(
         started,
         live,
         blocked: None,
+        preset,
     })
+}
+
+/// The agent preset a turn's session runs under (inventory A96), or `None` when the profile declares no presets.
+///
+/// DSH's rules: a session keeps the preset it recorded, so a later change of the default does not move it; a session
+/// that recorded none (one from before presets, or created by a path that named none) records the current default now
+/// and keeps it from then on; and a recorded preset that is no longer declared is **rejected** rather than replaced, so
+/// the turn is refused with a sentence naming it ([`TurnError::Preset`]) before anything is written to the log.
+fn session_preset(
+    runtime: &AgentRuntime,
+    session: &SessionHandle,
+) -> Result<Option<PresetDefinition>, TurnError> {
+    let Some(roster) = runtime.presets.as_ref() else {
+        return Ok(None);
+    };
+    let recorded = match runtime.session.recorded_preset(session) {
+        Some(recorded) => recorded,
+        None => runtime
+            .session
+            .record_preset(session, &roster.default)?
+            .unwrap_or_else(|| roster.default.clone()),
+    };
+    match roster.resolve(Some(&recorded)) {
+        PresetResolution::Found(preset) => Ok(Some(preset.clone())),
+        PresetResolution::Missing { missing, declared } => Err(TurnError::Preset(
+            missing_preset_message(&missing, &declared),
+        )),
+    }
+}
+
+/// The answer to a call whose tool the session's preset does not offer: the registry's own answer for an unknown
+/// tool, naming the tools the preset does offer (`(none)` when it offers none). The model is never shown such a tool;
+/// this is the answer to one it names anyway.
+pub fn outside_preset_answer(name: &str, offered: &[ToolSpec]) -> ToolResult {
+    let known = offered
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let known = if known.is_empty() {
+        "(none)".to_owned()
+    } else {
+        known
+    };
+    ToolResult::refused(
+        codes::UNKNOWN_TOOL,
+        format!("no tool named '{name}'; known: {known}"),
+    )
 }
 
 /// Run one turn.
@@ -523,6 +608,7 @@ async fn run_turn_body(
     cancel: Option<CancellationToken>,
     started: usize,
     progress: &mut TurnProgress,
+    preset: Option<&PresetDefinition>,
 ) -> Result<TurnResult, TurnError> {
     let session = &options.session;
     let max_rounds = match options.max_rounds {
@@ -541,7 +627,15 @@ async fn run_turn_body(
     // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
     let instruction_cwd = folder.unwrap_or_else(|| sandbox.workspace_root().to_path_buf());
 
-    let tools = runtime.tools.describe();
+    // The preset's tools, in the registry's order, and the system prompt: the caller's, else the preset's persona.
+    let tools = match preset {
+        None => runtime.tools.describe(),
+        Some(preset) => preset.narrow(runtime.tools.describe(), |spec| spec.name.as_str()),
+    };
+    let system = options
+        .system
+        .clone()
+        .or_else(|| preset.and_then(|preset| preset.persona.clone()));
     let mut denials: Vec<Denial> = Vec::new();
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut text = String::new();
@@ -600,7 +694,7 @@ async fn run_turn_body(
                     endpoint: options.endpoint.clone(),
                     model: options.model.clone(),
                     tools: tools.clone(),
-                    system: options.system.clone(),
+                    system: system.clone(),
                 },
             )
             .await?;
@@ -621,6 +715,12 @@ async fn run_turn_body(
             Ok(prepared) => prepared,
             Err(failure) => return Err(TurnError::Hook(pre_step_failure_message(&failure))),
         };
+        // The session's preset is applied again to what the hook answered (developer-five's review of A96): a
+        // listener may add a registered tool, and one outside the preset would otherwise reach the model's tool list
+        // even though a call to it is refused. A profile without presets is unchanged.
+        if let Some(preset) = preset {
+            prepared.tools = preset.narrow(prepared.tools, |spec| spec.name.as_str());
+        }
 
         // `(id, name, arguments)` for each complete tool call the round asked for.
         let mut calls: Vec<(String, String, String)> = Vec::new();
@@ -748,7 +848,7 @@ async fn run_turn_body(
                     endpoint: options.endpoint.clone(),
                     model: options.model.clone(),
                     tools: tools.clone(),
-                    system: options.system.clone(),
+                    system: system.clone(),
                 },
             )?;
             report = retried;
@@ -813,6 +913,10 @@ async fn run_turn_body(
         let limit = runtime.tools.max_parallel_tool_calls().max(1);
         let safe = |name: &str| limit > 1 && runtime.tools.is_concurrency_safe(name);
         let run_call = |name: String, arguments: String| {
+            // A tool outside the session's preset does not exist for this agent, so the call is not run.
+            let outside = preset
+                .filter(|preset| !preset.allows(&name))
+                .map(|_| outside_preset_answer(&name, &tools));
             let args = parse_arguments(&arguments);
             let context = ToolContext {
                 cwd: cwd.clone(),
@@ -828,6 +932,9 @@ async fn run_turn_body(
                         codes::INTERRUPTED,
                         "the turn was stopped before this call ran",
                     );
+                }
+                if let Some(answer) = outside {
+                    return answer;
                 }
                 // A call that escapes the registry (a failing `tools/pre-execute` listener) is still answered,
                 // as the TypeScript catch answers it: the stop's sentence when the turn was stopped, else the
@@ -1229,6 +1336,8 @@ pub(crate) mod tests {
         fail_user_content: AtomicBool,
         /// The folder the session was opened in, `None` for a record with none.
         folder: Mutex<Option<PathBuf>>,
+        /// The agent preset the record carries (inventory A96), `None` until one is recorded.
+        preset: Mutex<Option<String>>,
     }
 
     impl RecordingSession {
@@ -1237,6 +1346,7 @@ pub(crate) mod tests {
                 sources: Mutex::new(Vec::new()),
                 fail_user_content: AtomicBool::new(false),
                 folder: Mutex::new(None),
+                preset: Mutex::new(None),
                 state: Mutex::new(SessionState {
                     events: Vec::new(),
                     messages: Vec::new(),
@@ -1279,6 +1389,15 @@ pub(crate) mod tests {
 
         fn open_in(&self, folder: &str) {
             *self.folder.lock().unwrap() = Some(PathBuf::from(folder));
+        }
+
+        /// A session created under `preset`.
+        fn created_under(&self, preset: &str) {
+            *self.preset.lock().unwrap() = Some(preset.to_owned());
+        }
+
+        fn preset(&self) -> Option<String> {
+            self.preset.lock().unwrap().clone()
         }
 
         fn fail_user_content(&self, fail: bool) {
@@ -1425,6 +1544,23 @@ pub(crate) mod tests {
                 fields,
             });
             Ok(())
+        }
+
+        fn recorded_preset(&self, _: &SessionHandle) -> Option<String> {
+            self.preset()
+        }
+
+        /// The store's rule: written only when the record has none, trimmed, a blank one writing nothing.
+        fn record_preset(
+            &self,
+            _: &SessionHandle,
+            preset: &str,
+        ) -> Result<Option<String>, PortError> {
+            let mut recorded = self.preset.lock().unwrap();
+            if recorded.is_none() && !preset.trim().is_empty() {
+                *recorded = Some(preset.trim().to_owned());
+            }
+            Ok(recorded.clone())
         }
     }
 
@@ -1742,6 +1878,7 @@ pub(crate) mod tests {
             tools,
             hooks,
             turns: None,
+            presets: None,
         }
     }
 
@@ -2740,6 +2877,7 @@ pub(crate) mod tests {
             tools: registry_with(Vec::new()),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(turns.clone()),
+            presets: None,
         };
         let result = run_turn(
             &runtime,
@@ -2774,6 +2912,7 @@ pub(crate) mod tests {
             tools: registry_with(Vec::new()),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(turns),
+            presets: None,
         };
         let result = run_turn(
             &runtime,
@@ -3016,6 +3155,7 @@ pub(crate) mod tests {
             tools: registry_with(Vec::new()),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(turns.clone()),
+            presets: None,
         };
         let mut options = RunTurnOptions::new(session_handle(), "scripted", "hello");
         options.source = Some(serde_json::json!({ "kind": "team", "member": "one" }));
@@ -3064,6 +3204,7 @@ pub(crate) mod tests {
             tools: registry_with(Vec::new()),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(turns.clone()),
+            presets: None,
         };
         let error = begin_turn(
             &runtime,
@@ -3090,6 +3231,7 @@ pub(crate) mod tests {
             tools: registry_with(Vec::new()),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(turns.clone()),
+            presets: None,
         };
         let begun = begin_turn(
             &runtime,
@@ -3120,6 +3262,7 @@ pub(crate) mod tests {
             tools: registry_with(vec![answering_tool("read_file", "first")]),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: None,
+            presets: None,
         };
         let result = run_turn(
             &runtime,
@@ -3180,6 +3323,7 @@ pub(crate) mod tests {
             ]),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(TurnRegistry::new()),
+            presets: None,
         };
         let result = run_turn(
             &runtime,
@@ -3288,6 +3432,7 @@ pub(crate) mod tests {
             tools: registry_with(tools),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: Some(TurnRegistry::new()),
+            presets: None,
         };
         (runtime, scripted)
     }
@@ -3893,5 +4038,365 @@ pub(crate) mod tests {
         assert_eq!(result.denials.len(), 1);
         assert_eq!(result.denials[0].code, "INTERRUPTED");
         assert!(result.denials[0].message.contains("tools/pre-execute"));
+    }
+
+    // ---- Agent presets (inventory A96), mirroring test/presets.test.ts: real turns with a scripted model, and what
+    // each request offered read from its `model/request` record. ----
+
+    const READER_PERSONA: &str = "You are a careful reviewer who never edits.";
+
+    /// The test's `presets` row: `standard` (every tool) and `reader` (one tool and a persona), under `default`.
+    fn preset_roster(default: &str) -> Arc<PresetRoster> {
+        Arc::new(
+            heddle_config::preset_roster(Some(&serde_json::json!({
+                "default": default,
+                "presets": [
+                    { "id": "standard", "name": "Standard" },
+                    { "id": "reader", "name": "Reader", "tools": ["read_tool"], "persona": READER_PERSONA }
+                ]
+            })))
+            .unwrap(),
+        )
+    }
+
+    /// `read_tool` and `write_tool`, each noting in `ran` that it ran.
+    fn preset_tools(ran: &Arc<Mutex<Vec<String>>>) -> Arc<ToolRegistry> {
+        let tools = ["read_tool", "write_tool"]
+            .into_iter()
+            .map(|name| {
+                let ran = Arc::clone(ran);
+                tool_fn(
+                    ToolSpec {
+                        name: name.into(),
+                        description: format!("stands for {name}"),
+                        parameters: serde_json::json!({ "type": "object", "properties": {} }),
+                    },
+                    move |_args, _ctx| {
+                        ran.lock().unwrap().push(name.to_owned());
+                        Box::pin(async move { Ok(ToolResult::ok(format!("{name} ran"))) })
+                    },
+                )
+            })
+            .collect();
+        registry_with(tools)
+    }
+
+    /// The surface context, keeping the system prompt each `prepare` and `assemble` was asked to write from.
+    struct SystemContext {
+        inner: SurfaceContext,
+        systems: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ContextPort for SystemContext {
+        fn record_runtime_context(
+            &self,
+            session: &SessionHandle,
+            sections: &[RuntimeContextSection],
+        ) -> Result<(), PortError> {
+            self.inner.record_runtime_context(session, sections)
+        }
+
+        fn prepare<'a>(
+            &'a self,
+            session: &'a SessionHandle,
+            options: PrepareOptions,
+        ) -> BoxFuture<'a, Result<ContextReport, PortError>> {
+            self.systems.lock().unwrap().push(options.system.clone());
+            self.inner.prepare(session, options)
+        }
+
+        fn assemble(
+            &self,
+            session: &SessionHandle,
+            options: PrepareOptions,
+        ) -> Result<ContextReport, PortError> {
+            self.systems.lock().unwrap().push(options.system.clone());
+            self.inner.assemble(session, options)
+        }
+    }
+
+    fn preset_runtime(
+        model: Arc<ScriptedModel>,
+        session: &Arc<RecordingSession>,
+        tools: Arc<ToolRegistry>,
+        presets: Option<Arc<PresetRoster>>,
+    ) -> (AgentRuntime, Arc<SystemContext>) {
+        let context = Arc::new(SystemContext {
+            inner: SurfaceContext {
+                session: Arc::clone(session),
+            },
+            systems: Mutex::new(Vec::new()),
+        });
+        let runtime = AgentRuntime {
+            model,
+            session: Arc::clone(session) as Arc<dyn SessionPort>,
+            context: Arc::clone(&context) as Arc<dyn ContextPort>,
+            tools,
+            hooks: Arc::new(crate::ports::NoTurnHooks),
+            turns: Some(TurnRegistry::new()),
+            presets,
+        };
+        (runtime, context)
+    }
+
+    /// The tools each `model/request` offered, in order.
+    fn offered(session: &RecordingSession) -> Vec<Vec<String>> {
+        session
+            .state
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|event| event.kind == "model/request")
+            .map(|event| {
+                event.fields["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|name| name.as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn answers(text: &str) -> Step {
+        Step::Chunks(vec![Chunk::TextDelta { text: text.into() }, done("stop")])
+    }
+
+    #[tokio::test]
+    async fn a_session_under_a_non_default_preset_is_offered_only_its_tools_and_its_persona() {
+        let session = RecordingSession::new();
+        session.created_under("reader");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let model = ScriptedModel::new(vec![answers("read only"), answers("again")]);
+        let (runtime, context) = preset_runtime(
+            Arc::clone(&model),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("standard")),
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "look around"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offered(&session),
+            [["read_tool"]],
+            "the request offered the preset's tools only"
+        );
+        let names: Vec<String> = model.requests()[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        assert_eq!(names, ["read_tool"]);
+        assert_eq!(
+            context.systems.lock().unwrap().clone(),
+            [Some(READER_PERSONA.to_owned())],
+            "the system prompt is the preset's persona"
+        );
+
+        // A caller that names a system prompt keeps it.
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "and now");
+        options.system = Some("the caller's own".into());
+        run_turn(&runtime, options).await.unwrap();
+        assert_eq!(
+            context
+                .systems
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .flatten()
+                .as_deref(),
+            Some("the caller's own")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_session_is_offered_every_tool_and_records_the_default_which_it_keeps() {
+        let session = RecordingSession::new();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (first, _) = preset_runtime(
+            ScriptedModel::new(vec![answers("all")]),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("standard")),
+        );
+        run_turn(
+            &first,
+            RunTurnOptions::new(session_handle(), "scripted", "hello"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(offered(&session), [["read_tool", "write_tool"]]);
+        assert_eq!(
+            session.preset().as_deref(),
+            Some("standard"),
+            "the default was recorded"
+        );
+
+        // The same session under a profile whose default is now `reader`: it keeps `standard`.
+        let (second, _) = preset_runtime(
+            ScriptedModel::new(vec![answers("still all")]),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("reader")),
+        );
+        run_turn(
+            &second,
+            RunTurnOptions::new(session_handle(), "scripted", "again"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offered(&session).last().cloned().unwrap(),
+            ["read_tool", "write_tool"],
+            "an older session keeps the preset it recorded"
+        );
+        assert_eq!(session.preset().as_deref(), Some("standard"));
+    }
+
+    #[tokio::test]
+    async fn a_call_to_a_tool_outside_the_preset_gets_the_unknown_tool_answer_and_does_not_run() {
+        let session = RecordingSession::new();
+        session.created_under("reader");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "write_tool", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            answers("done"),
+        ]);
+        let (runtime, _) = preset_runtime(
+            Arc::clone(&model),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("standard")),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "write something");
+        options.max_rounds = RoundLimit::Rounds(3);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert!(ran.lock().unwrap().is_empty(), "the tool never ran");
+        let error = result.tool_calls[0].result.error.clone().unwrap();
+        assert_eq!(error.code, "UNKNOWN_TOOL");
+        assert_eq!(
+            error.message,
+            "no tool named 'write_tool'; known: read_tool"
+        );
+        assert_eq!(
+            outside_preset_answer("bash", &[])
+                .error
+                .map(|error| error.message),
+            Some("no tool named 'bash'; known: (none)".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recorded_preset_no_longer_declared_refuses_the_turn_before_anything_is_written() {
+        let session = RecordingSession::new();
+        session.created_under("retired");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let model = ScriptedModel::new(vec![answers("never")]);
+        let (runtime, _) = preset_runtime(
+            Arc::clone(&model),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("standard")),
+        );
+        let before = session.count(&session_handle());
+        let error = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "hello"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, TurnError::Preset(_)));
+        assert_eq!(
+            error.to_string(),
+            "the session's preset 'retired' is not declared in this profile; declared: standard, reader"
+        );
+        assert_eq!(
+            session.count(&session_handle()),
+            before,
+            "the refused turn wrote nothing"
+        );
+        assert!(model.requests().is_empty());
+        assert!(
+            !runtime.turns.as_ref().unwrap().is_running("s"),
+            "the refusal settles the live registration"
+        );
+        assert_eq!(
+            session.preset().as_deref(),
+            Some("retired"),
+            "and replaces nothing"
+        );
+    }
+
+    /// A pre-step listener that adds a tool to what the round offers.
+    struct AddsTool(ToolSpec);
+
+    impl TurnHooks for AddsTool {
+        fn pre_step(&self, mut step: PreStep) -> Result<PreStep, HookFailure> {
+            step.tools.push(self.0.clone());
+            Ok(step)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_a_pre_step_listener_adds_outside_the_preset_is_still_not_offered() {
+        // developer-five's review of A96: the preset is applied after the hook, not only before it.
+        let session = RecordingSession::new();
+        session.created_under("reader");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let model = ScriptedModel::new(vec![answers("read only")]);
+        let (mut runtime, _context) = preset_runtime(
+            Arc::clone(&model),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("standard")),
+        );
+        let write_spec = runtime
+            .tools
+            .describe()
+            .into_iter()
+            .find(|spec| spec.name == "write_tool")
+            .expect("the registry has write_tool");
+        runtime.hooks = Arc::new(AddsTool(write_spec));
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "look around"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offered(&session),
+            [["read_tool"]],
+            "the preset is applied after the hook"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_profile_without_the_presets_row_runs_every_session_as_before() {
+        let session = RecordingSession::new();
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let (runtime, context) = preset_runtime(
+            ScriptedModel::new(vec![answers("plain")]),
+            &session,
+            preset_tools(&ran),
+            None,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "hello"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(offered(&session), [["read_tool", "write_tool"]]);
+        assert_eq!(session.preset(), None, "and records no preset");
+        assert_eq!(context.systems.lock().unwrap().clone(), [None::<String>]);
     }
 }

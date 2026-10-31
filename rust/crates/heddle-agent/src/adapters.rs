@@ -288,6 +288,23 @@ impl SessionPort for Sessions {
             .map(|claimed| claimed.len())
             .map_err(port_error)
     }
+
+    fn recorded_preset(&self, session: &SessionHandle) -> Option<String> {
+        self.service
+            .meta(&session.id)
+            .and_then(|meta| meta.preset().map(str::to_owned))
+    }
+
+    fn record_preset(
+        &self,
+        session: &SessionHandle,
+        preset: &str,
+    ) -> Result<Option<String>, PortError> {
+        self.service
+            .record_preset(&session.id, preset)
+            .map(|meta| meta.and_then(|meta| meta.preset().map(str::to_owned)))
+            .map_err(port_error)
+    }
 }
 
 /// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,
@@ -330,6 +347,7 @@ impl SubagentStore for SessionSubagents {
             origin,
             delegation_depth: options.delegation_depth.map(u64::from),
             team_id: options.team_id,
+            preset: options.preset,
             id: options.id,
         };
         self.service.store().create(options).map_err(port_error)
@@ -733,6 +751,35 @@ pub(crate) mod tests {
             message.fields["message"]["source"],
             json!({ "kind": "goal" })
         );
+    }
+
+    /// Inventory A96: the port reads the record's preset and records one only when the session has none.
+    #[test]
+    fn the_session_port_reads_a_recorded_preset_and_records_one_only_when_there_is_none() {
+        let (sessions, _sessions_dir) = sessions_at("preset");
+        let handle = sessions.store().create(CreateOptions::default()).unwrap();
+        let port = Sessions::new(Arc::clone(&sessions));
+        assert_eq!(port.recorded_preset(&handle), None);
+        assert_eq!(
+            port.record_preset(&handle, "standard").unwrap().as_deref(),
+            Some("standard")
+        );
+        assert_eq!(
+            port.record_preset(&handle, "reader").unwrap().as_deref(),
+            Some("standard"),
+            "a session keeps the preset it recorded"
+        );
+        assert_eq!(port.recorded_preset(&handle).as_deref(), Some("standard"));
+        assert_eq!(port.count(&handle), 1, "the record is not the log");
+
+        // A child created through the subagent store carries the preset it is given.
+        let child = SessionSubagents::new(Arc::clone(&sessions))
+            .create(CreateSession {
+                preset: Some("reader".into()),
+                ..CreateSession::default()
+            })
+            .unwrap();
+        assert_eq!(port.recorded_preset(&child).as_deref(), Some("reader"));
     }
 
     #[test]

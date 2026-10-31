@@ -410,6 +410,7 @@ impl SessionPort for SessionView {
                     model: options.model,
                     reasoning_effort: None,
                     title: Some(options.title),
+                    preset: None,
                 },
             )
             .map(handle_of)
@@ -430,6 +431,7 @@ impl SessionPort for SessionView {
                     endpoint: options.endpoint,
                     model: options.model,
                     reasoning_effort: None,
+                    preset: None,
                 },
             )
             .map_err(port_error)?;
@@ -1086,6 +1088,33 @@ impl Component for TurnsComponent {
     }
 }
 
+/// `src/plugins/presets.ts`: the agent preset registry (inventory A96, DSH's dsh-agent-preset-registry).
+///
+/// Optional, like the live-turn registry: the turn and the server read it when the profile loads the row, and a
+/// profile without it runs every session with every tool and its own system prompt. The roster is validated when
+/// the row starts (`heddle_config::preset_roster`), so a duplicate id or a default nothing declares fails the row,
+/// and the run, at startup instead of at someone's first turn. The row's config reaches the roster as the loader
+/// hands it over: nothing fills in defaults, so a preset that names no `tools` keeps every tool.
+pub struct PresetsComponent;
+
+impl Component for PresetsComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // The roster's own sentences already name the row (`presets: …`).
+        let roster =
+            heddle_config::preset_roster(Some(config)).map_err(|error| error.to_string())?;
+        services.provide("presets", Arc::new(roster));
+        Ok(())
+    }
+}
+
 /// One shape to another through their shared serialization: the crates each declare the TypeScript
 /// message and request types, so a value crosses a crate boundary by its JSON.
 fn bridge<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, String> {
@@ -1559,6 +1588,70 @@ impl Component for ScheduleComponent {
             services.provide("schedule-listener", Arc::new((scope, listener)));
         }
         services.provide("schedule", plugin);
+        Ok(())
+    }
+}
+
+/// `src/plugins/jobs.ts`: background jobs — the registry, the three job tools, background `bash`, the completion
+/// notices, and the page's routes, which `heddle web` mounts.
+pub struct JobsComponent;
+
+impl Component for JobsComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "jobs")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-jobs composes its own row: the registry, the tools in the runtime's registry, background bash on
+        // the registry's sandbox, and the notices.
+        let plugin = heddle_jobs::start_row(heddle_jobs::JobsRow {
+            config,
+            sessions,
+            runtime,
+            async_runtime: Some(crate::runtime::tokio().handle().clone()),
+            warn: None,
+        })?;
+        // The session's own events: busy and idle without a live-turn registry, and a person's message resetting
+        // the wake count.
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("jobs");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    if let (Some(session), Some(event)) = (
+                        payload.get("session").and_then(Value::as_str),
+                        payload.get("event"),
+                    ) {
+                        forward.on_session_event(session, event);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("jobs-listener", Arc::new((scope, listener)));
+        }
+        // DSH's `tool:jobs` prompt section on every request that offers the job tools, through the model service's
+        // `model/request` hook; dropped with the boot's services, which removes the hook.
+        if let Some(model) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            services.provide(
+                "jobs-prompt-section",
+                Arc::new(heddle_jobs::attach_prompt_section(&model)),
+            );
+        }
+        // Dropped with the boot's services, so disposing the boot stops every live job (`ctx.effect` teardown).
+        services.provide(
+            "jobs-teardown",
+            Arc::new(heddle_jobs::JobsTeardown(Arc::clone(&plugin))),
+        );
+        services.provide("jobs", plugin);
         Ok(())
     }
 }

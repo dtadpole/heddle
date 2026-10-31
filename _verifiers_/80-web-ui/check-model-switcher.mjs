@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The model selector, judged in a browser against DSH's measured control.
@@ -132,6 +132,7 @@ async function plainDouble(content) {
       body += chunk
     })
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       requests.push({ url: request.url ?? '', body })
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' })
@@ -181,6 +182,7 @@ async function toolThenPlainDouble(content) {
       body += chunk
     })
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       requests.push({ url: request.url ?? '', body, at: Date.now() })
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' })
