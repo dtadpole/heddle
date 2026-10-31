@@ -49,7 +49,9 @@ use crate::surface::{
     index_by_seq, is_surface_eligible,
 };
 use crate::title::SessionTitles;
-use crate::transcript::{TranscriptFormat, decode_transcript, encode_frame};
+use crate::transcript::{
+    LogHeader, TranscriptFormat, decode_transcript, encode_frame, judge_log_header,
+};
 
 /// The transcript file name inside an **old-layout** session directory, current format.
 pub const TRANSCRIPT_NAME: &str = "session.v2.jsonl.zstd";
@@ -341,6 +343,53 @@ pub struct SessionStore {
     meta_lock: Mutex<()>,
     /// The automatic titles of this store's sessions ([`crate::title`]); idle until a model is attached.
     titles: Arc<SessionTitles>,
+    /// Each log's first-record verdict ([`SessionStore::log_readable`]), keyed by path and valid while the file's size
+    /// and modification time are the ones it was judged at: `list()` asks it of every session on every call, so a log is
+    /// re-read only after it changed, and a skipped log is reported once per change rather than once per listing.
+    headers: Mutex<HashMap<String, HeaderVerdict>>,
+    /// Where a skipped log is reported ([`skipped_log_line`]); standard error unless [`SessionStore::set_warn`] names a
+    /// collector.
+    warn: Mutex<Option<Warn>>,
+}
+
+/// Receives the line naming a log the store leaves out.
+pub type Warn = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// One log's first-record verdict, and the file state it was judged at.
+struct HeaderVerdict {
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    verdict: LogHeader,
+}
+
+/// The line the store prints when it leaves a session out because its log cannot be read, the same line the
+/// TypeScript store prints (`skippedLogLine`). DSH omits such a session silently; heddle names the file, because the
+/// file is the one thing a person has to find (#130).
+pub fn skipped_log_line(path: &str, reason: &str) -> String {
+    format!("heddle session: skipped unreadable log {path}: {reason}")
+}
+
+/// Judge a log file by its first record ([`judge_log_header`]), reading only as far as that record ends. A file that
+/// cannot be opened or read is judged as the load reads it, an empty session: the store's rule for a log not written
+/// yet, and the reason a session whose log is missing entirely is still listed and still openable. The workspace tree
+/// asks it too, of the log a session definition names.
+pub fn read_log_header(path: &str) -> LogHeader {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return LogHeader::Readable;
+    };
+    let mut head = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let Ok(read) = file.read(&mut chunk) else {
+            return LogHeader::Readable;
+        };
+        head.extend_from_slice(&chunk[..read]);
+        match judge_log_header(&head, read == 0) {
+            LogHeader::Incomplete => continue,
+            verdict => return verdict,
+        }
+    }
 }
 
 /// One session's fold: its events, and whether its transcript is stored as frames.
@@ -400,11 +449,12 @@ fn entries_sorted(dir: &Path) -> Vec<String> {
 }
 
 /// Add one parsed metadata file to a listing, first occurrence winning. A file that is not metadata is
-/// skipped rather than failing the list.
+/// skipped rather than failing the list, and so is a session whose log `readable` refuses.
 fn remember_meta(
     text: Result<String, std::io::Error>,
     metas: &mut Vec<SessionMeta>,
     seen: &mut Vec<String>,
+    readable: impl Fn(&str) -> bool,
 ) {
     let Ok(text) = text else {
         return;
@@ -416,7 +466,7 @@ fn remember_meta(
         return;
     };
     let id = meta.id().to_string();
-    if seen.contains(&id) {
+    if seen.contains(&id) || !readable(&id) {
         return;
     }
     seen.push(id);
@@ -433,6 +483,8 @@ impl SessionStore {
             state: Mutex::new(StoreState::default()),
             meta_lock: Mutex::new(()),
             titles: Arc::new(SessionTitles::default()),
+            headers: Mutex::new(HashMap::new()),
+            warn: Mutex::new(None),
         }
     }
 
@@ -444,12 +496,81 @@ impl SessionStore {
             state: Mutex::new(StoreState::default()),
             meta_lock: Mutex::new(()),
             titles: Arc::new(SessionTitles::default()),
+            headers: Mutex::new(HashMap::new()),
+            warn: Mutex::new(None),
         }
     }
 
     /// The absolute root every session is filed under.
     pub fn root(&self) -> &str {
         &self.root
+    }
+
+    /// Send the line naming a skipped log ([`skipped_log_line`]) to `warn` instead of standard error.
+    pub fn set_warn(&self, warn: Warn) {
+        *self.warn.lock().unwrap_or_else(PoisonError::into_inner) = Some(warn);
+    }
+
+    /// Whether a session's log can be read at all, judged by its first record ([`read_log_header`]), and reported once
+    /// when it cannot (`logReadable` in `src/session/store.ts`).
+    ///
+    /// DSH's discovery rule (dsh-session-persistence-jsonl README, "Reading the logs": "Unreadable or unsupported
+    /// headers, including corrupt Zstandard header frames, are omitted from discovery and `list()`"; `listArtifacts`,
+    /// lib/index.js:3102-3138). Measured before (#130): a log holding 64 random bytes, or the line `{"not":"zstd"}`, was
+    /// listed while `GET /api/sessions/<id>` answered 404, and nothing named the file.
+    fn log_readable(&self, path: &str) -> bool {
+        let Ok(stat) = std::fs::metadata(path) else {
+            self.headers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(path);
+            return true;
+        };
+        let (size, modified) = (stat.len(), stat.modified().ok());
+        let verdict = {
+            let mut headers = self.headers.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(known) = headers.get(path)
+                && known.size == size
+                && known.modified == modified
+            {
+                return known.verdict == LogHeader::Readable;
+            }
+            let verdict = read_log_header(path);
+            headers.insert(
+                path.to_string(),
+                HeaderVerdict {
+                    size,
+                    modified,
+                    verdict: verdict.clone(),
+                },
+            );
+            verdict
+        };
+        if let LogHeader::Unreadable(reason) = verdict {
+            let line = skipped_log_line(path, reason);
+            let warn = self
+                .warn
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            match warn {
+                Some(warn) => warn(&line),
+                None => eprintln!("{line}"),
+            }
+            return false;
+        }
+        true
+    }
+
+    /// The log of the session whose metadata is in `dir`: `<id>.v2.jsonl.zstd` beside it, else the directory's own
+    /// transcript — the path [`SessionStore::open`] hands out, so the listing and an open judge the same file.
+    fn transcript_for(dir: &str, id: &str) -> String {
+        let candidate = Path::new(dir).join(log_name(id));
+        if candidate.exists() {
+            candidate.to_string_lossy().into_owned()
+        } else {
+            transcript_in(dir)
+        }
     }
 
     /// The automatic-title coordinator every service over this store shares ([`crate::title`]).
@@ -859,17 +980,19 @@ impl SessionStore {
     }
 
     /// Open an existing session by id, in whichever layout it was written in.
+    ///
+    /// A session whose log cannot be read opens as no session, the answer `list()` gives by leaving it out: direct
+    /// access is refused (DSH: "Direct access to a corrupt compressed header still rejects"), and the routes answer it
+    /// as an unknown id, `404 no session <id>` — the answer this build already gave, now from the store (#130).
     pub fn open(&self, id: &str) -> Option<SessionHandle> {
         let meta = self.meta_file(id)?;
         let dir = Path::new(&meta)
             .parent()
             .map(|parent| parent.to_string_lossy().into_owned())?;
-        let candidate = Path::new(&dir).join(log_name(id));
-        let transcript = if candidate.exists() {
-            candidate.to_string_lossy().into_owned()
-        } else {
-            transcript_in(&dir)
-        };
+        let transcript = Self::transcript_for(&dir, id);
+        if !self.log_readable(&transcript) {
+            return None;
+        }
         Some(SessionHandle {
             id: id.to_string(),
             dir,
@@ -901,7 +1024,8 @@ impl SessionStore {
     }
 
     /// Every session, newest `created` first, from both layouts, none twice. A file that is not
-    /// metadata is skipped rather than failing the list. Directory entries are visited in byte order,
+    /// metadata is skipped rather than failing the list, and so is a session whose log cannot be read
+    /// ([`SessionStore::log_readable`], which names it once). Directory entries are visited in byte order,
     /// as Node's `readdirSync` returns them.
     pub fn list(&self) -> Vec<SessionMeta> {
         let mut metas: Vec<SessionMeta> = Vec::new();
@@ -909,11 +1033,14 @@ impl SessionStore {
 
         for name in entries_sorted(Path::new(&self.root)) {
             let at = Path::new(&self.root).join(&name);
+            let dir = at.to_string_lossy().into_owned();
+            let readable = |id: &str| self.log_readable(&Self::transcript_for(&dir, id));
             if name.starts_with("session-") {
                 remember_meta(
                     std::fs::read_to_string(at.join("meta.json")),
                     &mut metas,
                     &mut seen,
+                    readable,
                 );
                 continue;
             }
@@ -925,6 +1052,7 @@ impl SessionStore {
                     std::fs::read_to_string(at.join(&entry)),
                     &mut metas,
                     &mut seen,
+                    readable,
                 );
             }
         }

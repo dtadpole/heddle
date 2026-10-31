@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
@@ -72,7 +73,7 @@ async function startServer(label, options = {}) {
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double', '--session-root', join(home, 'sessions')],
-    { env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config } },
+    { env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config, HEDDLE_WEB_BROWSER: options.browserFlag ?? '' } },
   )
   return { home, work, double, config, ...child, close: async () => {
     child.kill()
@@ -419,5 +420,101 @@ test('the composer fills the panel and does not run off the screen', async (cont
   } finally {
     browser.close()
     await server.close()
+  }
+})
+
+test('the page is served under a strict script policy that allows its own inline scripts and nothing injected', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The page-level Content-Security-Policy (defence in depth behind the sanitizer, live issues developer-two-6 and -7),
+   * approved by the coordinator as option (1). Both builds compute it from the page as served: 'self' and the sha256
+   * of each inline script for scripts; https: for images, styles, fonts and media only because the HTML preview's
+   * srcdoc frame inherits the policy (issue #50).
+   */
+  const server = await startServer('csp')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const page = await fetch(server.url, { headers: { cookie } })
+    assert.equal(page.status, 200)
+    const html = await page.text()
+    const policy = page.headers.get('content-security-policy')
+    assert.notEqual(policy, null, 'the page carries a Content-Security-Policy')
+    const { createHash } = await import('node:crypto')
+    const scripts = [...html.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1] ?? '')
+    const expected = [
+      "default-src 'self'",
+      ["script-src 'self'", ...scripts.map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)].join(' '),
+      "style-src 'self' 'unsafe-inline' https:",
+      "img-src 'self' data: blob: https:",
+      "font-src 'self' data: https:",
+      "media-src 'self' https:",
+      "frame-src 'self'",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+    ].join('; ')
+    assert.equal(policy, expected, 'the approved policy, with the hash of each inline script the served page carries')
+
+    await browser.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: "window.__csp = []; document.addEventListener('securitypolicyviolation', (event) => window.__csp.push(event.violatedDirective + ' ' + (event.blockedURI || 'inline')))",
+    })
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the page runs under the policy')
+    assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'and loading it breaks no directive')
+
+    /**
+     * developer-eleven's request: the policy must hold while the page is used, not only while it loads, so a later page
+     * change that adds an inline script, a handler or an eval fails here instead of being blocked silently. A turn
+     * streams, then a markdown file and an HTML preview open from the tree.
+     */
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'notes.md'), '# Notes\n\nSome *text*, a list:\n\n- one\n- two\n\n```js\nconst a = 1\n```\n')
+    writeFileSync(join(server.work, 'page.html'), '<!doctype html><html><head><style>h1 { color: teal }</style></head><body><h1>Preview</h1><p>static</p></body></html>')
+    await fetch(new URL('/api/workspaces', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: server.work }) })
+    await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'say something'; field.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('send').click() })()`)
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("live content")', 20_000), 'a turn streams under the policy')
+    /** Read before the reload: the listener installed on every new document starts its list again. */
+    assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'and the turn breaks no directive')
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 15_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => { const row = document.querySelector('#tree .row'); if (row.closest('li').dataset.open === 'false') row.click(); return true })()`)
+    const fileRow = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((row) => (row.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    assert.ok(await browser.waitFor(`${fileRow('notes.md')} !== undefined && ${fileRow('page.html')} !== undefined`, 15_000), "the workspace's files are drawn")
+    await browser.evaluate(`${fileRow('notes.md')}.click()`)
+    /** textContent, not innerText: the document's heading is drawn in capitals, and innerText reads what is drawn. */
+    assert.ok(await browser.waitFor('document.getElementById("file-body")?.textContent.includes("Notes")', 15_000), 'a markdown file opens')
+    await browser.evaluate(`${fileRow('page.html')}.click()`)
+    assert.ok(await browser.waitFor('document.getElementById("html-view") !== null && !document.getElementById("html-view").hidden && (document.getElementById("html-view").srcdoc ?? "").includes("Preview")', 15_000), 'and an HTML preview')
+    assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'a turn, a file and a preview break no directive')
+    await browser.evaluate(`(() => { const element = document.createElement('script'); element.textContent = 'window.__injected = true'; document.body.append(element) })()`)
+    await browser.waitFor('Array.isArray(window.__csp) && window.__csp.length > 0', 5_000)
+    assert.equal(await browser.evaluate('window.__injected === true'), false, 'a script injected into the page does not run')
+    assert.match(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp)')).join('\n'), /script-src/, 'script-src refuses it')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+
+test('D-068 page framing allowance is opt-in and changes no script directive', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  let strict = null
+  for (const flag of ['', 'true', '1']) {
+    const server = await startServer('csp-frame-' + (flag || 'default'), { browserFlag: flag })
+    try {
+      const cookie = await cookieFor(server.url)
+      const response = await fetch(server.url, { headers: { cookie }, signal: AbortSignal.timeout(5000) })
+      assert.equal(response.status, 200)
+      const policy = response.headers.get('content-security-policy')
+      assert.ok(policy !== null)
+      if (flag === '') strict = policy
+      if (flag === '1') assert.equal(policy, strict.replace("frame-src 'self'", 'frame-src http: https:'))
+      else assert.equal(policy, strict)
+      assert.ok(policy.includes("object-src 'none'") && policy.includes("frame-ancestors 'none'"))
+    } finally { await server.close() }
   }
 })
