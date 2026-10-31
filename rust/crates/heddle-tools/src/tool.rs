@@ -47,6 +47,10 @@ pub mod codes {
     pub const SANDBOX_UNAVAILABLE: &str = "SANDBOX_UNAVAILABLE";
     /// The tool itself failed.
     pub const TOOL_FAILED: &str = "TOOL_FAILED";
+    /// A file a tool was asked to read does not exist (DSH's `FS_NOT_FOUND`).
+    pub const FS_NOT_FOUND: &str = "FS_NOT_FOUND";
+    /// A path a tool was asked to read is not a regular file, such as a directory (DSH's `FS_NOT_REGULAR_FILE`).
+    pub const FS_NOT_REGULAR_FILE: &str = "FS_NOT_REGULAR_FILE";
     /// A command exceeded its wall time and was killed.
     pub const TIMEOUT: &str = "TIMEOUT";
     /// A command exited non-zero.

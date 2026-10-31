@@ -50,6 +50,9 @@ pub mod title;
 pub mod transcript;
 pub mod unicode61;
 
+/// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
+pub mod title_text;
+
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,

@@ -21,6 +21,7 @@ import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
 import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame } from './transcript.ts'
+import { normalizeSessionTitle } from './title-text.ts'
 
 /**
  * The session store.
@@ -807,6 +808,8 @@ export class SessionStore {
     const dir = join(this.root, workspaceKey(cwd))
     mkdirSync(dir, { recursive: true })
     const handle: SessionHandle = { id, dir, transcript: join(dir, logName(id)), meta: join(dir, metaName(id)) }
+    /** A title is cleaned as DSH cleans an accepted one (`./title-text.ts`); one with nothing visible left is not written. */
+    const title = options.title === undefined ? '' : normalizeSessionTitle(options.title)
     writeFileSync(
       handle.meta,
       `${JSON.stringify(
@@ -817,7 +820,7 @@ export class SessionStore {
           ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
           ...(options.model !== undefined ? { model: options.model } : {}),
           ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-          ...(options.title !== undefined ? { title: options.title } : {}),
+          ...(title.length > 0 ? { title } : {}),
           ...(options.parentSession !== undefined ? { parentSession: options.parentSession } : {}),
           ...(options.origin !== undefined ? { origin: options.origin } : {}),
           ...(options.delegationDepth !== undefined ? { delegationDepth: options.delegationDepth } : {}),
@@ -839,11 +842,16 @@ export class SessionStore {
    * The **meta file** is a record, not the log: `session.jsonl` stays append-only and untouched, so a
    * rename cannot rewrite anything a run recorded. Only the title a person reads is replaced, and the
    * empty string clears it rather than leaving a blank name behind.
+   *
+   * The title is **cleaned as DSH cleans an accepted one** first (`./title-text.ts`, `dsh-session-title`
+   * `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80 UTF-8 bytes.
+   * Measured before: every title was kept as sent, a right-to-left override and an ANSI sequence included. A title
+   * with nothing visible left clears, as a blank one does; refusing it is the route's answer, as in DSH.
    */
   rename(id: SessionId, title: string): SessionMeta | null {
     const current = this.list().find((meta) => meta.id === id)
     if (current === undefined) return null
-    const trimmed = title.trim()
+    const trimmed = normalizeSessionTitle(title)
     const next: SessionMeta = {
       ...current,
       ...(trimmed.length > 0 ? { title: trimmed } : {}),
