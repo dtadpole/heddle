@@ -1005,7 +1005,8 @@ impl Component for GoalComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::goal_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1084,6 +1085,31 @@ impl Component for TurnsComponent {
 
     fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
         services.provide("turns", heddle_agent::TurnRegistry::new());
+        Ok(())
+    }
+}
+
+/// `src/plugins/locale.ts`: the interface language a person chose (issue #80). The settings API lists the row as
+/// namespace `locale` and validates `preference` against its schema (`en` or `zh`); a server reads the choice as
+/// [`heddle_config::LocalePreference`].
+pub struct LocaleComponent;
+
+impl Component for LocaleComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        heddle_config::locale_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let preference =
+            heddle_config::locale_preference(Some(config)).map_err(|error| error.to_string())?;
+        services.provide(
+            "locale",
+            Arc::new(heddle_config::LocalePreference(preference)),
+        );
         Ok(())
     }
 }
@@ -1182,7 +1208,8 @@ impl Component for ContextComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::context_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1361,7 +1388,8 @@ impl Component for SubagentToolComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::subagent_tool_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1507,7 +1535,8 @@ impl Component for TeamComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::team_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1552,7 +1581,8 @@ impl Component for ScheduleComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::schedule_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1588,6 +1618,71 @@ impl Component for ScheduleComponent {
             services.provide("schedule-listener", Arc::new((scope, listener)));
         }
         services.provide("schedule", plugin);
+        Ok(())
+    }
+}
+
+/// `src/plugins/jobs.ts`: background jobs — the registry, the three job tools, background `bash`, the completion
+/// notices, and the page's routes, which `heddle web` mounts.
+pub struct JobsComponent;
+
+impl Component for JobsComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::jobs_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "jobs")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-jobs composes its own row: the registry, the tools in the runtime's registry, background bash on
+        // the registry's sandbox, and the notices.
+        let plugin = heddle_jobs::start_row(heddle_jobs::JobsRow {
+            config,
+            sessions,
+            runtime,
+            async_runtime: Some(crate::runtime::tokio().handle().clone()),
+            warn: None,
+        })?;
+        // The session's own events: busy and idle without a live-turn registry, and a person's message resetting
+        // the wake count.
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("jobs");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    if let (Some(session), Some(event)) = (
+                        payload.get("session").and_then(Value::as_str),
+                        payload.get("event"),
+                    ) {
+                        forward.on_session_event(session, event);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("jobs-listener", Arc::new((scope, listener)));
+        }
+        // DSH's `tool:jobs` prompt section on every request that offers the job tools, through the model service's
+        // `model/request` hook; dropped with the boot's services, which removes the hook.
+        if let Some(model) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            services.provide(
+                "jobs-prompt-section",
+                Arc::new(heddle_jobs::attach_prompt_section(&model)),
+            );
+        }
+        // Dropped with the boot's services, so disposing the boot stops every live job (`ctx.effect` teardown).
+        services.provide(
+            "jobs-teardown",
+            Arc::new(heddle_jobs::JobsTeardown(Arc::clone(&plugin))),
+        );
+        services.provide("jobs", plugin);
         Ok(())
     }
 }

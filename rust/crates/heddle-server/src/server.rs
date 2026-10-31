@@ -47,7 +47,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
-use axum::http::{Method, StatusCode, header::HOST};
+use axum::http::{HeaderMap, Method, StatusCode, header, header::HOST};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
@@ -533,6 +533,9 @@ pub struct WebServer {
     heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl WebServer {
     /// `http://<host>:<port>/?token=<token>`.
     pub fn url(&self) -> &str {
@@ -584,6 +587,16 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        // A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each
+        // running command's process group is ended and its call is recorded as interrupted before the process
+        // goes (live-testing issue #6; DSH cancels its agents at teardown, dsh-bash-local graceMs 3000).
+        let runs = self.state.runs().clone();
+        if runs.abort_all() > 0 {
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+            while runs.any_running() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
@@ -757,7 +770,8 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
     if path == "/" && method == Method::GET {
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
-            return respond::html(StatusCode::OK, page::page());
+            let lang = page_language(&state, request.headers());
+            return respond::html(StatusCode::OK, page::with_language(page::page(), lang));
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
@@ -866,8 +880,25 @@ async fn healthz(State(state): State<AppState>) -> Response {
     healthz_body(state.port())
 }
 
-async fn page_route() -> Response {
-    respond::html(StatusCode::OK, page::page())
+async fn page_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    respond::html(
+        StatusCode::OK,
+        page::with_language(page::page(), page_language(&state, &headers)),
+    )
+}
+
+/// The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one
+/// the browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`.
+fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let locale = state
+        .harness()
+        .locale
+        .unwrap_or_default()
+        .for_request(accept);
+    heddle_config::document_language(locale)
 }
 
 async fn events_route(State(state): State<AppState>) -> Response {
@@ -1836,7 +1867,20 @@ fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
     }))
 }
 
+/// A turn asked for during the shutdown grace: the running turns were already stopped, so one started now would run a
+/// command nothing ends before the process goes (developer-nine's follow-up to issue #6).
+fn closing_refusal() -> Response {
+    respond::error_with_code(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the server is shutting down",
+        "server/closing",
+    )
+}
+
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
+    if state.runs().is_closing() {
+        return closing_refusal();
+    }
     // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
     let Some(prompt) = body
         .str("prompt")
@@ -1881,8 +1925,26 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
+    // A turn for a session that does not exist is the client's mistake, answered the way DSH answers it
+    // (`session/not-found`, dsh-api-session-controller) and the way the other session routes do (`404`,
+    // `no session <id>`), with the same shape as web.ts. It used to reach the resume and come back as a
+    // `400` naming the session root on disk (DSH parity R-developer-seven-2). A string that is not a
+    // session id names no session either, and is not echoed back or used as a path.
+    if let Some(resume) = resume {
+        let well_formed = SessionId::parse(resume).is_some();
+        if !well_formed || !sessions.exists(resume) {
+            let message = if well_formed {
+                format!("no session {resume}")
+            } else {
+                "no session with that id".to_owned()
+            };
+            return respond::error_with_code(StatusCode::NOT_FOUND, message, "session/not-found");
+        }
+    }
     let folder = body.non_empty("folder").map(canonical_path);
-    let title: String = prompt.chars().take(60).collect();
+    // A session this route opens is born untitled, as DSH's is (#68): its first message writes the fallback name and
+    // the session layer's title coordinator asks the model for the title (heddle_session::title). A title given here
+    // would read as a person's name, and no title would ever be generated.
     // A one-shot subagent's session takes no turn from here, refused before the session is opened so the child's log
     // gets nothing (web.ts asks `subagentTurnRefusal` at the same point).
     if let Some(resume) = resume {
@@ -1918,7 +1980,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             folder,
             OpenAt {
                 fresh: body.bool("new") == Some(true),
-                title: Some(title),
+                title: None,
                 selection: born.clone(),
                 preset: born_preset.clone(),
             },
@@ -1927,7 +1989,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         sessions.start(StartSession {
             resume: None,
             cwd: Some(state.harness().cwd.clone()),
-            title: Some(title),
+            title: None,
             selection: born.clone(),
             preset: born_preset.clone(),
         })
@@ -1995,6 +2057,11 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         sessions.record_preset(&session, named);
     }
 
+    // Checked again here: the shutdown may have begun while the session was opened. A turn that slips past this
+    // starts stopped (`RunRegistry::begin`).
+    if state.runs().is_closing() {
+        return closing_refusal();
+    }
     let guard = state.runs().begin(&session);
     let cancel = guard.cancellation();
     let request = crate::services::TurnRequest {
@@ -3505,6 +3572,99 @@ mod tests {
         assert!(body_text(&bytes).contains("event: done"));
     }
 
+    /// A runner that writes what the agent loop writes first into a real store: the prompt as the user message.
+    struct RecordingTurns(heddle_session::SessionService);
+
+    impl TurnRunner for RecordingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let service = self.0.clone();
+            Box::pin(async move {
+                let handle = service
+                    .open(&request.session)
+                    .expect("the session the route opened");
+                service
+                    .user(&handle, &request.prompt, None)
+                    .expect("the user message");
+                Ok(TurnOutcome::default())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_the_turn_route_opens_is_born_untitled_so_its_first_prompt_names_it() {
+        // #68: DSH writes no title when a session is created. dsh-session-title writes the fallback from the first
+        // eligible human message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session
+        // with no title yet (:387). The turn route opened its session titled with the prompt's first sixty characters,
+        // so the first message wrote no fallback and the title coordinator asked nothing (heddle_session::title).
+        use crate::adapters::StoreSessions;
+        const PROMPT: &str = "Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.";
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-turn-route-title-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(scratch.join("ws")).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let inner = heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        );
+        let harness = Harness::new(
+            Arc::new(StoreSessions::new(inner.clone())),
+            Arc::new(Models),
+            Arc::new(RecordingTurns(inner.clone())),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-route-title")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let fallback = heddle_session::title_from(PROMPT);
+        let cut: String = PROMPT.chars().take(60).collect();
+        for body in [
+            json!({"prompt": PROMPT, "folder": scratch.join("ws"), "new": true}),
+            json!({"prompt": PROMPT}),
+        ] {
+            let before: Vec<String> = inner
+                .list()
+                .iter()
+                .map(|meta| meta.id().to_owned())
+                .collect();
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+            let made: Vec<Option<String>> = inner
+                .list()
+                .iter()
+                .filter(|meta| !before.iter().any(|id| id == meta.id()))
+                .map(|meta| meta.title().map(str::to_owned))
+                .collect();
+            assert_eq!(made.len(), 1, "{body}: the turn opened one new session");
+            assert_eq!(
+                made[0].as_deref(),
+                Some(fallback.as_str()),
+                "{body}: the first message wrote the fallback, cut at a word, which a generated title may replace"
+            );
+            assert_ne!(made[0].as_deref(), Some(cut.as_str()), "{body}");
+        }
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     /// A runner that counts the turns it is asked to run.
     struct CountingTurns(Arc<std::sync::atomic::AtomicUsize>);
 
@@ -3523,8 +3683,10 @@ mod tests {
         // DSH parity C23 (R-developer-eight-26): dsh-api-session-controller refuses a prompt into a subagent's child
         // with `session/agent-busy` (`lib/index.js:128-142`); phase A measured `/api/turn` answering 200 and running it.
         // A teammate is a continuable child and still takes the turn.
-        let child = "session-one-shot-child";
-        let mate = "session-continuable-teammate";
+        // Well-formed session ids: /api/turn answers an id that is not one with `session/not-found` before it
+        // looks for a subagent (R-developer-seven-2), so the refusal under test needs ids a store could hold.
+        let child = "session-33333333-3333-3333-3333-333333333333";
+        let mate = "session-44444444-4444-4444-4444-444444444444";
         let meta = |id: &str, rest: Value| SessionMeta {
             id: id.into(),
             cwd: Some("/work".into()),
@@ -3595,6 +3757,65 @@ mod tests {
             subagent_turn_refusal(Some(&meta("session-plain", json!({})))),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_turn_for_an_unknown_session_is_session_not_found_and_a_held_one_continues() {
+        // DSH answers a session it does not hold with `session/not-found`; web.ts and this route answer
+        // `404 {"error": "no session <id>", "code": "session/not-found"}`. Before, this route reached the
+        // resume and answered `400` naming the session root on disk, and web.ts a `500` (R-developer-seven-2).
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::clone(&hub),
+            text: "hello".into(),
+        });
+        let (router, _) = app_with_runner("turn-unknown-session", runner);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let unknown = "session-22222222-2222-2222-2222-222222222222";
+        let body = serde_json::json!({"prompt": "hi", "session": unknown});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!("{{\"error\":\"no session {unknown}\",\"code\":\"session/not-found\"}}\n")
+        );
+
+        for raw in ["session-does-not-exist", "../../etc/passwd"] {
+            let body = serde_json::json!({"prompt": "hi", "session": raw});
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{raw}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                "{\"error\":\"no session with that id\",\"code\":\"session/not-found\"}\n",
+                "{raw} is not echoed back"
+            );
+        }
+
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, r#"{"prompt":"first"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let (_, _, listed) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        let listed: Value = serde_json::from_str(&body_text(&listed)).expect("the list is JSON");
+        let held = listed[0]["id"]
+            .as_str()
+            .expect("the first turn made a session")
+            .to_owned();
+        let body = serde_json::json!({"prompt": "again", "session": held});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a held session continues: {}",
+            body_text(&bytes)
+        );
+        assert!(body_text(&bytes).contains("event: done"));
     }
 
     #[tokio::test]

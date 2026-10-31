@@ -1,8 +1,8 @@
 ---
 title: The heddle-sandbox crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T13:14:11Z
-version: 0.7.1
+modified: 2026-10-31T02:21:29Z
+version: 0.7.2
 description: The Rust port crate for the permission modes, their enforcement backends, escalation and approvals — its public API, the recorded approval fixture and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
@@ -40,6 +40,7 @@ heddle-sandbox` renders it. Everything below is re-exported at the crate root.
 | `classify_outcome`, `SandboxOutcome`, `shell_denial_message`, `runner_failure_message` | the `bash` tool | `classifyOutcome`, the bash tool's sentences |
 | `SandboxBackend` trait, `ConfinedArgv`, `select_backend`, `seatbelt::*`, `linux::*` | the service; tests inject doubles | `backend.ts`, `seatbelt.ts`, `linux.ts` |
 | `kill_process_group(leader)` (refuses 0 and 1; a gone group is success) | the `bash` tool on Stop and on its wall time, for a command started with `process_group(0)` | `killProcessGroup` in `process-group.ts` |
+| `signal_process_group(leader, signal)` (Unix; the same refusals) | `heddle-jobs` on a job kill: `SIGTERM`, then `SIGKILL` after 3000 ms | `killProcessGroup(leader, signal)` |
 | `validate_escalation_args`, `approve_escalation`, `EscalationRequest`, `EscalationRefusal` (code `ESCALATION_REFUSED`), `EscalationApproval`, `ESCALATION_TARGETS`, `wider_modes` | the tool registry's one gate | `escalation.ts` |
 | `permission_transition`, `FULL_ACCESS_CONFIRMATION`, `ModeChange`, `TransitionRefusal` | `POST /api/sessions/<id>/permission` | `permissionTransition` |
 | `ApprovalService::{new, check, attach_answerer, can_answer, pending_requests, subscribe, request, answer, history}`, `ApprovalRequest` (JSON `{id, tool, reason, displayReason, session?, at}`), `Answer`, `ApprovalOutcome`, `is_approval_id` | the registry (`check`, `request`); the server (`attach_answerer`, `subscribe` for the SSE `approval` event, `GET /api/approvals`, `POST /api/approvals/<id>`) | `ApprovalService` |
