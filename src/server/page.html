@@ -3476,7 +3476,7 @@
     belongs in viewport coordinates (it opens upward from a chip at the bottom), and the gate is a modal asked
     once, before the one transition that removes the file boundary.
   -->
-  <div id="access-menu" role="menu" aria-label="the access mode this session runs under" hidden></div>
+  <div id="access-menu" role="menu" aria-label="the access mode this session runs under" data-i18n-aria-label="access.menu" hidden></div>
   <div id="access-dialog" role="dialog" aria-modal="true" aria-label="Enable Full access?" data-i18n-aria-label="access.confirmTitle" hidden>
     <div class="card">
       <div class="head">
@@ -3747,6 +3747,13 @@ const MESSAGES = Object.freeze({
     'dialog.deleteHeir': 'Its sessions will appear under “{heir}”.',
     'dialog.renameSession': 'Rename session',
     'dialog.sessionName': 'Session name',
+    'tree.actionsFor': 'actions for {name}',
+    'tree.newSessionIn': 'New session in {name}',
+    'tree.renameConversation': 'Rename conversation…',
+    'tree.renameConversationPrompt': 'Rename this conversation',
+    'access.menu': 'the access mode this session runs under',
+    'tree.sessionNew': 'New session',
+    'tree.untitled': 'Untitled',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3856,6 +3863,13 @@ const MESSAGES = Object.freeze({
     'dialog.deleteHeir': '其会话将显示在“{heir}”下。',
     'dialog.renameSession': '重命名会话',
     'dialog.sessionName': '会话名称',
+    'tree.actionsFor': '“{name}”的操作',
+    'tree.newSessionIn': '在“{name}”中新建会话',
+    'tree.renameConversation': '重命名对话…',
+    'tree.renameConversationPrompt': '重命名此对话',
+    'access.menu': '此会话运行的访问模式',
+    'tree.sessionNew': '新会话',
+    'tree.untitled': '未命名',
   }),
 })
 
@@ -11518,10 +11532,10 @@ function menuItemsFor(node) {
     })
     if (node.session) {
       items.push({
-        label: 'Rename conversation…',
+        label: t('tree.renameConversation'),
         glyph: 'rename',
         run: async () => {
-          const title = window.prompt('Rename this conversation', node.session.title ?? '')
+          const title = window.prompt(t('tree.renameConversationPrompt'), node.session.title ?? '')
           if (title === null) return
           const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
             method: 'POST',
@@ -12539,7 +12553,7 @@ function menuButton(node, items, options = {}) {
   button.className = 'untwisty'
   button.textContent = '…'
   /** The name of the control, which is DSH's `More actions` where the menu is the session's own. */
-  const name = options.label ?? 'actions for ' + node.label
+  const name = options.label ?? t('tree.actionsFor', { name: node.label })
   button.title = name
   button.setAttribute('aria-label', name)
   button.setAttribute('aria-haspopup', 'true')
@@ -13215,7 +13229,7 @@ function sessionLabel(meta) {
   if (typeof meta.title === 'string' && meta.title.trim().length > 0) return meta.title
   const definition = definitionOf.get(meta.id)
   if (definition !== undefined) return WorkspaceTree.basename(definition)
-  return (meta.turns ?? 0) === 0 ? 'New session' : 'Untitled'
+  return (meta.turns ?? 0) === 0 ? t('tree.sessionNew') : t('tree.untitled')
 }
 
 /** One session as a tree node, in the shape `nodeRow` and the session actions already read. */
@@ -13610,10 +13624,10 @@ function nodeRow(node, depth = 0) {
   if (node.kind === 'session' && node.session) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
-    quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
+    quick.append(quickButton(node.archived ? t('tree.unarchive') : t('tree.archive'), 'archive', () => archiveSession(node)))
     /** An archived row offers no pin, for the same reason the menu does not: pinning it would be refused. */
     if (!node.archived) {
-      const pinButton = quickButton(node.pinned ? 'Unpin session' : 'Pin session', node.pinned ? 'pin-fill' : 'pin', () => pinSession(node))
+      const pinButton = quickButton(node.pinned ? t('tree.unpin') : t('tree.pin'), node.pinned ? 'pin-fill' : 'pin', () => pinSession(node))
       pinButton.classList.add('pin-action')
       quick.append(pinButton)
     }
@@ -13628,7 +13642,7 @@ function nodeRow(node, depth = 0) {
   if (node.kind === 'workspace') {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
-    quick.append(quickButton(`New session in ${node.label}`, 'plus', () => startSessionAt(node)))
+    quick.append(quickButton(t('tree.newSessionIn', { name: node.label }), 'plus', () => startSessionAt(node)))
     quick.dataset.slot = 'after-menu'
     rowTools.append(quick)
   }
