@@ -138,28 +138,29 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * start a conversation in the workspace the reader is looking at.
      */
     /**
-     * The **empty state** — DSH's home, which this panel did not have: its centre carries the mark, a heading and the
-     * chord rather than a column headed "No session". With no conversation open (this fixture has a workspace and no
-     * sessions), the invitation is shown and the conversation's own column is put away under it.
+     * The **first visit** — DSH's `restoreSelection` with nothing saved starts a fresh New session in the most recently
+     * active workspace (dsh-client-ui-workspace lib/client.js:1620-1627; heddle since #17), so this fixture, a workspace
+     * and no sessions, opens on that blank rather than on an empty panel. The panel shows the blank's conversation, not
+     * the "Start a conversation" invitation (which is for a panel with nothing open, judged by the page's unit suite), and
+     * the header carries no title while the session is blank, as DSH's does (#24).
      */
+    assert.ok(
+      await browser.waitFor(`document.getElementById('session-title')?.hidden === true`, 20_000),
+      'a first visit opens a fresh New session, whose header shows no title',
+    )
     const empty = JSON.parse(
       await browser.evaluate(`(() => {
         const section = document.getElementById('empty-state')
-        const heading = section.querySelector('h3')
         return JSON.stringify({
           shown: !section.hidden && getComputedStyle(section).display !== 'none',
-          heading: heading === null ? null : heading.textContent.trim(),
-          hint: section.querySelector('p')?.textContent.replace(/\\s+/g, ' ').trim() ?? '',
           logHidden: document.getElementById('log').hidden,
           title: document.getElementById('session-title').textContent.trim()
         })
       })()`),
     )
-    assert.equal(empty.shown, true, 'a panel with no conversation shows the invitation')
-    assert.equal(empty.heading, 'Start a conversation', 'with a heading that says what to do')
-    assert.match(empty.hint, /⌥⌘N/, 'and the chord that does it')
-    assert.equal(empty.title, 'No session', 'the header still says there is no session')
-    assert.equal(empty.logHidden, true, 'while the conversation\'s own column is put away')
+    assert.equal(empty.shown, false, 'the invitation is not shown over the open New session')
+    assert.equal(empty.title, '', 'the header names no session while it is blank')
+    assert.equal(empty.logHidden, false, 'and the conversation\'s own column is the panel')
 
     /** The seeded workspace has to be drawn before the action has a target; the tree is a fetch of its own. */
     assert.ok(
