@@ -1715,8 +1715,14 @@
    * **two spans** — the model in the secondary text colour and the reasoning effort in a dimmer caption tone that
    * shrinks first (`flex-shrink: 1000`). The two tiers the owner asked for live in its menu: a root pane with a
    * `Model` row and an `Effort` row, each drilling into its own list; the model list is grouped by endpoint.
+   *
+   * The seat is a **flex box** so its trigger can be narrower than the model's name. A button sizes itself to its
+   * content, and the name does not wrap, so in a plain box the trigger kept the name's width when the row ran short and
+   * was drawn under the send button at phone width (#117). As a flex item with `min-width: 0` it shrinks with the seat,
+   * and the label ellipsizes. DSH swaps the name for a model icon when its row cannot fit (`data-model-compact`); this
+   * page has no model icon, so it shortens the name instead.
    */
-  #model-seat { position: relative; margin-left: auto; min-width: 0; }
+  #model-seat { position: relative; display: flex; margin-left: auto; min-width: 0; }
   #model-trigger {
     display: inline-flex; align-items: center; gap: 4px; min-width: 0;
     max-width: min(360px, 45cqw); height: 28px; padding: 0 4px 0 8px;
@@ -2011,7 +2017,12 @@
     font-variant-numeric: tabular-nums;
   }
   #composer-status[hidden] { display: none; }
-  #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  /**
+   * A pill may shrink below its text (`min-width: 0`, at most the line's width), and its label then ellipsizes: DSH's
+   * anchor and pill rules. Without them a line wider than its column was centred past both edges and its first words
+   * were cut off with nothing to scroll to (#117).
+   */
+  #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
   #composer-status .stat-icon { flex: none; width: 16px; height: 16px; }
   #composer-status .stat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #composer-status .stat-sep { margin: 0 6px; color: inherit; }
