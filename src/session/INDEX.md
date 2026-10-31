@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.3.0
+version: 1.4.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -59,6 +59,15 @@ grow with the square of the session's length, and it is also what made decompres
 it now happens once per session per process. The trade is stated in the code rather than hidden: a
 second process appending to the same session while this one holds it open would not be seen, and
 heddle runs one process per session.
+
+**A turn its writer never finished is closed when the session is next opened for writing**
+([`repair.ts`](repair.ts), issue #5). A server restarted while `bash` ran used to leave the log at the call:
+no result, no answer record, no turn end, and the view drew the call as running for good. As DSH does on
+attach for writing, the first process to take the session's writer lock appends the closers before anything
+else: an `error (INTERRUPTED)` result for each open call, then `assistant/completed` and `turn/completed`
+with `reason: { kind: 'interrupted' }`. A session no live writer holds reads with the same closers added and
+nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
+restart. A turn running in this process holds the lock already and is never closed.
 
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns
