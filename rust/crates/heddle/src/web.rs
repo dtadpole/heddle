@@ -196,6 +196,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
             .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
+        browser: invocation.env.get("HEDDLE_WEB_BROWSER") == Some("1"),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
         notes,
         shutdown: shutdown.clone(),
@@ -949,6 +950,27 @@ impl ServerSandbox for Sandbox {
         heddle_sandbox::permission_transition(current, requested, confirm)
             .map(|change| change.mode.to_string())
             .map_err(|refusal| refusal.reason().to_owned())
+    }
+
+    /// `rootFor`, the folder a session's calls (and its page terminals, #85) run in.
+    fn root_for(&self, folder: Option<&std::path::Path>) -> std::path::PathBuf {
+        self.service.root_for(folder)
+    }
+
+    /// A page terminal is wrapped as a bash call is: the same backend and policy, rooted at the session's folder.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &std::path::Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let mode = heddle_sandbox::SandboxMode::parse(mode)
+            .ok_or_else(|| format!("'{mode}' is not a sandbox mode"))?;
+        self.service
+            .rooted_at(root)
+            .confine(argv, mode)
+            .map(|confined| confined.argv)
+            .map_err(|error| error.to_string())
     }
 }
 

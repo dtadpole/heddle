@@ -35,6 +35,7 @@ use serde::Serialize;
 
 use heddle_session::SessionMeta;
 use heddle_session::definition::{SessionDefinitionFields, read_session_definition};
+use heddle_session::{LogHeader, read_log_header};
 
 use crate::collate::compare_names;
 use crate::error::WorkspaceError;
@@ -420,6 +421,20 @@ impl Context {
     }
 }
 
+/// Whether a definition names a log the store refuses: one on this machine whose first record cannot be read
+/// (`refusedLog` in `src/session/tree.ts`).
+///
+/// The store leaves such a session out of `list()` and opens it as no session ([`heddle_session::SessionStore::open`],
+/// DSH's rule that an unreadable header is "omitted from discovery and `list()`"), so its definition row would open on
+/// nothing: measured on #130, the row stayed in the tree after the store dropped the session, and a click got `404`.
+/// Only a definition the store does not list is asked, and only a log that is there and unreadable hides its row: a
+/// missing log, as on a clone of the repository on another machine, still draws the row as before.
+fn refused_log(log: Option<&str>) -> bool {
+    log.is_some_and(|log| {
+        !log.is_empty() && matches!(read_log_header(log), LogHeader::Unreadable(_))
+    })
+}
+
 /// The session a `_sessions_` instance stands for: the definition names it, and the store fills in the
 /// facts a row shows.
 fn session_of(dir: &str, context: &Context) -> Option<TreeSession> {
@@ -502,6 +517,8 @@ struct Flagged {
     pinned: bool,
     pinned_at: Option<String>,
     updated: Option<String>,
+    /// The definition names a log the store refuses ([`refused_log`]).
+    refused: bool,
     archived: bool,
 }
 
@@ -542,6 +559,10 @@ fn children_of(dir: &str, kind: NodeKind, context: &Context, listing: Vec<Entry>
                     let meta = definition
                         .as_ref()
                         .and_then(|definition| context.by_id.get(definition.id()));
+                    let refused = meta.is_none()
+                        && definition
+                            .as_ref()
+                            .is_some_and(|definition| refused_log(definition.log()));
                     // The flags come from the store and nowhere else.
                     Flagged {
                         name: entry.name,
@@ -551,8 +572,10 @@ fn children_of(dir: &str, kind: NodeKind, context: &Context, listing: Vec<Entry>
                         pinned_at: meta.and_then(|meta| meta.pinned_at().map(str::to_string)),
                         updated: meta.and_then(|meta| meta.updated().map(str::to_string)),
                         archived: meta.map(SessionMeta::archived).unwrap_or(false),
+                        refused,
                     }
                 })
+                .filter(|one| !one.refused)
                 .filter(|one| match context.archived {
                     ArchivedFilter::Show => true,
                     ArchivedFilter::Only => one.archived,
