@@ -21,7 +21,12 @@ grounded_in:
 - [`check-stream.mjs`](check-stream.mjs) — the live event stream against DSH's `$events` stream: it opens with
   `{ type: 'ready', clientId, host: { home } }` after its listeners are attached, so a baseline read on `ready`
   misses no increment; an idle stream gets a heartbeat every interval and a peer that stops reading is cut after
-  two (DSH parity phase B, developer-ten).
+  two; a reconnect is given every frame it missed after its cursor (`Last-Event-ID` or `?cursor=`) and a cursor
+  from another start gets `reset`; the page shows it is reconnecting while the server is down and, once back,
+  draws a session made meanwhile without a reload; renames, workspace edits and settled approvals are pushed to
+  every stream, numbered, and a page redraws a rename and a new workspace made elsewhere without a reload; an
+  approval answered on one page closes on every page; a failed turn reaches every client and the log, and the
+  transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,

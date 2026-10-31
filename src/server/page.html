@@ -2086,6 +2086,18 @@
   }
   #composer-status[hidden] { display: none; }
   /**
+   * The connection's state while the live stream is down: DSH shows a connecting state while its Connection retries;
+   * this pill is that state, over everything, until the stream is open again (phase B item 3).
+   */
+  #connection-state {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%); z-index: 1000;
+    display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border-radius: 999px;
+    background: var(--surface-2, #2a2a2a); color: var(--text-2, #ddd); font-size: 12px; line-height: 20px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  #connection-state[hidden] { display: none; }
+  #connection-state::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #e0a43a; }
+  /**
    * A pill may shrink below its text (`min-width: 0`, at most the line's width), and its label then ellipsizes: DSH's
    * anchor and pill rules. Without them a line wider than its column was centred past both edges and its first words
    * were cut off with nothing to scroll to (#117).
@@ -3055,6 +3067,7 @@
 -->
 <div id="gutter-left" role="separator" aria-orientation="vertical" aria-label="resize the sidebar" aria-valuemin="12" aria-valuemax="48" aria-valuenow="22" tabindex="0"></div>
 <main>
+  <div id="connection-state" role="status" aria-live="polite" hidden>Reconnecting to heddle…</div>
   <!--
     The session's own header, above its tabs — DSH prints the conversation's name there, and this view showed it
     only in the sidebar, so the reader had to look away from the conversation to know which one it was.
@@ -6281,9 +6294,23 @@ async function showSession(id) {
   void refreshScheduleCatalog()
 }
 
+/**
+ * The stream's running marks, ordered (developer-ten's review of #122): each mark from a `model/request` takes the
+ * next tick, remembered per session. A sessions read issued before a mark cannot end that turn: its answer predates
+ * the turn's start, so dropping the mark would settle live rows and flip Stop back to Send in the middle of a turn.
+ */
+let runningTick = 0
+const runningMarkedAt = new Map()
+function markRunning(id) {
+  runningSessions.add(id)
+  runningMarkedAt.set(id, ++runningTick)
+}
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
+  /** The newest running mark this read can know about; a mark after it outranks the read's silence. */
+  const readTick = runningTick
   const response = await fetch('/api/sessions')
   if (!response.ok) return
   const sessions = await response.json()
@@ -6301,10 +6328,13 @@ async function refreshSessions() {
       live.set(String(entry.id ?? ''), entry)
     }
     let changed = false
+    /** Sessions this read found no longer running: their end was never seen on the stream. */
+    const ended = []
     for (const id of [...runningSessions]) {
-      if (!live.has(id)) {
+      if (!live.has(id) && (runningMarkedAt.get(id) ?? 0) <= readTick) {
         runningSessions.delete(id)
         runningSince.delete(id)
+        ended.push(id)
         changed = true
       }
     }
@@ -6339,6 +6369,23 @@ async function refreshSessions() {
       paintRunningMarks()
       refreshRunningStatus()
     }
+    /**
+     * A turn whose end this page never saw ends here, as the `turn/completed` handler would end it (#122): the open
+     * chat settles, the composer offers Send again, and a message queued behind that turn is sent. Measured before
+     * (issue #122, J17b): after a server restart the stream's `reset` re-read the sessions and cleared the running mark,
+     * but the queued message stayed in the page until a reload dropped it. The pump refuses to run twice, so a
+     * message is never sent twice; the same path also ends a turn missed by a reload mid-turn or a failed turn.
+     */
+    for (const id of ended) {
+      if (id === current) {
+        settleChat()
+        void renderSettledAnswers()
+      }
+      // Every session that holds a queue is pumped, not only the composer's: a page keeps one queue per session, and
+      // a message queued in a session the person has since left must not stay stranded (developer-ten, developer-twelve).
+      if (queues.has(id)) void pumpQueue(id)
+    }
+    if (ended.length > 0) renderComposerState()
   }
   /**
    * The newest session is selected when nothing is yet.
@@ -6365,7 +6412,155 @@ async function refreshSessions() {
  * Motion turns on after the reader's first input in the sidebar — the reference's own guard, so a page that is loading does
  * not animate its first draw. Captured, so a helper restoring focus does not count as a second arming.
  */
-const events = new EventSource('/api/events')
+/**
+ * The live stream, kept open the way DSH's Connection keeps its `$events` stream open.
+ *
+ * A browser's own EventSource retry is fixed, shows nothing, and gives up for good on any answer that is not a
+ * stream (a relay's 502 while the server restarts), so the page owns the connection instead:
+ * - every frame's id is remembered, and a reconnect presents it as `?cursor=`, so the server replays what was
+ *   written while the stream was down (or answers `reset`, and the page re-reads its baselines);
+ * - a failure closes the source and retries on DSH's schedule, capped jittered exponential backoff from 500 ms
+ *   to 10 s, with `#connection-state` shown and `body[data-connection]` set to `connecting` until `ready`;
+ * - two heartbeat intervals of silence count as a failure, so a stream a relay dropped without closing is noticed.
+ * Listeners are registered once, on this object, and re-attached to every source it opens.
+ */
+const events = (() => {
+  const handlers = new Map()
+  const banner = document.getElementById('connection-state')
+  let source = null
+  let lastEventId = ''
+  let attempt = 0
+  let heartbeatMs = 2000
+  let retryTimer = 0
+  let silenceTimer = 0
+  function setState(state) {
+    document.body.dataset.connection = state
+    banner.hidden = state !== 'connecting'
+  }
+  function heard() {
+    clearTimeout(silenceTimer)
+    silenceTimer = setTimeout(() => fail(), heartbeatMs * 2 + 500)
+  }
+  function deliver(name, message) {
+    if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
+    heard()
+    for (const handler of handlers.get(name) ?? []) {
+      try {
+        handler(message)
+      } catch (error) {
+        console.error(error)
+      }
+    }
+  }
+  function attach(es, name) {
+    es.addEventListener(name, (message) => {
+      if (source === es) deliver(name, message)
+    })
+  }
+  function connect() {
+    clearTimeout(retryTimer)
+    const es = new EventSource(lastEventId.length > 0 ? '/api/events?cursor=' + encodeURIComponent(lastEventId) : '/api/events')
+    source = es
+    /** A connection that never says `ready` is as dead as one that went quiet. */
+    heard()
+    es.addEventListener('ready', (message) => {
+      if (source !== es) return
+      try {
+        const data = JSON.parse(message.data)
+        if (Number.isFinite(data.heartbeatMs) && data.heartbeatMs > 0) heartbeatMs = data.heartbeatMs
+        /** Not resumed: nothing will be replayed, so the newest id is where the next reconnect starts. */
+        if (data.resumed !== true && typeof data.cursor === 'string') lastEventId = data.cursor
+      } catch {
+        // a ready frame without data still opens the stream
+      }
+      attempt = 0
+      setState('open')
+      deliver('ready', message)
+    })
+    es.addEventListener('heartbeat', () => {
+      if (source === es) heard()
+    })
+    for (const name of handlers.keys()) if (name !== 'ready') attach(es, name)
+    es.onerror = () => {
+      if (source === es) fail()
+    }
+  }
+  function fail() {
+    clearTimeout(silenceTimer)
+    if (source !== null) source.close()
+    source = null
+    setState('connecting')
+    clearTimeout(retryTimer)
+    const cap = Math.min(10_000, 500 * 2 ** attempt)
+    attempt = Math.min(attempt + 1, 10)
+    retryTimer = setTimeout(connect, cap / 2 + Math.random() * (cap / 2))
+  }
+  connect()
+  return {
+    addEventListener(name, handler) {
+      if (!handlers.has(name)) {
+        handlers.set(name, [])
+        if (source !== null && name !== 'ready') attach(source, name)
+      }
+      handlers.get(name).push(handler)
+    },
+  }
+})()
+/**
+ * A reset means the server could not replay what this page missed — it restarted, or the page was away too long —
+ * so everything the stream would have told it is read again: the list and its running marks, the tree, the open
+ * session's transcript and any waiting question (DSH's owners re-read their baselines on `connection/reset`).
+ */
+/* turn-failure:begin */
+/**
+ * A failed turn is drawn once per page, whichever way it arrives first: the turn's own `event: error` (the page
+ * that started it) or the recorded `turn/failed` on the stream (every page). The same session and message within
+ * a few seconds is the same failure.
+ */
+const TurnFailure = {
+  WINDOW_MS: 5000,
+  isRepeat(last, session, message, now) {
+    return last !== null && last.session === session && last.message === message && now - last.at < this.WINDOW_MS
+  },
+  text(message) {
+    return typeof message === 'string' && message.length > 0 ? message : 'the turn failed'
+  },
+}
+/* turn-failure:end */
+let lastTurnFailure = null
+function drawTurnFailure(session, message) {
+  const now = performance.now()
+  const text = TurnFailure.text(message)
+  if (TurnFailure.isRepeat(lastTurnFailure, session, text, now)) return
+  lastTurnFailure = { session, message: text, at: now }
+  add('denied', text)
+}
+/**
+ * Changes that never reach a session's log, pushed by the server (phase B item 4): an added, renamed or removed
+ * workspace, and a renamed session. The tree is read again on the same debounce the log events use, and a rename of
+ * the open session retitles its header, so a second page follows the first without reading the list on its own.
+ */
+events.addEventListener('workspace', () => scheduleTreeRefresh())
+events.addEventListener('sessions', (message) => {
+  scheduleTreeRefresh()
+  try {
+    const data = JSON.parse(message.data)
+    if (data.type === 'session/renamed' && data.session === current && typeof data.title === 'string' && data.title.length > 0) {
+      const titleCell = document.getElementById('session-title')
+      if (titleCell !== null) titleCell.textContent = data.title
+    }
+  } catch {
+    // a frame that is not JSON changes nothing but the tree
+  }
+})
+events.addEventListener('reset', () => {
+  void (async () => {
+    await refreshSessions()
+    await renderTree()
+    if (current !== null) await showSession(current)
+    await refreshApprovals()
+  })()
+})
 /**
  * The list is redrawn shortly after activity, once per burst.
  *
@@ -6402,7 +6597,7 @@ events.addEventListener('session', (message) => {
      * stale start left by a missed end event.
      */
     const wasRunning = runningSessions.has(payload.session)
-    runningSessions.add(payload.session)
+    markRunning(payload.session)
     if (!wasRunning || !runningSince.has(payload.session)) {
       const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
       runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
@@ -6426,6 +6621,22 @@ events.addEventListener('session', (message) => {
       liveRounds += 1
       updateStatusBar()
     }
+  }
+  else if (event.type === 'turn/failed') {
+    /**
+     * A turn that failed, recorded by the server (R-developer-six-2): it ends here for every page, not only the
+     * one that started it, and the panel showing the session says why.
+     */
+    runningSessions.delete(payload.session)
+    runningSince.delete(payload.session)
+    paintRunningMarks()
+    scheduleTreeRefresh()
+    if (current === null || payload.session === current) {
+      drawTurnFailure(payload.session, event.message)
+      settleChat()
+    }
+    if (payload.session === composerKey) void pumpQueue()
+    renderComposerState()
   }
   else if (event.type === 'turn/completed') {
     runningSessions.delete(payload.session)
@@ -7742,7 +7953,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       } else if (name === 'error') {
         stopButton.disabled = false
         hideApproval()
-        add('denied', payload.message)
+        drawTurnFailure(payload.session, payload.message)
         /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
         if (typeof payload.session === 'string') {
           runningSessions.delete(payload.session)
@@ -14522,10 +14733,34 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
  */
 const approvalCard = document.getElementById('approval-card')
 let approvalPending = null
+/* approval-settle:begin */
+/**
+ * When the approval card closes without being pressed (phase B item 5), as plain rules so they are tested on their own
+ * (test/approval-settle.test.ts).
+ */
+const ApprovalSettle = {
+  /** A settled frame closes the card when it names the question the card shows. */
+  closesOn(pendingId, settled) {
+    return typeof pendingId === 'string' && pendingId.length > 0 && settled !== null && typeof settled === 'object' && settled.id === pendingId
+  },
+  /**
+   * A pending list closes the card when it no longer holds the card's question — but only a list asked for after the
+   * card was shown, so a push that raced the read is not undone.
+   */
+  staleAfterPoll(pendingId, shownAt, askedAt, requests) {
+    if (typeof pendingId !== 'string' || pendingId.length === 0) return false
+    if (!(askedAt > shownAt)) return false
+    return !(Array.isArray(requests) ? requests : []).some((entry) => entry !== null && typeof entry === 'object' && entry.id === pendingId)
+  },
+}
+/* approval-settle:end */
+/** When the card was last shown: a pending list read before that cannot speak for the question it shows. */
+let approvalShownAt = 0
 function showApproval(request) {
   if (request === null || typeof request !== 'object') return
   if (request.session !== undefined && current !== null && request.session !== current) return
   approvalPending = request
+  approvalShownAt = performance.now()
   approvalCard.dataset.id = typeof request.id === 'string' ? request.id : ''
   document.getElementById('approval-reason').textContent = request.displayReason ?? request.reason ?? ''
   approvalCard.hidden = false
@@ -14582,12 +14817,35 @@ events.addEventListener('approval', (message) => {
     // a frame that is not a question is not this card's business
   }
 })
+/**
+ * A question answered anywhere closes here too (phase B item 5).
+ *
+ * DSH ends an approval waterfall for every client once one answers; this page used to keep its card until it was
+ * pressed, and pressing it then got a 409. The server announces every accepted answer as `approval-settled`, and the
+ * card for that question goes. A question settled without an answer (a timeout, a Stop) is caught by the poll below.
+ */
+events.addEventListener('approval-settled', (message) => {
+  try {
+    const settled = JSON.parse(message.data)
+    if (ApprovalSettle.closesOn(approvalPending?.id, settled)) hideApproval()
+  } catch {
+    // a frame that is not JSON settles nothing
+  }
+})
 async function refreshApprovals() {
   try {
+    const askedAt = performance.now()
     const response = await fetch('/api/approvals')
     if (!response.ok) return
     const body = await response.json()
-    const request = (body.requests ?? []).find((entry) => entry.session === undefined || entry.session === current)
+    const requests = Array.isArray(body.requests) ? body.requests : []
+    /**
+     * The pending list is the authority on what is still waiting: a card whose question is no longer in it was
+     * settled elsewhere — answered on another page, timed out, or withdrawn by a Stop — and goes. Only a list read
+     * after the card was shown may close it, so a push that raced this read is not undone.
+     */
+    if (ApprovalSettle.staleAfterPoll(approvalPending?.id, approvalShownAt, askedAt, requests)) hideApproval()
+    const request = requests.find((entry) => entry.session === undefined || entry.session === current)
     if (request !== undefined) showApproval(request)
   } catch {
     // a page that cannot read pending questions still answers the next one it is shown
