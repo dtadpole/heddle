@@ -14595,6 +14595,64 @@ const WorkspaceDrag = (() => {
 })()
 /* workspace-drag:end */
 
+/* workspace-folder:begin */
+/**
+ * A workspace whose folder was deleted or moved (#141), as plain rules so test/workspace-missing-folder.test.ts loads them
+ * out of the page.
+ *
+ * DSH keeps such a workspace and names it by its id: its dialogs call `renameWorkspace(workspaceId, title)` and
+ * `deleteWorkspace(workspaceId)` (dsh-client-ui-workspace lib/client.js:3784, :3818, :5192-5197; workspace.delete,
+ * dsh-workspace lib/index.js:461-471). Its `status()` says `missing-dir` (lib/index.js:154-160), which
+ * `GET /api/workspaces` carries as each workspace's `status`, and its file tree draws a level whose directory is gone as
+ * one failed line in its own words (dsh-client-ui-sidebar-files lib/client.js:483-489, :564-569; en words at :770).
+ */
+const WorkspaceFolder = (() => {
+  /** DSH's code for a directory that is not there (dsh-api-workspace-files lib/index.js:568). */
+  const NOT_FOUND = 'workspace-file/not-found'
+  /** DSH's `error.notFound` (dsh-client-ui-sidebar-files lib/client.js:770). */
+  const GONE_LINE = 'That directory is gone. It may have been moved or deleted.'
+
+  /** Whether a drawn workspace group's folder is gone, by the list's `status`; a server that does not say is not read as gone. */
+  function gone(group) {
+    return group !== null && typeof group === 'object' && group.workspace !== null && typeof group.workspace === 'object' && group.workspace.status === 'missing-dir'
+  }
+
+  /**
+   * What Rename and Delete workspace put in `/api/workspaces/<key>`: the workspace's id — the one the server lists for
+   * the row's path, else the drawn row's own (another client may have removed it, #49) — and its path only when nothing
+   * names an id. A path is resolved through the file system, which a folder that is gone cannot be.
+   */
+  function routeKey(node, workspaces) {
+    const listed = (Array.isArray(workspaces) ? workspaces : []).find((workspace) => workspace !== null && typeof workspace === 'object' && workspace.path === node.path)
+    if (listed !== undefined && typeof listed.id === 'string' && listed.id.length > 0) return listed.id
+    const drawn = node.group?.workspace?.id
+    return typeof drawn === 'string' && drawn.length > 0 ? drawn : node.path
+  }
+
+  return { NOT_FOUND, GONE_LINE, gone, routeKey }
+})()
+/* workspace-folder:end */
+
+/**
+ * A workspace group whose folder is gone, opened: its child workspaces and sessions as usual, then its `Files` heading
+ * over the one line DSH draws for a directory that is not there — the shape of the failed line a folder the server may
+ * not read gets (`data-files-row="failed"`, with the code), never "nothing inside", and no tree read that could only fail.
+ */
+function paintGoneFolder(group, depth) {
+  const heading = document.createElement('li')
+  heading.className = 'tree-heading'
+  heading.setAttribute('role', 'none')
+  heading.style.setProperty('--tree-depth', String(depth + 1))
+  heading.textContent = 'Files'
+  const line = document.createElement('div')
+  line.className = 'empty'
+  line.dataset.filesRow = 'failed'
+  line.dataset.filesCode = WorkspaceFolder.NOT_FOUND
+  line.textContent = WorkspaceFolder.GONE_LINE
+  group.append(heading, line)
+  markSelection()
+}
+
 /** The workspace being dragged, with the level it may land at; null while no workspace drag is under way. */
 let workspaceDragging = null
 
@@ -15742,6 +15800,8 @@ async function loadChildren(node, li) {
     paintSessionRows(group, node.group, depth + 1)
     let files = []
     if (node.kind === 'workspace') {
+      /** Its folder was deleted or moved (#141): said in DSH's words under the Files heading, without a read. */
+      if (WorkspaceFolder.gone(node.group)) return paintGoneFolder(group, depth)
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
         if (!response.ok) throw new Error('the tree answered ' + response.status)
@@ -17196,6 +17256,8 @@ async function openRenameWorkspace(node) {
   const workspaces = await currentWorkspaces()
   const own = workspaces.find((workspace) => workspace.path === node.path)
   renameTarget = {
+    /** By id, as DSH renames (#141): a path is resolved through the file system, which a folder that is gone cannot be. */
+    key: WorkspaceFolder.routeKey(node, workspaces),
     path: node.path,
     stored: own?.title ?? node.label,
     others: workspaces.filter((workspace) => workspace.path !== node.path && workspace.origin !== 'auto').map((workspace) => workspace.title),
@@ -17230,7 +17292,7 @@ async function confirmRename() {
   renameTarget.busy = true
   button.disabled = true
   try {
-    const response = await fetch('/api/workspaces/' + encodeURIComponent(renameTarget.path), {
+    const response = await fetch('/api/workspaces/' + encodeURIComponent(renameTarget.key), {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title }),
@@ -17293,7 +17355,8 @@ async function openDeleteWorkspace(node) {
     above = candidate.parent ?? null
   }
   const name = workspaceDisplayTitle(own?.title ?? node.label)
-  deleteTarget = { path: node.path, busy: false }
+  /** By id, as DSH's `deleteWorkspace(workspaceId)` (#141): a workspace whose folder is gone is still removed. */
+  deleteTarget = { key: WorkspaceFolder.routeKey(node, workspaces), path: node.path, busy: false }
   document.getElementById('workspace-delete-desc').textContent =
     `This removes “${name}” from the workspace list. The folder and session logs will be kept. ` +
     (heir === null ? 'Its sessions will appear under Ungrouped.' : `Its sessions will appear under “${workspaceDisplayTitle(heir.title)}”.`)
@@ -17310,7 +17373,7 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
   document.getElementById('workspace-delete-status').hidden = false
   dialogError('workspace-delete-error', '')
   try {
-    const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.path), { method: 'DELETE' })
+    const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.key), { method: 'DELETE' })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
       document.getElementById('workspace-delete-status').hidden = true

@@ -618,6 +618,112 @@ test('Rename and Delete on a workspace another client removed say so in words an
   }
 })
 
+test('a workspace whose folder was deleted says so when opened, and Rename and Delete reach it by its id (#141)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * GitHub issue #141: a workspace whose folder was deleted or moved stayed in the tree, opened as if its folder were
+   * empty, and the dialogs named it by its folder's path, which the routes resolve through the file system. DSH's
+   * dialogs name a workspace by its id (dsh-client-ui-workspace lib/client.js:3784, :3818, :5192-5197, workspace.delete
+   * in dsh-workspace lib/index.js:461-471), its status() is missing-dir for such a folder (lib/index.js:154-160), and
+   * its file tree draws a level whose directory is gone as one failed line, "That directory is gone. It may have been
+   * moved or deleted." (dsh-client-ui-sidebar-files lib/client.js:483-489, :564-569, words at :770). The page draws that
+   * line under the group's Files heading, the shape of the failed line #106 brought, and keeps the group's session.
+   */
+  const place = fixtureDir('workspaces-gone-folder')
+  const server = await startServer('gone-folder', { home: place })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const row = (label) => `Array.from(document.querySelectorAll('#tree li[data-kind=workspace] > .row')).find((entry) => entry.querySelector('.label')?.textContent === ${JSON.stringify(label)})`
+  const groupOf = (label) => `${row(label)}?.closest('li')`
+  const type = (id, value) => `(() => { const input = document.getElementById(${JSON.stringify(id)}); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })) })()`
+  const menu = async (label, item) => {
+    await browser.evaluate(`${row(label)}.querySelector('[aria-haspopup]').click()`)
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')).find((entry) => entry.textContent.trim() === ${JSON.stringify(item)}).click()`)
+  }
+  const open = (label) => `(() => { const li = ${groupOf(label)}; if (li.dataset.open !== 'true') li.querySelector(':scope > .row').click() })()`
+  const level = (label) => `JSON.stringify((() => {
+    const li = ${groupOf(label)}
+    const group = li?.querySelector(':scope > ul')
+    if (!group) return null
+    const failed = group.querySelector(':scope > [data-files-row="failed"]')
+    return {
+      failed: failed === null ? null : { text: failed.textContent, code: failed.dataset.filesCode ?? null },
+      headings: Array.from(group.querySelectorAll(':scope > .tree-heading')).map((heading) => heading.textContent),
+      sessions: group.querySelectorAll(':scope > li[data-kind=session]').length,
+      empty: Array.from(group.querySelectorAll(':scope > .empty')).map((line) => line.textContent),
+    }
+  })())`
+  try {
+    for (const name of ['keep', 'gone']) mkdirSync(join(place, name), { recursive: true })
+    const real = realpathSync(place)
+    const cookie = await cookieFor(server.url)
+    const ids = {}
+    for (const name of ['keep', 'gone']) {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: join(place, name) }) })
+      assert.equal(added.status, 200, `registered ${name} (${JSON.stringify(added.body)})`)
+      ids[name] = added.body.record.id
+    }
+    const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'work in the folder that will go', folder: join(place, 'gone') }) })
+    assert.equal(turn.status, 200, `a turn made a session in the folder (${turn.status})`)
+    const session = ((await api(server.url, cookie, '/api/sessions')).body ?? []).find((meta) => meta.cwd === join(real, 'gone'))?.id
+    assert.ok(session !== undefined, 'the session is listed')
+    const { rmSync } = await import('node:fs')
+    rmSync(join(place, 'gone'), { recursive: true, force: true })
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`${row('keep')} !== undefined && ${row('gone')} !== undefined`, 10_000)
+    await browser.evaluate(`window.__unhandled = []; window.addEventListener('unhandledrejection', (event) => window.__unhandled.push(String(event.reason && event.reason.message ? event.reason.message : event.reason)))`)
+    await browser.evaluate(`window.__asked = []; (() => { const original = window.fetch.bind(window); window.fetch = (input, init) => { window.__asked.push([(init && init.method) || 'GET', typeof input === 'string' ? input : input.url]); return original(input, init) } })()`)
+
+    await browser.evaluate(open('gone'))
+    const failedLine = `${groupOf('gone')}?.querySelector(':scope > ul > [data-files-row="failed"]')`
+    assert.ok(await browser.waitFor(`${failedLine} != null`, 10_000), `the workspace whose folder is gone opens to a line that says so\nsaw: ${await browser.evaluate(level('gone'))}`)
+    const gone = JSON.parse(await browser.evaluate(level('gone')))
+    assert.deepEqual(gone.failed, { text: 'That directory is gone. It may have been moved or deleted.', code: 'workspace-file/not-found' }, "in DSH's words, with DSH's code")
+    assert.deepEqual(gone.headings, ['Files'], 'under its Files heading')
+    assert.equal(gone.sessions, 1, 'and its session is still drawn')
+    assert.deepEqual(gone.empty.filter((text) => text === 'nothing inside'), [], 'it is never "nothing inside"')
+    assert.doesNotMatch(await browser.evaluate(`document.getElementById('tree-note').textContent`), /could not read|not under any workspace root/, 'and the note does not call it unreadable or out of bounds')
+    await browser.evaluate(open('keep'))
+    await browser.waitFor(`${groupOf('keep')}?.querySelector(':scope > ul') != null`, 10_000)
+    await new Promise((done) => setTimeout(done, 300))
+    assert.equal(JSON.parse(await browser.evaluate(level('keep'))).failed, null, 'a workspace whose folder is there has no such line')
+
+    await menu('gone', 'Rename')
+    await browser.waitFor(`document.getElementById('workspace-rename').open`, 10_000)
+    await browser.evaluate(type('workspace-rename-input', 'Gone Renamed'))
+    await browser.evaluate(`document.getElementById('workspace-rename-confirm').click()`)
+    assert.ok(
+      await browser.waitFor(`!document.getElementById('workspace-rename').open && ${row('Gone Renamed')} !== undefined`, 10_000),
+      `Rename saves the new name and the tree draws it\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('workspace-rename-error').textContent)`)}`,
+    )
+    await menu('Gone Renamed', 'Delete workspace')
+    await browser.waitFor(`document.getElementById('workspace-delete').open`, 10_000)
+    await browser.evaluate(`document.getElementById('workspace-delete-confirm').click()`)
+    assert.ok(
+      await browser.waitFor(`!document.getElementById('workspace-delete').open && ${row('Gone Renamed')} === undefined`, 10_000),
+      `Delete workspace takes the row away\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('workspace-delete-error').textContent)`)}`,
+    )
+
+    const asked = JSON.parse(await browser.evaluate('JSON.stringify(window.__asked)'))
+    const byId = `/api/workspaces/${encodeURIComponent(ids.gone)}`
+    const writes = asked.filter(([method, url]) => (method === 'PATCH' || method === 'DELETE') && url.includes('/api/workspaces/'))
+    assert.deepEqual(writes.map(([method, url]) => [method, new URL(url, server.url).pathname]), [['PATCH', byId], ['DELETE', byId]], 'both dialogs named the workspace by its id, never by its folder')
+    const views = (await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []
+    assert.ok(!views.some((view) => view.id === ids.gone), 'the server no longer holds it')
+    assert.ok(views.some((view) => view.id === ids.keep), 'and still holds the other')
+    const sessions = (await api(server.url, cookie, '/api/sessions')).body
+    assert.ok(Array.isArray(sessions) && sessions.some((meta) => meta.id === session), 'the session of the gone folder is kept')
+    const unhandled = JSON.parse(await browser.evaluate('JSON.stringify(window.__unhandled)'))
+    assert.deepEqual(unhandled, [], 'no failure is left to the console')
+  } finally {
+    browser.close()
+    await server.close()
+    removeDir(place)
+  }
+})
+
 test('after Add workspace the next message starts its conversation in the new folder, not in the session that was open', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return

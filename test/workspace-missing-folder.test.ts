@@ -102,3 +102,40 @@ test("the tree route's question: a folder that is gone under a root is missing t
   assert.deepEqual(root && { path: root.path, owner: root.owner?.id }, { path: join(real, 'w'), owner: record.id }, "the root's own folder, gone, is missing and still the root's")
 })
 
+/** The page's half: the workspace dialogs ask by id, and a workspace group whose folder is gone says so in DSH's words. */
+const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
+const block = (name: string): string => {
+  const begin = page.indexOf(`/* ${name}:begin */`)
+  const end = page.indexOf(`/* ${name}:end */`)
+  assert.ok(begin !== -1 && end > begin, `page.html carries the ${name} block`)
+  return page.slice(begin, end)
+}
+
+interface WorkspaceFolderBlock {
+  NOT_FOUND: string
+  GONE_LINE: string
+  gone: (group: unknown) => boolean
+  routeKey: (node: { path: string; group?: { workspace?: { id?: string } | null } }, workspaces: { id: string; path: string }[]) => string
+}
+
+test("a workspace group whose folder is gone is told by the list's status, and its line is DSH's not-found sentence", () => {
+  const folder = new Function(`${block('workspace-folder')}\nreturn WorkspaceFolder`)() as WorkspaceFolderBlock
+  assert.equal(folder.NOT_FOUND, 'workspace-file/not-found', "DSH's code for a directory that is not there")
+  assert.equal(folder.GONE_LINE, 'That directory is gone. It may have been moved or deleted.', "and DSH's words for it (dsh-client-ui-sidebar-files lib/client.js:770)")
+  assert.equal(folder.gone({ workspace: { id: 'w', status: 'missing-dir' } }), true)
+  assert.equal(folder.gone({ workspace: { id: 'w', status: 'ok' } }), false)
+  assert.equal(folder.gone({ workspace: { id: 'w' } }), false, 'a server that does not say is not read as gone')
+  assert.equal(folder.gone({ workspace: null }), false, 'Ungrouped has no folder')
+  assert.equal(folder.gone(undefined), false)
+})
+
+test('Rename and Delete workspace name the workspace by its id, as DSH does, whatever became of its folder', () => {
+  const folder = new Function(`${block('workspace-folder')}\nreturn WorkspaceFolder`)() as WorkspaceFolderBlock
+  const workspaces = [
+    { id: 'w-1', path: '/work/one' },
+    { id: 'w-2', path: '/work/two' },
+  ]
+  assert.equal(folder.routeKey({ path: '/work/two' }, workspaces), 'w-2', 'the id the server lists for the row')
+  assert.equal(folder.routeKey({ path: '/work/gone', group: { workspace: { id: 'w-9' } } }, workspaces), 'w-9', 'the drawn row\'s own id when the list no longer has it (another client removed it, #49)')
+  assert.equal(folder.routeKey({ path: '/work/older' }, []), '/work/older', 'and the path only when nothing names an id')
+})
