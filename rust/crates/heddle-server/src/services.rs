@@ -152,6 +152,12 @@ pub enum ForkOutcome {
     Unavailable {
         code: String,
     },
+    /// Refused — an explicit `atSeq` names no event of the source. Answered `409` with DSH's sentence, which
+    /// cites the source's last seq (`none` for an empty log).
+    NoSuchEvent {
+        at_seq: u64,
+        last_seq: Option<u64>,
+    },
     Forked(CreatedSession),
 }
 
@@ -207,8 +213,8 @@ pub trait SessionService: Send + Sync {
         preset: Option<&str>,
     ) -> Result<CreatedSession, ServiceError>;
 
-    /// Fork a session at its last completed turn.
-    fn fork(&self, id: &str) -> ForkOutcome;
+    /// Fork a session at its last completed turn, or at `at_seq` (DSH's inclusive `atSeq`) when given.
+    fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome;
 
     /// Pin, unpin, archive or unarchive. `Ok(None)` is an unknown session; `Err` is a refusal answered
     /// `409` with its code (`archived` when the store gave none).
@@ -408,6 +414,20 @@ pub trait TurnRunner: Send + Sync {
         &self,
         request: TurnRequest,
     ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>>;
+
+    /// Whether the agent runtime has a turn in flight for `session` that this server did not start — a
+    /// subagent's, a teammate's, a settlement notice's (the TypeScript build's `ctx.get('turns').isRunning`).
+    /// The archive route asks it so a session doing work the page never started is still refused. A runner
+    /// without a live-turn registry knows of none.
+    fn is_live(&self, _session: &str) -> bool {
+        false
+    }
+
+    /// Stop every such turn of `session`; whether there was one (`turns.abort`). The stop-and-archive path
+    /// calls it for the session and each running subagent descendant.
+    fn interrupt(&self, _session: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -433,6 +453,34 @@ pub trait SandboxService: Send + Sync {
         requested: Option<&Value>,
         confirm: Option<&Value>,
     ) -> Result<String, String>;
+
+    /// The folder a session's calls run in (`rootFor`): the session's folder, or the configured root when the
+    /// operator named one or the session has none. A page terminal starts here (#85).
+    fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        match folder {
+            Some(folder) if !folder.as_os_str().is_empty() => folder.to_path_buf(),
+            _ => PathBuf::from(self.workspace_root()),
+        }
+    }
+
+    /// Wrap `argv` under `mode`, rooted at `root`, the way a bash call is wrapped (#85: a page terminal is
+    /// confined like bash). `Err` carries the sandbox's sentence when this host cannot confine the mode. The
+    /// default confines nothing, so it refuses every mode but `danger-full-access`: it fails closed.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let _ = root;
+        if mode == "danger-full-access" {
+            Ok(argv.to_vec())
+        } else {
+            Err(format!(
+                "sandbox mode \"{mode}\" is requested but this server's sandbox cannot confine a terminal; refusing to run it unconfined"
+            ))
+        }
+    }
 }
 
 /// How a person answered an approval question.
@@ -737,7 +785,7 @@ impl SessionService for UnavailableSessions {
     ) -> Result<CreatedSession, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
-    fn fork(&self, _id: &str) -> ForkOutcome {
+    fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
         ForkOutcome::NotFound
     }
     fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {

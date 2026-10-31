@@ -41,8 +41,10 @@ pub enum SessionError {
         source: std::io::Error,
     },
     /// A transcript line that does not parse: the load fails naming its position rather than skipping it.
-    /// `<transcript>:<line> is not valid JSON — <message>`
-    #[error("{path}:{line} is not valid JSON — {message}")]
+    /// `<transcript file name>:<line> is not valid JSON — <message>`. The log is named by its file name alone, as the
+    /// TypeScript store names it (`SessionLogUnreadableError`): the text reaches HTTP answers, and the absolute path put the
+    /// store root, home directory included, into a turn's `error` frame (#130). `path` keeps the whole path.
+    #[error("{}:{line} is not valid JSON — {message}", file_name(.path))]
     InvalidLine {
         path: String,
         line: usize,
@@ -115,6 +117,14 @@ pub enum SessionError {
     /// (`cannot write "<path>": …`, dsh-fs-local lib/index.js:495).
     #[error("cannot write to \"{folder}\": permission denied")]
     Unwritable { folder: String },
+}
+
+/// The last component of a path, or the path itself when it has none.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map_or_else(
+        || path.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// ` (process <pid>)` when the lock named its holder, nothing otherwise.
