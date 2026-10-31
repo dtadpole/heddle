@@ -272,5 +272,5 @@ export function renderSource(path: string, text: string): Rendered {
  */
 export async function renderSourceOffThread(path: string, text: string): Promise<Rendered> {
   if (rendererFor(path).renderer !== 'markdown') return renderSource(path, text)
-  return { renderer: 'markdown', html: `<div class="markdown">${await renderMarkdownOffThread(text, { base: dirname(path) })}</div>` }
+  return { renderer: 'markdown', html: `<div class="markdown">${await renderMarkdownOffThread(text, { base: dirname(path), remoteImages: true })}</div>` }
 }

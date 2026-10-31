@@ -374,10 +374,13 @@ const RECENT_DOCUMENTS = 32
 /** The role a worker is started with, so this module serves renders only in a worker it started itself. */
 const WORKER_ROLE = 'heddle-markdown-renderer'
 
+/** What {@link renderMarkdown} is told about a document, carried to the worker whole so the two cannot drift apart. */
+type RenderOptions = NonNullable<Parameters<typeof renderMarkdown>[1]>
+
 interface RenderJob {
   readonly id: number
   readonly source: string
-  readonly base?: string
+  readonly options: RenderOptions
 }
 
 /**
@@ -390,7 +393,7 @@ if (!isMainThread && parentPort !== null && (workerData as { role?: unknown } | 
   const port = parentPort
   port.on('message', (job: RenderJob) => {
     try {
-      port.postMessage({ id: job.id, html: renderMarkdown(job.source, job.base !== undefined ? { base: job.base } : {}) })
+      port.postMessage({ id: job.id, html: renderMarkdown(job.source, job.options) })
     } catch (error) {
       port.postMessage({ id: job.id, error: error instanceof Error ? error.message : String(error) })
     }
@@ -438,14 +441,14 @@ export class MarkdownWorker {
   }
 
   /** Render one document; resolves with its HTML, or with its text as a block when the budget ran out. Never rejects. */
-  render(source: string, options: { readonly base?: string } = {}): Promise<string> {
+  render(source: string, options: RenderOptions = {}): Promise<string> {
     const text = String(source ?? '')
     if (this.unavailable) return Promise.resolve(renderMarkdown(text, options))
-    const key = createHash('sha256').update(options.base ?? '').update('\u0000').update(text).digest('hex')
+    const key = createHash('sha256').update(JSON.stringify(options)).update('\u0000').update(text).digest('hex')
     const known = this.recent.get(key)
     if (known !== undefined) return known
     const answer = new Promise<string>((settle) => {
-      this.queue.push({ job: { id: this.nextId++, source: text, ...(options.base !== undefined ? { base: options.base } : {}) }, settle })
+      this.queue.push({ job: { id: this.nextId++, source: text, options: { ...options } }, settle })
       this.pump()
     })
     this.recent.set(key, answer)
@@ -545,7 +548,7 @@ export class MarkdownWorker {
   /** No worker can run here: render on this thread from now on, the old behaviour, rather than not at all. */
   private giveUp(): void {
     this.unavailable = true
-    for (const entry of this.queue.splice(0)) entry.settle(renderMarkdown(entry.job.source, entry.job.base !== undefined ? { base: entry.job.base } : {}))
+    for (const entry of this.queue.splice(0)) entry.settle(renderMarkdown(entry.job.source, entry.job.options))
   }
 }
 
@@ -558,7 +561,7 @@ let shared: MarkdownWorker | undefined
  * Same output as `renderMarkdown` for every document that renders within {@link MARKDOWN_RENDER_BUDGET_MS}; past it,
  * {@link markdownFallback}. The synchronous function stays for callers that are not serving anyone.
  */
-export function renderMarkdownOffThread(source: string, options: { readonly base?: string } = {}): Promise<string> {
+export function renderMarkdownOffThread(source: string, options: RenderOptions = {}): Promise<string> {
   shared ??= new MarkdownWorker()
   return shared.render(source, options)
 }

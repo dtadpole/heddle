@@ -98,3 +98,13 @@ test('a document the renderer cannot finish in its budget comes back as its own 
     await renderer.close()
   }
 })
+
+test('off the thread, a document renders exactly as on it: an answer, and a preview with its remote images', async () => {
+  /** Every option `renderMarkdown` takes travels to the worker, so a preview keeps its remote images and an answer does not. */
+  const { renderSource, renderSourceOffThread } = await import('../src/server/code.ts')
+  const text = '# notes\n\n![remote](https://example.com/a.png) ![local](pic.png) [link](README.md)\n\n- one\n- `two`\n'
+  assert.equal(await markdown.renderMarkdownOffThread(text), markdown.renderMarkdown(text), 'an answer')
+  const preview = await renderSourceOffThread('/tmp/docs/README.md', text)
+  assert.deepEqual(preview, renderSource('/tmp/docs/README.md', text), 'a previewed document')
+  assert.match(String(preview.html), /https:\/\/example\.com\/a\.png/, 'whose remote image is kept as written')
+})
