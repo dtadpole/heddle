@@ -64,6 +64,12 @@ export interface WorkspaceStoreShape {
   /** Workspace ids in the collection's own order. */
   readonly workspaceIds: readonly string[]
   readonly workspaces: Record<string, WorkspaceRecord>
+  /**
+   * The workspace first use created (see {@link WorkspaceService.initializeDefault}), kept after its registration is
+   * deleted — DSH's `defaultWorkspaceId`, which is what stops an emptied registry from being given it back. Absent
+   * until a first use happens, so a record that never had one is written exactly as before.
+   */
+  readonly defaultWorkspaceId?: string
 }
 
 /**
@@ -79,6 +85,19 @@ export class WorkspaceNameConflict extends Error {
   }
 }
 
+/**
+ * A reorder naming a workspace that is not in the order — DSH's `WorkspaceOrderInvalidError` (dsh-workspace
+ * lib/index.js:333-344), with its sentence. The route answers it `404` with DSH's `workspace/not-found`.
+ */
+export class WorkspaceOrderInvalid extends Error {
+  readonly code = 'workspace/not-found'
+  readonly workspaceId: string
+  constructor(workspaceId: string) {
+    super(`cannot reorder unknown workspace '${workspaceId}'`)
+    this.workspaceId = workspaceId
+  }
+}
+
 /** What `add` reports: the record, and whether this call is what created it. */
 export interface WorkspaceAddition {
   readonly record: WorkspaceRecord
@@ -89,6 +108,25 @@ export interface WorkspaceAddition {
 export function defaultWorkspaceFile(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.HEDDLE_HOME ?? join(homedir(), '.heddle')
   return join(home, 'workspaces.json')
+}
+
+/**
+ * The first-use folder's own name: DSH's `DEFAULT_WORKSPACE_DIRECTORY` (dsh-api-workspace-controller
+ * lib/types/default-workspace.js). Fixed and language-neutral, so one install keeps one path; the workspace's first
+ * title is this same name, which the page labels *Default workspace*.
+ */
+export const DEFAULT_WORKSPACE_DIRECTORY = 'default-workspace'
+
+/**
+ * Where first use puts its workspace: `$HEDDLE_HOME/default-workspace`, else `~/.heddle/default-workspace`.
+ *
+ * DSH uses `<Documents>/deepseek-harness/default-workspace` (lib/index.js:609-640). Heddle's counterpart of that
+ * product folder is its own home, so first use never reaches into the user's Documents — a protected folder whose
+ * every access the OS asks about.
+ */
+export function defaultWorkspaceDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HEDDLE_HOME ?? join(homedir(), '.heddle')
+  return join(home, DEFAULT_WORKSPACE_DIRECTORY)
 }
 
 export const Config = Schema.object({
@@ -138,6 +176,7 @@ export class WorkspaceService extends Service {
         version?: number
         workspaceIds?: string[]
         workspaces?: Record<string, Partial<WorkspaceRecord> & { sessionIds?: unknown }>
+        defaultWorkspaceId?: unknown
       }
       const workspaces: Record<string, WorkspaceRecord> = {}
       for (const [id, record] of Object.entries(parsed.workspaces ?? {})) {
@@ -155,7 +194,12 @@ export class WorkspaceService extends Service {
           updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
         }
       }
-      return { version: 3, workspaceIds: parsed.workspaceIds ?? [], workspaces }
+      return {
+        version: 3,
+        workspaceIds: parsed.workspaceIds ?? [],
+        workspaces,
+        ...(typeof parsed.defaultWorkspaceId === 'string' ? { defaultWorkspaceId: parsed.defaultWorkspaceId } : {}),
+      }
     } catch {
       return { version: 3, workspaceIds: [], workspaces: {} }
     }
@@ -214,6 +258,39 @@ export class WorkspaceService extends Service {
     const before = this.find(path)
     const record = this.ensure(path, title, { origin: 'added' })
     return { record, created: before === undefined }
+  }
+
+  /**
+   * First use: create or reuse the default workspace — DSH's `workspace/initializeDefault`.
+   *
+   * DSH's rules (dsh-workspace lib/index.js:425-440), kept as they are:
+   *
+   * - once a first use has happened, the answer is **that** workspace, or nothing when its registration was deleted:
+   *   deleting it turns first use off for good, so an emptied list is not handed the folder back;
+   * - otherwise it applies only to an **empty install** — no workspace record of any kind and no session at all — and
+   *   anything else answers nothing, which is not an error;
+   * - the folder is made when missing and reused when present, and the workspace is titled after the folder's own name;
+   * - no session is started and nothing is sent. The page shows the workspace and aims the composer at it, as *Add
+   *   workspace* does (D-056: a heddle session writes a definition into its folder, so none is started unasked).
+   *
+   * `all` is every session the store holds, archived and subagent ones included.
+   */
+  initializeDefault(all: readonly SessionMeta[], directory: string = defaultWorkspaceDirectory()): WorkspaceRecord | undefined {
+    const shape = this.read()
+    if (shape.defaultWorkspaceId !== undefined) return shape.workspaces[shape.defaultWorkspaceId]
+    if (shape.workspaceIds.length > 0 || Object.keys(shape.workspaces).length > 0 || all.length > 0) return undefined
+    mkdirSync(directory, { recursive: true })
+    const now = new Date().toISOString()
+    const record: WorkspaceRecord = {
+      id: randomUUID(),
+      path: canonicalPath(directory),
+      title: DEFAULT_WORKSPACE_DIRECTORY,
+      origin: 'added',
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.write({ version: 3, workspaceIds: [record.id], workspaces: { [record.id]: record }, defaultWorkspaceId: record.id })
+    return record
   }
 
   /**
@@ -286,6 +363,37 @@ export class WorkspaceService extends Service {
     shape.workspaces[record.id] = updated
     this.write(shape)
     return updated
+  }
+
+  /**
+   * Move one workspace within the stored order, DOM-`insertBefore`-like — DSH's `workspace/insertBefore`
+   * (dsh-workspace lib/index.js:473-499).
+   *
+   * With an anchor the workspace lands just before it; without one it goes to the end. Both are named by id or by
+   * path, as the other routes name a workspace, and either missing from the order is {@link WorkspaceOrderInvalid}.
+   * Naming itself as its anchor, or a move that changes nothing, writes nothing. The order is the same
+   * `workspaceIds` array a new root is prepended to, so the file keeps its shape and the other build reads it as
+   * before. The order is registry-wide and flat: nesting is drawn from paths, so the page only offers a drop among a
+   * workspace's siblings, as DSH's does. Answers the complete order, as DSH's does.
+   */
+  insertBefore(idOrPath: string, beforeIdOrPath?: string): readonly string[] {
+    const shape = this.read()
+    const listed = (key: string): string => {
+      const record = this.find(key)
+      if (record === undefined || !shape.workspaceIds.includes(record.id)) throw new WorkspaceOrderInvalid(key)
+      return record.id
+    }
+    const id = listed(idOrPath)
+    const before = beforeIdOrPath === undefined ? undefined : listed(beforeIdOrPath)
+    if (before === id) return shape.workspaceIds
+    const without = shape.workspaceIds.filter((each) => each !== id)
+    const at = before === undefined ? without.length : without.indexOf(before)
+    const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
+    if (workspaceIds.length === shape.workspaceIds.length && workspaceIds.every((each, index) => each === shape.workspaceIds[index])) {
+      return shape.workspaceIds
+    }
+    this.write({ ...shape, workspaceIds })
+    return workspaceIds
   }
 
   /**

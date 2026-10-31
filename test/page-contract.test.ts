@@ -89,7 +89,8 @@ test('the collapsed state is not remembered, so a reload cannot hide the tree', 
    */
   assert.doesNotMatch(page, /heddle\.layout\.collapsed/, 'no storage key for the collapsed state')
   assert.doesNotMatch(page, /setItem\(SIDEBAR_COLLAPSED_KEY/, 'and nothing written when it changes')
-  assert.match(page, /\/\*\* Every visit starts wide[\s\S]*?setSidebarCollapsed\(false\)/, 'a load puts the panel back')
+  // Below DSH's 1024-pixel breakpoint the first paint is the rail (live-testing draft developer-ten-9); wide, the panel.
+  assert.match(page, /Every visit starts wide on a wide window[\s\S]*?\npaintSidebarCollapse\(\)\n/, 'a load puts the panel back on a wide window')
 })
 
 test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the panel first", () => {
@@ -100,7 +101,7 @@ test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the pan
    */
   assert.match(page, /\{ code: 'KeyB', key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table, by its physical key')
   assert.match(page, /if \(action === 'sidebar'\) \{/, 'and the handler acts on it')
-  assert.match(page, /if \(sidebarCollapsed\(\)\) setSidebarCollapsed\(false\)/, 'search opens the panel first')
+  assert.match(page, /if \(sidebarCollapsed\(\)\) openSidebar\(\)/, 'search opens the panel first')
 })
 
 test('the right panel is a tablist, with a tab and a panel for each view', () => {
@@ -157,11 +158,81 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')
   assert.match(page, /let treeTops = \[\]/, 'the tree keeps the workspace rows the action needs')
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
-  assert.match(page, /if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/, 'from the open session\'s workspace first')
+  assert.match(
+    page,
+    /if \(chosenWorkspace !== null && chosenWorkspace\.during === current\) \{[\s\S]*?const byChoice = treeTops\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/,
+    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace',
+  )
   assert.match(page, /if \(selectedPath !== null && !selectedPath\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
   assert.match(page, /\{ code: 'KeyN', key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
+})
+
+test('New session asks for a new session every time and names none it found in the list', () => {
+  /**
+   * DSH's sidebar `New session` and its chord create a fresh Session on each press (`startSession` with no options, then
+   * `connectBlank` with no reuse: dsh-client-ui-workspace lib/client.js:1403-1406, 1520). A page that named an empty
+   * session from the shared list put a second client into the first one's conversation (coordinator, 2026-10-29). The
+   * browser check is 70's "two clients pressing New session..."; this detects the request regaining a session field.
+   */
+  const start = page.indexOf('async function startSessionAt(node) {')
+  assert.ok(start > 0, 'the one New session path is in the page')
+  const body = page.slice(start, page.indexOf('\n}\n', start))
+  assert.match(body, /body: JSON\.stringify\(\{ branch: node\.path \}\)/, 'the request names the folder and nothing else')
+  assert.doesNotMatch(body, /session: |blankToReuse\(/, 'no session id, found or remembered, rides along')
+})
+
+test('New session starts in the workspace row the person opened or added, not the open session\'s (#25)', () => {
+  /**
+   * DSH starts a session in the workspace a person acted on: a row's `+` names it (dsh-client-ui-workspace
+   * lib/client.js:3233-3236, and a named workspace wins at :1508), and Add workspace starts one there at once
+   * (:3936-3938). The Session Intent hero picker (C36) changes only a blank session's target, so for the panel's button
+   * and chord, opening workspace B's row after a session in A must make B the target; the browser check is 80's "New session starts in the workspace row the
+   * person opened". This detects the choice no longer being recorded where the person acts.
+   */
+  assert.match(page, /function chooseWorkspace\(path\) \{\s*chosenWorkspace = path === null \? null : \{ path, during: current \}/, 'a choice remembers the session it was made beside')
+  assert.match(page, /if \(node\.kind === 'workspace'\) \{\s*if \(li\.dataset\.open !== 'true'\) chooseWorkspace\(node\.path\)/, 'opening a workspace row chooses it')
+  const show = page.slice(page.indexOf('async function showSession(id) {'))
+  assert.match(show.slice(0, show.indexOf('\n}\n')), /if \(current !== id\) chooseWorkspace\(null\)\s*current = id/, 'and opening another session forgets the choice')
+  /**
+   * Add workspace shows what it registered through showNewWorkspace, which first use's default workspace shares (C39);
+   * only Add workspace then opens a session there (#22), and first use opens none (D-056).
+   */
+  const adopt = page.slice(page.indexOf('async function adoptWorkspace(path) {'))
+  assert.match(adopt.slice(0, adopt.indexOf('\n}\n')), /await showNewWorkspace\([^\n]*\{ openSession: true \}\)/, 'adding one shows the workspace it registered and opens a session')
+  const shown = page.slice(page.indexOf('async function showNewWorkspace(added, '))
+  const shownBody = shown.slice(0, shown.indexOf('\n}\n'))
+  assert.match(shownBody, /chooseWorkspace\(added\)/, 'and so does adding one')
+  assert.match(shownBody, /if \(openSession\) await startSessionAt\(\{ path: added \}\)\s*else chooseSelected\(added\)/, 'a session only when asked')
+  const first = page.slice(page.indexOf('async function initializeDefaultWorkspace() {'))
+  assert.doesNotMatch(first.slice(0, first.indexOf('\n}\n')), /openSession/, 'first use opens no session')
+  const select = page.slice(page.indexOf('async function selectSession(node) {'))
+  assert.match(
+    select.slice(0, select.indexOf('\n}\n')),
+    /if \(current === node\.session\.id\) chooseSelected\(node\.path\)/,
+    'a session row\'s slow load does not take the mark back from a session opened meanwhile',
+  )
+})
+
+test('Add workspace and New session say when their request fails, instead of leaving a rejection in the console (#59)', () => {
+  /**
+   * DSH reports a failed session creation as `New session failed: {message}` (dsh-client-ui-workspace lib/client.js:4957,
+   * from openWorkspaceSession's catch, :1476-1487) and an adoption failure's message in its folder dialog's alert
+   * (:2603-2611). On main both requests were unguarded `fetch` calls, so an offline press changed nothing on screen; the
+   * browser check is 80's "Add workspace and New session say they failed". This detects a guard being dropped.
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const start = body('async function startSessionAt(node) {')
+  assert.match(start, /try \{\s*response = await fetch\('\/api\/sessions'/, 'the session request is guarded')
+  assert.match(start, /const failed = \(message\) => setNote\('New session failed: ' \+ message\)/, 'and a failure is said in DSH\'s words')
+  const adopt = body('async function adoptWorkspace(path) {')
+  assert.match(adopt, /try \{\s*response = await fetch\('\/api\/workspaces'/, 'the registration request is guarded')
+  assert.match(adopt, /return 'could not register that folder: ' \+/, 'and its failure is a refusal the dialog shows')
 })
 
 test('a panel with nothing open shows an invitation, and gives way when something opens', () => {

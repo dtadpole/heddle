@@ -1,8 +1,8 @@
 ---
 title: The outside-component protocol
 created: 2026-10-23T01:42:22Z
-modified: 2026-10-23T05:05:53Z
-version: 0.2.0
+modified: 2026-10-31T04:30:00Z
+version: 0.3.0
 description: How the Rust heddle binary speaks to an outside tool (part 4) and, later, an outside hook listener (part 6) — a process declared in configuration, spoken to as line-delimited JSON-RPC 2.0 on stdio.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md, part 4 (an outside tool is a process declared in configuration, spoken to as line-delimited JSON on stdio) and part 6 (an outside listener uses the part-4 protocol)
@@ -37,7 +37,9 @@ what the module did in process. The types are [`src/protocol.rs`](src/protocol.r
 1. **`initialize`** (request, host → component), the first message:
    `{"protocol":"heddle-component/1","row":"<row id>","config":<the row's config>,"workspaceRoot":"/abs","mode":"workspace-write"}`.
    The component answers `{"tools":[{"name","description","parameters"}, ...]}` — and, for part 6, `"listeners"`,
-   whose entries `heddle-events` defines. No answer within 10 s fails the row.
+   whose entries `heddle-events` defines. No answer within 10 s fails the row. A tool may add
+   `"concurrencySafe": true` (DSH's `isConcurrencySafe`, a TypeScript plugin tool's `concurrencySafe`): its calls may
+   then share a model step's parallel group, up to `tools.maxParallelToolCalls`. Absent or `false`, a call runs alone.
 2. **Registration.** Each declared tool goes through `ToolRegistry::register`, the rule a built-in obeys: a blank
    name or description **fails the row** with the registry's sentence (`a tool must be registered with a name`,
    `the tool '<name>' must be registered with a description`), so the run fails where the configuration is

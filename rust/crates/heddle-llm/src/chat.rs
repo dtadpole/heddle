@@ -13,7 +13,7 @@ use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fol
 use crate::error::ModelError;
 use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
-use crate::types::{Chunk, ContentPart, GenerateRequest, Message};
+use crate::types::{Chunk, ContentPart, GenerateRequest, Message, Role};
 use heddle_config::EndpointConfig;
 
 /// The Chat Completions adapter for one endpoint.
@@ -77,9 +77,17 @@ pub fn chat_request(
     if let Some(model) = request.model.as_ref().or(endpoint.model.as_ref()) {
         body.insert("model".into(), Value::String(model.clone()));
     }
+    let effort = crate::adapter::reasoning_value(endpoint, request)?;
+    let reasoning_content = replays_reasoning_content(endpoint, request, effort.is_some());
     body.insert(
         "messages".into(),
-        Value::Array(request.messages.iter().map(to_chat_message).collect()),
+        Value::Array(
+            request
+                .messages
+                .iter()
+                .map(|message| chat_message(message, reasoning_content))
+                .collect(),
+        ),
     );
     if !request.tools.is_empty() {
         body.insert(
@@ -114,13 +122,22 @@ pub fn chat_request(
         );
     }
     // Chat Completions names the level `reasoning_effort`; the value is the model's declared wire value.
-    if let Some(value) = crate::adapter::reasoning_value(endpoint, request)? {
+    if let Some(value) = effort {
         body.insert(
             "reasoning_effort".into(),
             serde_json::to_value(value).unwrap_or(Value::Null),
         );
     }
     body.insert("stream".into(), Value::Bool(streaming));
+    // A stream asks for its usage (#69), as DSH's OpenAI-completions layer does unless a model's compat says the
+    // provider cannot (pi-ai `supportsUsageInStreaming`): DeepSeek reports usage unasked, an OpenAI-shaped gateway
+    // does not. Only on a stream, since a non-streamed call refuses `stream_options`.
+    if streaming {
+        body.insert(
+            "stream_options".into(),
+            serde_json::json!({ "include_usage": true }),
+        );
+    }
 
     Ok(PreparedCall {
         url: format!(
@@ -138,6 +155,61 @@ pub fn chat_request(
         ),
         stream: streaming,
     })
+}
+
+/// Whether this request's replayed assistant messages carry `reasoning_content` (`replaysReasoningContent`,
+/// developer-ten-3).
+///
+/// DeepSeek's thinking mode refuses a continuation whose replayed assistant message lacks it ("The
+/// `reasoning_content` in the thinking mode must be passed back to the API"): a tool-call round, a steer and a
+/// subagent's notice all continue a turn that way. DSH's rule, from its OpenAI-completions layer (pi-ai's compat
+/// `requiresReasoningContentOnAssistantMessages`, re-read 2026-10-29): auto-detected for a base URL containing
+/// `deepseek.com`, applied while reasoning is on — every replayed assistant message carries its thinking text, or
+/// `""` when it has none. Reasoning is on when the request names a reasoning level or the history already holds
+/// reasoning. Every other chat endpoint is left as it was.
+pub fn replays_reasoning_content(
+    endpoint: &EndpointConfig,
+    request: &GenerateRequest,
+    effort_named: bool,
+) -> bool {
+    if !endpoint
+        .base_url_for(request.model.as_deref())
+        .to_lowercase()
+        .contains("deepseek.com")
+    {
+        return false;
+    }
+    effort_named
+        || request.messages.iter().any(|message| {
+            message.role == Role::Assistant
+                && message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::Reasoning { .. }))
+        })
+}
+
+/// [`to_chat_message`], with a replayed assistant message's `reasoning_content` when `reasoning_content` is set:
+/// its thinking, blank blocks dropped and the rest joined by newlines, or `""` (`toChatMessage(message,
+/// {reasoningContent})`).
+pub fn chat_message(message: &Message, reasoning_content: bool) -> Value {
+    let mut value = to_chat_message(message);
+    if reasoning_content
+        && message.role == Role::Assistant
+        && let Value::Object(object) = &mut value
+    {
+        let thinking = message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Reasoning { text } if !text.trim().is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        object.insert("reasoning_content".into(), Value::String(thinking));
+    }
+    value
 }
 
 /// One message in this shape (`toChatMessage`): text parts joined by `\n` as a string `content` (`null` when there
@@ -288,9 +360,14 @@ pub fn chunks_from_chat_json(answer: &Value) -> Vec<Chunk> {
 
 /// The streamed fold: deltas, live tool-call fragments, assembly by `index`, `done` on `finish_reason` with usage
 /// from the same frame; `[DONE]` with no finish frame is a plain `stop`.
+///
+/// A finish frame without usage holds its `done` (#69): with `include_usage`, an OpenAI-shaped stream reports
+/// usage in its own last frame, `choices: []`, after the finish frame and before `[DONE]`. The held `done` goes
+/// out with that frame's usage, or bare at `[DONE]` or the end.
 #[derive(Debug, Default)]
 pub struct ChatFold {
     calls: Vec<(u32, crate::types::ToolCall)>,
+    finished: Option<String>,
 }
 
 impl ChatFold {
@@ -314,7 +391,7 @@ impl StreamFold for ChatFold {
         if event.data == "[DONE]" {
             return Ok(Folded {
                 chunks: vec![Chunk::Done {
-                    finish_reason: "stop".into(),
+                    finish_reason: self.finished.take().unwrap_or_else(|| "stop".into()),
                     usage: None,
                 }],
                 finished: true,
@@ -325,6 +402,20 @@ impl StreamFold for ChatFold {
             // An unparseable `data:` is skipped, as the TypeScript read loop does.
             Err(_) => return Ok(Folded::default()),
         };
+        if self.finished.is_some() {
+            let usage =
+                crate::usage::openai_chat_usage(parsed.get("usage").unwrap_or(&Value::Null));
+            if usage.is_none() {
+                return Ok(Folded::default());
+            }
+            return Ok(Folded {
+                chunks: vec![Chunk::Done {
+                    finish_reason: self.finished.take().unwrap_or_default(),
+                    usage,
+                }],
+                finished: true,
+            });
+        }
         let mut chunks = Vec::new();
         let choice = parsed
             .get("choices")
@@ -407,17 +498,19 @@ impl StreamFold for ChatFold {
             }
             let usage =
                 crate::usage::openai_chat_usage(parsed.get("usage").unwrap_or(&Value::Null));
-            chunks.push(Chunk::Done {
-                finish_reason: crate::types::canonical_finish_reason(
-                    Some(finish),
-                    self.calls.len(),
-                ),
-                usage,
-            });
-            return Ok(Folded {
-                chunks,
-                finished: true,
-            });
+            let reason = crate::types::canonical_finish_reason(Some(finish), self.calls.len());
+            // DeepSeek puts usage on the finish frame itself: done at once, as before.
+            if usage.is_some() {
+                chunks.push(Chunk::Done {
+                    finish_reason: reason,
+                    usage,
+                });
+                return Ok(Folded {
+                    chunks,
+                    finished: true,
+                });
+            }
+            self.finished = Some(reason);
         }
         Ok(Folded {
             chunks,
@@ -427,7 +520,7 @@ impl StreamFold for ChatFold {
 
     fn end(&mut self) -> Vec<Chunk> {
         vec![Chunk::Done {
-            finish_reason: "stop".into(),
+            finish_reason: self.finished.take().unwrap_or_else(|| "stop".into()),
             usage: None,
         }]
     }
@@ -519,35 +612,43 @@ mod tests {
             .expect("folds");
         assert_eq!(
             folded.chunks,
-            vec![
-                Chunk::ToolCall(crate::types::ToolCall {
-                    id: "call_1".into(),
-                    name: "write_file".into(),
-                    arguments: "{\"path\":\"a.txt\"}".into(),
-                }),
-                Chunk::Done {
-                    finish_reason: "tool_calls".into(),
-                    usage: None,
-                },
-            ]
+            vec![Chunk::ToolCall(crate::types::ToolCall {
+                id: "call_1".into(),
+                name: "write_file".into(),
+                arguments: "{\"path\":\"a.txt\"}".into(),
+            })],
+            "the assembled call goes out with the finish frame"
         );
-        assert!(folded.finished);
+        // A finish frame without usage holds its `done` for the usage frame, `[DONE]` or the end (#69).
+        assert!(!folded.finished);
+        let done = fold.event(&sse("[DONE]")).expect("folds");
+        assert_eq!(
+            done.chunks,
+            vec![Chunk::Done {
+                finish_reason: "tool_calls".into(),
+                usage: None,
+            }]
+        );
+        assert!(done.finished);
     }
 
     #[test]
     fn the_finish_frame_carries_the_usage_and_the_loop_word_for_the_provider_word() {
-        let folded = ChatFold::new()
+        let mut fold = ChatFold::new();
+        let folded = fold
             .event(&delta(serde_json::json!({
                 "delta": {},
                 "finish_reason": "length"
             })))
             .unwrap_or_else(|error| panic!("{error}"));
+        assert!(folded.chunks.is_empty() && !folded.finished);
         assert_eq!(
-            folded.chunks,
+            fold.end(),
             vec![Chunk::Done {
                 finish_reason: "max_output_tokens".into(),
                 usage: None,
-            }]
+            }],
+            "a stream that ends after a usage-less finish frame still finishes with its word"
         );
 
         let with_usage = ChatFold::new()
@@ -564,6 +665,41 @@ mod tests {
                 usage: Some(TokenUsage {
                     input_tokens: Some(10),
                     output_tokens: Some(4),
+                    ..TokenUsage::default()
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_openai_usage_frame_after_the_finish_frame_reaches_the_done() {
+        // With `include_usage`, OpenAI sends the finish frame, then `choices: []` with the usage, then `[DONE]` (#69).
+        let mut fold = ChatFold::new();
+        let text = fold
+            .event(&delta(serde_json::json!({ "delta": { "content": "hi" } })))
+            .expect("folds");
+        assert_eq!(text.chunks, vec![Chunk::TextDelta { text: "hi".into() }]);
+        let finish = fold
+            .event(&delta(
+                serde_json::json!({ "delta": {}, "finish_reason": "stop" }),
+            ))
+            .expect("folds");
+        assert!(finish.chunks.is_empty() && !finish.finished);
+        let usage = fold
+            .event(&sse(&serde_json::json!({
+                "choices": [],
+                "usage": { "prompt_tokens": 12, "completion_tokens": 3 }
+            })
+            .to_string()))
+            .expect("folds");
+        assert!(usage.finished);
+        assert_eq!(
+            usage.chunks,
+            vec![Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: Some(TokenUsage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(3),
                     ..TokenUsage::default()
                 }),
             }]
@@ -764,6 +900,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 
@@ -803,6 +940,11 @@ mod tests {
         assert_eq!(call.body["max_tokens"], serde_json::json!(64));
         assert_eq!(call.body["temperature"], serde_json::json!(0.2));
         assert_eq!(call.body["stream"], serde_json::json!(true));
+        assert_eq!(
+            call.body["stream_options"],
+            serde_json::json!({ "include_usage": true }),
+            "a stream asks for its usage (#69)"
+        );
     }
 
     #[test]
@@ -841,6 +983,10 @@ mod tests {
         let call = chat_request(&endpoint, &request).expect("builds");
         assert!(!call.stream);
         assert_eq!(call.body["stream"], serde_json::json!(false));
+        assert!(
+            call.body.get("stream_options").is_none(),
+            "a single answer refuses stream_options"
+        );
 
         let mut endpoint = base_endpoint();
         endpoint.stream = None;
@@ -860,6 +1006,97 @@ mod tests {
         )
         .expect("builds");
         assert!(call.stream);
+    }
+
+    fn thinking_message() -> Message {
+        Message::new(
+            Role::Assistant,
+            vec![
+                ContentPart::Reasoning {
+                    text: "count up".into(),
+                },
+                ContentPart::Reasoning { text: "   ".into() },
+                ContentPart::Reasoning {
+                    text: "from one".into(),
+                },
+                ContentPart::text("1 2 3"),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_replayed_assistant_message_carries_its_thinking_or_empty_only_when_asked() {
+        let thinking = thinking_message();
+        let plain = Message::new(Role::Assistant, vec![ContentPart::text("done")]);
+        let user = user_message("STEER: stop");
+        assert_eq!(
+            chat_message(&thinking, true)["reasoning_content"],
+            serde_json::json!("count up\nfrom one"),
+            "blank blocks dropped"
+        );
+        assert_eq!(
+            chat_message(&plain, true)["reasoning_content"],
+            serde_json::json!(""),
+            "no thinking is \"\""
+        );
+        assert!(chat_message(&user, true).get("reasoning_content").is_none());
+        assert!(
+            chat_message(&thinking, false)
+                .get("reasoning_content")
+                .is_none(),
+            "off, as every other endpoint keeps it"
+        );
+        assert_eq!(
+            chat_message(&thinking, true)["content"],
+            serde_json::json!("1 2 3")
+        );
+    }
+
+    #[test]
+    fn only_a_deepseek_base_url_with_reasoning_on_replays_reasoning_content() {
+        let mut deepseek = base_endpoint();
+        deepseek.base_url = "https://api.deepseek.com/v1".into();
+        let other = base_endpoint();
+        let user = user_message("go");
+        let quiet = GenerateRequest {
+            endpoint: "chat".into(),
+            messages: vec![
+                user.clone(),
+                Message::new(Role::Assistant, vec![ContentPart::text("done")]),
+                user.clone(),
+            ],
+            ..GenerateRequest::default()
+        };
+        let thought = GenerateRequest {
+            endpoint: "chat".into(),
+            messages: vec![user.clone(), thinking_message(), user.clone()],
+            ..GenerateRequest::default()
+        };
+        assert!(replays_reasoning_content(&deepseek, &quiet, true));
+        assert!(replays_reasoning_content(&deepseek, &thought, false));
+        assert!(!replays_reasoning_content(&deepseek, &quiet, false));
+        assert!(!replays_reasoning_content(&other, &thought, true));
+
+        let call = chat_request(&deepseek, &thought).expect("builds");
+        let assistants: Vec<&Value> = call.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        assert_eq!(
+            assistants[0]["reasoning_content"],
+            serde_json::json!("count up\nfrom one")
+        );
+        let plain = chat_request(&other, &thought).expect("builds");
+        assert!(
+            plain.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message.get("reasoning_content").is_none()),
+            "another endpoint receives no reasoning_content"
+        );
     }
 
     #[test]

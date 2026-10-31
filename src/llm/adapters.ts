@@ -99,6 +99,8 @@ function parseBlock(block: string): SseEvent | null {
 }
 
 import { titleCaseHeaders, wire, type WireResponse } from './http.ts'
+// The endpoint rules live beside the endpoint list, as `heddle-llm` reads them from `heddle-config`.
+import { isShippedFixture, unscriptedFixtureMessage } from '../endpoints.ts'
 
 /** What a call site passes to {@link post}; the transport is in `./http.ts`. */
 interface HttpOptions {
@@ -169,9 +171,10 @@ export function openAiChatAdapter(
   signal?: AbortSignal,
 ): AsyncIterable<Chunk> {
   const effort = reasoningValue(endpoint, request)
+  const reasoningContent = replaysReasoningContent(endpoint, request, effort !== undefined && effort.value !== null)
   const body = {
     model: request.model ?? endpoint.model,
-    messages: request.messages.map(toChatMessage),
+    messages: request.messages.map((message) => toChatMessage(message, { reasoningContent })),
     ...(request.tools && request.tools.length > 0
       ? {
           tools: request.tools.map((tool) => ({
@@ -193,7 +196,13 @@ export function openAiChatAdapter(
   return (async function* chat() {
     const result = await post({
       url: `${baseUrlFor(endpoint, request.model)}/chat/completions`,
-      body: { ...body, stream: streaming },
+      /**
+       * A stream asks for its usage (#69). DSH's OpenAI-completions layer sends `stream_options.include_usage`
+       * unless a model's compat says the provider cannot (pi-ai `supportsUsageInStreaming`). DeepSeek reports
+       * usage unasked, but an OpenAI-shaped gateway reports none without it, so GPT turns recorded no usage.
+       * It is sent only on a stream, since a non-streamed call refuses `stream_options`.
+       */
+      body: { ...body, stream: streaming, ...(streaming ? { stream_options: { include_usage: true } } : {}) },
       ...(endpoint.apiKey !== undefined ? { apiKey: endpoint.apiKey } : {}),
       ...(endpoint.headers !== undefined ? { headers: endpoint.headers } : {}),
       ...(endpoint.timeoutMs !== undefined ? { timeoutMs: endpoint.timeoutMs } : {}),
@@ -209,6 +218,12 @@ export function openAiChatAdapter(
     }
 
     const calls = new Map<number, PartialToolCall>()
+    /**
+     * The finish reason of a finish frame that carried no usage. With `include_usage`, an OpenAI-shaped stream
+     * reports usage in its own last frame, `choices: []`, after the finish frame and before `[DONE]`, so `done`
+     * waits for that frame, `[DONE]` or the end (#69).
+     */
+    let finished: string | undefined
     for await (const event of readSse(result.stream)) {
       if (event.data === '[DONE]') break
       let parsed: {
@@ -225,6 +240,14 @@ export function openAiChatAdapter(
       try {
         parsed = JSON.parse(event.data)
       } catch {
+        continue
+      }
+      if (finished !== undefined) {
+        const usage = openaiChatUsage(parsed.usage)
+        if (usage !== undefined) {
+          yield { type: 'done', finishReason: finished, usage }
+          return
+        }
         continue
       }
       const choice = parsed.choices?.[0]
@@ -254,15 +277,17 @@ export function openAiChatAdapter(
         for (const call of calls.values()) {
           yield { type: 'tool-call', id: call.id || `call-${call.name}`, name: call.name, arguments: call.arguments }
         }
-        yield {
-          type: 'done',
-          finishReason: canonicalFinishReason(choice.finish_reason, calls.size),
-          ...(openaiChatUsage(parsed.usage) !== undefined ? { usage: openaiChatUsage(parsed.usage) } : {}),
+        const reason = canonicalFinishReason(choice.finish_reason, calls.size)
+        const usage = openaiChatUsage(parsed.usage)
+        // DeepSeek puts usage on the finish frame itself: done at once, as before.
+        if (usage !== undefined) {
+          yield { type: 'done', finishReason: reason, usage }
+          return
         }
-        return
+        finished = reason
       }
     }
-    yield { type: 'done', finishReason: 'stop' }
+    yield { type: 'done', finishReason: finished ?? 'stop' }
   })()
 }
 
@@ -352,13 +377,32 @@ export function toAnthropicContent(parts: readonly ContentPart[]): Record<string
 }
 
 /**
+ * Whether this request's replayed assistant messages carry `reasoning_content` (developer-ten-3).
+ *
+ * DeepSeek's thinking mode refuses a continuation whose replayed assistant message lacks it ("The `reasoning_content`
+ * in the thinking mode must be passed back to the API"): a tool-call round, a steer and a subagent's notice all
+ * continue a turn that way. DSH's rule, from its OpenAI-completions layer (pi-ai's compat
+ * `requiresReasoningContentOnAssistantMessages`, re-read 2026-10-29): auto-detected for a base URL containing
+ * `deepseek.com`, and applied while reasoning is on — every replayed assistant message carries its thinking text, or
+ * `""` when it has none. Here reasoning is on when the request names a reasoning level or the history already holds
+ * reasoning. Every other chat endpoint is left as it was: no new field reaches a gateway that may refuse it.
+ */
+export function replaysReasoningContent(endpoint: Adapter['endpoint'], request: GenerateRequest, effortNamed: boolean): boolean {
+  if (!baseUrlFor(endpoint, request.model).toLowerCase().includes('deepseek.com')) return false
+  return effortNamed || request.messages.some((message) => message.role === 'assistant' && message.content.some((part) => part.type === 'reasoning'))
+}
+
+/**
  * One message in the Chat Completions shape.
  *
  * Text-only messages keep the string `content` the wire has always taken; a message carrying images
  * switches to the typed-parts form, which is the only shape that can carry an `image_url`. Exported so
  * the mapping can be asserted without a network call.
  */
-export function toChatMessage(message: GenerateRequest['messages'][number]): Record<string, unknown> {
+export function toChatMessage(
+  message: GenerateRequest['messages'][number],
+  options: { readonly reasoningContent?: boolean } = {},
+): Record<string, unknown> {
   const text = message.content
     .filter((part): part is Extract<(typeof message.content)[number], { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
@@ -392,6 +436,16 @@ export function toChatMessage(message: GenerateRequest['messages'][number]): Rec
         }
       : {}),
     ...(message.toolCallId !== undefined ? { tool_call_id: message.toolCallId } : {}),
+    /** A replayed assistant message's thinking, blank blocks dropped and the rest joined by newlines, or "" (pi-ai). */
+    ...(options.reasoningContent === true && message.role === 'assistant'
+      ? {
+          reasoning_content: message.content
+            .filter((part): part is Extract<(typeof message.content)[number], { type: 'reasoning' }> => part.type === 'reasoning')
+            .map((part) => part.text)
+            .filter((text) => text.trim().length > 0)
+            .join('\n'),
+        }
+      : {}),
   }
 }
 
@@ -696,9 +750,55 @@ export function anthropicCall(
 
   return {
     url: `${baseUrlFor(endpoint, request.model)}/projects/${endpoint.project}/locations/${endpoint.region}/publishers/anthropic/models/${model}:streamRawPredict`,
-    body,
+    body: withPromptCache(body, endpoint),
     headers: titleCaseHeaders(endpoint.headers ?? {}),
   }
+}
+
+/** The breakpoint every cached block carries: DSH's short retention (pi-ai `getCacheControl`, no `ttl`). */
+const EPHEMERAL = { type: 'ephemeral' } as const
+
+/** The block types Anthropic lets a cache breakpoint sit on, as pi-ai marks the last block of the last message. */
+const CACHEABLE_BLOCKS = new Set(['text', 'image', 'document', 'tool_result'])
+
+/**
+ * Mark an Anthropic request's prompt for caching (#70), as DSH's route does by default (pi-ai
+ * `anthropic-messages`).
+ *
+ * The system prompt becomes one text block with a breakpoint, the last tool definition gets one (the tool list is
+ * cached up to it), and so does the last block of the last message when that message is the user's, which caches
+ * the conversation so far. That is three of Anthropic's four breakpoints. Measured before on both builds: a
+ * two-turn Claude session billed 5193 then 5205 input tokens, with no cache read or write, because no request
+ * carried `cache_control`. The usage readers already take `cache_read_input_tokens` and
+ * `cache_creation_input_tokens`. An endpoint with `promptCache: false` sends the body unmarked.
+ */
+export function withPromptCache(body: Record<string, unknown>, endpoint: { readonly promptCache?: boolean }): Record<string, unknown> {
+  if (endpoint.promptCache === false) return body
+  const cached: Record<string, unknown> = { ...body }
+  if (typeof body.system === 'string' && body.system.length > 0) {
+    cached.system = [{ type: 'text', text: body.system, cache_control: EPHEMERAL }]
+  }
+  if (Array.isArray(body.tools) && body.tools.length > 0) {
+    const tools = [...(body.tools as Record<string, unknown>[])]
+    tools[tools.length - 1] = { ...tools[tools.length - 1], cache_control: EPHEMERAL }
+    cached.tools = tools
+  }
+  if (Array.isArray(body.messages) && body.messages.length > 0) {
+    const messages = [...(body.messages as { role?: string; content?: unknown }[])]
+    const last = messages[messages.length - 1]!
+    if (last.role === 'user' && Array.isArray(last.content) && last.content.length > 0) {
+      const content = [...(last.content as Record<string, unknown>[])]
+      const block = content[content.length - 1]!
+      // An empty text block may not carry a breakpoint.
+      const empty = block.type === 'text' && (typeof block.text !== 'string' || block.text.length === 0)
+      if (typeof block.type === 'string' && CACHEABLE_BLOCKS.has(block.type) && !empty) {
+        content[content.length - 1] = { ...block, cache_control: EPHEMERAL }
+        messages[messages.length - 1] = { ...last, content }
+      }
+    }
+    cached.messages = messages
+  }
+  return cached
 }
 
 /** The message list as Anthropic reads it, with a system prompt left to the top-level field. */
@@ -771,7 +871,7 @@ export async function* anthropicChunks(
 ): AsyncIterable<Chunk> {
   const calls = new Map<number, PartialToolCall>()
   let finishReason = 'stop'
-  let usage: { inputTokens?: number; outputTokens?: number } | undefined
+  let usage: TokenUsage | undefined
 
   for await (const event of events) {
     let parsed: Record<string, unknown>
@@ -782,13 +882,12 @@ export async function* anthropicChunks(
     }
     const type = String(parsed.type ?? event.event ?? '')
     if (type === 'message_start') {
-      const message = parsed.message as { usage?: { input_tokens?: number; output_tokens?: number } } | undefined
-      if (message?.usage !== undefined) {
-        usage = {
-          ...(message.usage.input_tokens !== undefined ? { inputTokens: message.usage.input_tokens } : {}),
-          ...(message.usage.output_tokens !== undefined ? { outputTokens: message.usage.output_tokens } : {}),
-        }
-      }
+      /**
+       * The start frame reports the input side, the cache read and write included (#70: with the prompt marked for
+       * caching, most of it is a cache read). It used to keep only input and output, so a cache never showed.
+       */
+      const started = anthropicUsage((parsed.message as { usage?: unknown } | undefined)?.usage)
+      if (started !== undefined) usage = started
     } else if (type === 'content_block_start') {
       const block = parsed.content_block as { type?: string; id?: string; name?: string } | undefined
       const index = typeof parsed.index === 'number' ? parsed.index : 0
@@ -827,8 +926,9 @@ export async function* anthropicChunks(
        * through put a stop notice on every ordinary Claude answer.
        */
       if (typeof delta?.stop_reason === 'string') finishReason = canonicalFinishReason(delta.stop_reason, calls.size)
-      const reported = parsed.usage as { output_tokens?: number } | undefined
-      if (reported?.output_tokens !== undefined) usage = { ...(usage ?? {}), outputTokens: reported.output_tokens }
+      // The delta's usage restates what it knows; a bucket it names replaces the start frame's.
+      const reported = anthropicUsage(parsed.usage)
+      if (reported !== undefined) usage = { ...(usage ?? {}), ...reported }
     } else if (type === 'message_stop') {
       for (const call of calls.values()) yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
       yield { type: 'done', finishReason, ...(usage !== undefined ? { usage } : {}) }
@@ -981,7 +1081,7 @@ export function anthropicMessagesCall(
 
   return {
     url: `${baseUrlFor(endpoint, request.model)}/messages`,
-    body,
+    body: withPromptCache(body, endpoint),
     headers: titleCaseHeaders({ 'anthropic-version': ANTHROPIC_MESSAGES_VERSION, ...(endpoint.headers ?? {}) }),
     stream: streaming,
   }
@@ -1084,7 +1184,13 @@ export function scriptedAdapter(
     try {
       script = JSON.parse(readFileSync(scriptPath, 'utf8')) as { steps?: unknown[] }
     } catch (error) {
-      throw new ModelError(`the script for '${endpoint.name}' could not be read at ${scriptPath}`, {
+      // The shipped fixture with no script is what a home that configured nothing runs on (issue #74): say how to
+      // configure a model rather than naming a test file.
+      const missing = (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      const message = missing && isShippedFixture(endpoint)
+        ? unscriptedFixtureMessage()
+        : `the script for '${endpoint.name}' could not be read at ${scriptPath}`
+      throw new ModelError(message, {
         endpoint: endpoint.name,
         code: 'SCRIPT',
         cause: error,

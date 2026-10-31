@@ -742,7 +742,8 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
      * the backend from the first paint; the live turn is added on top while it runs.
      */
     await browser.goto(server.url)
-    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent !== ""', 20_000))
+    // Initial zero is already nonempty; wait for this fixture's known durable count rather than racing history load.
+    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent === "2 turns"', 20_000))
     const reloaded = JSON.parse(await dock())
     const durableTurns = await browser.evaluate(`(async () => {
       const rows = await (await fetch('/api/sessions')).json()
@@ -1369,7 +1370,9 @@ test('a pending image is delivered to a vision route as image content', async (c
     assert.match(String(image.image_url.url), /^data:image\/png;base64,/, 'as a data URL of the declared media type')
     assert.equal(Buffer.from(String(image.image_url.url).split(',')[1] ?? '', 'base64').length, bytes.length, 'with the whole stored file')
     assert.ok(user.content.some((part) => part.type === 'text' && part.text === 'describe this image'), 'beside the prompt text')
-    assert.ok(!JSON.stringify(sent).includes(server.home), 'and the stored path is not what the provider was told')
+    // The stored file sits under <home>/uploads. The whole home is not the test: an empty install now works in
+    // <home>/default-workspace, so the request's cwd and runtime context name the home on purpose.
+    assert.ok(!JSON.stringify(sent).includes(join(server.home, 'uploads')), 'and the stored path is not what the provider was told')
 
     const rows = await browser.evaluate(`(async () => (await (await fetch('/api/sessions')).json()).map((row) => row.id).slice(0, 1))()`)
     assert.equal(rows.length, 1, 'the turn created a session')
@@ -1743,6 +1746,188 @@ test('a queued message keeps its image through an edit and reaches the provider'
     const user = promptMessage(server, 'edited queued message')
     assert.ok(Array.isArray(user.content), 'the edited message still carries typed parts')
     assert.ok(user.content.some((part) => part.type === 'image_url'), 'and its image')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a queued message runs as a turn with Stop on offer, and a message typed meanwhile waits for it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue developer-ten-6 (P1, measured on 8082 on 2026-10-29): once the queue had sent its message as a turn of
+   * its own, the composer was drawn idle under that running turn: Send instead of Stop, so the turn could not be
+   * stopped, and a message typed then went out at once as a second turn beside it on the same session. DSH: "While a
+   * normal composer is running, its primary pointer action remains Stop when the draft is empty"; a turn started from
+   * the queue is a running turn like any other.
+   */
+  const server = await startServer('queued-stop', { holdOpenMs: 2500 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the panel is up')
+    await type(browser, 'first')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length >= 1), 'the first turn reached the endpoint')
+    await type(browser, 'queued one')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 10_000), 'the second message waits in the dock')
+    assert.ok(await until(() => server.double.requests.length >= 2, 15_000), 'the first turn ended and the queue sent its message as a turn of its own')
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === true', 10_000), 'the dock has drained')
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        stop: !document.getElementById('stop').hidden,
+        send: !document.getElementById('send').hidden,
+        label: document.getElementById('send').getAttribute('aria-label'),
+      })`),
+    )
+    assert.deepEqual(state, { stop: true, send: false, label: 'Queue message' }, 'while the queued turn runs, the composer offers Stop and Enter queues')
+    const asked = server.double.requests.length
+    await type(browser, 'typed meanwhile')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("queue").hidden === false', 5_000), 'a message typed meanwhile waits in the dock')
+    assert.equal(server.double.requests.length, asked, 'and no second turn started beside the running one')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+
+test('switching to idle Y keeps X queued messages moving and Y offers Send', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('session-queues', { holdOpenMs: 8000 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const door = await fetch(server.url, { redirect: 'manual' })
+    const cookie = String(door.headers.get('set-cookie') ?? '').split(';')[0]
+    const headers = { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' }
+    const post = (path, body) => fetch(new URL(path, server.url), { method: 'POST', headers, body: JSON.stringify(body) }).then((response) => response.json())
+    await post('/api/workspaces', { path: server.work })
+    /**
+     * Both sessions are titled when they are made. A session with no turn and no title is a New session placeholder, and
+     * among those only the open one is a tree row (DSH `sessionVisible`, dsh-client-ui-workspace lib/client.js:959-966;
+     * heddle's `WorkspaceTree.placeholder` / `hiddenBlank`), so two untitled blanks would leave Y without a row to click
+     * once X is open. A titled session is one a person named, and is a row however many turns it has.
+     */
+    const x = (await post('/api/sessions', { branch: server.work, title: 'session X' })).session
+    const y = (await post('/api/sessions', { branch: server.work, title: 'session Y' })).session
+    assert.ok(typeof x === 'string' && typeof y === 'string')
+    await browser.goto(server.url)
+    const row = (id) => `document.querySelector('#tree li[data-kind=session][data-session-id=${JSON.stringify(id)}] > .row')`
+    const open = async (id) => {
+      await browser.waitFor(`${row(id)} !== null`, 15000)
+      await browser.evaluate(`${row(id)}.click()`)
+      await browser.waitFor(`document.querySelector('#tree li[data-session-id=${JSON.stringify(id)}]')?.getAttribute('aria-selected') === 'true'`, 10000)
+    }
+    await open(x)
+    await type(browser, 'FIRST-X')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor(`document.getElementById('stop').hidden === false`, 15000)
+    await type(browser, 'QUEUED-X')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor(`document.getElementById('queue').innerText.includes('QUEUED-X')`, 10000)
+    await open(y)
+    assert.equal(await browser.evaluate(`document.getElementById('stop').hidden`), true, 'Refs #73: idle Y must not show Stop for X')
+    const deadline = Date.now() + 15000
+    let recorded = null
+    while (Date.now() < deadline) {
+      recorded = await fetch(new URL('/api/sessions/' + encodeURIComponent(x), server.url), { headers: { cookie } }).then((response) => response.json())
+      if (JSON.stringify(recorded).includes('QUEUED-X')) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.ok(JSON.stringify(recorded).includes('QUEUED-X'), 'Refs #72: X queue drains while Y is shown')
+    const other = await fetch(new URL('/api/sessions/' + encodeURIComponent(y), server.url), { headers: { cookie } }).then((response) => response.json())
+    assert.ok(!JSON.stringify(other).includes('QUEUED-X'), 'queued text stays in X')
+  } finally { browser.close(); await server.close() }
+})
+
+
+test('Stop preserves pending messages until a new send drains them ahead of new text', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('stop-keeps-queue', { holdOpenMs: 3500 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("model-trigger") !== null', 20000)
+    await type(browser, 'FIRST')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1))
+    await type(browser, 'KEPT')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor('!document.getElementById("queue").hidden', 10000)
+    await browser.evaluate('document.getElementById("stop").click()')
+    await browser.waitFor('document.getElementById("stop").hidden', 10000)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    assert.equal(server.double.requests.length, 1, 'Refs #75: Stop must not start a queued turn')
+    assert.ok(await browser.evaluate('document.getElementById("queue").innerText.includes("KEPT")'), 'pending text remains visible')
+    await type(browser, 'NEXT')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length >= 3, 20000), 'a new send wakes retained work and then itself')
+    const asked = server.double.requests.map((request) => JSON.stringify(request))
+    assert.ok(asked[1].includes('KEPT'), 'retained work goes first')
+    assert.ok(asked[2].includes('NEXT'), 'new text follows retained work')
+  } finally { browser.close(); await server.close() }
+})
+
+test('a message the server took is not put back or resent when the connection drops before its turn ends', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue #48 (2026-10-30): when the network dropped at the end of a turn, the answer had arrived in full, but the
+   * page said "the message could not be sent: Failed to fetch" and put the answered prompt back in the composer, so
+   * Enter sent it again as a duplicate turn. DSH restores a draft only for a failed submission. The drop is made
+   * deterministic in the page: the turn's response stream errors as a lost connection does, right after the answer's
+   * text has been read, while the model double still holds the stream open.
+   */
+  const server = await startServer('dropped-end', { holdOpenMs: 4000 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the panel is up')
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.fetch = async (input, init) => {
+        const response = await real(input, init)
+        if (!String(input).includes('/api/turn') || response.body === null) return response
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let seen = ''
+        let drop = false
+        const body = new ReadableStream({
+          async pull(controller) {
+            if (drop) { controller.error(new TypeError('Failed to fetch')); return }
+            const { value, done } = await reader.read()
+            if (done) { controller.close(); return }
+            controller.enqueue(value)
+            seen += decoder.decode(value, { stream: true })
+            if (seen.includes('the answer')) drop = true
+          },
+        })
+        return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
+      }
+    })()`)
+    await type(browser, 'only once')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("the answer")', 15_000), 'the answer arrived')
+    assert.ok(
+      await browser.waitFor(`[...document.querySelectorAll('#log .turn.denied')].length > 0`, 10_000),
+      'and the dropped connection is reported',
+    )
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        field: document.querySelector('textarea').value,
+        notes: [...document.querySelectorAll('#log .turn.denied')].map((note) => note.textContent),
+      })`),
+    )
+    assert.equal(state.field, '', `the delivered message is not put back in the composer (${JSON.stringify(state)})`)
+    assert.ok(!state.notes.some((note) => /could not be sent/.test(note)), `nor reported as unsent (${JSON.stringify(state.notes)})`)
+    assert.ok(state.notes.some((note) => /delivered/.test(note)), 'the note says the message was delivered')
+    assert.equal(server.double.requests.length, 1, 'and nothing was sent twice')
   } finally {
     browser.close()
     await server.close()

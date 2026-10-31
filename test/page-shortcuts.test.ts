@@ -60,6 +60,7 @@ test('every Option chord fires with the key values Chrome delivers on a Mac', ()
     ['KeyB', '∫', 'sidebar'],
     ['KeyN', 'Dead', 'new-session'],
     ['Comma', '≤', 'settings'],
+    ['KeyO', 'ø', 'add-workspace'],
   ]
   for (const [code, key, action] of chords) {
     assert.equal(shortcutFor(keydown({ code, key, metaKey: true, altKey: true }), mac), action, `⌥⌘ ${code} (key ${key})`)
@@ -151,11 +152,9 @@ test('two Escape presses within 500 ms stop the running turn, as DSH does', () =
   assert.match(page, /const card = document\.getElementById\('approval-card'\)\n\s+return card !== null && !card\.hidden/, 'and the approval card')
   assert.match(page, /previous\.region === press\.region &&\n\s+previous\.session === press\.session &&\n\s+previous\.turn === press\.turn &&/, 'a change of region, session or turn breaks it')
   assert.match(page, /\n\s+\},\n\s+true,\n\)\n/, 'read in the capture phase, before menus close themselves')
-  /** "preserve queued messages": the stop holds the queue until the person acts again. */
-  assert.match(page, /queueHeldAfterStop\.add\(composerKey\)/, 'a stop holds the queue')
-  assert.match(page, /if \(payload\.session === composerKey && !queueHeldAfterStop\.has\(payload\.session\)\) void pumpQueue\(\)/, 'the stopped turn\'s end does not pump it')
-  assert.match(page, /if \(queueHeldAfterStop\.has\(key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE \? composerKey : key\)\) break/, 'nor does the pump loop carry on')
-  assert.equal((page.match(/queueHeldAfterStop\.delete\(composerKey\)/g) ?? []).length, 4, 'sending, queueing or steering releases it')
+  /** "preserve queued messages": the sequence is the Stop button's own cancellation, which holds the queue (Refs #75). */
+  assert.match(page, /anyRunning\(\)\n\s+\) \{\n\s+stopSequence = null\n\s+void stopTurn\(\)/, 'the second press stops through stopTurn')
+  assert.match(page, /async function stopTurn\(\) \{\n\s+stoppedQueues\.add\(queueOf\(\)\)/, 'which holds the queue')
   assert.match(page, /title="Stop generating \(Esc Esc\)"/, 'and the Stop button names the sequence, as DSH\'s tooltip does')
 })
 

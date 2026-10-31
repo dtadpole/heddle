@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { validateHeaderValue } from 'node:http'
 import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentsOf, FILE_ANSWER_HEADERS, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession , } from '../src/server/web.ts'
+import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, inlineContentType, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -77,6 +78,7 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   const turns = transcriptTurns([
     { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'first' }] } },
     { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: 'a.txt', content: 'x' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 1 bytes to a.txt' }], toolCallId: 'c1' } },
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'done' } },
     { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'second' }] } },
     { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'nothing to write' } },
@@ -96,6 +98,96 @@ test('a file route answers with the sandbox and nosniff headers DSH puts on its 
     'content-security-policy': "sandbox; default-src 'none'",
     'x-content-type-options': 'nosniff',
   })
+})
+
+test('a download name reaches the header as visible ASCII, with the real name in filename*', () => {
+  /**
+   * Live issues developer-two-2 and developer-two-3 (2026-10-29): the raw name went into `content-disposition`, so
+   * Node refused `说明.txt` part-way through writeHead (a 404 written over the started 200) and `café.txt` went out
+   * as a raw Latin-1 byte. These are the same strings the Rust server's `attachment_disposition` test expects.
+   */
+  const cases: Array<[string, string]> = [
+    ['notes.txt', 'attachment; filename="notes.txt"'],
+    ['说明.txt', `attachment; filename="__.txt"; filename*=UTF-8''%E8%AF%B4%E6%98%8E.txt`],
+    ['café.txt', `attachment; filename="caf_.txt"; filename*=UTF-8''caf%C3%A9.txt`],
+    ['say "hi"\\now.txt', `attachment; filename="say _hi__now.txt"; filename*=UTF-8''say%20%22hi%22%5Cnow.txt`],
+    ["line\nbreak (1)'*.txt", `attachment; filename="line_break (1)'*.txt"; filename*=UTF-8''line%0Abreak%20%281%29%27%2A.txt`],
+    ['🦀.bin', `attachment; filename="_.bin"; filename*=UTF-8''%F0%9F%A6%80.bin`],
+  ]
+  for (const [name, expected] of cases) {
+    const value = attachmentDisposition(name)
+    assert.equal(value, expected, `the disposition for ${JSON.stringify(name)}`)
+    assert.match(value, /^[\x20-\x7e]*$/, `only visible ASCII for ${JSON.stringify(name)}`)
+    assert.doesNotThrow(() => validateHeaderValue('content-disposition', value), `Node accepts it for ${JSON.stringify(name)}`)
+    const encoded = /filename\*=UTF-8''(.*)$/.exec(value)?.[1]
+    assert.equal(encoded === undefined ? /filename="(.*)"/.exec(value)?.[1] : decodeURIComponent(encoded), name, 'it decodes back to the real name')
+  }
+})
+
+test('a write that failed is not an edited file; one that succeeded in the same exchange is', () => {
+  /**
+   * DSH parity R-developer-twelve-11, measured 2026-10-29: with every `write_file` refused by the sandbox the panel
+   * still named the files with their added lines, though the disk was unchanged. A call's arguments are what the
+   * model asked for; only an `ok` result is a change.
+   */
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit three files' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: '/w/refused.txt', content: 'one\ntwo\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: "error (SANDBOX): '/w/refused.txt' is outside the sandbox root /elsewhere" }], toolCallId: 'c1' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c2', name: 'bash', arguments: JSON.stringify({ command: "sed -i '' 's/a/b/' /w/shell.txt" }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'error (SANDBOX): [sandbox: file access denied under workspace-write mode]' }], toolCallId: 'c2' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c3', name: 'write_file', arguments: JSON.stringify({ path: '/w/kept.txt', content: 'x\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 2 bytes to /w/kept.txt' }], toolCallId: 'c3' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'one of three' } },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answer?.files, [{ path: '/w/kept.txt', added: 1 }], 'only the write that succeeded is listed')
+  assert.equal(turns.find((turn) => turn.name === 'write_file')?.state, 'error', 'the refused call itself still reads as an error')
+})
+
+test('an exchange whose every write failed carries no panel at all', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'x' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'error: permission denied' }], toolCallId: 'c1' } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'could not write' } },
+  ])
+  assert.equal(turns.find((turn) => turn.kind === 'assistant')?.files, undefined, 'nothing changed, so no Edited files panel')
+})
+
+test('a write still waiting for its result is not yet an edited file', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'writing now' } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'x' }) } },
+  ])
+  assert.equal(turns.find((turn) => turn.kind === 'assistant')?.files, undefined, 'a running call has changed nothing yet')
+})
+
+test('a path written twice keeps the lines of its last successful write', () => {
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'edit' }] } },
+    // Results without ids pair with the newest open call, as a provider that sends no ids requires.
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'one\ntwo\nthree\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'wrote 14 bytes to /w/a.txt' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'tool-call', name: 'write_file', arguments: JSON.stringify({ path: '/w/a.txt', content: 'one\n' }) } },
+    { type: 'message', message: { role: 'tool', content: [{ type: 'text', text: 'Error: disk full' }] } },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'the second write failed' } },
+  ])
+  assert.deepEqual(turns.find((turn) => turn.kind === 'assistant')?.files, [{ path: '/w/a.txt', added: 3 }], 'the failed second write does not overwrite the first')
+})
+
+test('a stylesheet is served inline as CSS, so an HTML preview can apply it; a page or a script is still a download', () => {
+  /**
+   * DSH parity R-developer-twelve-14, measured 2026-10-29: an HTML preview's `<link rel="stylesheet">` is rewritten
+   * to `/api/raw`, which served the CSS as a download type, and a standards-mode document refuses such a stylesheet,
+   * so the preview showed unstyled.
+   */
+  assert.equal(inlineContentType('/w/style.css'), 'text/css; charset=utf-8')
+  assert.equal(inlineContentType('/w/THEME.CSS'), 'text/css; charset=utf-8', 'the extension is matched case-insensitively')
+  for (const path of ['/w/page.html', '/w/app.js', '/w/README.md', '/w/data.json', '/w/LICENSE', '/w/x.xhtml']) {
+    assert.equal(inlineContentType(path), null, `${path} is still a download`)
+  }
 })
 
 test('a turn stopped by the round limit keeps its reason on the answer', () => {

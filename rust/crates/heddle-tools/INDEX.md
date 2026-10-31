@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:07:16Z
-version: 0.6.0
+modified: 2026-10-31T02:58:51Z
+version: 0.6.1
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -31,7 +31,7 @@ The Rust port of the tool registry, the built-in tools, and outside tools as pro
 | `ToolResult`, `ToolError`, `codes`, `ToolFailure` | `{ output, error?, data? }` in the TypeScript JSON shape; stable codes; how a tool's `run` fails unexpectedly | everyone |
 | `ToolRegistry` | `register` (refuses a blank name or description), `filter_to`, `allow_list`, `missing`, `names`, `describe`, `has`, `get`, `call`, `run_command`, `effective_mode`, `sandbox`, `sandbox_policy`, `summary_line`, `from_config` | `heddle` (CLI), `heddle-agent`, `heddle-server`, `heddle-web-composer` |
 | `ToolGates`: `ApprovalGate`, `SandboxGate`, `ModeResolver`, `ToolHooks` | what the registry asks of approvals/escalation, the sandbox, the per-session mode and the hook bus | implemented over `heddle-sandbox`, `heddle-session`, `heddle-events` |
-| `ToolsConfig` | the `tools` row: `allow`, `includeBuiltins` (true), `bashTimeoutMs` (30000) | `heddle` (boot) |
+| `ToolsConfig` | the `tools` row: `allow`, `includeBuiltins` (true), `bashTimeoutMs` (30000), `bashMaxTimeoutMs` (600000, DSH's cap on a call's own `timeoutMs`) | `heddle` (boot) |
 | `builtin_tools`, `escalation_fields` | `write_file`, `read_file`, `list_dir`, `bash`, with descriptions copied verbatim | `ToolRegistry::from_config` |
 | `OutsideComponentSpec`, `OutsideComponent`, `ProcessTool` | start a declared process, register its tools, forward their calls | `heddle` (boot); `heddle-events` for part-6 listeners |
 | `protocol` | the wire types of [`PROTOCOL.md`](PROTOCOL.md) | integrator-one's verifier fixture, `heddle-events` |
@@ -44,7 +44,8 @@ The registry's gate order, which the port keeps exactly: unknown (`UNKNOWN_TOOL`
 approval (`DENIED`) → `tools/pre-execute` (`HOOKED`) → escalation (`BAD_ARGS`, `ESCALATION_REFUSED`) → the mode,
 resolved once from the session's record or the deployment default and never from the arguments → `run` →
 `tools/post-execute`; a sandbox denial thrown by a tool is `SANDBOX`, any other failure `TOOL_FAILED`. `call`
-never fails: every refusal is a result the model reads.
+never fails: every refusal is a result the model reads. `read_file` classifies a missing file as `FS_NOT_FOUND` and a
+directory as `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …` with DSH's display spelling (issue #4).
 
 ## Where the port stands
 
@@ -85,9 +86,10 @@ Each step lands with its unit tests in the worktree and is pushed to `hd/develop
 | 5b | The `tools`/`commands` entry point (D-043) | **landed** | 5 unit tests from the verifier's own expectations: the allow list leaves exactly `read_file` with a description over ten characters; the JSON is `JSON.stringify(v, null, 2)` with only `name` and `description`; the text pads the name to 14 and cuts the description at its first period; a replacement under a taken name is the one listed; `commands` with its em dash and as JSON. Plus a registry over the three real services writing inside the workspace and refusing outside |
 | 6 | `40-pluggable-tools` through `HEDDLE_BIN` | with `heddle` (boot, `tools --json`, `--turn`) and integrator-one's process branch | the verifier, exit 0 |
 
-**Not ported: background jobs.** The crate description names them, but the TypeScript build has no source and no
-verifier for them (its `background-jobs` session read DSH's mechanism and recorded it in
-`_context_/dsh-mechanisms/dsh-jobs.md`; nothing landed in `src/`). They join this API when the oracle has them.
+**Background jobs live in `heddle-jobs`.** This crate holds only the seam they reach `bash` through
+(`background.rs`: `BashBackground`, `attach_bash_background`, `ForegroundRun`) and what both runs share
+(`launch_shell`, `shell_result`). With no runner attached, `bash` is foreground-only and its wall time kills; the jobs
+row's runner adds `run_in_background` and, with `promoteOnTimeout`, takes the foreground calls too.
 
 ## Read next
 

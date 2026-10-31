@@ -73,7 +73,9 @@ fn the_matcher_compares_the_code_and_reads_mod_by_platform() {
         "nothing fires under AltGraph"
     );
     assert!(
-        source.contains("const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform"),
+        source.contains(
+            "const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform"
+        ),
         "a Mac is read as DSH reads it, from navigator.platform and without minding case"
     );
 }
@@ -85,7 +87,8 @@ fn two_escape_presses_stop_the_running_turn() {
     assert!(PAGE_SOURCE.contains("function isStopSequence(previous, now)"));
     assert!(PAGE_SOURCE.contains("function uiTakesEscape()"), "a menu, dialog or approval card breaks the sequence");
     assert!(PAGE_SOURCE.contains("previous.turn === press.turn &&"), "so does a new turn");
-    assert!(PAGE_SOURCE.contains("queueHeldAfterStop.add(composerKey)"), "and a stop keeps queued messages queued");
+    assert!(PAGE_SOURCE.contains("stopSequence = null\n      void stopTurn()"), "the second press is the Stop button's cancellation");
+    assert!(PAGE_SOURCE.contains("async function stopTurn() {\n  stoppedQueues.add(queueOf())"), "which keeps queued messages queued");
 }
 
 /// Mod+/ opens DSH's keyboard reference, one dialog titled Keyboard shortcuts (DSH parity R-developer-seven-11).

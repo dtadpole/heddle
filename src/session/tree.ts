@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, type Stats } from 'node:fs'
 import { basename, join, sep } from 'node:path'
 
 import { canonicalPath, depthOf, isUnder } from '../paths.ts'
@@ -66,6 +66,23 @@ export interface TreeNode {
    * UI show them as ad-hoc work while keeping every session reachable.
    */
   readonly adHoc?: readonly TreeNode[]
+}
+
+/**
+ * A folder the tree was asked to list and may not read (issue #106).
+ *
+ * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:483-489): a listing
+ * that failed is a failure, and its file backend says `cannot list "<path>": permission denied` of a folder it may not
+ * read (dsh-fs-local lib/index.js:269). DSH has no code for that one, so this carries heddle's own in DSH's family,
+ * `workspace-file/unreadable`, and names the folder relative to its workspace (a root by its title), never by the
+ * absolute path. The caller decides what a refusal is: the CLI prints it, the route answers `400` with the code.
+ */
+export class WorkspaceFileError extends Error {
+  readonly code = 'workspace-file/unreadable'
+  constructor(name: string) {
+    super(`cannot list "${name}": permission denied`)
+    this.name = 'WorkspaceFileError'
+  }
 }
 
 /** A registered root, as the workspace record states it. */
@@ -160,26 +177,85 @@ function currentByFolder(sessions: readonly SessionMeta[]): Map<string, SessionM
   return map
 }
 
+/** One entry of a directory, with what its row needs. */
+interface Entry {
+  readonly name: string
+  readonly directory: boolean
+  readonly bytes: number
+  readonly link: boolean
+}
+
 /**
  * One directory's entries worth showing: folders first, then files, each name-sorted.
  *
  * Folders first is what makes a tree navigable — the structure a person is walking stays together at
  * the top, and the leaves sit under it. Dot-entries and the two noise directories are not returned at
  * all, which is the same judgement the tree made when it showed folders only.
+ *
+ * A **symlink is what it resolves to**, as DSH lists one: `dsh-fs-local`'s `listDirectory` probes each child's resolved
+ * target for its type and reports a size only for a regular file, so a linked folder lists as a folder and expands like
+ * its target (`dsh-api-workspace-files`, `list` follows a final directory link). A directory entry's own type does not
+ * follow the link, which is why this asks `stat`: measured, a link to a folder was a 0-byte file that could not be
+ * opened. A link that resolves to nothing stays a 0-byte leaf. `link` tells the caller to keep the row at the link's own
+ * path rather than its target's.
  */
-function entries(dir: string): { readonly name: string; readonly directory: boolean; readonly bytes: number }[] {
+function entries(dir: string): Entry[] {
   try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => !entry.name.startsWith('.') && !PLUMBING.has(entry.name))
-      .map((entry) => ({
-        name: entry.name,
-        directory: entry.isDirectory(),
-        bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0,
-      }))
-      .sort((left, right) => (left.directory === right.directory ? collator.compare(left.name, right.name) : left.directory ? -1 : 1))
+    return listed(dir)
   } catch {
-    // A folder that cannot be read is a folder with nothing to show, not a failure of the tree.
+    // A folder *inside* a listing that cannot be read (a `_sessions_` drawer, say) has nothing to add to that listing.
     return []
+  }
+}
+
+/** The entries of one directory, or the error that kept it from being read. */
+function listed(dir: string): Entry[] {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => !entry.name.startsWith('.') && !PLUMBING.has(entry.name))
+    .map((entry) => {
+      if (!entry.isSymbolicLink()) {
+        return { name: entry.name, directory: entry.isDirectory(), bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0, link: false }
+      }
+      const target = statOf(join(dir, entry.name))
+      return {
+        name: entry.name,
+        directory: target?.isDirectory() === true,
+        bytes: target?.isFile() === true ? target.size : 0,
+        link: true,
+      }
+    })
+    .sort((left, right) => (left.directory === right.directory ? collator.compare(left.name, right.name) : left.directory ? -1 : 1))
+}
+
+/**
+ * The entries of the folder the caller **asked for**: a folder it may not read is a `WorkspaceFileError`, not an empty
+ * list (#106) — "nothing inside" was false, and the page said it. Any other failure keeps the old answer, an empty level.
+ */
+function askedEntries(dir: string, context: Context): Entry[] {
+  try {
+    return listed(dir)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code === 'EACCES' || code === 'EPERM') throw new WorkspaceFileError(nameInWorkspace(dir, context))
+    return []
+  }
+}
+
+/** A folder as a person knows it: a root by its title, a folder by its path inside its root, else by its name. */
+function nameInWorkspace(dir: string, context: Context): string {
+  const root = context.byPath.get(dir)
+  if (root !== undefined) return root.title
+  const owner = context.ownerOf(dir)
+  if (owner === undefined) return basename(dir) || dir
+  return dir.slice(owner.path.length).split(sep).filter(Boolean).join('/')
+}
+
+/** What a path resolves to, following links, or `undefined` when it resolves to nothing. */
+function statOf(path: string): Stats | undefined {
+  try {
+    return statSync(path)
+  } catch {
+    return undefined
   }
 }
 
@@ -202,7 +278,7 @@ export interface FileReading {
   readonly bytes: number
   readonly lines: number
   readonly text: string
-  /** The file is longer than the limit, so `text` is its beginning and not all of it. */
+  /** The file is longer than the limit, so `text` is its beginning and not all of it: the complete characters before the limit. */
   readonly truncated: boolean
 }
 
@@ -233,15 +309,35 @@ export function readFileText(path: string, options: { readonly limit?: number } 
   const whole = readFileSync(canonical)
   const slice = whole.subarray(0, limit)
   if (slice.includes(0)) throw new Error(`${canonical} looks like a binary file, so it has no text to show`)
-  const text = slice.toString('utf8')
-  if (text.includes('\uFFFD')) throw new Error(`${canonical} is not UTF-8 text, so it has no text to show`)
+  const truncated = whole.length > slice.length
+  const text = decodeUtf8(slice, truncated)
+  if (text === undefined) throw new Error(`${canonical} is not UTF-8 text, so it has no text to show`)
   return {
     path: canonical,
     name: basename(canonical),
     bytes: stats.size,
     lines: text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0),
     text,
-    truncated: whole.length > slice.length,
+    truncated,
+  }
+}
+
+/**
+ * The slice's text, or `undefined` when its bytes are not UTF-8 (issue #78).
+ *
+ * Decoded **strictly**: a literal U+FFFD in the file is a character like any other, and only bytes that are not UTF-8
+ * are refused — DSH's reader decodes with `TextDecoder('utf-8', { fatal: true })` (dsh-fs-local lib/index.js:454). When
+ * the limit cut the file, its last character may be cut too, so the slice is decoded in **stream** mode, which holds
+ * back a trailing sequence that is incomplete but valid so far and throws on any byte that begins no character — DSH
+ * decodes its chunks the same way (:342), and it is the Rust port's `Utf8Error::error_len() == None` at the end. The
+ * text is then the complete characters before the cut. A file that is not cut has no such excuse, so a final incomplete
+ * character is refused. `ignoreBOM` keeps a leading BOM in the text, as `Buffer.toString` did and the Rust port does.
+ */
+function decodeUtf8(slice: Uint8Array, truncated: boolean): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(slice, { stream: truncated })
+  } catch {
+    return undefined
   }
 }
 
@@ -355,7 +451,7 @@ function sessionOf(dir: string, context: Context): TreeNode['session'] {
 }
 
 /** The direct children of a folder: its subfolders, its files, or a registered root among them. */
-function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
+function childrenOf(dir: string, kind: NodeKind, context: Context, listing: readonly Entry[] = entries(dir)): TreeNode[] {
   const sessions: TreeNode[] = []
   const rest: TreeNode[] = []
   /**
@@ -365,8 +461,14 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
    */
   const parentIsSessions = basename(dir) === SESSIONS_FOLDER
 
-  for (const entry of entries(dir)) {
-    const path = canonicalPath(join(dir, entry.name))
+  for (const entry of listing) {
+    /**
+     * A link's row stays at the **link's own path**, DSH's rule (a child's path is the listed directory's joined with its
+     * name, `dsh-api-workspace-files` types.d.ts). Canonicalising it put the row at its target's path, which the target's
+     * own row already holds, so two rows shared one path. Asking for the link's path lists its target: `tree` resolves it,
+     * and the caller's containment check refuses a link that leads outside every root.
+     */
+    const path = entry.link ? join(dir, entry.name) : canonicalPath(join(dir, entry.name))
 
     /**
      * The sessions folder is **not a node**; the sessions inside it are this branch's own.
@@ -539,10 +641,20 @@ export function tree(path: string | null, input: TreeInput): TreeNode {
 
   if (path === null || path === '') {
     const tops = context.roots.filter((root) => context.ownerOf(root.path) === undefined)
-    const asNode = (root: TreeRoot): TreeNode => ({
-      ...row(root.path, 'workspace', root.title, context),
-      children: childrenOf(root.path, 'workspace', context),
-    })
+    /**
+     * A root that cannot be read is still listed, with its children **not listed** (`null`) rather than an empty list
+     * (#106): asking for it by path answers why.
+     */
+    const asNode = (root: TreeRoot): TreeNode => {
+      let children: TreeNode[] | null
+      try {
+        children = childrenOf(root.path, 'workspace', context, askedEntries(root.path, context))
+      } catch (error) {
+        if (!(error instanceof WorkspaceFileError)) throw error
+        children = null
+      }
+      return { ...row(root.path, 'workspace', root.title, context), children }
+    }
     return {
       path: '',
       kind: 'roots',
@@ -563,5 +675,5 @@ export function tree(path: string | null, input: TreeInput): TreeNode {
   const root = context.byPath.get(canonical)
   const kind = root !== undefined ? 'workspace' : kindOf(canonical, input)
   const label = root !== undefined ? root.title : basename(canonical)
-  return { ...row(canonical, kind, label, context), children: childrenOf(canonical, kind, context) }
+  return { ...row(canonical, kind, label, context), children: childrenOf(canonical, kind, context, askedEntries(canonical, context)) }
 }
