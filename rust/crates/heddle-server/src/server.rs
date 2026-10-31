@@ -524,6 +524,9 @@ pub struct WebServer {
     heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl WebServer {
     /// `http://<host>:<port>/?token=<token>`.
     pub fn url(&self) -> &str {
@@ -575,6 +578,16 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        // A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each
+        // running command's process group is ended and its call is recorded as interrupted before the process
+        // goes (live-testing issue #6; DSH cancels its agents at teardown, dsh-bash-local graceMs 3000).
+        let runs = self.state.runs().clone();
+        if runs.abort_all() > 0 {
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+            while runs.any_running() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
