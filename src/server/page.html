@@ -6267,12 +6267,28 @@ async function sendNow(text, attachments = []) {
   }
   directTurnPending += 1
   renderComposerState()
+  /**
+   * Whether the server took the message: `runTurn` says so when the turn's response opens, before its stream is read.
+   *
+   * Live issue #48 (2026-10-30): when the connection dropped at the end of a turn, the answer had streamed in full, but
+   * reading the stream's end threw, and this catch said "the message could not be sent" and put the answered prompt back
+   * in the composer, so Enter sent it again as a duplicate turn and the next message was appended to it. DSH restores a
+   * draft only for a failed **submission**; once the host has the message its echo is retired and nothing comes back.
+   * The queue's pump already drew this line (`accepted` in `pumpQueue`).
+   */
+  let accepted = false
   try {
-    await runTurn(text, composerKey, attachments)
+    await runTurn(text, composerKey, attachments, () => {
+      accepted = true
+    })
   } catch (error) {
-    if (field.value.trim() === '') field.value = text
-    growComposer()
-    add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    if (accepted) {
+      add('denied', `the connection dropped while the answer was arriving (${(error && error.message) || error}); the message itself was delivered`)
+    } else {
+      if (field.value.trim() === '') field.value = text
+      growComposer()
+      add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    }
   } finally {
     directTurnPending = Math.max(0, directTurnPending - 1)
     if (directTurnPending === 0) {
