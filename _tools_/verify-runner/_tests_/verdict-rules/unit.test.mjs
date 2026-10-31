@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-import { classify, collectNames, tapCounts } from '../../run.mjs'
+import { classify, collectNames, descendantsOf, tapCounts } from '../../run.mjs'
 
 /**
  * The runner's own **component tests**.
@@ -112,4 +117,73 @@ test('a deliberate skip is a pass only when the target asks for it, never by def
   /** A failure still outranks a permitted skip: a red check is never hidden by the flag. */
   const failed = classify(tap({ tests: 5, pass: 2, fail: 1, skipped: 2 }), '', 1, { allowSkip: true })
   assert.equal(failed.verdict, 1, 'a failure is still a failure')
+})
+
+test('the descendants of a process are found by parent, across levels, and nothing else is', () => {
+  const rows = [
+    { pid: 10, ppid: 1 }, // the runner
+    { pid: 11, ppid: 10 }, // node --test
+    { pid: 12, ppid: 11 }, // the harness
+    { pid: 13, ppid: 11 }, // a browser in its own process group, still a child by parent
+    { pid: 14, ppid: 13 }, // the browser's helper
+    { pid: 20, ppid: 1 }, // an unrelated process
+    { pid: 21, ppid: 20 },
+  ]
+  assert.deepEqual(descendantsOf(10, rows), [11, 12, 13, 14])
+  assert.deepEqual(descendantsOf(20, rows), [21])
+  assert.deepEqual(descendantsOf(14, rows), [], 'a leaf has no descendants')
+})
+
+/** Whether a pid still names a live process. */
+function alive(pid) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+test('a runner told to stop ends every process its check started, a detached one included', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'verify-runner-orphans-'))
+  const pidsFile = join(dir, 'pids.json')
+  const check = join(dir, 'hang.check.mjs')
+  writeFileSync(
+    check,
+    [
+      "import { spawn } from 'node:child_process'",
+      "import { writeFileSync } from 'node:fs'",
+      "import { test } from 'node:test'",
+      "test('hangs with two children', async () => {",
+      "  const attached = spawn('sleep', ['120'], { stdio: 'ignore' })",
+      "  const detached = spawn('sleep', ['120'], { stdio: 'ignore', detached: true })",
+      `  writeFileSync(${JSON.stringify(pidsFile)}, JSON.stringify([attached.pid, detached.pid]))`,
+      '  await new Promise(() => setInterval(() => {}, 1000))',
+      '})',
+      '',
+    ].join('\n'),
+  )
+  const runner = fileURLToPath(new URL('../../run.mjs', import.meta.url))
+  /** Outside this test runner's own context: a nested `node --test` that inherits it reports to this run instead. */
+  const env = { ...process.env }
+  delete env.NODE_TEST_CONTEXT
+  const child = spawn(process.execPath, [runner, check, '--list'], { stdio: 'ignore', env })
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
+  let pids = []
+  try {
+    const started = Date.now()
+    while (!existsSync(pidsFile) && Date.now() - started < 15_000) await new Promise((resolve) => setTimeout(resolve, 50))
+    pids = JSON.parse(readFileSync(pidsFile, 'utf8'))
+    assert.ok(pids.every(alive), 'both children run before the runner is stopped')
+    child.kill('SIGTERM')
+    const result = await Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve('timed out'), 10_000))])
+    assert.deepEqual(result, { code: 143, signal: null }, 'the runner exits at once, with the SIGTERM status')
+    const settled = Date.now()
+    while (pids.some(alive) && Date.now() - settled < 3000) await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.deepEqual(pids.filter(alive), [], 'no child of the check outlives the runner')
+  } finally {
+    for (const pid of pids) if (alive(pid)) process.kill(pid, 'SIGKILL')
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
