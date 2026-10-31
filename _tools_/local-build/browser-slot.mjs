@@ -8,8 +8,8 @@
 //
 // Slot 1 is still the mkdir directory $ROOT/browser.lock (slot n is browser.lock<n>) with an `owner` file
 // inside, so a seat that takes it by hand (mkdir) and this tool exclude each other. $ROOT/browser-cap holds
-// "<count> [reserve=<role>]" (default 1); with a reservation the last slot serves only that role and the
-// others everyone else. No new holder is admitted while memory is short (D-060). Waiting seats hold one ticket each in
+// "<count> [reserve=<role>]" (default 1); with a reservation the last slot serves only that role, and the
+// others serve every seat, that role included. No new holder is admitted while memory is short (D-060). Waiting seats hold one ticket each in
 // $ROOT/browser.queue; a ticket keeps its place across calls, so a seat whose tool calls are bounded to
 // two minutes calls `take` again until it gets the slot. $ROOT/browser.next (written by the coordinator)
 // puts its seat first while that seat is queued, and is consumed when that seat takes the slot.
@@ -37,15 +37,16 @@ const POLL_MS = number('BROWSER_SLOT_POLL_MS', 1000)
 const MAX_HOLD_S = 600 // the team's rule: hold the slot at most ten minutes
 const QUEUED = 75 // EX_TEMPFAIL: still waiting, the ticket is kept
 const STALE_COPY = 78 // EX_CONFIG: this copy is older than one already in use
-export const VERSION = 4 // bump on every change to the queue's rules; older copies then refuse
+export const VERSION = 5 // bump on every change to the queue's rules; older copies then refuse
 const VERSION_FILE = path.join(ROOT, 'browser-slot.version')
 // A free slot the first waiter has not taken for this long may go to the next waiter whose gate passes.
 const HEAD_GRACE_S = number('BROWSER_SLOT_HEAD_GRACE_SECONDS', 60)
 const freeSince = (n) => path.join(ROOT, `browser.free-since${n}`)
-// D-061: memory_pressure free under 25% admits no one (the primary gate); swap used at or over 7680M is the
-// backstop. browser-cap may override both ("min-free=25 swap-stop=7680"), then the environment (tests).
+// D-064: a new holder needs memory_pressure free >= 25% and disk free >= 20 GiB on the volume of the slot folder.
+// Swap is no gate (macOS keeps stale pages there and grows it on demand); browser-cap's old swap keys are ignored.
+// browser-cap may move the lines ("min-free=25 disk-min=20"); the environment overrides both (tests).
 const MIN_FREE_PCT = 25
-const SWAP_STOP_MB = 7680
+const MIN_DISK_GB = 20
 
 export const lockDir = (n) => path.join(ROOT, n === 1 ? 'browser.lock' : `browser.lock${n}`)
 
@@ -59,16 +60,21 @@ export function config() {
   const reserve = (text.match(/reserve=([a-z0-9-]+)/) || [])[1] || null
   const key = (name, fallback) => Number((text.match(new RegExp(`${name}=(\\d+)`)) || [])[1]) || fallback
   const minFree = number('BROWSER_SLOT_MIN_FREE_PCT', key('min-free', MIN_FREE_PCT))
-  const swapStop = number('BROWSER_SLOT_SWAP_STOP_MB', key('swap-stop', SWAP_STOP_MB))
-  return { count, reserve: count >= 2 ? reserve : null, minFree, swapStop }
+  const minDisk = number('BROWSER_SLOT_MIN_DISK_GB', key('disk-min', MIN_DISK_GB))
+  return { count, reserve: count >= 2 ? reserve : null, minFree, minDisk }
 }
 
 export const roleOf = (seat, role) => role || (seat.startsWith('integrator-') ? 'integrator' : 'developer')
 
-/** With a reservation the last slot serves only the reserved role, and the other slots only the rest. */
+/**
+ * With a reservation the last slot serves only the reserved role; every other slot serves every seat, the reserved
+ * role included. A reservation is a slot an integrator never waits behind a developer for, not a fence that keeps an
+ * integrator off a free shared slot (measured 2026-10-30 23:47: integrator-one waited for browser.lock4 while
+ * slots 2 and 3 were free).
+ */
 export function eligible(n, role, cfg) {
   if (!cfg.reserve) return true
-  return n === cfg.count ? role === cfg.reserve : role !== cfg.reserve
+  return n === cfg.count ? role === cfg.reserve : true
 }
 
 /** Slots to look at: the configured ones plus any held beyond a lowered cap. */
@@ -83,19 +89,25 @@ function slotNumbers(cfg) {
   return [...Array.from({ length: cfg.count }, (_, i) => i + 1), ...extra.sort((a, b) => a - b)]
 }
 
-/** D-061: no new holder while memory_pressure reports under 25% free, or swap used is at or over 7680M. */
+/** D-064: no new holder while memory_pressure reports under 25% free, or the slot folder's volume has under 20 GiB. */
 export function memoryGate(cfg = config()) {
-  const read = (fake, cmd, args, pattern) => {
-    if (env[fake] !== undefined && env[fake] !== '') return Number(env[fake])
-    const r = spawnSync(cmd, args, { encoding: 'utf8' })
-    const m = (r.stdout || '').match(pattern)
-    return m ? Number(m[1]) : null
+  const fake = (name) => (env[name] !== undefined && env[name] !== '' ? Number(env[name]) : undefined)
+  let free = fake('BROWSER_SLOT_FAKE_FREE_PCT')
+  if (free === undefined) {
+    const m = (spawnSync('memory_pressure', [], { encoding: 'utf8' }).stdout || '').match(/free percentage:\s*(\d+)%/)
+    free = m ? Number(m[1]) : null
   }
-  const free = read('BROWSER_SLOT_FAKE_FREE_PCT', 'memory_pressure', [], /free percentage:\s*(\d+)%/)
-  const swap = read('BROWSER_SLOT_FAKE_SWAP_MB', 'sysctl', ['-n', 'vm.swapusage'], /used\s*=\s*([\d.]+)M/)
-  const reading = `memory free ${free ?? '?'}%, swap ${swap === null ? '?' : Math.round(swap)}M`
-  if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-061)` }
-  if (swap !== null && swap >= cfg.swapStop) return { ok: false, reading, why: `swap ${Math.round(swap)}M >= ${cfg.swapStop}M (D-061 backstop)` }
+  let disk = fake('BROWSER_SLOT_FAKE_DISK_GB')
+  if (disk === undefined) {
+    // df -k: the last line's fourth field is the available KiB of the volume holding the slot folder
+    const lines = (spawnSync('df', ['-k', fs.existsSync(ROOT) ? ROOT : os.homedir()], { encoding: 'utf8' }).stdout || '').trim().split('\n')
+    const kb = Number((lines.at(-1) || '').split(/\s+/)[3])
+    disk = lines.length > 1 && Number.isFinite(kb) ? kb / 1024 / 1024 : null
+  }
+  const reading = `memory free ${free ?? '?'}%, disk ${disk === null ? '?' : disk.toFixed(1)} GiB free`
+  if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-064)` }
+  if (disk !== null && disk < cfg.minDisk)
+    return { ok: false, reading, why: `disk free ${disk.toFixed(1)} GiB < ${cfg.minDisk} GiB (D-064)` }
   return { ok: true, reading, why: '' }
 }
 
@@ -299,7 +311,10 @@ export function take({ seat, role, purpose = 'browser gate', waitS = 100, pid = 
     const order = servingOrder(listTickets())
     for (const n of slots) if (holders.get(n)) fs.rmSync(freeSince(n), { force: true }) // held again: a new free period
     let held = ''
-    for (const n of slots.filter((k) => k <= cfg.count && !holders.get(k) && eligible(k, role, cfg))) {
+    const open = slots.filter((k) => k <= cfg.count && !holders.get(k) && eligible(k, role, cfg))
+    // The reserved role tries its own slot first, so a shared slot stays with the others while that one is free.
+    if (cfg.reserve && role === cfg.reserve) open.sort((a, b) => (b === cfg.count) - (a === cfg.count))
+    for (const n of open) {
       if (!fs.existsSync(freeSince(n))) fs.writeFileSync(freeSince(n), `${clock()}\n`)
       const head = order.find((t) => eligible(n, t.role, cfg))
       const freeFor = age_of(freeSince(n)) ?? 0
@@ -327,7 +342,9 @@ export function take({ seat, role, purpose = 'browser gate', waitS = 100, pid = 
       .map((k) => `slot ${k} held by ${holders.get(k).seat}`)
     noteVerdict(seat, held || busyNow.join('; ') || 'waiting')
     if (Date.now() >= deadline) {
-      const mineClass = order.filter((t) => !cfg.reserve || (t.role === cfg.reserve) === (role === cfg.reserve))
+      // The reserved role counts only its own role ahead (its slot serves no one else); every other seat counts
+      // every earlier waiter, since the reserved role takes shared slots too.
+      const mineClass = order.filter((t) => !cfg.reserve || role !== cfg.reserve || t.role === cfg.reserve)
       const position = mineClass.findIndex((t) => t.seat === seat) + 1
       const busy = slots
         .filter((k) => k <= cfg.count && eligible(k, role, cfg))
@@ -362,7 +379,7 @@ export function release({ seat, force = false, slot, out = console.log }) {
 export function status({ out = console.log } = {}) {
   const cfg = config()
   const gate = memoryGate(cfg)
-  const reserved = cfg.reserve ? `, ${path.basename(lockDir(cfg.count))} reserved for ${cfg.reserve}` : ''
+  const reserved = cfg.reserve ? `, ${path.basename(lockDir(cfg.count))} reserved for ${cfg.reserve} (who may take the others too)` : ''
   out(`cap     ${cfg.count} slot(s)${reserved}; ${gate.reading}: ${gate.ok ? 'new holders allowed' : `no new holder, ${gate.why}`}`)
   let recorded = '?'
   try {

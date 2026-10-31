@@ -199,6 +199,10 @@ export class SessionService extends Service {
    * `context-mgmt 4d`, not `session-20261017-1340` — and the reason is the same here: a clock name is an
    * identity, and a list of identities is a list nobody can scan. A title the person typed afterwards wins,
    * because this only fills a blank.
+   *
+   * That name is the **fallback**. When a model is attached (the session plugin attaches the model service), the
+   * store's title coordinator then asks the session's own endpoint for a title once the turn's request is on record,
+   * and the answer replaces the fallback unless a person renamed the session first (`./title.ts`).
    */
   user(handle: SessionHandle, text: string, source?: unknown): void {
     this.userContent(handle, [{ type: 'text', text }], source)
@@ -294,8 +298,15 @@ export class SessionService extends Service {
     return this.store.list()
   }
 
-  /** Retitle a session; the log is untouched and the meta record is the only thing rewritten. */
+  /**
+   * Retitle a session; the log is untouched and the meta record is the only thing rewritten.
+   *
+   * A rename is a person naming the session, so it **pins** the name: an automatic title still being generated for it
+   * lands nowhere (DSH's `rename()` supersedes in-flight generation, dsh-session-title lib/index.js:295-311). Confirming
+   * the automatic title unchanged counts as naming it, as it does there.
+   */
   rename(id: SessionId, title: string): SessionMeta | null {
+    this.store.titles.supersede(id)
     return this.store.rename(id, title)
   }
 

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
+import { toChatMessage } from '../src/llm/adapters.ts'
 import { SessionStore, type SessionHandle } from '../src/session/store.ts'
 
 /**
@@ -56,8 +57,75 @@ test('a streamed run is one node, folded from the chunks that follow it', () => 
   const message = store.deriveNode(handle, surface.nodes[0] ?? -1)
   assert.deepEqual(
     message?.content.map((part) => part.type),
-    ['reasoning', 'text', 'text', 'tool-call'],
-    'the fold keeps arrival order, and reasoning stays its own block',
+    ['reasoning', 'text', 'tool-call'],
+    'the fold keeps arrival order, reasoning stays its own block, and the two text deltas are one block',
+  )
+})
+
+/**
+ * Consecutive deltas of one block derive to **one** part, the way DSH assembles a stream.
+ *
+ * DSH's `BlockAssembler.push` (dsh-llm `lib/types/assembler.js:46-52`) appends every `text-delta` and
+ * `reasoning-delta` of a block to one partial (`partial.text += chunk.text`), so an answer is stored and sent back as
+ * whole blocks. Deriving one part per delta instead made the chat adapter, which keeps separate text blocks apart with
+ * a newline, hand the model its own earlier answer as `al\nph\na` (live-testing draft developer-five-2).
+ */
+test('consecutive text deltas derive to one text part, and the request carries them as one string', () => {
+  const { store, handle } = session()
+  store.assistantChunk(handle, { type: 'text-delta', text: 'al' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'ph' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'a' })
+  store.assistantChunk(handle, { type: 'done', finishReason: 'stop' })
+
+  const [message] = store.deriveMessages(handle)
+  assert.deepEqual(message, { role: 'assistant', content: [{ type: 'text', text: 'alpha' }] })
+  assert.deepEqual(toChatMessage(message!), { role: 'assistant', content: 'alpha' }, 'no newline where the stream split it')
+})
+
+test('a tool call between two texts is a block boundary, so the texts stay two parts', () => {
+  const { store, handle } = session()
+  store.assistantChunk(handle, { type: 'text-delta', text: 'let me ' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'look' })
+  store.assistantChunk(handle, { type: 'tool-call', id: 'call-1', name: 'list_dir', arguments: '{}' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'done ' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'now' })
+  store.assistantChunk(handle, { type: 'done', finishReason: 'tool_calls' })
+
+  assert.deepEqual(store.deriveMessages(handle), [
+    {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'let me look' },
+        { type: 'tool-call', id: 'call-1', name: 'list_dir', arguments: '{}' },
+        { type: 'text', text: 'done now' },
+      ],
+    },
+  ])
+})
+
+test('consecutive reasoning deltas derive to one reasoning part, and a switch of kind starts a new one', () => {
+  const { store, handle } = session()
+  store.assistantChunk(handle, { type: 'reasoning-delta', text: 'Th' })
+  store.assistantChunk(handle, { type: 'reasoning-delta', text: 'ink' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'an' })
+  store.assistantChunk(handle, { type: 'text-delta', text: 'swer' })
+  store.assistantChunk(handle, { type: 'reasoning-delta', text: 'again' })
+  store.assistantChunk(handle, { type: 'done', finishReason: 'stop' })
+
+  assert.deepEqual(store.deriveMessages(handle), [
+    {
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'Think' },
+        { type: 'text', text: 'answer' },
+        { type: 'reasoning', text: 'again' },
+      ],
+    },
+  ])
+  assert.equal(
+    store.read(handle).filter((event) => event.type === 'assistant/chunk').length,
+    6,
+    'the log still records one event per chunk; only the derivation coalesces',
   )
 })
 
