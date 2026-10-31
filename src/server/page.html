@@ -9878,6 +9878,20 @@ async function setSessionFlags(node, patch, extra = {}) {
     body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
   })
   const body = await response.json().catch(() => ({}))
+  /**
+   * The route refuses an archive while the session still has work the page did not know about — a background job
+   * (DSH's job archive admission lists it). DSH's archive dialog offers to stop that work; the confirm names it, and
+   * agreeing archives with `stop: true`, which kills the jobs with `session archived`.
+   */
+  if (response.status === 409 && body.code === 'active' && patch.archived === true && extra.stop !== true) {
+    const jobs = Array.isArray(body.jobs) ? body.jobs : []
+    const work =
+      jobs.length === 0
+        ? 'a running turn'
+        : `${jobs.length === 1 ? 'a running background job' : `${jobs.length} running background jobs`} (${jobs.map((job) => job.label).join(', ')})`
+    if (!window.confirm(`This session has ${work}. Stop ${jobs.length > 1 ? 'them' : 'it'} and archive the session?`)) return
+    return setSessionFlags(node, patch, { ...extra, stop: true })
+  }
   if (!response.ok) {
     setNote(body.error ?? 'could not change that session')
     return
