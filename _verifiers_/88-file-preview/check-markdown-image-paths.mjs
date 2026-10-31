@@ -7,6 +7,7 @@ import { deflateSync } from 'node:zlib'
 import { test } from 'node:test'
 
 import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedConfig } from '../../_tools_/verify-runner/lib.mjs'
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
  * Issue #131 HTTP regression, no browser. Run with node --test; HEDDLE_BIN selects the Rust build.
@@ -150,6 +151,26 @@ test('Markdown encoded image URLs serve distinct exact PNG bytes behind cookie a
     const linkResponse = await request(linked, { headers: { cookie } })
     assert.equal(linkResponse.status, 200)
     assert.equal(await linkResponse.text(), 'literal-percent link target\n')
+    if (process.env.HEDDLE_IMAGE_PATH_BROWSER === '1') {
+      assert.ok(browserAvailable(), 'the requested browser decoder check is available')
+      const browser = await openBrowser({ width: 1200, height: 800 })
+      try {
+        // Restore the image document, then exercise the actual File-panel renderer and image decoder.
+        writeFileSync(documentPath, cases.map(([destination], index) => `![image ${index}](${destination})`).join('\n\n'))
+        await browser.goto(server.url)
+        await browser.waitFor('document.body.dataset.ready === "true"', 20000)
+        await browser.evaluate(`globalThis.showFile({ path: ${JSON.stringify(documentPath)} })`)
+        await browser.waitFor('document.querySelectorAll("#file-body img").length === 3 && [...document.querySelectorAll("#file-body img")].every(img => img.complete && img.naturalWidth === 1)', 10000)
+        const decodedPaths = await browser.evaluate('[...document.querySelectorAll("#file-body img")].map(img => new URL(img.src).searchParams.get("path"))')
+        assert.deepEqual(decodedPaths, cases.map(([, name]) => join(work, name)), 'the actual decoder fetched each distinct once-decoded path')
+        writeFileSync(documentPath, '[budget](100%.md)')
+        await browser.evaluate(`globalThis.showFile({ path: ${JSON.stringify(documentPath)} })`)
+        await browser.waitFor('document.querySelector("#file-body a") !== null', 10000)
+        await browser.evaluate('document.querySelector("#file-body a").click()')
+        await browser.waitFor('document.getElementById("file-body").textContent.includes("literal-percent link target")', 10000)
+        assert.equal(new URL(await browser.evaluate('location.href')).origin, origin, 'the local link does not leave the app')
+      } finally { browser.close() }
+    }
     const unsafePath = join(home, 'outside.png')
     writeFileSync(unsafePath, png([20, 30, 40]))
     const outside = await request(`${origin}/api/raw?path=${encodeURIComponent(unsafePath)}`, { headers: { cookie } })
