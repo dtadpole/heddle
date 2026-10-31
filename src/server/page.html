@@ -8527,6 +8527,12 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   const decoder = new TextDecoder()
   let buffer = ''
   /**
+   * The session this turn created, once adopted. The turn stream repeats its `session` event with the events it
+   * relays, and adopting on each one re-read the whole session (`fetchSessionAccess`) about five times a model round:
+   * measured on TS, 52 full reads in one test's two messages. A turn creates at most one session, so it is adopted once.
+   */
+  let adopted = null
+  /**
    * Blocks are separated by a **blank line** — two real newlines. Measured while writing this, and the reason
    * the literal is called out: it was written as `'\\n\\n'`, four characters rather than two, so the split
    * never matched and only the first block of the stream was ever read. The live view survived because the
@@ -8548,7 +8554,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * A turn with no session starts one, and the panel follows it: the queue that was loose while the
          * turn ran belongs to the session it created.
          */
-        if (target === null) {
+        if (target === null && adopted === null) {
+          adopted = payload.session
           current = payload.session
           chooseWorkspace(null)
           adoptSession(payload.session)
