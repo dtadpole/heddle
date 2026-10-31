@@ -583,3 +583,32 @@ test('an HTML preview applies its relative stylesheet and does not run its scrip
     await server.close()
   }
 })
+
+
+test('a Chinese heading fragment reaches the second heading on both renderer outputs', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('unicode-heading')
+  const browser = await openBrowser({ width: 1280, height: 700 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'link.md'), '[Go to second](target.md#第二节)\n')
+    writeFileSync(join(server.work, 'target.md'), '# 第一节\n\n' + Array.from({length:50}, (_,i) => `paragraph ${i}\n\n`).join('') + '# 第二节\n\nRequested target.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('link.md')} !== undefined`, 15000)
+    await browser.evaluate(`${row('link.md')}.click()`)
+    await browser.waitFor(`document.querySelector('#file-body a') !== null`, 10000)
+    await browser.evaluate(`document.querySelector('#file-body a').click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('Requested target.')`, 10000)
+    const target = await browser.evaluate(`(() => {
+      const pane = document.getElementById('file-body')
+      const heading = Array.from(pane.querySelectorAll('h1')).find((node) => node.textContent === '第二节')
+      return { top: heading.getBoundingClientRect().top, floor: pane.getBoundingClientRect().bottom, scroll: pane.scrollTop }
+    })()`)
+    assert.ok(target.top >= 0 && target.top < target.floor, `Refs #121: requested second heading is visible (${JSON.stringify(target)})`)
+    assert.ok(target.scroll > 0, 'did not wrongly select first heading')
+  } finally { browser.close(); await server.close() }
+})
