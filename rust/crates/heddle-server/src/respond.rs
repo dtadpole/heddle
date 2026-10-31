@@ -47,6 +47,11 @@ pub fn json<T: Serialize + ?Sized>(status: StatusCode, body: &T) -> Response {
     response(status, "application/json", text)
 }
 
+/// `application/json` with a body a service already wrote (its trailing newline included); `cache-control: no-store`.
+pub fn raw_json(status: StatusCode, body: String) -> Response {
+    response(status, "application/json", body)
+}
+
 /// `application/json` on one line, plus a newline; `cache-control: no-store`.
 pub fn json_compact<T: Serialize + ?Sized>(status: StatusCode, body: &T) -> Response {
     response(status, "application/json", compact_line(body))
