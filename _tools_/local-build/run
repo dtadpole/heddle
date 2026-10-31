@@ -134,7 +134,9 @@ is_old() {
 reclaim() {
     d=$1
     before=$(owner_line "$d")
-    t=$(mktemp -d "$ROOT/.trash.XXXXXX") || return 1
+    # The trash sits beside the directory (a second argument names its parent), so the
+    # rename never crosses a volume and stays atomic.
+    t=$(mktemp -d "${2:-$ROOT}/.trash.XXXXXX") || return 1
     if ! mv "$d" "$t/slot" 2>/dev/null; then
         rm -rf "$t" 2>/dev/null || true
         return 1
@@ -279,6 +281,13 @@ done
 # reclaimed and re-acquired while a command runs (an hour-old stamp, a reused pid), and
 # this process must never delete the new occupant's directory.
 cleanup() {
+    if [ -n "${TREE_LOCK:-}" ] && [ -f "$TREE_LOCK/owner" ]; then
+        l_pid=0
+        read -r l_pid l_rest < "$TREE_LOCK/owner" 2>/dev/null || true
+        if [ "${l_pid:-}" = "$$" ]; then
+            rm -rf "$TREE_LOCK" 2>/dev/null || true
+        fi
+    fi
     d="$ROOT/slot-${SLOT:-none}"
     [ -f "$d/owner" ] || return 0
     owner_fields "$d"
@@ -289,6 +298,60 @@ cleanup() {
 trap cleanup EXIT
 
 echo "local-build: slot $SLOT, cap $CAP of $SLOTS, jobs $([ "$has_jobs" = 1 ] && echo caller || echo "$JOBS"), cwd $PWD" >&2
+
+# A seat's worktrees may share one CARGO_TARGET_DIR to save the disk. Cargo does not key a
+# workspace crate by its checkout path, so a tree whose sources are older than another
+# tree's build there looks fresh, and its binary is the other tree's code. For a compiling
+# command into a CARGO_TARGET_DIR, the runner therefore holds the target's lock for the
+# whole command, and when another tree (or an unknown one) built there last, touches this
+# tree's Rust sources first so cargo rebuilds them (shared-target.md).
+TREE_LOCK=
+guard_shared_target() {
+    [ -n "${CARGO_TARGET_DIR:-}" ] || return 0
+    [ "${LOCAL_BUILD_TREE_GUARD:-1}" != 0 ] || return 0
+    case "${1-}" in
+        build | check | test | run | bench | doc | clippy | rustc | install | fix) ;;
+        *) return 0 ;;
+    esac
+    # Cargo reads a relative target from the caller's directory; spell it out for the messages.
+    case "$CARGO_TARGET_DIR" in
+        /*) td=$CARGO_TARGET_DIR ;;
+        *) td="$PWD/$CARGO_TARGET_DIR" ;;
+    esac
+    tree=$(git rev-parse --show-toplevel 2>/dev/null) || tree=$PWD
+    mkdir -p "$td"
+    lock="$td/.local-build-lock"
+    lock_deadline=$(( $(stamp) + WAIT ))
+    said=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        if is_dead "$lock"; then
+            reclaim "$lock" "$td" || true
+            continue
+        fi
+        if [ "$said" = 0 ]; then
+            echo "local-build: waiting for the build in ${o_cwd:-another tree} to finish with $td" >&2
+            said=1
+        fi
+        if [ "$(stamp)" -ge "$lock_deadline" ]; then
+            echo "local-build: $td stayed locked by ${o_cwd:-another tree} for ${WAIT}s; try again later" >&2
+            exit 75
+        fi
+        sleep 1
+    done
+    printf '%s %s 0 %s\n' "$$" "$(stamp)" "$tree" > "$lock/owner"
+    TREE_LOCK=$lock
+    last=
+    if [ -f "$td/.local-build-tree" ]; then
+        read -r last 2>/dev/null < "$td/.local-build-tree" || true
+    fi
+    if [ "$last" != "$tree" ]; then
+        n=$(cd "$tree" && git ls-files -z -co --exclude-standard -- '*.rs' 2>/dev/null | tr -cd '\000' | wc -c | tr -d ' ')
+        (cd "$tree" && git ls-files -z -co --exclude-standard -- '*.rs' 2>/dev/null | xargs -0 touch -c) || true
+        echo "local-build: $td was last built from ${last:-an unrecorded tree}; touched $n Rust sources in $tree so cargo rebuilds them" >&2
+        printf '%s\n' "$tree" > "$td/.local-build-tree"
+    fi
+}
+guard_shared_target "$@"
 
 if [ "$has_jobs" = 1 ]; then
     set -- "$@"
@@ -313,6 +376,12 @@ cargo_pid=$!
 if [ -f "$ROOT/slot-$SLOT/owner" ]; then
     owner_fields "$ROOT/slot-$SLOT"
     printf '%s %s %s %s\n' "$$" "$o_ts" "$cargo_pid" "$PWD" > "$ROOT/slot-$SLOT/owner" 2>/dev/null || true
+fi
+# The target's lock records cargo too, so a killed shell whose cargo still writes the target
+# keeps the lock until cargo exits.
+if [ -n "$TREE_LOCK" ] && [ -f "$TREE_LOCK/owner" ]; then
+    owner_fields "$TREE_LOCK"
+    printf '%s %s %s %s\n' "$$" "$o_ts" "$cargo_pid" "$o_cwd" > "$TREE_LOCK/owner" 2>/dev/null || true
 fi
 
 forward() {
