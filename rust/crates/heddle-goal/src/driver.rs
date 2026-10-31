@@ -500,6 +500,12 @@ pub struct DriverTrigger {
     in_turn: Mutex<HashSet<String>>,
 }
 
+/// Whether a `turn/completed` event says its turn ended abnormally: stopped, or failed with an error. Every
+/// failed or stopped turn writes one since d9443684 (`record_unfinished`).
+pub fn turn_ended_abnormally(event: &serde_json::Value) -> bool {
+    event.get("stopped") == Some(&serde_json::Value::Bool(true)) || event.get("error").is_some()
+}
+
 impl DriverTrigger {
     /// A trigger for `driver`.
     pub fn new(driver: Arc<GoalDriver>) -> DriverTrigger {
@@ -509,15 +515,29 @@ impl DriverTrigger {
         }
     }
 
-    /// One appended event of `session`: returns the chain it requested, if it requested one. Never blocks; the
-    /// chain is not awaited, so a turn is not held open by the rounds it starts.
-    pub fn on_session_event(&self, session: &str, event_type: &str) -> Option<DriverRun> {
+    /// One appended event of `session` (the event object, with its `type`): returns the chain it requested, if
+    /// it requested one. Never blocks; the chain is not awaited, so a turn is not held open by the rounds it
+    /// starts.
+    ///
+    /// A turn that ended abnormally is no edge (DSH's dsh-goal-round-driver: "Cancellation never auto-restarts a
+    /// round"; "No abnormal auto-retry"): a `turn/completed` that is stopped or names an error
+    /// ([`turn_ended_abnormally`]). Without this, a failing provider chained goal rounds up to the cap: the chain
+    /// stops on a failed round, and the failed turn's completion started a new chain. The goal stays as it is; a
+    /// person's next turn or a goal change may continue it. `goal-driver.ts` does the same.
+    pub fn on_session_event(&self, session: &str, event: &serde_json::Value) -> Option<DriverRun> {
+        let event_type = event
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
         match classify_session_event(event_type) {
             SessionEdge::TurnCompleted => {
                 self.in_turn
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(session);
+                if turn_ended_abnormally(event) {
+                    return None;
+                }
                 self.request_if_known(session)
             }
             SessionEdge::TurnActivity => {
@@ -1159,12 +1179,18 @@ mod tests {
         let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
         let trigger = DriverTrigger::new(driver.clone());
 
-        assert!(trigger.on_session_event("s1", "model/request").is_none());
         assert!(
-            trigger.on_session_event("s1", "goal/change").is_none(),
+            trigger
+                .on_session_event("s1", &json!({ "type": "model/request" }))
+                .is_none()
+        );
+        assert!(
+            trigger
+                .on_session_event("s1", &json!({ "type": "goal/change" }))
+                .is_none(),
             "a goal change inside a turn waits for the completion edge"
         );
-        let run = trigger.on_session_event("s1", "turn/completed");
+        let run = trigger.on_session_event("s1", &json!({ "type": "turn/completed" }));
         assert!(run.is_some(), "a completion requests a pass");
         let _ = run.unwrap().await;
         assert!(!calls.lock().unwrap().is_empty());
@@ -1181,11 +1207,60 @@ mod tests {
                 max_goal_rounds: None,
             },
         );
-        assert!(trigger.on_session_event("s1", "goal/change").is_some());
         assert!(
-            trigger.on_session_event("nope", "turn/completed").is_none(),
+            trigger
+                .on_session_event("s1", &json!({ "type": "goal/change" }))
+                .is_some()
+        );
+        assert!(
+            trigger
+                .on_session_event("nope", &json!({ "type": "turn/completed" }))
+                .is_none(),
             "an unknown session is a no-op"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_or_failed_turn_requests_no_pass() {
+        // DSH's dsh-goal-round-driver never auto-restarts a cancelled round and never auto-retries an abnormal
+        // failure. Since d9443684 every failed or stopped turn writes turn/completed with `stopped` or `error`.
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let trigger = DriverTrigger::new(driver.clone());
+
+        for ended in [
+            json!({ "type": "turn/completed", "rounds": 1, "stopped": true }),
+            json!({ "type": "turn/completed", "rounds": 1, "error": "the provider broke" }),
+        ] {
+            assert!(
+                trigger
+                    .on_session_event("s1", &json!({ "type": "model/request" }))
+                    .is_none()
+            );
+            assert!(
+                trigger.on_session_event("s1", &ended).is_none(),
+                "no pass after {ended}"
+            );
+        }
+        assert!(calls.lock().unwrap().is_empty(), "no round ran");
+
+        // The session is at rest again, and a settled turn or a goal change still requests a pass.
+        let run = trigger.on_session_event("s1", &json!({ "type": "turn/completed", "rounds": 1 }));
+        assert!(run.is_some(), "a settled turn requests a pass");
+        let _ = run.unwrap().await;
+        assert!(
+            trigger
+                .on_session_event("s1", &json!({ "type": "goal/change" }))
+                .is_some(),
+            "a goal change at rest still does"
+        );
+        assert!(turn_ended_abnormally(&json!({ "stopped": true })));
+        assert!(turn_ended_abnormally(&json!({ "error": "x" })));
+        assert!(!turn_ended_abnormally(
+            &json!({ "stopped": false, "rounds": 2 })
+        ));
     }
 
     #[test]
@@ -1261,10 +1336,12 @@ mod tests {
             let trigger = trigger.clone();
             move || {
                 assert!(
-                    trigger.on_session_event("s1", "model/request").is_none(),
+                    trigger
+                        .on_session_event("s1", &json!({ "type": "model/request" }))
+                        .is_none(),
                     "mid-turn: no request"
                 );
-                trigger.on_session_event("s1", "turn/completed")
+                trigger.on_session_event("s1", &json!({ "type": "turn/completed" }))
             }
         })
         .join()

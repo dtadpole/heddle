@@ -55,6 +55,13 @@ export function apply(ctx: Context): void {
    * The idle half is read from the log because heddle has no agent-status field: a turn's own events mark
    * the session busy, `turn/completed` marks it idle again. It is the equivalent of DSH's
    * `agent.status === 'idle'` in `readyToDrive`.
+   *
+   * A turn that ended **abnormally** is no edge (DSH's dsh-goal-round-driver: "Cancellation never auto-restarts a
+   * round"; "No abnormal auto-retry — transient provider and persistence failures require a later
+   * human-authorized resume"). Abnormal is a `turn/completed` that says `stopped` or names an `error`, which every
+   * failed or stopped turn writes since d9443684. Without this, a failing provider chained goal rounds up to the
+   * cap: the chain itself stops on a failed round ('turn-failed'), and the failed turn's completion started a new
+   * chain. The goal stays as it is; a person's next turn or a goal change is the edge that may continue it.
    */
   const inTurn = new Set<string>()
   const requestFor = (session: string): void => {
@@ -67,6 +74,8 @@ export function apply(ctx: Context): void {
   ctx.on('session/event', ({ session, event }) => {
     if (event.type === 'turn/completed') {
       inTurn.delete(session)
+      const ended = event as { stopped?: unknown; error?: unknown }
+      if (ended.stopped === true || ended.error !== undefined) return
       requestFor(session)
       return
     }

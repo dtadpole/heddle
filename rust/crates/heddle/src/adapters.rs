@@ -1447,13 +1447,11 @@ impl Component for GoalDriverComponent {
             let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
                 move |payload: &Value| {
                     let session = payload.get("session").and_then(Value::as_str);
-                    let kind = payload
-                        .get("event")
-                        .and_then(|event| event.get("type"))
-                        .and_then(Value::as_str);
-                    if let (Some(session), Some(kind)) = (session, kind) {
-                        // The chain runs on the process runtime; the append is not held open by it.
-                        if let Some(run) = trigger.on_session_event(session, kind) {
+                    let event = payload.get("event");
+                    if let (Some(session), Some(event)) = (session, event) {
+                        // The chain runs on the process runtime; the append is not held open by it. The whole
+                        // event goes in, so the trigger can tell a stopped or failed turn from a settled one.
+                        if let Some(run) = trigger.on_session_event(session, event) {
                             crate::runtime::tokio().spawn(run);
                         }
                     }
