@@ -1632,6 +1632,8 @@
   #tree li[data-contains-current='true'] > .row > .icon { color: var(--accent); }
   #tree li[data-kind='more'] > .row { height: 28px; color: var(--text-3); font-size: 13px; }
   #tree li[data-kind='more'] > .row:hover { color: var(--text-2); background: transparent; }
+  /** `Show more` is a real `<button>`, as DSH's is (#92), so the platform's button box comes off and the row's drawing stays. */
+  #tree li[data-kind='more'] > button.row { width: 100%; box-sizing: border-box; margin: 0; border: 0; background: transparent; text-align: left; }
   #tree li.tree-heading { display: flex; align-items: center; height: 24px; padding: 0 .5rem 0 calc(.5rem + var(--tree-depth, 0) * 14px); font-size: 11px; color: var(--text-3); cursor: default; user-select: none; }
   #tree li[data-kind='ungrouped'] > .row .label { color: var(--text-2); }
   /** The adopted-folder group used to live here; the owner removed it, so the tree ends its own list. */
@@ -12202,10 +12204,16 @@ function paintSessionRows(list, group, depth) {
     li.dataset.slot = 'more'
     li.setAttribute('role', 'none')
     li.style.setProperty('--tree-depth', String(depth))
-    const row = document.createElement('div')
+    /**
+     * DSH's control is a `<button>` whose `aria-expanded` says whether the group shows every session
+     * (`dsh-client-ui-workspace` lib/client.js:3309-3326, `sessionsExpanded` at :3159), which is the `less` mode here. It
+     * was a `div` with `role="button"`, no expanded state and a key handler of its own (#92); a button takes Enter and
+     * Space itself.
+     */
+    const row = document.createElement('button')
+    row.type = 'button'
     row.className = 'row'
-    row.tabIndex = 0
-    row.setAttribute('role', 'button')
+    row.setAttribute('aria-expanded', String(mode === 'less'))
     /** An empty icon cell, so the words line up with the session titles above them, as DSH's overflow row does. */
     const spacer = document.createElement('span')
     spacer.className = 'icon spacer'
@@ -12215,16 +12223,13 @@ function paintSessionRows(list, group, depth) {
     label.textContent = WorkspaceTree.overflowLabel(mode, drawn.hidden)
     row.append(spacer, label)
     row.onclick = () => {
+      const focused = document.activeElement === row
       if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))
       else watermarks.delete(group.key)
       paintSessionRows(list, group, depth)
       markSelection()
-    }
-    row.onkeydown = (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault()
-        row.onclick()
-      }
+      /** DSH's button is the same element after the toggle, so focus stays on it; the redraw here makes a new one. */
+      if (focused) list.querySelector(':scope > li[data-slot="more"] > button')?.focus()
     }
     li.append(row)
     rows.push(li)
@@ -12409,8 +12414,12 @@ function nodeRow(node, depth = 0) {
    * A row is **focusable**, and that is what makes the display swap keyboard-reachable: the controls are not rendered until the
    * row is focused, so the row itself has to be the thing a keyboard can land on. Without this, `:focus-within` could only fire
    * from a control that is never rendered — a keyboard reader had no way to reach a row's actions at all.
+   *
+   * **One** Tab stop per row, the `.row` below, which takes Enter and Space. The list item was a second stop in front of it
+   * that ignored Enter, so a session row cost five Tab presses (#92). DSH's rows are no Tab stop at all (no `tabIndex`, no key
+   * handler: `dsh-client-ui-workspace` lib/client.js:1965-1970, :2273-2282) and its tree has no arrow keys (:2526-2537), so
+   * there is no roving focus to copy; the stop is heddle's, because it is what reaches the row's controls.
    */
-  li.tabIndex = 0
   li.dataset.kind = node.kind
   /** The key the movement animation matches a previous position to: a session by its id, anything else by its path. */
   li.dataset.rowKey = node.kind === 'session' && node.session !== undefined && node.session !== null ? 'session:' + node.session.id : 'node:' + node.path
@@ -13721,6 +13730,12 @@ async function renderFlatList() {
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }
+      }
+      /** The row is a Tab stop, so it opens on Enter and Space as the tree's rows do (#92). */
+      row.onkeydown = (event) => {
+        if (!WorkspaceTree.rowKeyOpens(event, row)) return
+        event.preventDefault()
+        row.onclick()
       }
       li.append(row)
       return li

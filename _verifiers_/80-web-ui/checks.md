@@ -91,7 +91,9 @@ grounded_in:
   `guardedOpen`).
 - [`check-tree-keyboard.mjs`](check-tree-keyboard.mjs) — the session tree from the keyboard, with the browser's own key
   events: Enter or Space on a row's `Pin session`, `Archive session`, `…` or `New session in` acts on that control and
-  never opens the row (#98).
+  never opens the row (#98); a row is one Tab stop (a session row's `…`, Archive and Pin, then the next row, which
+  Enter opens; a workspace row's `…` and New session in, then its first row), and `Show {n} more sessions` is a
+  `<button>` whose `aria-expanded` follows Enter and Space with focus kept on it (#92).
 
 ## What it deliberately does not judge
 

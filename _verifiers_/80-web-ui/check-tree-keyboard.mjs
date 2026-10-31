@@ -281,3 +281,88 @@ test('Enter or Space on a row control acts on the control and never opens the ro
   const started = { count: (await sessions()).length, expanded: await browser.evaluate(`${workspaceRow}.getAttribute('aria-expanded')`) }
   assert.deepEqual(started, { count: before + 1, expanded: 'true' }, 'Enter on New session in starts a session and does not fold the workspace')
 })
+
+/** What holds focus, as a short name: `row:<label>` for a tree row, `li:<label>` for a list item, else the control's name. */
+const focusName = `(() => {
+  const active = document.activeElement
+  if (active === null || active === document.body) return 'body'
+  const label = (li) => li?.querySelector(':scope > .row > .label')?.textContent ?? ''
+  if (active.matches('#tree .row')) return 'row:' + (active.querySelector(':scope > .label')?.textContent ?? '')
+  if (active.matches('#tree li')) return 'li:' + label(active)
+  return active.tagName + ':' + (active.getAttribute('aria-label') ?? active.textContent.trim())
+})()`
+
+test('a tree row is one Tab stop that opens on Enter, and Show more is a button with aria-expanded (#92)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const f = await fixture()
+  const { browser } = f
+  await load(f)
+
+  /**
+   * From a session row, Tab visits its three controls — the `…`, Archive, Pin — and the fourth Tab is the next row,
+   * which Enter opens. The list item around a row is no stop of its own (it was, and Enter on it did nothing).
+   */
+  const pair = JSON.parse(
+    await browser.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('#tree > li[data-kind="workspace"] > ul > li[data-kind="session"]')]
+      for (const li of rows) {
+        const next = li.nextElementSibling
+        const controls = li.querySelectorAll(':scope > .row .row-tools > .menu-wrap > button, :scope > .row .row-tools > .session-actions > button').length
+        if (controls !== 3 || next?.dataset.kind !== 'session' || next.getAttribute('aria-selected') === 'true') continue
+        const label = (each) => each.querySelector(':scope > .row > .label').textContent
+        return JSON.stringify({ from: label(li), to: label(next) })
+      }
+      return 'null'
+    })()`),
+  )
+  assert.notEqual(pair, null, 'the workspace draws a session row with its three controls followed by a session row that is not open')
+  await browser.evaluate(`${rowOf(pair.from)}.querySelector(':scope > .row').focus()`)
+  assert.equal(await browser.evaluate(focusName), `row:${pair.from}`, 'the walk starts on a session row')
+  const stops = []
+  for (let index = 0; index < 4; index += 1) {
+    await press(browser, 'Tab')
+    stops.push(await browser.evaluate(focusName))
+  }
+  assert.match(stops[0] ?? '', /^BUTTON:actions for /, `Tab 1 is the row's …\nsaw: ${JSON.stringify(stops)}`)
+  assert.match(stops[1] ?? '', /^BUTTON:(Un)?[Aa]rchive session$/, `Tab 2 is Archive session\nsaw: ${JSON.stringify(stops)}`)
+  assert.match(stops[2] ?? '', /^BUTTON:(Un)?[Pp]in session$/, `Tab 3 is Pin session\nsaw: ${JSON.stringify(stops)}`)
+  assert.equal(stops[3], `row:${pair.to}`, `one stop per row: Tab 4 is the next row itself, not its list item\nsaw: ${JSON.stringify(stops)}`)
+  await press(browser, 'Enter')
+  assert.ok(await settle(browser, `${openTitle}.includes(${JSON.stringify(pair.to)})`, 10_000), `Enter on that stop opens its session\nsaw: ${await browser.evaluate(openTitle)}`)
+  await quiet(browser)
+
+  /** A workspace row: the row, its `…`, New session in, then the first row inside it. */
+  await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row').focus()`)
+  const workspaceStops = []
+  for (let index = 0; index < 3; index += 1) {
+    await press(browser, 'Tab')
+    workspaceStops.push(await browser.evaluate(focusName))
+  }
+  const first = await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > ul > li')?.querySelector(':scope > .row > .label')?.textContent ?? ''`)
+  assert.match(workspaceStops[0] ?? '', /^BUTTON:actions for /, `a workspace row's Tab 1 is its …\nsaw: ${JSON.stringify(workspaceStops)}`)
+  assert.match(workspaceStops[1] ?? '', /^BUTTON:New session in /, `Tab 2 is New session in\nsaw: ${JSON.stringify(workspaceStops)}`)
+  assert.equal(workspaceStops[2], `row:${first}`, `Tab 3 is the first row inside it\nsaw: ${JSON.stringify(workspaceStops)}`)
+
+  /** Show more is a real button whose aria-expanded follows it, and the keyboard keeps its place on it. */
+  const more = `document.querySelector('#tree > li[data-kind="workspace"] > ul > li[data-kind="more"] > .row')`
+  const shape = () =>
+    browser.evaluate(`JSON.stringify((() => {
+      const control = ${more}
+      return control === null ? null : { tag: control.tagName, role: control.getAttribute('role'), expanded: control.getAttribute('aria-expanded'), label: control.querySelector('.label')?.textContent ?? '', focused: document.activeElement === control }
+    })())`).then(JSON.parse)
+  const folded = await shape()
+  assert.notEqual(folded, null, 'the workspace has more sessions than it shows')
+  assert.deepEqual({ tag: folded.tag, role: folded.role, expanded: folded.expanded }, { tag: 'BUTTON', role: null, expanded: 'false' }, `Show more is a button, not expanded\nsaw: ${JSON.stringify(folded)}`)
+  assert.match(folded.label, /^Show \d+ more sessions$/)
+  await browser.evaluate(`${more}.focus()`)
+  await press(browser, 'Enter')
+  await settle(browser, `${more}?.getAttribute('aria-expanded') === 'true'`, 5_000)
+  await quiet(browser)
+  const opened = await shape()
+  assert.deepEqual({ expanded: opened.expanded, label: opened.label, focused: opened.focused }, { expanded: 'true', label: 'Show less', focused: true }, `Enter shows every session, says so, and keeps focus on the control\nsaw: ${JSON.stringify(opened)}`)
+  await press(browser, ' ')
+  await settle(browser, `${more}?.getAttribute('aria-expanded') === 'false'`, 5_000)
+  const again = await shape()
+  assert.deepEqual({ expanded: again.expanded, focused: again.focused }, { expanded: 'false', focused: true }, `Space folds them back\nsaw: ${JSON.stringify(again)}`)
+})

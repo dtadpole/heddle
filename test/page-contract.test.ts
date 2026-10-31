@@ -492,3 +492,21 @@ test('a key on a tree row\'s control is the control\'s: the row opens only on a 
   assert.match(build, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'the row asks the rule before it takes a key')
   assert.doesNotMatch(build, /onkeydown = \(event\) => \{\s*if \(event\.key === 'Enter'/, 'and no handler in the row takes Enter whatever its target')
 })
+
+test('a tree row is one Tab stop that opens on Enter, and Show more is a button with an expanded state (#92)', () => {
+  /**
+   * Each row was two stops, the list item (which ignored Enter) and the `.row` inside it, so a session row cost five Tab
+   * presses; Show more was a `div[role=button]` with no `aria-expanded`. DSH's rows have no `tabIndex` and its tree no
+   * arrow keys (dsh-client-ui-workspace lib/client.js:1965-1970, :2273-2282, :2526-2537); its Show more is a `<button>`
+   * with `aria-expanded` (:3309-3326). The stops are judged in 80's check-tree-keyboard.mjs; this detects their return.
+   */
+  const build = pageFunction('function nodeRow(node, depth = 0) {')
+  assert.doesNotMatch(build, /\bli\.tabIndex\b|li\.setAttribute\('tabindex'/, 'the list item is no Tab stop')
+  assert.match(build, /row\.tabIndex = 0/, 'the row is the one stop')
+  const more = pageFunction('function paintSessionRows(list, group, depth) {')
+  assert.match(more, /const row = document\.createElement\('button'\)\s*row\.type = 'button'/, 'Show more is a button')
+  assert.match(more, /row\.setAttribute\('aria-expanded', String\(mode === 'less'\)\)/, 'whose aria-expanded says the group shows every session')
+  assert.doesNotMatch(more, /setAttribute\('role', 'button'\)|row\.onkeydown/, 'with no stand-in role and no key handler of its own')
+  const flat = pageFunction('async function renderFlatList() {')
+  assert.match(flat, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'a flat list row opens on Enter too')
+})
