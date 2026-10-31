@@ -2238,6 +2238,24 @@
    * Escape, focus containment and the backdrop are the platform's; the card is the access gate's (surface, 16px radius,
    * right-aligned actions).
    */
+  /** DSH's keyboard reference: a 480×600 card that shrinks to the window, search above an internally scrolling list. */
+  #shortcut-reference { width: min(480px, calc(100vw - 32px)); height: min(600px, calc(100vh - 32px)); }
+  #shortcut-reference[open] { display: flex; flex-direction: column; }
+  #shortcut-reference-search { margin: 0 0 8px; }
+  #shortcut-reference-list { overflow-y: auto; flex: 1; }
+  #shortcut-reference-list .group { margin: 12px 0 4px; color: var(--muted); font-size: 12px; }
+  #shortcut-reference-list .shortcut-row { display: flex; align-items: center; justify-content: space-between; height: 42px; gap: 12px; }
+  #shortcut-reference-list .shortcut-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #shortcut-reference-list .shortcut-row:not([data-fixed]) { cursor: pointer; border-radius: 8px; padding: 0 8px; margin: 0 -8px; }
+  #shortcut-reference-list .shortcut-row:not([data-fixed]):hover, #shortcut-reference-list .shortcut-row:not([data-fixed]):focus-visible { background: var(--hover, color-mix(in oklab, var(--text) 6%, transparent)); }
+  #shortcut-reference-list .shortcut-row .row-actions { display: flex; align-items: center; gap: 6px; }
+  #shortcut-reference-list .shortcut-row .row-actions button { font-size: 12px; padding: 2px 6px; }
+  #shortcut-reference-list kbd[data-recording] { border: 1px solid var(--muted); color: var(--muted); }
+  #shortcut-reference-list kbd[data-error] { border-color: #e5484d; }
+  #shortcut-reference-status { min-height: 1.2em; margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  #shortcut-reference-foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+  #shortcut-restore-confirm:not([hidden]) { display: flex; align-items: center; gap: 8px; }
+  #shortcut-reference-list kbd { font: inherit; font-size: 12px; padding: 2px 6px; border-radius: 6px; background: var(--surface-2, var(--surface)); }
   .ws-dialog {
     width: min(92vw, 440px); padding: 20px; border: 1px solid var(--border); border-radius: 16px;
     background: var(--surface); color: var(--text); box-shadow: var(--shadow-menu);
@@ -3012,6 +3030,49 @@
   @media (prefers-reduced-motion: reduce) { #search-pending .skeleton-bar { animation: none; } }
 
   /**
+   * The right sidebar and its Browser tabs (#86), after DSH's `ui-sidebar-right` and `ui-sidebar-browser`.
+   *
+   * Opt-in, as DSH's Web profile ships it: nothing here is reachable unless `/api/status` says `browser: true`. The
+   * column sits beside the conversation while DSH's budget leaves room for it (`layoutRightSidebar`), covers the
+   * conversation column when it does not, and covers the window below 768 pixels, where a third column would squeeze
+   * the composer off the screen (#35).
+   */
+  #browser-open { width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; flex: none; border-radius: var(--radius); background: none; border: 0; color: var(--text-3); }
+  #browser-open:hover, #browser-open[aria-expanded='true'] { background: var(--hover); color: var(--text); }
+  /** With no session there is no More menu to carry the header's `margin-left: auto`, so the globe takes it. */
+  #session-more:empty + #browser-open { margin-left: auto; }
+  #right-sidebar { flex: none; width: min(480px, 45vw); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg); }
+  #rs-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 8px; border-bottom: 1px solid var(--line); }
+  #rs-tabs { flex: 1 1 auto; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  .rs-tab { flex: none; display: inline-flex; align-items: center; max-width: 180px; border-radius: var(--radius); color: var(--text-3); }
+  .rs-tab:hover, .rs-tab[data-active='true'] { background: var(--hover); color: var(--text); }
+  .rs-tab > [role='tab'] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 4px 4px 8px; font: inherit; font-size: 12px; color: inherit; background: none; border: 0; }
+  .rs-tab-close, #rs-new, #rs-close { flex: none; width: 24px; height: 24px; padding: 0; display: inline-grid; place-items: center; font: inherit; font-size: 13px; color: var(--text-3); background: none; border: 0; border-radius: 6px; }
+  .rs-tab-close:hover, #rs-new:hover, #rs-close:hover { background: color-mix(in oklab, currentColor 12%, transparent); color: var(--text); }
+  #rs-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .browser-tab { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  /** A row, stated: the page's `form` rule makes every form a column. */
+  .browser-bar { flex: none; display: flex; flex-direction: row; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); }
+  .browser-bar button { flex: none; height: 28px; min-width: 28px; padding: 0 6px; display: inline-grid; place-items: center; font: inherit; font-size: 12px; color: var(--text-2); background: none; border: 0; border-radius: var(--radius); }
+  .browser-bar button:not(:disabled):hover { background: var(--hover); color: var(--text); }
+  .browser-bar button:disabled { opacity: .4; }
+  .browser-bar svg { width: 14px; height: 14px; }
+  .browser-address { flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 8px; font: inherit; font-size: 12px; color: var(--text); background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: var(--radius); }
+  .browser-address[aria-invalid='true'] { border-color: #d14343; }
+  .browser-address[data-address='unknown'] { color: var(--text-3); font-style: italic; }
+  .browser-notice { flex: none; margin: 0; padding: 6px 10px; font-size: 12px; color: var(--text-2); border-bottom: 1px solid var(--line); }
+  .browser-notice[data-kind='error'] { color: #f0a0a0; }
+  .browser-view { position: relative; flex: 1 1 auto; min-height: 0; background: var(--bg); }
+  .browser-view iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+  .browser-start { margin: 0; padding: 24px 16px; color: var(--text-3); font-size: 13px; text-align: center; }
+  /** No room for a track: the pane covers the conversation column and leaves the left sidebar and its gutter usable. */
+  #right-sidebar[data-presentation='cover'] { position: fixed; top: 0; right: 0; bottom: 0; left: var(--rs-cover-left, 0px); z-index: 40; width: auto; }
+  #right-sidebar[data-presentation='fullscreen'] { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
+  @media (max-width: 767px) {
+    #right-sidebar { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
+  }
+
+  /**
    * Schedules and reminders — DSH's `dsh-client-ui-schedule` views in this page's palette: the transcript's
    * created-reminder card, the session header's reminder clock and its popover, the sidebar row's clock mark and hover
    * card, the Automation tasks page and the task detail it shares with the conversation's task drawer. The numbers are
@@ -3417,6 +3478,11 @@
     -->
     <span id="schedule-catalog-action" hidden></span>
     <span id="session-more"></span>
+    <!--
+      The Browser tab's entry point (#86): hidden unless the server was started with the Browser enabled, because
+      DSH's Web profile ships its Browser off too. It shows or hides the right sidebar, opening a first tab.
+    -->
+    <button type="button" id="browser-open" aria-label="Browser" title="Browser" aria-controls="right-sidebar" aria-expanded="false" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c1.8 1.9 2.7 4 2.7 6.5S9.8 12.6 8 14.5M8 1.5C6.2 3.4 5.3 5.5 5.3 8s.9 4.6 2.7 6.5"/></svg></button>
   </header>
   <!--
     The ring is a **tablist**, which is what DSH uses for the same control and what this control actually is: one of
@@ -3705,7 +3771,7 @@
           </button>
           <div id="model-menu" role="menu" aria-label="Model and reasoning effort" data-i18n-aria-label="model.menuAria" hidden></div>
         </div>
-        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating" data-i18n-aria-label="composer.stop" data-i18n-title="composer.stop" hidden>
+        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating (Esc Esc)" aria-keyshortcuts="Escape Escape" data-i18n-aria-label="composer.stop" data-i18n-title="composer.stopTitle" hidden>
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/></svg>
         </button>
         <button id="send" type="submit" aria-label="Send message">
@@ -3765,11 +3831,41 @@
 </div>
 </main>
 <!--
+  The right sidebar (#86), after DSH's `ui-sidebar-right`: a column of tabs beside the conversation. Its one kind of tab
+  so far is the Browser, drawn by `openBrowserTab()`; the tabs are this page's, not the session's, so they stay open
+  across a session switch and are gone after a reload.
+-->
+<section id="right-sidebar" aria-label="Right sidebar" hidden>
+  <header id="rs-head">
+    <div id="rs-tabs" role="tablist" aria-label="Right sidebar tabs"></div>
+    <button type="button" id="rs-new" aria-label="New browser tab" title="New browser tab">+</button>
+    <button type="button" id="rs-close" aria-label="Hide the right sidebar" title="Hide">✕</button>
+  </header>
+  <div id="rs-body"></div>
+</section>
+<!--
   The settings surface, as a **native dialog**: the reference's own shape (measured 2026-10-17: `role=dialog` 800x765,
   radius 28, `rgb(44,44,46)`, sections and a `Close` action). Server, Models and Workspaces are read-only: the endpoint
   file holds credentials and is never rendered. Configuration is writable as DSH's settings page is: each profile entry's
   fields over `GET` and `POST /api/settings`, written to the active profile's patch, refused when stale or invalid.
 -->
+<dialog id="shortcut-reference" class="ws-dialog" aria-labelledby="shortcut-reference-title">
+  <div class="ws-head">
+    <h2 id="shortcut-reference-title">Keyboard shortcuts</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <input type="search" id="shortcut-reference-search" aria-label="Search shortcuts" placeholder="Search by action or key" spellcheck="false" autocomplete="off">
+  <div id="shortcut-reference-list" role="list"></div>
+  <p id="shortcut-reference-status" role="status" aria-live="polite"></p>
+  <div id="shortcut-reference-foot">
+    <button type="button" id="shortcut-restore-all">Restore all defaults <span id="shortcut-override-count" hidden></span></button>
+    <div id="shortcut-restore-confirm" hidden>
+      <span>Restore every shortcut to its default?</span>
+      <button type="button" id="shortcut-restore-cancel">Cancel</button>
+      <button type="button" id="shortcut-restore-ok" class="ws-primary">Restore</button>
+    </div>
+  </div>
+</dialog>
 <dialog id="settings-dialog" aria-labelledby="settings-title">
   <header id="settings-head">
     <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
@@ -3954,6 +4050,7 @@ const MESSAGES = Object.freeze({
     'composer.sendHint': '{label} — Enter · Shift+Enter for a new line',
     'composer.queueHint': '{label} — Enter · Ctrl+Enter sends the queue',
     'composer.stop': 'Stop generating',
+    'composer.stopTitle': 'Stop generating (Esc Esc)',
     'composer.commands': 'Add files or run commands',
     'composer.attachHint': 'Add a file or insert a workspace path',
     'composer.pending': 'Pending files',
@@ -3973,6 +4070,9 @@ const MESSAGES = Object.freeze({
     'settings.statusFailed': 'could not read the server status: {reason}',
     'settings.sandbox': 'Sandbox',
     'settings.cwd': 'Working directory',
+    'settings.browserTab': 'Browser tab',
+    'settings.browserTabOn': 'enabled',
+    'settings.browserTabOff': 'off \u2014 start the server with HEDDLE_WEB_BROWSER=1',
     'settings.unknown': 'unknown',
     'settings.serverAnswered': 'the server answered {status}',
     'settings.endpointsFailed': 'could not read the endpoint list: {reason}',
@@ -4067,6 +4167,7 @@ const MESSAGES = Object.freeze({
     'composer.sendHint': '{label} — Enter · Shift+Enter 换行',
     'composer.queueHint': '{label} — Enter · Ctrl+Enter 发送排队消息',
     'composer.stop': '停止生成',
+    'composer.stopTitle': '停止生成（Esc Esc）',
     'composer.commands': '添加文件或调用指令',
     'composer.attachHint': '添加文件或插入工作区路径',
     'composer.pending': '待发送文件',
@@ -4086,6 +4187,9 @@ const MESSAGES = Object.freeze({
     'settings.statusFailed': '无法读取服务器状态：{reason}',
     'settings.sandbox': '沙箱',
     'settings.cwd': '工作目录',
+    'settings.browserTab': '浏览器标签页',
+    'settings.browserTabOn': '已启用',
+    'settings.browserTabOff': '未启用——启动服务器时设置 HEDDLE_WEB_BROWSER=1',
     'settings.unknown': '未知',
     'settings.serverAnswered': '服务器返回 {status}',
     'settings.endpointsFailed': '无法读取端点列表：{reason}',
@@ -7403,6 +7507,13 @@ function restoreChatScroll(id) {
  * counter, `showGeneration`, for both): the older one draws nothing when its read returns.
  */
 let sessionLoading = null
+/**
+ * The open session's own folder (its record's `cwd`), read by showSession. A relative link in an answer means this folder
+ * (C62). It is kept apart from activeFolder, which only a row click or a workspace action sets: a reload that restores
+ * the saved session opens it by id, and that left the link handler with no folder, so the browser followed the link
+ * (#41, developer-two's live acceptance run).
+ */
+let sessionFolder = null
 
 /**
  * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
@@ -7420,6 +7531,7 @@ async function showSession(id) {
   const generation = ++showGeneration
   /** Where the reader left the session being replaced, before anything below changes the view. */
   rememberChatScroll()
+  sessionFolder = null
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -7549,6 +7661,7 @@ async function showSession(id) {
     }
     const branchCell = document.getElementById('session-branch')
     if (branchCell !== null) branchCell.textContent = typeof body.cwd === 'string' ? body.cwd : ''
+    sessionFolder = typeof body.cwd === 'string' && body.cwd !== '' ? body.cwd : null
     /**
      * Each turn renders inside its own guard.
      *
@@ -8112,7 +8225,6 @@ events.addEventListener('session', (message) => {
     pendingInteractions.delete(payload.session)
     paintRunningMarks()
     if (payload.session === (current ?? composerKey)) {
-      liveRounds = 0
       void refreshSessionStats()
     }
     /**
@@ -9566,9 +9678,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         /** What the provider said the turn cost, and how long it took, if it said anything. */
         stopRequested = false
         stopButton.disabled = false
-        liveRounds = 0
-        liveUsage = undefined
-        updateStatusBar()
+        // Replace live figures only when the durable fold arrives; clearing first flashes an empty dock.
         void refreshSessionStats()
         /**
          * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
@@ -9872,9 +9982,11 @@ function statPanelRows(kind) {
     if (typeof stats.llmMs === 'number') push('LLM time', formatDurationMs(stats.llmMs))
     if (typeof stats.toolMs === 'number') push('Tool time', formatDurationMs(stats.toolMs))
     if (typeof stats.ttftMs === 'number' && typeof stats.ttftSteps === 'number' && stats.ttftSteps > 0) push('Avg time to first token (TTFT)', formatDurationMs(stats.ttftMs / stats.ttftSteps))
-    if (typeof stats.generationMs === 'number' && stats.generationMs > 0 && typeof stats.decodeTokens === 'number' && stats.decodeTokens > 0) push('Tokens per second (TPS)', `${formatRate(stats.decodeTokens / (stats.generationMs / 1000))} tok/s`)
+    const generationMs = (stats.generationMs ?? 0) + liveGenerationMs
+    const decodeTokens = (stats.decodeTokens ?? 0) + liveDecodeTokens
+    if (generationMs > 0 && decodeTokens > 0) push('Tokens per second (TPS)', `${formatRate(decodeTokens / (generationMs / 1000))} tok/s`)
   } else if (kind === 'usage') {
-    const usage = stats.usage
+    const usage = addUsage(stats.usage, liveUsage)
     if (usage !== undefined) {
       const billed = (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
       const hasBilled = usage.inputTokens !== undefined || usage.cacheReadTokens !== undefined || usage.cacheWriteTokens !== undefined
@@ -10819,11 +10931,420 @@ async function loadStatus() {
     const body = await response.json()
     const mode = body?.sandbox?.mode
     if (typeof mode === 'string') accessDefaultMode = mode
+    applyBrowserFeature(body?.browser === true)
   } catch {
     // A status the page cannot read must not stop the composer from being one.
   }
   renderAccess()
 }
+
+/**
+ * The right sidebar's Browser tabs (#86), after DSH's `ui-sidebar-browser` on Web.
+ *
+ * A tab frames an HTTP(S) page and keeps the history this page asked for; the server never fetches, proxies or probes
+ * the page. DSH's rules, kept as written there:
+ *
+ * - The address parser accepts `http:` and `https:`, loopback included, and a bare host becomes HTTPS. `file:`, script,
+ *   data and blob input, a user name or password, and this application's own origin are refused before anything loads.
+ * - The frame carries DSH's default sandbox, sends no referrer, and is made anew for every load this page requests.
+ * - The first `load` of a requested address is known. A later `load` proves the page moved somewhere this page cannot
+ *   read (another origin's URL is not ours to see), so the address is marked, Back, Forward and Open in system browser
+ *   are disabled, and Reload returns to the last known address.
+ * - An iframe `error` shows a transient load-failure notice until the next load this page requests.
+ *
+ * Differences from DSH, stated rather than hidden: there is no per-tab switch that removes the sandbox; this
+ * application's port under any loopback name counts as its own origin; the tabs belong to the page rather than to the
+ * session and are not restored after a reload. DSH's Web chords are bound (Mod+Shift+B shows or hides the sidebar,
+ * Mod+Alt+T opens a tab), but where DSH refuses them without an open session ("Select a session first"), here they
+ * need none, since the tabs are the page's.
+ */
+const BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox'
+const BROWSER_MAX_ADDRESS = 16384
+const BROWSER_MAX_HISTORY = 100
+const BROWSER_REFUSALS = {
+  empty: 'Enter an address.',
+  invalid: 'That address is invalid or too long.',
+  protocol: 'Only HTTP and HTTPS addresses are supported; open local files from the workspace tree.',
+  credentials: 'Addresses cannot contain a username or password.',
+  'application-origin': 'The browser tab cannot open this application itself.',
+}
+const BROWSER_UNKNOWN = 'The page navigated; this tab cannot read its new URL.'
+const BROWSER_FAILED = 'The page could not load; reload or open it in the system browser.'
+const BROWSER_LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
+const rightSidebar = document.getElementById('right-sidebar')
+const rsTabs = document.getElementById('rs-tabs')
+const rsBody = document.getElementById('rs-body')
+const browserOpen = document.getElementById('browser-open')
+/** Whether the server enabled the Browser (`/api/status` `browser: true`); nothing below runs while it is false. */
+let browserEnabled = false
+const sidebarTabs = []
+let activeSidebarTab = null
+let sidebarTabCount = 0
+
+/** The port a URL reaches, with the scheme's default filled in. */
+function effectivePort(url) {
+  return url.port !== '' ? url.port : url.protocol === 'https:' ? '443' : '80'
+}
+
+/**
+ * One address-bar value, checked against the fixed allowlist before anything is framed.
+ *
+ * DSH's `parseBrowserAddress`: the scheme test does not take `localhost:8080` for a scheme, because what follows its
+ * colon is a port.
+ * @returns `{ ok: true, target: { url, title } }` or `{ ok: false, reason }`, a key of `BROWSER_REFUSALS`.
+ */
+function parseBrowserAddress(input, applicationOrigin) {
+  const trimmed = String(input).trim()
+  if (trimmed === '') return { ok: false, reason: 'empty' }
+  if (trimmed.length > BROWSER_MAX_ADDRESS) return { ok: false, reason: 'invalid' }
+  const candidate = /^[A-Za-z][A-Za-z\d+.-]*:(?!\d+(?:[/?#]|$))/u.test(trimmed) ? trimmed : `https://${trimmed}`
+  let url
+  try {
+    url = new URL(candidate)
+  } catch {
+    return { ok: false, reason: 'invalid' }
+  }
+  if (url.username !== '' || url.password !== '') return { ok: false, reason: 'credentials' }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return { ok: false, reason: 'protocol' }
+  if (applicationOrigin !== undefined && applicationOrigin !== 'null') {
+    let app = null
+    try {
+      app = new URL(applicationOrigin)
+    } catch {
+      app = null
+    }
+    if (app !== null) {
+      if (url.origin === app.origin) return { ok: false, reason: 'application-origin' }
+      const sameLoopbackPort = BROWSER_LOOPBACK.has(app.hostname) && BROWSER_LOOPBACK.has(url.hostname) && effectivePort(url) === effectivePort(app)
+      if (sameLoopbackPort) return { ok: false, reason: 'application-origin' }
+    }
+  }
+  return { ok: true, target: { url: url.href, title: url.hostname } }
+}
+
+/** A toolbar icon, drawn in `currentColor`. */
+function browserIcon(d) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.4')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.append(svgPath(d))
+  return svg
+}
+
+function browserButton(name, label, d) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.dataset.browser = name
+  button.setAttribute('aria-label', label)
+  button.title = label
+  button.append(browserIcon(d))
+  return button
+}
+
+/** Draw a tab from its navigation state; the state is the only thing that decides what is enabled. */
+function renderBrowserTab(tab) {
+  const nav = tab.nav
+  const target = nav.entries[nav.index]
+  const unknown = nav.status === 'unknown'
+  tab.back.disabled = unknown || nav.index <= 0
+  tab.forward.disabled = unknown || nav.index < 0 || nav.index >= nav.entries.length - 1
+  tab.reload.disabled = target === undefined
+  tab.external.disabled = target === undefined || unknown
+  tab.address.dataset.address = target === undefined ? 'empty' : unknown ? 'unknown' : nav.status
+  tab.address.setAttribute('aria-invalid', nav.refusal === null ? 'false' : 'true')
+  const message = nav.refusal !== null ? BROWSER_REFUSALS[nav.refusal] : nav.failed ? BROWSER_FAILED : unknown ? BROWSER_UNKNOWN : ''
+  tab.notice.textContent = message
+  tab.notice.dataset.kind = nav.refusal !== null || nav.failed ? 'error' : 'info'
+  tab.notice.hidden = message === ''
+  tab.panel.setAttribute('aria-busy', String(nav.status === 'loading' && !nav.failed))
+  tab.label.textContent = target === undefined ? 'Browser' : target.title
+  tab.button.title = target === undefined ? 'Browser' : target.url
+}
+
+/** Frame the current entry under a new revision, so a late `load` from an older frame is not mistaken for this one. */
+function browserRequest(tab, index) {
+  const nav = tab.nav
+  const target = nav.entries[index]
+  if (target === undefined) return
+  nav.index = index
+  nav.revision += 1
+  nav.status = 'loading'
+  nav.failed = false
+  nav.refusal = null
+  const revision = nav.revision
+  tab.frame?.remove()
+  tab.start.remove()
+  const frame = document.createElement('iframe')
+  // The sandbox and the referrer policy are set before the address, so the first request already carries both.
+  frame.setAttribute('sandbox', BROWSER_SANDBOX)
+  frame.referrerPolicy = 'no-referrer'
+  frame.dataset.browserFrame = 'iframe'
+  frame.title = target.title
+  frame.addEventListener('load', () => {
+    if (tab.frame !== frame || nav.revision !== revision) return
+    if (nav.status === 'loading') nav.status = 'known'
+    else if (nav.status === 'known') nav.status = 'unknown'
+    renderBrowserTab(tab)
+  })
+  frame.addEventListener('error', () => {
+    if (tab.frame !== frame || nav.revision !== revision) return
+    nav.failed = true
+    renderBrowserTab(tab)
+  })
+  frame.src = target.url
+  tab.frame = frame
+  tab.view.append(frame)
+  tab.address.value = target.url
+  renderBrowserTab(tab)
+}
+
+/** Validate an address and load it; the current address reloads, any other discards the forward branch. */
+function browserLoad(tab, value) {
+  const parsed = parseBrowserAddress(value, location.origin)
+  if (!parsed.ok) {
+    tab.nav.refusal = parsed.reason
+    renderBrowserTab(tab)
+    return
+  }
+  const nav = tab.nav
+  const current = nav.entries[nav.index]
+  if (current !== undefined && current.url === parsed.target.url) {
+    browserRequest(tab, nav.index)
+    return
+  }
+  nav.entries = [...nav.entries.slice(0, nav.index + 1), parsed.target]
+  if (nav.entries.length > BROWSER_MAX_HISTORY) nav.entries.splice(0, nav.entries.length - BROWSER_MAX_HISTORY)
+  browserRequest(tab, nav.entries.length - 1)
+}
+
+function selectSidebarTab(tab) {
+  activeSidebarTab = tab
+  for (const each of sidebarTabs) {
+    const selected = each === tab
+    each.tab.dataset.active = String(selected)
+    each.button.setAttribute('aria-selected', String(selected))
+    each.button.tabIndex = selected ? 0 : -1
+    each.panel.hidden = !selected
+  }
+}
+
+/**
+ * The column budget, DSH's `computeColumns` (`dsh-client-ui-layout`): beside a right track the conversation keeps 400
+ * pixels, and the track is the reader's preference — 45% of the window at the first opening, kept after that — held
+ * between 300 pixels and 70% of the window and shrunk to the room that is left. Below 768 pixels the pane covers the
+ * window, DSH's automatic fullscreen.
+ *
+ * One difference, stated: where the room is under 300 pixels DSH drops the track and hides its panel, which makes the
+ * opening gesture do nothing; here the pane covers the conversation column instead, and becomes a track again by
+ * itself once the left sidebar or the window makes room. The left sidebar's own bounds (12–48rem, 80% of the window)
+ * are its owner's and are not narrowed here.
+ */
+const RIGHTBAR_CENTER_MIN = 400
+const RIGHTBAR_MIN = 300
+const RIGHTBAR_MAX_RATIO = 0.7
+const RIGHTBAR_DEFAULT_RATIO = 0.45
+const RIGHTBAR_FULLSCREEN_BELOW = 768
+let rightbarPreference = null
+const conversationColumn = document.querySelector('main')
+
+/** Place the open pane: a track of the budget's width, or a cover where there is no room for one. */
+function layoutRightSidebar() {
+  if (rightSidebar.hidden) return
+  const viewport = document.documentElement.clientWidth
+  rightbarPreference ??= Math.max(RIGHTBAR_MIN, Math.round(viewport * RIGHTBAR_DEFAULT_RATIO))
+  // Everything left of the conversation is the left sidebar and its gutter, whichever width they have now.
+  const start = Math.round(conversationColumn.getBoundingClientRect().left)
+  const available = viewport - start - RIGHTBAR_CENTER_MIN
+  let presentation = 'push'
+  if (viewport < RIGHTBAR_FULLSCREEN_BELOW) presentation = 'fullscreen'
+  else if (available < RIGHTBAR_MIN) presentation = 'cover'
+  const track = Math.min(viewport * RIGHTBAR_MAX_RATIO, Math.max(RIGHTBAR_MIN, rightbarPreference))
+  rightSidebar.dataset.presentation = presentation
+  rightSidebar.style.width = presentation === 'push' ? `${Math.floor(Math.min(available, track))}px` : ''
+  rightSidebar.style.setProperty('--rs-cover-left', `${start}px`)
+}
+
+function showRightSidebar(open) {
+  // DSH's `openRightbar`: opening below 1024 pixels puts a narrow opening of the left sidebar back to its rail.
+  if (open && rightSidebar.hidden && sidebarNarrow() && sidebarNarrowExpanded) {
+    sidebarNarrowExpanded = false
+    paintSidebarCollapse()
+  }
+  rightSidebar.hidden = !open
+  browserOpen.setAttribute('aria-expanded', String(open))
+  layoutRightSidebar()
+}
+
+/** The left sidebar's drag, keys, collapse and stored width all move the conversation's left edge, and so does the window. */
+window.addEventListener('resize', layoutRightSidebar)
+new ResizeObserver(() => layoutRightSidebar()).observe(document.getElementById('workspace-sidebar'))
+
+function closeSidebarTab(tab) {
+  const at = sidebarTabs.indexOf(tab)
+  if (at < 0) return
+  sidebarTabs.splice(at, 1)
+  tab.frame?.remove()
+  tab.tab.remove()
+  tab.panel.remove()
+  if (sidebarTabs.length === 0) {
+    activeSidebarTab = null
+    showRightSidebar(false)
+    browserOpen.focus()
+    return
+  }
+  if (activeSidebarTab === tab) {
+    const next = sidebarTabs[Math.min(at, sidebarTabs.length - 1)]
+    selectSidebarTab(next)
+    next.button.focus()
+  }
+}
+
+/** Open another Browser tab, as DSH's guide action does each time, and put the cursor in its address bar. */
+function openBrowserTab(initialAddress) {
+  if (!browserEnabled) return null
+  sidebarTabCount += 1
+  const id = `rs-tab-${sidebarTabCount}`
+  const tab = { id, nav: { entries: [], index: -1, revision: 0, status: 'empty', failed: false, refusal: null }, frame: null }
+  tab.tab = document.createElement('div')
+  tab.tab.className = 'rs-tab'
+  tab.button = document.createElement('button')
+  tab.button.type = 'button'
+  tab.button.id = id
+  tab.button.setAttribute('role', 'tab')
+  tab.button.setAttribute('aria-controls', `${id}-panel`)
+  tab.label = document.createElement('span')
+  tab.button.append(tab.label)
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.className = 'rs-tab-close'
+  close.setAttribute('aria-label', 'Close tab')
+  close.title = 'Close tab'
+  close.textContent = '×'
+  tab.tab.append(tab.button, close)
+
+  tab.panel = document.createElement('div')
+  tab.panel.className = 'browser-tab'
+  tab.panel.id = `${id}-panel`
+  tab.panel.setAttribute('role', 'tabpanel')
+  tab.panel.setAttribute('aria-labelledby', id)
+  const bar = document.createElement('form')
+  bar.className = 'browser-bar'
+  bar.setAttribute('aria-label', 'Browser navigation')
+  tab.back = browserButton('back', 'Back', 'M10 3.5 5.5 8l4.5 4.5')
+  tab.forward = browserButton('forward', 'Forward', 'M6 3.5 10.5 8 6 12.5')
+  tab.reload = browserButton('reload', 'Reload', 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
+  tab.address = document.createElement('input')
+  tab.address.type = 'text'
+  tab.address.className = 'browser-address'
+  tab.address.dataset.browser = 'address'
+  tab.address.setAttribute('aria-label', 'Address')
+  tab.address.placeholder = 'Enter an HTTP(S) address'
+  tab.address.spellcheck = false
+  tab.address.autocomplete = 'off'
+  tab.address.setAttribute('autocapitalize', 'off')
+  tab.address.setAttribute('enterkeyhint', 'go')
+  const go = document.createElement('button')
+  go.type = 'submit'
+  go.dataset.browser = 'go'
+  go.textContent = 'Go'
+  tab.external = browserButton('external', 'Open in system browser', 'M9 3h4v4M13 3 7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5')
+  bar.append(tab.back, tab.forward, tab.reload, tab.address, go, tab.external)
+  tab.notice = document.createElement('p')
+  tab.notice.className = 'browser-notice'
+  tab.notice.dataset.browser = 'notice'
+  tab.notice.setAttribute('role', 'status')
+  tab.notice.hidden = true
+  tab.view = document.createElement('div')
+  tab.view.className = 'browser-view'
+  tab.start = document.createElement('p')
+  tab.start.className = 'browser-start'
+  tab.start.textContent = 'Enter an HTTP(S) address to start browsing'
+  tab.view.append(tab.start)
+  tab.panel.append(bar, tab.notice, tab.view)
+
+  bar.addEventListener('submit', (submitEvent) => {
+    submitEvent.preventDefault()
+    browserLoad(tab, tab.address.value)
+  })
+  tab.back.addEventListener('click', () => {
+    if (!tab.back.disabled) browserRequest(tab, tab.nav.index - 1)
+  })
+  tab.forward.addEventListener('click', () => {
+    if (!tab.forward.disabled) browserRequest(tab, tab.nav.index + 1)
+  })
+  tab.reload.addEventListener('click', () => {
+    if (tab.nav.index >= 0) browserRequest(tab, tab.nav.index)
+  })
+  tab.external.addEventListener('click', () => {
+    const target = tab.nav.entries[tab.nav.index]
+    if (target !== undefined && tab.nav.status !== 'unknown') window.open(target.url, '_blank', 'noopener,noreferrer')
+  })
+  tab.button.addEventListener('click', () => selectSidebarTab(tab))
+  close.addEventListener('click', () => closeSidebarTab(tab))
+
+  sidebarTabs.push(tab)
+  rsTabs.append(tab.tab)
+  rsBody.append(tab.panel)
+  renderBrowserTab(tab)
+  selectSidebarTab(tab)
+  showRightSidebar(true)
+  if (initialAddress !== undefined) browserLoad(tab, initialAddress)
+  tab.address.focus()
+  return tab
+}
+
+/**
+ * Reveal the entry point once the server says the Browser is enabled; a default server never shows it. Its two chords
+ * are bound from the same moment (`availableShortcuts`).
+ */
+function applyBrowserFeature(enabled) {
+  browserEnabled = enabled
+  browserOpen.hidden = !enabled
+  refreshShortcuts()
+}
+
+/**
+ * What the globe and DSH's `sidebar.right.toggle` (Mod+Shift+B on the Web) both do: hide the open sidebar, or show it
+ * with the cursor in its tab's address bar, opening a first tab when there is none. Hiding it from inside hands the
+ * focus to the globe, so the cursor does not fall to the page.
+ */
+function toggleRightSidebar() {
+  if (!browserEnabled) return
+  if (!rightSidebar.hidden) {
+    const inside = rightSidebar.contains(document.activeElement)
+    showRightSidebar(false)
+    if (inside) browserOpen.focus()
+    return
+  }
+  if (activeSidebarTab === null) {
+    openBrowserTab()
+    return
+  }
+  showRightSidebar(true)
+  activeSidebarTab.address.focus()
+}
+
+browserOpen.addEventListener('click', () => toggleRightSidebar())
+document.getElementById('rs-new').addEventListener('click', () => openBrowserTab())
+document.getElementById('rs-close').addEventListener('click', () => {
+  showRightSidebar(false)
+  browserOpen.focus()
+})
+/** Arrow keys move between the sidebar's tabs, the behaviour `role=tablist` promises. */
+rsTabs.addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key !== 'ArrowLeft' && keyEvent.key !== 'ArrowRight') return
+  const at = sidebarTabs.indexOf(activeSidebarTab)
+  if (at < 0) return
+  const next = sidebarTabs[(at + (keyEvent.key === 'ArrowRight' ? 1 : sidebarTabs.length - 1)) % sidebarTabs.length]
+  keyEvent.preventDefault()
+  selectSidebarTab(next)
+  next.button.focus()
+})
 
 accessButton.addEventListener('click', (clickEvent) => {
   clickEvent.stopPropagation()
@@ -12745,7 +13266,7 @@ log.addEventListener('click', (clickEvent) => {
   if (anchor === null) return
   if (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.shiftKey || clickEvent.altKey || clickEvent.button !== 0) return
   const href = anchor.getAttribute('href') ?? ''
-  const path = chatLinkPath(href, activeFolder)
+  const path = chatLinkPath(href, sessionFolder ?? activeFolder)
   if (path === null) return
   clickEvent.preventDefault()
   const fragment = href.split('#')[1] ?? ''
@@ -14048,6 +14569,8 @@ async function fillSettings(options = {}) {
     const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
     server.append(...settingsTerm(t('settings.sandbox'), sandbox ?? t('settings.unknown')))
     server.append(...settingsTerm(t('settings.cwd'), status === null || typeof status.cwd !== 'string' ? t('settings.unknown') : status.cwd))
+    // The Browser tab is the operator's choice at start (#86), so the page says how to make it rather than offering a switch.
+    server.append(...settingsTerm(t('settings.browserTab'), status !== null && status.browser === true ? t('settings.browserTabOn') : t('settings.browserTabOff')))
   }
 
   if (endpointsRead.failure !== undefined) {
@@ -14363,25 +14886,43 @@ settingsDialog.addEventListener('click', (clickEvent) => {
  * The session shortcuts — DSH's own chords, read from its menu on 2026-10-17: `Alt+Meta+G` rename,
  * `Shift+Meta+F` fork, `Alt+Meta+A` archive, and `Alt+Meta+K` to reach the search box.
  *
- * `Meta` is written as "meta or control" because the page runs on a Mac where the chord is ⌥⌘ and a keyboard that
- * only has Control should still reach it. Each entry states its modifiers exactly: a chord with `shift` is not the
- * same gesture as one without, and matching loosely would make `Shift+Alt+Meta+A` archive a session by accident.
+ * Each chord names the **physical key** (`code`), as DSH's `dsh-client-shortcuts` does ("the service accepts physical
+ * `code` values"). The character a key types is the wrong thing to match: Chrome on a Mac applies Option to `key`, so
+ * ⌥⌘A arrives as `å`, ⌥⌘K as `˚`, ⌥⌘G as `©` and ⌥⌘N as a dead key, and a table of letters never fired on the
+ * machine the chords were written for (DSH parity R-developer-seven-7). `key` stays beside each code only for an event
+ * that carries no code at all (a synthetic event, some on-screen keyboards).
+ *
+ * Each entry states its modifiers exactly: a chord with `shift` is not the same gesture as one without, and matching
+ * loosely would make `Shift+Alt+Meta+A` archive a session by accident.
  */
 /* session-shortcuts:begin */
 const SESSION_SHORTCUTS = [
-  { key: 'a', alt: true, action: 'archive' },
-  { key: 'g', alt: true, action: 'rename' },
-  { key: 'k', alt: true, action: 'search' },
-  { key: 'f', shift: true, action: 'fork' },
+  { code: 'KeyA', key: 'a', alt: true, action: 'archive' },
+  { code: 'KeyG', key: 'g', alt: true, action: 'rename' },
+  { code: 'KeyK', key: 'k', alt: true, action: 'search' },
+  { code: 'KeyF', key: 'f', shift: true, action: 'fork' },
   /** DSH's own chord for the same control: `Alt+Meta+B`. */
-  { key: 'b', alt: true, action: 'sidebar' },
+  { code: 'KeyB', key: 'b', alt: true, action: 'sidebar' },
   /** DSH's chord for its primary action; read from its `New session` control on 2026-10-17. */
-  { key: 'n', alt: true, action: 'new-session' },
+  { code: 'KeyN', key: 'n', alt: true, action: 'new-session' },
   /** DSH's chord for Settings, read from its menu in the same session. */
-  { key: ',', alt: true, action: 'settings' },
+  { code: 'Comma', key: ',', alt: true, action: 'settings' },
   /** DSH's `workspace.add`, `KeyO` with primary+alt on the Web (dsh-client-ui-workspace `client.js:133`). */
-  { key: 'o', alt: true, action: 'add-workspace' },
+  { code: 'KeyO', key: 'o', alt: true, action: 'add-workspace' },
+  /** DSH's keyboard reference (`dsh-client-ui-shortcuts`): Mod+/ opens it, and closes it when it is in front. */
+  { code: 'Slash', key: '/', action: 'shortcuts-reference' },
+  /** DSH's `sidebar.right.toggle`, `KeyB` with primary+shift on the Web (dsh-client-ui-sidebar-right `client.js:198`). */
+  { code: 'KeyB', key: 'b', shift: true, action: 'right-sidebar' },
+  /** DSH's `browser.new`, `KeyT` with primary+alt on the Web (dsh-client-ui-sidebar-browser `client.js:1565`). */
+  { code: 'KeyT', key: 't', alt: true, action: 'browser-new' },
 ]
+
+/**
+ * Whether this page runs on a Mac, where DSH's abstract `Mod` (`primary`) is Command; everywhere else it is Control.
+ * DSH's own test (`dsh-client-shortcuts` `detectEnvironment`), case-insensitive: `navigator.platform` is `MacIntel` on a
+ * Mac, while `navigator.userAgentData.platform` is `macOS`, which a case-sensitive `/Mac/` misses.
+ */
+const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform || '')
 
 /**
  * Which shortcut an event is, or `null` when it is none of them.
@@ -14392,13 +14933,24 @@ const SESSION_SHORTCUTS = [
  * The **physical key** decides when the event names one, as DSH's registry matches `event.code` (dsh-client-shortcuts
  * `client.js:1416`): on a Mac, ⌥ changes the character, so ⌥⌘O arrives as `key: 'ø'` and only `code: 'KeyO'` says
  * which key it was. A synthetic event without a code falls back to its character.
+ *
+ * The rules are DSH's (`dsh-client-shortcuts` `keydown` and `dispatch`): `Mod` is Command on a Mac and Control
+ * elsewhere, and the other of the two is not part of any chord, so the modifier set must match exactly; nothing fires
+ * while an input method composes, while AltGraph is held, or on the key after a dead key; a dead key itself fires
+ * nothing, except ⌥⌘N on a Mac, which Chrome delivers as a dead key and DSH keeps as its new-session chord.
  */
-function shortcutFor(event) {
-  if (!event.metaKey && !event.ctrlKey) return null
-  const code = typeof event.code === 'string' && event.code !== '' ? event.code : null
-  for (const shortcut of SESSION_SHORTCUTS) {
-    const physical = shortcut.key === ',' ? 'Comma' : 'Key' + shortcut.key.toUpperCase()
-    if (code !== null ? code !== physical : String(event.key).toLowerCase() !== shortcut.key) continue
+function shortcutFor(event, options = {}) {
+  const mac = options.mac === undefined ? SHORTCUTS_ON_MAC : options.mac
+  if (event.defaultPrevented || options.afterDeadKey === true) return null
+  if (event.isComposing || event.keyCode === 229) return null
+  if (typeof event.getModifierState === 'function' && event.getModifierState('AltGraph')) return null
+  const primary = mac ? event.metaKey : event.ctrlKey
+  const other = mac ? event.ctrlKey : event.metaKey
+  if (!primary || other) return null
+  const code = typeof event.code === 'string' ? event.code : ''
+  if (event.key === 'Dead' && !(mac && code === 'KeyN' && event.altKey && !event.shiftKey)) return null
+  for (const shortcut of options.table ?? SESSION_SHORTCUTS) {
+    if (code !== '' ? code !== shortcut.code : String(event.key).toLowerCase() !== shortcut.key) continue
     if (Boolean(shortcut.alt) !== event.altKey) continue
     if (Boolean(shortcut.shift) !== event.shiftKey) continue
     return shortcut.action
@@ -14406,6 +14958,17 @@ function shortcutFor(event) {
   return null
 }
 /* session-shortcuts:end */
+
+/**
+ * Whether the last key was a dead key that did not fire a chord: the key after it composes a character, so DSH
+ * treats it as composition. A pointer press, a focus change or a finished composition starts over, as DSH's do.
+ */
+let shortcutAfterDeadKey = false
+for (const type of ['compositionstart', 'compositionend', 'focusin', 'pointerdown']) {
+  document.addEventListener(type, () => {
+    shortcutAfterDeadKey = false
+  }, true)
+}
 
 /** The node of the row the panel is showing, which is what a shortcut acts on. */
 function selectedNode() {
@@ -14421,9 +14984,12 @@ function selectedNode() {
  * nothing is indistinguishable from a key that is not bound.
  */
 document.addEventListener('keydown', (event) => {
-  const action = shortcutFor(event)
+  const action = shortcutFor(event, { afterDeadKey: shortcutAfterDeadKey, table: activeShortcuts })
+  shortcutAfterDeadKey = event.key === 'Dead' && action === null
   if (action === null) return
   event.preventDefault()
+  /** A held chord repeats its keydown; DSH takes the repeat so the browser does not act on it, and runs nothing. */
+  if (event.repeat) return
   if (action === 'sidebar') {
     toggleSidebarCollapse()
     sidebarToggle.focus()
@@ -14433,7 +14999,23 @@ document.addEventListener('keydown', (event) => {
     void startNewSession()
     return
   }
+  if (action === 'shortcuts-reference') {
+    toggleShortcutReference()
+    return
+  }
+  /**
+   * The right sidebar's two commands (S38, S42). They are in the table only while the server enables the Browser
+   * (`availableShortcuts`); like DSH's (`modals: []`), neither acts behind an open dialog.
+   */
+  if (action === 'right-sidebar' || action === 'browser-new') {
+    if (document.querySelector('dialog[open]') !== null) return
+    if (action === 'right-sidebar') toggleRightSidebar()
+    else openBrowserTab()
+    return
+  }
   if (action === 'settings') {
+    /** While the reference is in front, the Settings command neither opens nor closes Settings (DSH). */
+    if (shortcutReference.open) return
     void showSettings()
     return
   }
@@ -14460,6 +15042,472 @@ document.addEventListener('keydown', (event) => {
   else if (action === 'fork') void forkSession(node)
   else if (action === 'rename') renameSession(node)
 })
+
+/**
+ * The keyboard reference, DSH's (`dsh-client-ui-shortcuts`): one dialog, *Keyboard shortcuts*, listing the commands in
+ * DSH's product order with the chord this page binds, then the fixed message-input actions (read-only); a search
+ * matches an ordered subsequence of a label, its English alias or its keys, ignoring case. Mod+/ opens it when no
+ * dialog is open or Settings is in front and closes it when it is in front. The page had no list of its keys at all
+ * (DSH parity R-developer-seven-11, row S40).
+ */
+const shortcutReference = document.getElementById('shortcut-reference')
+/**
+ * The commands in DSH's reference order, its `coreActionOrder` (`dsh-client-ui-shortcuts` `client.js:505`): the
+ * reference itself first, then New session, the left sidebar, Search, Add workspace, Rename, Fork, Archive, Settings,
+ * the right sidebar and the Browser. The last two carry DSH's labels and aliases.
+ */
+const SHORTCUT_LABELS = {
+  'shortcuts-reference': ['Keyboard shortcuts', 'keys help'],
+  'new-session': ['New session', 'new chat'],
+  sidebar: ['Toggle sidebar', 'panel'],
+  search: ['Search sessions', 'find'],
+  'add-workspace': ['Add workspace', 'folder'],
+  rename: ['Rename session', 'title'],
+  fork: ['Fork session', 'branch copy'],
+  archive: ['Archive session', 'hide'],
+  settings: ['Open settings', 'preferences'],
+  'right-sidebar': ['Toggle right sidebar', 'right panel'],
+  'browser-new': ['Browser', 'new browser tab'],
+}
+/**
+ * The commands that act on the right sidebar. It exists only while the server enables the Browser, its one kind of
+ * tab, so until `/api/status` says so they are unbound (the keys stay the browser's) and the reference omits them.
+ * DSH's sidebar always exists (Files, Terminal), so there the toggle is always bound.
+ */
+const PANEL_SHORTCUTS = ['right-sidebar', 'browser-new']
+const FIXED_INPUT_ACTIONS = [
+  { label: 'Send message', alias: 'submit', keys: 'Enter' },
+  { label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
+  { label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
+]
+function chordText(shortcut, mac) {
+  const glyph = keyForCode(shortcut.code).toUpperCase()
+  if (mac) return `${shortcut.alt ? '⌥' : ''}${shortcut.shift ? '⇧' : ''}⌘${glyph}`
+  return ['Ctrl', shortcut.alt ? 'Alt' : null, shortcut.shift ? 'Shift' : null, glyph].filter((part) => part !== null).join('+')
+}
+function subsequenceMatch(text, query) {
+  const haystack = String(text).toLowerCase()
+  let at = 0
+  for (const character of String(query).toLowerCase().replace(/\s+/g, '')) {
+    at = haystack.indexOf(character, at)
+    if (at === -1) return false
+    at += 1
+  }
+  return true
+}
+function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides = {}, hidden = []) {
+  const rows = []
+  for (const action of Object.keys(SHORTCUT_LABELS)) {
+    if (hidden.includes(action)) continue
+    const shortcut = table.find((entry) => entry.action === action)
+    const [label, alias] = SHORTCUT_LABELS[action]
+    const keys = shortcut === undefined ? 'No shortcut' : chordText(shortcut, mac)
+    rows.push({ group: 'Commands', label, alias, keys, fixed: false, action, bound: shortcut !== undefined, overridden: Object.prototype.hasOwnProperty.call(overrides, action) })
+  }
+  for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: 'Message input', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
+  const wanted = String(query ?? '').trim()
+  return wanted === '' ? rows : rows.filter((row) => [row.label, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
+}
+/**
+ * Draw the list. A repaint replaces the rows, and a focused row that is removed takes the focus with it to the page
+ * body, outside the dialog, where the recorder's key handler never sees the next key: a refused chord's "Try another"
+ * could not be answered. So the keyboard goes back where it was, to the same control of the same row, or to the row
+ * when that control left with the binding (Remove, Restore default), or to the search field when the search no longer
+ * matches the row (a query that matched its old keys). `keep` names the place when the caller knows it
+ * (`{ action, control }`); otherwise it is read from the focus, so a repaint from another tab's change keeps it too.
+ */
+function renderShortcutReference(keep = null) {
+  const list = document.getElementById('shortcut-reference-list')
+  const active = list.contains(document.activeElement) ? document.activeElement : null
+  const place = keep ?? (active === null ? null : { action: active.closest('.shortcut-row[data-action]')?.dataset.action ?? null, control: active.dataset.bindingAction ?? null })
+  list.replaceChildren()
+  let group = null
+  const rows = shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC, activeShortcuts, keybindings.overrides, browserEnabled ? [] : PANEL_SHORTCUTS)
+  for (const row of rows) {
+    if (row.group !== group) {
+      group = row.group
+      const heading = document.createElement('div')
+      heading.className = 'group'
+      heading.textContent = group
+      list.append(heading)
+    }
+    const item = document.createElement('div')
+    item.className = 'shortcut-row'
+    item.setAttribute('role', 'listitem')
+    if (row.fixed) item.dataset.fixed = 'true'
+    const label = document.createElement('span')
+    label.className = 'label'
+    label.textContent = row.label
+    const keys = document.createElement('kbd')
+    keys.textContent = row.keys
+    if (row.fixed) {
+      item.append(label, keys)
+      list.append(item)
+      continue
+    }
+    /** An application row records a new chord when clicked (DSH); its inline actions do not start recording. */
+    item.dataset.action = row.action
+    item.tabIndex = 0
+    if (recordingAction === row.action) {
+      keys.dataset.recording = 'true'
+      keys.textContent = recordingError === null ? 'Press a shortcut…' : 'Try another'
+      if (recordingError !== null) keys.dataset.error = 'true'
+    }
+    const actions = document.createElement('span')
+    actions.className = 'row-actions'
+    if (keybindings.readable && row.bound && recordingAction !== row.action) {
+      const remove = document.createElement('button')
+      remove.type = 'button'
+      remove.dataset.bindingAction = 'remove'
+      remove.textContent = 'Remove'
+      actions.append(remove)
+    }
+    if (keybindings.readable && row.overridden && recordingAction !== row.action) {
+      const restore = document.createElement('button')
+      restore.type = 'button'
+      restore.dataset.bindingAction = 'restore'
+      restore.textContent = 'Restore default'
+      actions.append(restore)
+    }
+    actions.append(keys)
+    item.append(label, actions)
+    list.append(item)
+  }
+  const count = Object.keys(keybindings.overrides).length
+  const counter = document.getElementById('shortcut-override-count')
+  counter.textContent = `(${count})`
+  counter.hidden = count === 0
+  document.getElementById('shortcut-restore-all').disabled = count === 0 || !keybindings.readable
+  if (place === null || place.action === null) return
+  const row = list.querySelector(`.shortcut-row[data-action="${place.action}"]`)
+  const control = typeof place.control === 'string' ? row?.querySelector(`button[data-binding-action="${place.control}"]`) : null
+  /** A search can match a row by its keys, so a new binding can take the row out of the list; the search field stays. */
+  const target = control ?? row ?? document.getElementById('shortcut-reference-search')
+  target.focus()
+}
+/**
+ * Bindings a person chose, DSH's way (`dsh-client-shortcuts`, `dsh-client-ui-shortcuts`): only overrides are kept, per
+ * device, in this origin's localStorage under `heddle.keybindings.v1` (DSH's Web document is `dsh.keybindings.v1`). A
+ * missing command inherits its default, `null` clears its binding, and Restore default removes the override; explicit
+ * overrides displace a default they collide with, and explicit overrides that collide with each other are all off. A
+ * document this page cannot read leaves the defaults active and editing off, and nothing overwrites it. The chords were
+ * fixed in the page (DSH parity R-developer-seven-12, row S41).
+ */
+const KEYBINDINGS_KEY = 'heddle.keybindings.v1'
+const RECORDABLE_CODE = /^(Key[A-Z]|Digit[0-9]|Comma|Period|Slash|Semicolon|Quote|BracketLeft|BracketRight|Backslash|Minus|Equal|Backquote)$/
+function keyForCode(code) {
+  const named = { Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']', Backslash: '\\', Minus: '-', Equal: '=', Backquote: '`' }
+  if (Object.prototype.hasOwnProperty.call(named, code)) return named[code]
+  return String(code).replace(/^Key|^Digit/, '').toLowerCase()
+}
+function parseKeybindings(raw) {
+  if (raw === null || raw === undefined) return { readable: true, overrides: {} }
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || parsed.version !== 1) return { readable: false, overrides: {} }
+    if (parsed.overrides === null || typeof parsed.overrides !== 'object' || Array.isArray(parsed.overrides)) return { readable: false, overrides: {} }
+    const overrides = {}
+    for (const [action, value] of Object.entries(parsed.overrides)) {
+      if (value === null) overrides[action] = null
+      else if (typeof value === 'object' && typeof value.code === 'string' && RECORDABLE_CODE.test(value.code)) {
+        overrides[action] = { code: value.code, alt: value.alt === true, shift: value.shift === true }
+      }
+    }
+    return { readable: true, overrides }
+  } catch {
+    return { readable: false, overrides: {} }
+  }
+}
+function sameChord(a, b) {
+  return a.code === b.code && Boolean(a.alt) === Boolean(b.alt) && Boolean(a.shift) === Boolean(b.shift)
+}
+function effectiveShortcuts(defaults, overrides) {
+  const explicit = defaults
+    .filter((entry) => overrides[entry.action] !== undefined && overrides[entry.action] !== null)
+    .map((entry) => ({ ...overrides[entry.action], key: keyForCode(overrides[entry.action].code), action: entry.action }))
+  const live = explicit.filter((entry) => !explicit.some((other) => other !== entry && sameChord(other, entry)))
+  const table = []
+  for (const entry of defaults) {
+    const override = overrides[entry.action]
+    if (override === null) continue
+    if (override !== undefined) {
+      const mine = live.find((candidate) => candidate.action === entry.action)
+      if (mine !== undefined) table.push(mine)
+      continue
+    }
+    if (explicit.some((candidate) => sameChord(candidate, entry))) continue
+    table.push(entry)
+  }
+  return table
+}
+/** What a key press means while a row records: still waiting, a refusal, or a chord. */
+function recordedChord(event, mac) {
+  /**
+   * An input method composing, or AltGraph held, owns the key: DSH's recorder (`dsh-client-ui-shortcuts`) neither takes
+   * nor records it, as dispatch fires nothing for it (`shortcutFor`).
+   */
+  if (event.isComposing || event.keyCode === 229 || (typeof event.getModifierState === 'function' && event.getModifierState('AltGraph'))) {
+    return { pending: true, inputMethod: true }
+  }
+  if (['Meta', 'Control', 'Alt', 'Shift', 'AltGraph', 'CapsLock', 'OS'].includes(event.key)) return { pending: true }
+  const primary = mac ? event.metaKey : event.ctrlKey
+  const other = mac ? event.ctrlKey : event.metaKey
+  if (!primary || other) return { error: mac ? 'A shortcut starts with ⌘.' : 'A shortcut starts with Ctrl.' }
+  if (!RECORDABLE_CODE.test(event.code)) return { error: 'That key cannot be part of a shortcut.' }
+  /** A dead key never fires a chord (accent input stays protected), so it is not recorded either, except ⌥⌘N on a Mac. */
+  if (event.key === 'Dead' && !(mac && event.code === 'KeyN' && event.altKey === true && event.shiftKey !== true)) {
+    return { error: 'That key starts an accent on this keyboard; choose another.' }
+  }
+  return { chord: { code: event.code, alt: event.altKey === true, shift: event.shiftKey === true } }
+}
+function bindingConflict(chord, action, table) {
+  return table.find((entry) => entry.action !== action && sameChord(entry, chord))?.action ?? null
+}
+function readStoredKeybindings() {
+  try {
+    return parseKeybindings(localStorage.getItem(KEYBINDINGS_KEY))
+  } catch {
+    return { readable: false, overrides: {} }
+  }
+}
+let keybindings = readStoredKeybindings()
+/**
+ * The defaults this page offers now: every chord, less the right sidebar's while it does not exist (`PANEL_SHORTCUTS`).
+ * A recorded chord for a command left out is kept in storage and applies again once the command is back.
+ */
+function availableShortcuts() {
+  return SESSION_SHORTCUTS.filter((entry) => browserEnabled || !PANEL_SHORTCUTS.includes(entry.action))
+}
+/** Rebuild the bindings in force after the stored overrides or the available commands change. */
+function refreshShortcuts() {
+  activeShortcuts = effectiveShortcuts(availableShortcuts(), keybindings.overrides)
+  if (shortcutReference.open) renderShortcutReference()
+}
+let activeShortcuts = effectiveShortcuts(availableShortcuts(), keybindings.overrides)
+let recordingAction = null
+let recordingError = null
+function shortcutStatus(text) {
+  document.getElementById('shortcut-reference-status').textContent = text
+}
+function unreadableNotice() {
+  return `Keyboard shortcuts could not be read from this browser's storage (${KEYBINDINGS_KEY}); the defaults are active and editing is off until it is repaired.`
+}
+function writeKeybindings(overrides, done) {
+  if (!keybindings.readable) {
+    shortcutStatus(unreadableNotice())
+    return false
+  }
+  try {
+    localStorage.setItem(KEYBINDINGS_KEY, JSON.stringify({ version: 1, overrides }))
+  } catch (error) {
+    shortcutStatus(`The shortcut was not saved: ${(error && error.message) || error}`)
+    return false
+  }
+  keybindings = { readable: true, overrides }
+  activeShortcuts = effectiveShortcuts(availableShortcuts(), overrides)
+  shortcutStatus(done)
+  return true
+}
+function startRecording(action) {
+  if (!keybindings.readable) {
+    shortcutStatus(unreadableNotice())
+    return
+  }
+  recordingAction = action
+  recordingError = null
+  shortcutStatus(`Recording a shortcut for ${SHORTCUT_LABELS[action][0]}. Escape cancels.`)
+  renderShortcutReference({ action, control: null })
+}
+function stopRecording(message) {
+  const action = recordingAction
+  recordingAction = null
+  recordingError = null
+  if (message !== undefined) shortcutStatus(message)
+  renderShortcutReference(action === null ? null : { action, control: null })
+}
+shortcutReference.addEventListener(
+  'keydown',
+  (event) => {
+    if (recordingAction === null) {
+      const row = event.target instanceof Element ? event.target.closest('.shortcut-row[data-action]') : null
+      if (row !== null && event.target === row && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault()
+        startRecording(row.dataset.action)
+      }
+      return
+    }
+    const result = recordedChord(event, SHORTCUTS_ON_MAC)
+    if (result.inputMethod) return
+    if (event.key === 'Tab') {
+      stopRecording('Recording cancelled.')
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
+      stopRecording('Recording cancelled.')
+      return
+    }
+    if (event.repeat) return
+    if (result.pending) return
+    const label = SHORTCUT_LABELS[recordingAction][0]
+    if (result.error !== undefined) {
+      recordingError = result.error
+      shortcutStatus(result.error)
+      renderShortcutReference({ action: recordingAction, control: null })
+      return
+    }
+    const holder = bindingConflict(result.chord, recordingAction, activeShortcuts)
+    if (holder !== null) {
+      recordingError = 'taken'
+      shortcutStatus(`${chordText(result.chord, SHORTCUTS_ON_MAC)} is already ${SHORTCUT_LABELS[holder][0]}.`)
+      renderShortcutReference({ action: recordingAction, control: null })
+      return
+    }
+    const overrides = { ...keybindings.overrides, [recordingAction]: result.chord }
+    if (writeKeybindings(overrides, `${label} is now ${chordText(result.chord, SHORTCUTS_ON_MAC)}.`)) stopRecording()
+  },
+  true,
+)
+/** Escape while recording cancels the recording, not the dialog. */
+shortcutReference.addEventListener('cancel', (event) => {
+  if (recordingAction === null) return
+  event.preventDefault()
+  stopRecording('Recording cancelled.')
+})
+document.getElementById('shortcut-reference-list').addEventListener('click', (event) => {
+  const target = event.target instanceof Element ? event.target : null
+  const row = target?.closest('.shortcut-row[data-action]')
+  if (row === null || row === undefined) return
+  const action = row.dataset.action
+  const label = SHORTCUT_LABELS[action][0]
+  const button = target.closest('button[data-binding-action]')
+  if (button !== null) {
+    const overrides = { ...keybindings.overrides }
+    if (button.dataset.bindingAction === 'remove') {
+      overrides[action] = null
+      writeKeybindings(overrides, `${label} has no shortcut now.`)
+    } else {
+      delete overrides[action]
+      writeKeybindings(overrides, `${label} is back to its default.`)
+    }
+    renderShortcutReference({ action, control: button.dataset.bindingAction })
+    return
+  }
+  if (recordingAction !== action) startRecording(action)
+})
+document.getElementById('shortcut-restore-all').addEventListener('click', () => {
+  document.getElementById('shortcut-restore-confirm').hidden = false
+  document.getElementById('shortcut-restore-cancel').focus()
+})
+document.getElementById('shortcut-restore-cancel').addEventListener('click', () => {
+  document.getElementById('shortcut-restore-confirm').hidden = true
+  document.getElementById('shortcut-restore-all').focus()
+})
+document.getElementById('shortcut-restore-ok').addEventListener('click', () => {
+  document.getElementById('shortcut-restore-confirm').hidden = true
+  writeKeybindings({}, 'Every shortcut is back to its default.')
+  renderShortcutReference()
+  document.getElementById('shortcut-restore-all').focus()
+})
+/** Another tab that changes the bindings changes them here too. */
+window.addEventListener('storage', (event) => {
+  if (event.key !== KEYBINDINGS_KEY) return
+  keybindings = readStoredKeybindings()
+  refreshShortcuts()
+})
+
+function toggleShortcutReference() {
+  if (shortcutReference.open) {
+    shortcutReference.close()
+    return
+  }
+  const front = document.querySelector('dialog[open]')
+  if (front !== null && front.id !== 'settings-dialog') return
+  const search = document.getElementById('shortcut-reference-search')
+  search.value = ''
+  recordingAction = null
+  recordingError = null
+  document.getElementById('shortcut-restore-confirm').hidden = true
+  shortcutStatus(keybindings.readable ? '' : unreadableNotice())
+  renderShortcutReference()
+  shortcutReference.showModal()
+  search.focus()
+}
+document.getElementById('shortcut-reference-search').addEventListener('input', () => renderShortcutReference())
+shortcutReference.querySelector('[data-ws-close]').addEventListener('click', () => {
+  recordingAction = null
+  recordingError = null
+  shortcutReference.close()
+})
+
+/**
+ * Two independent Escape presses stop the running turn, DSH's fixed action (`dsh-client-ui-conversation`: "two
+ * independent Escape presses in the focused Chat or Composer stop its current running turn and preserve queued
+ * messages"; the interval is the shortcuts service's `stopSequenceMs`, 500 ms by default). Only presses in the
+ * conversation column count (the chat and the composer live in `main`); DSH's sequence breakers reset it: a menu, the
+ * approval card, a dialog, a composing input method, a held repeat, a modifier, or a change of input region, session or
+ * turn between the presses. The second press must come within the interval. It is the Stop button's own cancellation,
+ * and queued messages stay queued after it (`stoppedQueues`, Refs #75). Stop was a click only (DSH parity
+ * R-developer-seven-10, row S43).
+ */
+const STOP_SEQUENCE_MS = 500
+let stopSequence = null
+function isStopSequence(previous, now) {
+  return previous !== null && now - previous >= 0 && now - previous <= STOP_SEQUENCE_MS
+}
+/**
+ * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover or the approval
+ * card. DSH breaks the stop sequence on each, so Escape closing the model menu or an approval card never also counts
+ * toward a stop. Read in the capture phase, before those controls close themselves.
+ */
+function uiTakesEscape() {
+  if (document.querySelector('dialog[open]') !== null) return true
+  if ([...document.querySelectorAll('[role="menu"]')].some((menu) => !menu.hidden)) return true
+  if (statPopoverKind !== null) return true
+  const card = document.getElementById('approval-card')
+  return card !== null && !card.hidden
+}
+document.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key !== 'Escape' || event.repeat || event.isComposing) {
+      stopSequence = null
+      return
+    }
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || uiTakesEscape()) {
+      stopSequence = null
+      return
+    }
+    const target = event.target instanceof Element ? event.target : document.activeElement
+    if (target === null || target.closest('main') === null) {
+      stopSequence = null
+      return
+    }
+    /** A change of input region, session or turn between the presses breaks the sequence, as in DSH. */
+    const press = {
+      at: performance.now(),
+      region: target.closest('#prompt') !== null ? 'composer' : 'chat',
+      session: composerKey,
+      turn: runningSince.get(composerKey) ?? null,
+    }
+    const previous = stopSequence
+    if (
+      previous !== null &&
+      isStopSequence(previous.at, press.at) &&
+      previous.region === press.region &&
+      previous.session === press.session &&
+      previous.turn === press.turn &&
+      anyRunning()
+    ) {
+      stopSequence = null
+      void stopTurn()
+      return
+    }
+    stopSequence = press
+  },
+  true,
+)
 
 /** The `…` control: a button, and the one list it opens. */
 function menuButton(node, items, options = {}) {
