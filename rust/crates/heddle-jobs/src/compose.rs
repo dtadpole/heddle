@@ -413,8 +413,11 @@ impl RuntimeHost {
 }
 
 impl NoticeHost for RuntimeHost {
+    /// An archived session is no longer a place to deliver to: DSH stops its work when it is archived and its
+    /// agent refuses a step there, so a notice must not start a turn in it.
     fn exists(&self, session: &str) -> bool {
         self.store.open(session).is_some()
+            && self.store.meta(session).is_none_or(|meta| !meta.archived())
     }
 
     fn is_running(&self, session: &str) -> bool {

@@ -1,3 +1,4 @@
+import { isSerializedSchema, normalizeProjection } from './form-projection.ts'
 import { compose, type NamedLayer } from './schema.ts'
 
 /**
@@ -106,7 +107,9 @@ export async function rowSchemaJson(row: { readonly name: string }, layers: read
     baseUrl !== undefined && (row.name.startsWith('.') || row.name.startsWith('/')) ? new URL(row.name, baseUrl).href : row.name
   try {
     const schema = findSchema((await import(specifier)) as Record<string, unknown>) as { toJSON?: () => unknown } | undefined
-    return typeof schema?.toJSON === 'function' ? schema.toJSON() : null
+    const serialized = typeof schema?.toJSON === 'function' ? schema.toJSON() : null
+    // DSH's form projection with deterministic uids, so both builds answer the same descriptor (#123).
+    return isSerializedSchema(serialized) ? normalizeProjection(serialized) : serialized
   } catch {
     return null
   }
@@ -119,7 +122,7 @@ export async function rowSchemaJson(row: { readonly name: string }, layers: read
  * `static Config`, and a function plugin exports `Config` by name. Trying only one of them
  * is how a validation pass silently checks half a tree.
  */
-function findSchema(module: Record<string, unknown>): unknown {
+export function findSchema(module: Record<string, unknown>): unknown {
   const named = module.Config
   if (named !== undefined) return named
   /**

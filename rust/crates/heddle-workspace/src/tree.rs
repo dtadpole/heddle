@@ -37,6 +37,7 @@ use heddle_session::SessionMeta;
 use heddle_session::definition::{SessionDefinitionFields, read_session_definition};
 
 use crate::collate::compare_names;
+use crate::error::WorkspaceError;
 use crate::record::{WorkspaceOrigin, WorkspaceRecord};
 
 /// The type folder whose instances are a branch's sessions. Named, not classified: the tree gives the
@@ -251,9 +252,13 @@ struct Entry {
 /// 0-byte leaf. A directory entry's own file type does not follow the link, which is why a link to a
 /// folder used to list as a file with the folder entry's size.
 fn entries(dir: &str) -> Vec<Entry> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
+    // A folder *inside* a listing that cannot be read (a `_sessions_` drawer, say) has nothing to add to it.
+    listed(dir).unwrap_or_default()
+}
+
+/// The entries of one directory, or the error that kept it from being read.
+fn listed(dir: &str) -> std::io::Result<Vec<Entry>> {
+    let read = std::fs::read_dir(dir)?;
     let mut entries: Vec<Entry> = read
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
@@ -303,7 +308,45 @@ fn entries(dir: &str) -> Vec<Entry> {
             std::cmp::Ordering::Greater
         }
     });
-    entries
+    Ok(entries)
+}
+
+/// The entries of the folder the caller **asked for**: a folder it may not read is
+/// [`WorkspaceError::Unreadable`], not an empty list (#106) — "nothing inside" was false, and the page
+/// said it. Any other failure keeps the old answer, an empty level.
+fn asked_entries(dir: &str, context: &Context) -> Result<Vec<Entry>, WorkspaceError> {
+    match listed(dir) {
+        Ok(entries) => Ok(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(WorkspaceError::Unreadable {
+                name: name_in_workspace(dir, context),
+            })
+        }
+        Err(_) => Ok(Vec::new()),
+    }
+}
+
+/// A folder as a person knows it: a root by its title, a folder by its path inside its root, else by
+/// its name.
+fn name_in_workspace(dir: &str, context: &Context) -> String {
+    if let Some(root) = context.by_path.get(dir) {
+        return root.title.clone();
+    }
+    match context.owner_of(dir) {
+        Some(owner) => dir[owner.path.len()..]
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>()
+            .join("/"),
+        None => {
+            let name = basename(dir);
+            if name.is_empty() {
+                dir.to_string()
+            } else {
+                name
+            }
+        }
+    }
 }
 
 /// The newest session bound to each folder, so a folder row can be its session.
@@ -462,14 +505,15 @@ struct Flagged {
     archived: bool,
 }
 
-/// The direct children of a folder: its subfolders, its files, or a registered root among them.
-fn children_of(dir: &str, kind: NodeKind, context: &Context) -> Vec<TreeNode> {
+/// The direct children of a folder — its subfolders, its files, or a registered root among them — from
+/// its `listing`.
+fn children_of(dir: &str, kind: NodeKind, context: &Context, listing: Vec<Entry>) -> Vec<TreeNode> {
     let mut sessions: Vec<TreeNode> = Vec::new();
     let mut rest: Vec<TreeNode> = Vec::new();
     // Asked for **by name**, the sessions folder answers with sessions rather than with instances.
     let parent_is_sessions = basename(dir) == SESSIONS_FOLDER;
 
-    for entry in entries(dir) {
+    for entry in listing {
         // A link's row stays at the **link's own path**, DSH's rule (a child's path is the listed
         // directory's joined with its name): canonicalising it put the row at its target's path, which the
         // target's own row already holds. Asking for the link's path lists its target; refusing a link that
@@ -638,8 +682,10 @@ pub fn kind_of(path: &str, input: &TreeInput) -> NodeKind {
 }
 
 /// One level of the tree: the virtual root when `path` is `None` or empty, otherwise that path's node
-/// with its direct children (a file's own row when the path is not a directory).
-pub fn tree(path: Option<&str>, input: &TreeInput) -> TreeNode {
+/// with its direct children (a file's own row when the path is not a directory). A folder asked for
+/// that cannot be read is [`WorkspaceError::Unreadable`] (#106); on the virtual root such a root lists
+/// with `children: null`.
+pub fn tree(path: Option<&str>, input: &TreeInput) -> Result<TreeNode, WorkspaceError> {
     let context = Context::build(input);
 
     if path.is_none() || path == Some("") {
@@ -656,7 +702,11 @@ pub fn tree(path: Option<&str>, input: &TreeInput) -> TreeNode {
                 &root.title,
                 false,
             );
-            node.children = Some(children_of(&root.path, NodeKind::Workspace, &context));
+            // A root that cannot be read is still listed, with its children **not listed** (`null`)
+            // rather than an empty list (#106): asking for it by path answers why.
+            node.children = asked_entries(&root.path, &context)
+                .ok()
+                .map(|listing| children_of(&root.path, NodeKind::Workspace, &context, listing));
             node
         };
         let children = tops
@@ -669,7 +719,7 @@ pub fn tree(path: Option<&str>, input: &TreeInput) -> TreeNode {
             .filter(|root| root.origin == Some(WorkspaceOrigin::Auto))
             .map(|root| as_node(root))
             .collect();
-        return TreeNode {
+        return Ok(TreeNode {
             path: String::new(),
             kind: NodeKind::Roots,
             label: "workspaces".to_string(),
@@ -681,7 +731,7 @@ pub fn tree(path: Option<&str>, input: &TreeInput) -> TreeNode {
             children: Some(children),
             bytes: None,
             ad_hoc: Some(ad_hoc),
-        };
+        });
     }
 
     let canonical = canonical(path.unwrap_or_default());
@@ -697,15 +747,16 @@ pub fn tree(path: Option<&str>, input: &TreeInput) -> TreeNode {
         );
         node.children = Some(Vec::new());
         node.bytes = Some(size_of(&canonical));
-        return node;
+        return Ok(node);
     }
     let (kind, label) = match context.by_path.get(&canonical) {
         Some(root) => (NodeKind::Workspace, root.title.clone()),
         None => (kind_of(&canonical, input), basename(&canonical)),
     };
     let mut node = row(&context, &canonical, kind, &label, false);
-    node.children = Some(children_of(&canonical, kind, &context));
-    node
+    let listing = asked_entries(&canonical, &context)?;
+    node.children = Some(children_of(&canonical, kind, &context, listing));
+    Ok(node)
 }
 
 #[cfg(test)]
@@ -823,7 +874,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fixture(dir.path());
         let input = input(dir.path(), vec![]);
-        let root = tree(None, &input);
+        let root = tree(None, &input).unwrap();
         let workspace = &root.children.as_ref().unwrap()[0];
         assert_eq!(child(workspace, "_tools_").unwrap().kind, NodeKind::Type);
         assert_eq!(
@@ -836,7 +887,7 @@ mod tests {
         assert!(child(workspace, "node_modules").is_none());
         assert!(child(workspace, "some-tool").is_none(), "one level only");
 
-        let tools = tree(Some(&dir.path().join("_tools_").to_string_lossy()), &input);
+        let tools = tree(Some(&dir.path().join("_tools_").to_string_lossy()), &input).unwrap();
         assert_eq!(tools.kind, NodeKind::Type);
         assert_eq!(child(&tools, "some-tool").unwrap().kind, NodeKind::Instance);
         assert_eq!(child(&tools, "some-tool").unwrap().badge, None);
@@ -850,7 +901,8 @@ mod tests {
         let root = tree(
             Some(dir.path().to_str().unwrap()),
             &input(dir.path(), vec![]),
-        );
+        )
+        .unwrap();
         let children = root.children.unwrap();
         let first_file = children
             .iter()
@@ -875,7 +927,7 @@ mod tests {
         fixture(dir.path());
         let input = input(dir.path(), vec![]);
         let project = dir.path().join("_projects_/a-project");
-        let node = tree(Some(project.to_str().unwrap()), &input);
+        let node = tree(Some(project.to_str().unwrap()), &input).unwrap();
         let context = child(&node, "_context_").expect("the type is listed");
         assert_eq!(context.kind, NodeKind::Type);
         assert_eq!(context.badge.as_deref(), Some("CTX"));
@@ -883,7 +935,8 @@ mod tests {
         let empty = tree(
             Some(&dir.path().join("_formatters_").to_string_lossy()),
             &input,
-        );
+        )
+        .unwrap();
         assert_eq!(empty.kind, NodeKind::Type);
         assert_eq!(empty.children, Some(Vec::new()));
     }
@@ -911,7 +964,7 @@ mod tests {
                 json!({}),
             ),
         ];
-        let root = tree(Some(work), &input(dir.path(), sessions.clone()));
+        let root = tree(Some(work), &input(dir.path(), sessions.clone())).unwrap();
         assert_eq!(
             root.session, None,
             "the root is a boundary, not an instance"
@@ -921,7 +974,8 @@ mod tests {
         let tools = tree(
             Some(&dir.path().join("_tools_").to_string_lossy()),
             &input(dir.path(), sessions.clone()),
-        );
+        )
+        .unwrap();
         let tool = child(&tools, "some-tool").unwrap();
         assert_eq!(tool.kind, NodeKind::Instance);
         let session = tool
@@ -947,7 +1001,8 @@ mod tests {
         let tools = tree(
             Some(&dir.path().join("_tools_").to_string_lossy()),
             &input(dir.path(), sessions),
-        );
+        )
+        .unwrap();
         assert_eq!(child(&tools, "some-tool").unwrap().session, None);
     }
 
@@ -997,7 +1052,8 @@ mod tests {
         let tools = tree(
             Some(&dir.path().join("_tools_/some-tool").to_string_lossy()),
             &input(dir.path(), sessions),
-        );
+        )
+        .unwrap();
         let labels: Vec<String> = tools
             .children
             .as_ref()
@@ -1032,7 +1088,8 @@ mod tests {
         let asked = tree(
             Some(&instance.join(SESSIONS_FOLDER).to_string_lossy()),
             &input(dir.path(), vec![]),
-        );
+        )
+        .unwrap();
         assert_eq!(asked.kind, NodeKind::Type);
         let answered = asked.children.as_ref().unwrap();
         assert_eq!(
@@ -1078,7 +1135,7 @@ mod tests {
             .join("_tools_/some-tool")
             .to_string_lossy()
             .into_owned();
-        let hidden = tree(Some(&type_path), &input(dir.path(), sessions.clone()));
+        let hidden = tree(Some(&type_path), &input(dir.path(), sessions.clone())).unwrap();
         assert!(
             !hidden
                 .children
@@ -1090,7 +1147,7 @@ mod tests {
 
         let mut shown_input = input(dir.path(), sessions.clone());
         shown_input.archived = ArchivedFilter::Show;
-        let shown = tree(Some(&type_path), &shown_input);
+        let shown = tree(Some(&type_path), &shown_input).unwrap();
         let archived = shown
             .children
             .as_ref()
@@ -1123,7 +1180,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let root = tree(None, &input);
+        let root = tree(None, &input).unwrap();
         assert_eq!(root.kind, NodeKind::Roots);
         assert_eq!(root.label, "workspaces");
         assert_eq!(root.children.as_ref().unwrap().len(), 1);
@@ -1152,7 +1209,7 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "hello").unwrap();
         assert_eq!(kind_of(file.to_str().unwrap(), &input), NodeKind::File);
-        let node = tree(Some(file.to_str().unwrap()), &input);
+        let node = tree(Some(file.to_str().unwrap()), &input).unwrap();
         assert_eq!(node.kind, NodeKind::File);
         assert_eq!(node.children, Some(Vec::new()));
         assert_eq!(node.bytes, Some(5));
@@ -1165,7 +1222,8 @@ mod tests {
         let root = tree(
             Some(dir.path().to_str().unwrap()),
             &input(dir.path(), vec![]),
-        );
+        )
+        .unwrap();
         let value: Value = serde_json::to_value(&root).unwrap();
         let object = value.as_object().unwrap();
         assert_eq!(
@@ -1207,7 +1265,8 @@ mod tests {
         let tools = tree(
             Some(&dir.path().join("_tools_/some-tool").to_string_lossy()),
             &input(dir.path(), sessions),
-        );
+        )
+        .unwrap();
         let session = tools
             .children
             .as_ref()
@@ -1283,7 +1342,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let level = tree(Some(root.to_str().unwrap()), &input);
+        let level = tree(Some(root.to_str().unwrap()), &input).unwrap();
 
         let link = child(&level, "nest-link").expect("the link is listed");
         assert_eq!(
@@ -1345,7 +1404,7 @@ mod tests {
             "a linked folder sorts with the folders"
         );
 
-        let expanded = tree(Some(&at("nest-link")), &input);
+        let expanded = tree(Some(&at("nest-link")), &input).unwrap();
         let inside: Vec<String> = expanded
             .children
             .unwrap()
@@ -1356,6 +1415,124 @@ mod tests {
             inside,
             vec!["Folder:inner", "File:a.txt"],
             "expanding the link lists its target"
+        );
+    }
+
+    /// File modes do not stop the superuser; a test run as root cannot judge an unreadable folder.
+    fn file_modes_apply() -> bool {
+        let probe = tempfile::tempdir().unwrap();
+        let locked = probe.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        set_mode(&locked, 0o000);
+        let applies = std::fs::read_dir(&locked).is_err();
+        set_mode(&locked, 0o755);
+        applies
+    }
+
+    fn set_mode(path: &StdPath, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Restores a folder's mode when the test ends, pass or fail, so the temp dir can be removed.
+    struct Restore(std::path::PathBuf);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    /// Issue #106: DSH's tree tells an empty level from a failed one (dsh-client-ui-sidebar-files
+    /// lib/client.js:483-489), and its backend says `cannot list "<path>": permission denied` of a folder it
+    /// may not read (dsh-fs-local lib/index.js:269). This tree answered `[]`, which the page drew as
+    /// "nothing inside".
+    #[test]
+    fn an_unreadable_folder_is_a_failure_with_a_code_not_an_empty_list() {
+        if !file_modes_apply() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "locked/held.txt", "a file the tree cannot list\n");
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let input = input(root, vec![]);
+        let locked = root.join("locked");
+        let _restore = Restore(locked.clone());
+        set_mode(&locked, 0o000);
+
+        let error = tree(Some(&locked.to_string_lossy()), &input).unwrap_err();
+        assert_eq!(error.code(), Some("workspace-file/unreadable"));
+        assert_eq!(
+            error.to_string(),
+            "cannot list \"locked\": permission denied",
+            "named relative to its workspace"
+        );
+
+        let empty = tree(Some(&root.join("empty").to_string_lossy()), &input).unwrap();
+        assert_eq!(
+            empty.children,
+            Some(Vec::new()),
+            "an empty folder is still asked and empty"
+        );
+        let parent = tree(Some(&root.to_string_lossy()), &input).unwrap();
+        assert!(
+            child(&parent, "locked").is_some(),
+            "the readable folder above still names it"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_root_is_a_failure_named_by_its_title_and_the_roots_leave_it_unlisted() {
+        if !file_modes_apply() {
+            return;
+        }
+        let locked = tempfile::tempdir().unwrap();
+        let open = tempfile::tempdir().unwrap();
+        write(locked.path(), "held.txt", "inside\n");
+        write(open.path(), "kept.txt", "inside\n");
+        let root_of = |path: &StdPath, title: &str| TreeRoot {
+            path: path.to_string_lossy().into_owned(),
+            title: title.to_string(),
+            origin: Some(WorkspaceOrigin::Added),
+        };
+        let input = TreeInput {
+            roots: vec![
+                root_of(locked.path(), "locked-work"),
+                root_of(open.path(), "open-work"),
+            ],
+            ..TreeInput::default()
+        };
+        let _restore = Restore(locked.path().to_path_buf());
+        set_mode(locked.path(), 0o000);
+
+        let error = tree(Some(&locked.path().to_string_lossy()), &input).unwrap_err();
+        assert_eq!(error.code(), Some("workspace-file/unreadable"));
+        assert_eq!(
+            error.to_string(),
+            "cannot list \"locked-work\": permission denied"
+        );
+
+        let listing = tree(None, &input).unwrap();
+        let roots = listing.children.unwrap();
+        let canonical_of = |path: &StdPath| canonical(&path.to_string_lossy());
+        let unlisted = roots
+            .iter()
+            .find(|node| node.path == canonical_of(locked.path()))
+            .unwrap();
+        assert_eq!(
+            unlisted.children, None,
+            "not asked-and-empty: the listing could not ask"
+        );
+        let listed = roots
+            .iter()
+            .find(|node| node.path == canonical_of(open.path()))
+            .unwrap();
+        assert_eq!(
+            listed.children.as_ref().map(Vec::len),
+            Some(1),
+            "a readable root beside it lists"
         );
     }
 }

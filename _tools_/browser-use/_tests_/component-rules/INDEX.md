@@ -1,7 +1,7 @@
 ---
 title: Browser Use Component Rules
-version: 1.0.0
-description: The rules the browser tool's helpers implement, judged without a browser.
+version: 1.1.0
+description: The rules the browser tool's helpers implement, judged without a browser, Chrome's command line among them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, separating component tests from delivery verifiers
 ---
@@ -25,6 +25,11 @@ node --test _tools_/browser-use/_tests_/component-rules/unit.test.mjs
   [`_tools_/browser-use/_verifiers/`](../../_verifiers/INDEX.md), which drives a real browser and keeps
   the project's verdict contract.
 - **The surface's behaviour.** The coverage test asserts which tools exist, not that they work.
+
+Chrome's command line is tested without a browser: every start, headless or windowed, passes
+`--disable-default-apps`, and the caller's own flags come last. Without it a fresh profile downloads Google
+Docs Offline and Chrome Web Store Payments into the user TMPDIR, and a killed browser leaves each download
+there as a hidden `.com.google.Chrome.XXXXXX` file (30,000 of them, 5.3 GiB, by 31 October 2026).
 
 Chrome output cleanup is tested without a browser: `releaseChromeOutput` destroys only this launch's
 read streams and does not signal unrelated processes. A helper retaining inherited descriptors must

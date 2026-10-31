@@ -33,10 +33,22 @@ interface Tree {
   flatten: (groups: Group[]) => Group[]
   containsSession: (group: Group, id: string | null, deep?: boolean) => boolean
   shownCount: (sessions: unknown[], watermark: number, options?: Record<string, unknown>) => number
+  watermarkRows: (sessions: { id: string }[], watermark: number) => { rows: { id: string }[]; hidden: number; conversations: number }
   nextWatermark: (total: number, shown: number) => number
-  overflow: (total: number, shown: number) => 'more' | 'less' | null
+  overflow: (total: number, shown: number, baseline?: number) => 'more' | 'less' | null
+  overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
-  flatList: (sessions: unknown[], options?: Record<string, unknown>) => { id: string }[]
+  hiddenBlank: (meta: unknown, current: unknown) => boolean
+  withOpenBlank: (rows: { id: string }[], current: unknown) => { id: string }[]
+  flatRows: (sessions: unknown[], options?: Record<string, unknown>) => { order: string[]; rows: { id: string }[] }
+  accountOrders: (workspaces: unknown[], sessions: unknown[], order: OrderState) => Record<string, string[]>
+  chooseOrderBy: (state: OrderState, mode: 'updated' | 'manual', shown: Record<string, string[]>) => OrderState
+  withPinFronted: (state: OrderState, id: string, shown: Record<string, string[]>) => OrderState
+}
+
+interface OrderState {
+  orderBy: 'updated' | 'manual'
+  orders: Record<string, string[]>
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -115,6 +127,44 @@ test('a subagent\'s session is hidden, and the archive filter has DSH\'s three s
   assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { archived: 'only' })[0]), ['s-archived'])
 })
 
+test('only the open New session placeholder is a row, and it leads; a titled, pinned or running zero-turn session stays', () => {
+  /**
+   * DSH's `sessionVisible` (dsh-client-ui-workspace lib/client.js:959-966): among blank sessions only the current one is
+   * visible. New session makes a fresh blank on every press, so the older ones, and another client's, must not be rows.
+   */
+  const workspaces = [
+    workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned', 's-titled', 's-blank-other', 's-pinned-blank', 's-running'] }),
+  ]
+  const sessions = [
+    session('s-blank-new', 9, { turns: 0 }),
+    session('s-running', 6, { turns: 0, running: true }),
+    session('s-talked', 5),
+    session('s-titled', 4, { turns: 0, title: 'named on purpose' }),
+    session('s-pinned', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
+    session('s-pinned-blank', 2, { turns: 0, pinned: true, pinnedAt: '2026-10-28T08:00:00.000Z' }),
+    session('s-blank-old', 1, { turns: 0 }),
+    session('s-blank-other', 0, { turns: 0, cwd: '/w/other' }),
+  ]
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: 's-talked' })[0]),
+    ['s-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'with an ordinary session open, no placeholder is a row, in any folder, newest or not',
+  )
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: 's-blank-old' })[0]),
+    ['s-blank-old', 's-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'the open placeholder is the only one shown, and it leads, ahead of the pins',
+  )
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: null })[0]),
+    ['s-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'with nothing open, no placeholder is a row',
+  )
+  assert.equal(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 8, 'a caller that names no open session sees every row, as before')
+  assert.equal(tree.hiddenBlank(sessions[0], 's-talked'), true, 'the flat list asks the same rule')
+  assert.equal(tree.hiddenBlank(sessions[0], 's-blank-new'), false)
+})
+
 test('archived only drops a workspace with nothing archived, and its child rises to the nearest shown level', () => {
   const workspaces = [workspace('w-child', '/r/c', { parent: 'w-root', sessionIds: ['s-old'] }), workspace('w-root', '/r', { sessionIds: ['s-live'] })]
   const sessions = [session('s-old', 1, { archived: true }), session('s-live', 2)]
@@ -122,47 +172,77 @@ test('archived only drops a workspace with nothing archived, and its child rises
   assert.deepEqual(groups.map((group) => [group.key, group.depth]), [['w-child', 0]])
 })
 
-test('pinned sessions lead, the newest pin first, then the most recently updated', () => {
+test('pinned sessions lead, and each part is by last update alone: pin time does not order Last updated', () => {
+  /**
+   * DSH's README (*Reordering and view options*): Last updated "sorts each partition strictly by the latest user prompt or
+   * steer time, newest first; pin time does not affect it" (C17, R-developer-eight-20). This test asserted newest pin
+   * first until then; pin order is Manual's (test/workspace-order.test.ts).
+   */
   const sessions = [
     session('s-recent', 50),
-    session('s-pin-old', 1, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
-    session('s-pin-new', 2, { pinned: true, pinnedAt: '2026-10-28T09:30:00.000Z' }),
+    session('s-pin-old', 1, { pinned: true, pinnedAt: '2026-10-28T09:30:00.000Z' }),
+    session('s-pin-new', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
     session('s-pin-untimed', 3, { pinned: true }),
     session('s-older', 10),
     session('s-archived-pin', 60, { pinned: true, archived: true }),
   ]
   const order = [...sessions].sort(tree.sessionOrder).map((meta) => meta.id)
   /** An archived row carries no pin (DSH keeps the two sets exclusive), so it sorts by its age among the rest. */
-  assert.deepEqual(order, ['s-pin-new', 's-pin-old', 's-pin-untimed', 's-archived-pin', 's-recent', 's-older'])
+  assert.deepEqual(order, ['s-pin-untimed', 's-pin-new', 's-pin-old', 's-archived-pin', 's-recent', 's-older'])
 })
 
 /**
- * R-developer-eight-17 (DSH parity C13): `In one list` ordered pins by when the sessions were created, so two pins read
- * in one order in the tree and in the other order in the flat list. DSH fronts a new pin in the group and in the flat list
- * alike (`dsh-client-ui-workspace` `pinSessionOrder`), so the flat list takes the tree's rule: the newest pin first, then
- * the last write, newest first.
+ * R-developer-eight-17 (DSH parity C13): `In one list` sorted pins by creation, so two pins read one way in the tree and
+ * the other way in the flat list. Since C17 (#63) the flat list is its own account in the selected order, and it follows
+ * the tree's rule in both modes, as DSH's `deriveFlat` runs `sectionMembers` over the flat account's order
+ * (dsh-client-ui-workspace/lib/client.js:1146-1154, 3583-3584). README *Reordering and view options*: **Last updated**
+ * sorts each partition by the latest prompt, "pin time does not affect it". **Pinning** "moves the Session to the front of
+ * its complete saved sequence without changing the selected mode. It leads the pinned partition in Manual but need not
+ * lead it in Last updated. Unpinning leaves the saved position unchanged". DSH fronts the pin in the group's account and
+ * in the flat list's (`pinSessionOrder` / `pinOrderAccounts`, client.js:1303-1309, 1343-1345).
  */
-test('the flat list orders like the tree: the newest pin first, then the most recently updated', () => {
+test('the flat list orders like the tree in either mode: Last updated by prompt time, Manual with the later pin first', () => {
   const sessions = [
-    /** Created first, written last: an unpinned row that leads the rest by its last write, not its creation. */
+    /** Created first, prompted last: an unpinned row that leads the rest by its prompt, not by its creation. */
     { ...session('s-written-last', 1), updated: '2026-10-28T10:59:00.000Z' },
-    /** Created before the other pin, pinned after it: the later pin leads. */
+    /** Pinned after s-pin-earlier, but prompted before it. */
     session('s-pin-later', 2, { pinned: true, pinnedAt: '2026-10-28T11:30:00.000Z' }),
     session('s-pin-earlier', 3, { pinned: true, pinnedAt: '2026-10-28T11:00:00.000Z' }),
-    session('s-untouched', 4),
+    /** The oldest prompt: it is pinned under Manual below. */
+    session('s-quiet', 0),
     session('s-archived', 5, { archived: true }),
   ]
   const workspaces = [workspace('w', '/w', { sessionIds: sessions.map((meta) => meta.id) })]
-  const treeOrder = ids(tree.deriveGroups(workspaces, sessions)[0])
-  const flatOrder = tree.flatList(sessions).map((meta) => meta.id)
-  assert.deepEqual(flatOrder, ['s-pin-later', 's-pin-earlier', 's-written-last', 's-untouched'], 'the later pin first, then by last write; archived hidden')
-  assert.deepEqual(flatOrder, treeOrder, 'and the same order the tree draws for the same sessions')
-  assert.deepEqual(
-    tree.flatList(sessions, { archived: 'show' }).map((meta) => meta.id),
-    ['s-pin-later', 's-pin-earlier', 's-written-last', 's-archived', 's-untouched'],
-    'show lists the archived row by its age among the rest',
-  )
-  assert.deepEqual(tree.flatList(sessions, { archived: 'only' }).map((meta) => meta.id), ['s-archived'], 'only lists the archived rows')
+  const lastUpdated: OrderState = { orderBy: 'updated', orders: {} }
+  const treeRows = (metas: unknown[], order: OrderState, archived?: string) => ids(tree.deriveGroups(workspaces, metas, { order, archived })[0])
+  const flatRows = (metas: unknown[], order: OrderState, archived?: string) => tree.flatRows(metas, { order, archived }).rows.map((meta) => meta.id)
+
+  /** Last updated: the pinned part by prompt time, so the later pin does not lead. */
+  assert.deepEqual(flatRows(sessions, lastUpdated), ['s-pin-earlier', 's-pin-later', 's-written-last', 's-quiet'], 'pins by prompt time, then the rest by prompt time; archived hidden')
+  assert.deepEqual(flatRows(sessions, lastUpdated), treeRows(sessions, lastUpdated), 'and the same order the tree draws')
+  assert.deepEqual(flatRows(sessions, lastUpdated, 'show'), ['s-pin-earlier', 's-pin-later', 's-written-last', 's-archived', 's-quiet'], 'show lists the archived row by its age among the rest')
+  assert.deepEqual(flatRows(sessions, lastUpdated, 'show'), treeRows(sessions, lastUpdated, 'show'))
+  assert.deepEqual(flatRows(sessions, lastUpdated, 'only'), ['s-archived'], 'only lists the archived rows')
+
+  /** Manual freezes what Last updated showed, in both accounts. */
+  const manual = tree.chooseOrderBy(lastUpdated, 'manual', tree.accountOrders(workspaces, sessions, lastUpdated))
+  assert.deepEqual(treeRows(sessions, manual), ['s-pin-earlier', 's-pin-later', 's-written-last', 's-quiet'], 'entering Manual keeps the order on screen')
+  assert.deepEqual(flatRows(sessions, manual), treeRows(sessions, manual))
+
+  /** A pin under Manual fronts the session in the group and in the flat list: the latest pin leads, oldest prompt or not. */
+  const pinned = sessions.map((meta) => (meta.id === 's-quiet' ? { ...meta, pinned: true, pinnedAt: '2026-10-28T12:00:00.000Z' } : meta))
+  const fronted = tree.withPinFronted(manual, 's-quiet', tree.accountOrders(workspaces, sessions, manual))
+  assert.deepEqual(treeRows(pinned, fronted), ['s-quiet', 's-pin-earlier', 's-pin-later', 's-written-last'], 'under Manual the latest pin leads the pinned part')
+  assert.deepEqual(flatRows(pinned, fronted), treeRows(pinned, fronted), 'and leads the flat list alike')
+
+  /** Under Last updated the same pins go by prompt time again, in both views. */
+  assert.deepEqual(treeRows(pinned, lastUpdated), ['s-pin-earlier', 's-pin-later', 's-quiet', 's-written-last'], 'Last updated: the latest pin need not lead')
+  assert.deepEqual(flatRows(pinned, lastUpdated), treeRows(pinned, lastUpdated))
+
+  /** Unpinning under Manual leaves the saved position: the row heads the ordinary part, ahead of a later prompt. */
+  const unpinned = pinned.map((meta) => (meta.id === 's-quiet' ? { ...meta, pinned: false, pinnedAt: undefined } : meta))
+  assert.deepEqual(treeRows(unpinned, fronted), ['s-pin-earlier', 's-pin-later', 's-quiet', 's-written-last'], 'an unpin moves nothing in the saved sequence')
+  assert.deepEqual(flatRows(unpinned, fronted), treeRows(unpinned, fronted))
 })
 
 test('Show more: five rows, raised to the last running or open session within fifty, five more per click', () => {
@@ -179,6 +259,39 @@ test('Show more: five rows, raised to the last running or open session within fi
   assert.equal(tree.overflow(12, 12), 'less', 'after the last batch the control folds it back')
 })
 
+test('Show more counts conversations: the open New session is drawn on top of five, and the control names how many it hides', () => {
+  /**
+   * DSH's `watermarkRows` (dsh-client-ui-workspace lib/client.js:2807-2819) shows every blank row plus the first
+   * `watermark` non-blank rows, and its control reads `Show {n} more sessions` with the hidden count (`:3325`, `:4897`).
+   * #54: the page took the five places over the whole list, blank or not, and its control said only `Show more`.
+   */
+  const blank = session('s-blank', 59, { turns: 0 })
+  const talked = Array.from({ length: 12 }, (_, index) => session(`s-${12 - index}`, 40 - index))
+  const list = [blank, ...talked]
+  const mark = tree.shownCount(list, tree.INITIAL, { current: 's-blank' })
+  assert.equal(mark, 5, 'the open placeholder does not raise the watermark, nor take a place under it')
+  const drawn = tree.watermarkRows(list, mark)
+  assert.deepEqual(
+    drawn.rows.map((meta) => meta.id),
+    ['s-blank', 's-12', 's-11', 's-10', 's-9', 's-8'],
+    'the placeholder and the five newest conversations',
+  )
+  assert.equal(drawn.hidden, 7, 'seven conversations stay behind the control')
+  assert.equal(drawn.conversations, 12)
+  assert.equal(tree.overflow(drawn.conversations, mark), 'more')
+  assert.equal(tree.overflowLabel('more', drawn.hidden), 'Show 7 more sessions', "DSH's words, with the count")
+  const next = tree.nextWatermark(drawn.conversations, mark)
+  assert.equal(tree.watermarkRows(list, next).hidden, 2, 'a click shows five more')
+  const all = tree.nextWatermark(drawn.conversations, next)
+  assert.equal(tree.watermarkRows(list, all).hidden, 0, 'and the last batch shows the rest')
+  assert.equal(tree.overflow(drawn.conversations, all), 'less')
+  assert.equal(tree.overflowLabel('less', 0), 'Show less')
+  assert.equal(tree.overflow(5, 5), null, 'five conversations and a placeholder need no control')
+  assert.equal(tree.overflow(12, 12, 12), null, 'nor do rows the open conversation already raised into view')
+  const raised = tree.shownCount(talked, tree.INITIAL, { current: 's-2' })
+  assert.equal(raised, 11, 'an open conversation further down still raises the watermark to itself')
+})
+
 test('a group knows whether it, or a group under it, holds the open session', () => {
   const workspaces = [workspace('w-child', '/r/c', { parent: 'w-root', sessionIds: ['s-in-child'] }), workspace('w-root', '/r', { sessionIds: ['s-in-root'] })]
   const [root] = tree.deriveGroups(workspaces, [session('s-in-child', 1), session('s-in-root', 2)])
@@ -188,4 +301,23 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+test('the first-use workspace reads as Default workspace while it keeps its automatic title', () => {
+  /**
+   * DSH's workspaceDisplayTitle (dsh-api-workspace-controller lib/types/default-workspace.js): the stored title stays
+   * the folder name, default-workspace, and the browser labels it with the default name; any other title, including
+   * one a person typed, reads verbatim.
+   */
+  const label = new Function(`${page.slice(begin, end)}\nreturn typeof workspaceDisplayTitle === 'function' ? workspaceDisplayTitle : undefined`)() as
+    | ((title: string) => string)
+    | undefined
+  assert.equal(typeof label, 'function', 'the block carries the label rule')
+  assert.equal(label?.('default-workspace'), 'Default workspace')
+  assert.equal(label?.('Default workspace'), 'Default workspace')
+  assert.equal(label?.('notes'), 'notes')
+  const [group] = tree.deriveGroups([workspace('w-default', '/h/default-workspace', { title: 'default-workspace' })], [])
+  assert.equal(group?.label, 'Default workspace', 'the row shows the default name')
+  const [renamed] = tree.deriveGroups([workspace('w-default', '/h/default-workspace', { title: 'Mine' })], [])
+  assert.equal(renamed?.label, 'Mine', 'and a rename wins')
 })
