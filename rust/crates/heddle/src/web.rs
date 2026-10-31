@@ -144,6 +144,9 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     harness.locale = boot
         .services
         .get::<Arc<heddle_config::LiveLocale>>("locale");
+    harness.theme = boot
+        .services
+        .get::<Arc<heddle_config::LiveTheme>>("ui-theme");
     harness
 }
 
@@ -430,6 +433,7 @@ fn settings_router(args: &Args, invocation: &Invocation, boot: &Boot) -> Option<
 ///   holds the written configuration.
 /// - The locale row (issue #80): the server's held preference is replaced, and the next page request reads it, so a
 ///   language chosen in Settings is the `<html lang>` of the next page without a restart.
+/// - The ui-theme row (issue #81): the same, for the theme and font settings the served `<html>` carries.
 fn with_live_rows(
     service: heddle_config::SettingsService,
     boot: &Boot,
@@ -452,13 +456,18 @@ fn with_live_rows(
         .services
         .get::<Arc<heddle_config::LiveLocale>>("locale")
         .map(|live| (rows_of(crate::builtins::Builtin::Locale), live));
-    if model.is_none() && locale.is_none() {
+    let theme = boot
+        .services
+        .get::<Arc<heddle_config::LiveTheme>>("ui-theme")
+        .map(|live| (rows_of(crate::builtins::Builtin::UiTheme), live));
+    if model.is_none() && locale.is_none() && theme.is_none() {
         return service;
     }
     let live: Vec<String> = model
         .iter()
         .flat_map(|(ids, _)| ids.clone())
         .chain(locale.iter().flat_map(|(ids, _)| ids.clone()))
+        .chain(theme.iter().flat_map(|(ids, _)| ids.clone()))
         .collect();
     service.with_live(
         live,
@@ -469,6 +478,11 @@ fn with_live_rows(
                 return source.set_row_config(config);
             }
             if let Some((ids, live)) = &locale
+                && ids.iter().any(|id| id == ns)
+            {
+                return live.set_config(config);
+            }
+            if let Some((ids, live)) = &theme
                 && ids.iter().any(|id| id == ns)
             {
                 return live.set_config(config);

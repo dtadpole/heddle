@@ -1118,6 +1118,31 @@ impl Component for LocaleComponent {
     }
 }
 
+/// `src/plugins/ui-theme.ts`: appearance and typography preferences (issue #81). The settings API lists the row as
+/// namespace `ui-theme` and validates it against DSH's schema; a server reads the settings live as
+/// [`heddle_config::LiveTheme`], so a write is the next page's theme and sizes.
+pub struct UiThemeComponent;
+
+impl Component for UiThemeComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        heddle_config::theme_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let settings =
+            heddle_config::theme_settings(Some(config)).map_err(|error| error.to_string())?;
+        services.provide(
+            "ui-theme",
+            Arc::new(heddle_config::LiveTheme::new(settings)),
+        );
+        Ok(())
+    }
+}
+
 /// `src/plugins/presets.ts`: the agent preset registry (inventory A96, DSH's dsh-agent-preset-registry).
 ///
 /// Optional, like the live-turn registry: the turn and the server read it when the profile loads the row, and a

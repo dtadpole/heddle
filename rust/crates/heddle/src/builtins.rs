@@ -59,6 +59,8 @@ pub enum Builtin {
     Turns,
     /// `src/plugins/locale.ts`: the interface language a person chose (issue #80).
     Locale,
+    /// `src/plugins/ui-theme.ts`: appearance and typography preferences (issue #81).
+    UiTheme,
     /// `src/plugins/presets.ts`: the agent presets (inventory A96).
     Presets,
     /// `src/plugins/team.ts`.
@@ -242,6 +244,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         "locale",
         "locale",
         Some("locale"),
+        &[],
+        "heddle-config",
+    ),
+    spec(
+        Builtin::UiTheme,
+        "plugins/ui-theme",
+        "ui-theme",
+        "ui-theme",
+        Some("ui-theme"),
         &[],
         "heddle-config",
     ),
@@ -466,6 +477,9 @@ impl Catalog for BuiltinCatalog {
             }
             ComponentRef::Builtin(Builtin::Locale) => {
                 Some(Box::new(crate::adapters::LocaleComponent))
+            }
+            ComponentRef::Builtin(Builtin::UiTheme) => {
+                Some(Box::new(crate::adapters::UiThemeComponent))
             }
             ComponentRef::Builtin(Builtin::Presets) => {
                 Some(Box::new(crate::adapters::PresetsComponent))
