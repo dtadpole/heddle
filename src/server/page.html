@@ -10209,7 +10209,8 @@ function messageAttachments(attachments) {
  * path travels with the message.
  */
 async function addPickedFiles(files) {
-  const added = []
+  // Each upload owns its result: a later refusal must not discard an already admitted file (#42).
+  const refused = []
   for (const file of files) {
     try {
       const response = await fetch(`/api/uploads?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })
@@ -10220,23 +10221,24 @@ async function addPickedFiles(files) {
       const saved = await response.json()
       // The page's own preview of an image, for the queue's thumbnail before the message reaches the log.
       const preview = /^image\//.test(String(file.type ?? '')) ? URL.createObjectURL(file) : undefined
-      added.push({ path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) })
+      pendingAttachments = [...pendingAttachments, { path: saved.path, name: file.name, bytes: saved.bytes, ...(preview !== undefined ? { preview } : {}) }]
+      renderPendingAttachments()
     } catch (error) {
-      showAttachFailure(files, error)
-      return
+      refused.push({ name: file.name, reason: (error && error.message) || String(error) })
+      showAttachFailure(refused)
     }
   }
-  pendingAttachments = [...pendingAttachments, ...added]
-  renderPendingAttachments()
 }
 
-/** Say why a chosen file could not be added, in the menu the person opened. */
-function showAttachFailure(files, error) {
+/** Say why each refused file could not be added, one line per file. */
+function showAttachFailure(refused) {
   attachMenu.replaceChildren()
-  const note = document.createElement('div')
-  note.className = 'meta'
-  note.textContent = `could not add ${files.map((file) => file.name).join(', ')}: ${(error && error.message) || error}`
-  attachMenu.append(note)
+  for (const { name, reason } of refused) {
+    const note = document.createElement('div')
+    note.className = 'meta'
+    note.textContent = `could not add ${name}: ${reason}`
+    attachMenu.append(note)
+  }
   attachMenu.hidden = false
   attachButton.setAttribute('aria-expanded', 'true')
 }

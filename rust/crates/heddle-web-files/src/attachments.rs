@@ -49,6 +49,21 @@ impl ImageMediaType {
     }
 }
 
+/// Ordinary files may be zero bytes; an empty raster cannot be valid image content.
+pub fn validate_upload_content(
+    name: &str,
+    bytes: u64,
+    content_type: &str,
+) -> Result<(), AttachmentInputError> {
+    let extension = crate::node_path::extname(name).to_lowercase();
+    let is_image = ImageMediaType::for_extension(&extension).is_some()
+        || content_type.to_ascii_lowercase().starts_with("image/");
+    if bytes == 0 && is_image {
+        return Err(AttachmentInputError("an empty image is not valid".to_string()));
+    }
+    Ok(())
+}
+
 /// One attachment, as the user message's content records it.
 ///
 /// Serializes to exactly the `image` and `file` content parts of the TypeScript session log —
@@ -175,6 +190,7 @@ pub fn read_attachment(
             crate::uploads::MAX_UPLOAD_BYTES / (1024 * 1024)
         )));
     }
+    validate_upload_content(&canonical_text, metadata.len(), "")?;
     let bytes = std::fs::read(&canonical).map_err(|_| {
         AttachmentInputError(format!(
             "the attached file could not be read: {canonical_text}"

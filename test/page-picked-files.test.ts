@@ -76,7 +76,7 @@ test('#42: an all-refused pick leaves existing cards untouched and names each re
   assert.deepEqual(at.notes.map(note => note.textContent), ['could not add one.txt: the server answered 503', 'could not add two.txt: the server answered 503'])
 })
 
-test('#42: an empty pick neither clears cards nor renders a new failure', async () => {
+test('#42: an empty pick neither clears cards nor renders a new failure', { timeout: 5000 }, async () => {
   const at = harness(async () => { throw new Error('no request expected') })
   await at.pick([])
   assert.deepEqual(Array.from(at.cards(), file => file.name), ['existing.txt'])

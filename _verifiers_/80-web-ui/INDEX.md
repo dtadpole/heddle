@@ -31,6 +31,11 @@ Exit `0` when the claim holds, `1` when it fails, `3` when it could not be judge
 claim that could not be judged is never reported as holding, which is the runner's
 whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verify-runner/INDEX.md).
 
+## Focused regression evidence
+
+- [Issue 42](issue-42.md) — partial picker success, ordinary empty upload policy,
+  actual-function TS regressions and authored Rust checks; no browser required.
+
 ## Read next
 
 [`checks.md`](checks.md) for each check file and what the part leaves out; [`readings.md`](readings.md) for the measured verdicts.
