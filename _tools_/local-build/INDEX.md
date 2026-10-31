@@ -1,12 +1,12 @@
 ---
 title: Local build
-version: 1.10.0
+version: 1.11.0
 description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once, and queues the seats fairly for the one browser slot.
 grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
   - source: rust/INDEX.md, the build environment of the Rust port
 created: 2026-10-23T03:10:31Z
-modified: 2026-10-31T05:00:00Z
+modified: 2026-10-31T12:45:00Z
 ---
 
 # `local-build`
@@ -59,10 +59,14 @@ and the hand-made lock during the switch.
 
 ## TMPDIR sweep
 
-After a gate, run `_tools_/local-build/tmp-sweep` (`--dry-run` to list). It removes `heddle-*`,
-`hd-*-browser-*`, `scoped_dir*` and `com.google.Chrome*` entries older than two hours from the user TMPDIR,
-but never one a running process names. It also reports the npm and uv cache sizes, and never removes them.
-[tmp-sweep.md](tmp-sweep.md) has the details.
+After a gate, run `_tools_/local-build/tmp-sweep` (`--dry-run` to list). It removes seven kinds of entry older
+than two hours from the user TMPDIR, but never one a running process names:
+- scratch folders: `heddle-*`;
+- browser profiles: `hd-*-browser-*`, and testers' `hd*-live-profile*` and `*-chrome-profile*`;
+- Chrome's own leftovers: `scoped_dir*`, `com.google.Chrome*` and the hidden `.com.google.Chrome*`.
+
+Then it prints TMPDIR's total, entry count and five largest entries, so a leak shows in its own output. It also
+reports the npm and uv cache sizes, and never removes them. [tmp-sweep.md](tmp-sweep.md) has the details.
 
 ## Build output sweep
 
@@ -79,7 +83,7 @@ node --test _tools_/local-build/_tests_/tmp-sweep/unit.test.mjs
 node --test _tools_/local-build/_tests_/deps-sweep/unit.test.mjs
 ```
 
-Last run 2026-10-30 21:49 PDT, this change on main e3843905, in a ts slot: slot-runner 32, browser-slot 24, tmp-sweep 5 and deps-sweep 5 passed, 0 failed.
+Last run 2026-10-31 05:48 PDT, this change on main a3620cef, in a ts slot: slot-runner 32, browser-slot 24, tmp-sweep 7 and deps-sweep 5 passed, 0 failed.
 
 The suite runs the script against a temporary slot root and a fake cargo: no real slot, no real build. It
 judges slot release, the exit status, the job cap, six concurrent callers held until released (so a full set of slots is proven, not timed), a killed owner, an old stamp, a live

@@ -1,0 +1,998 @@
+{
+  "plugins/greeting": {
+    "uid": 2,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {
+          "default": "!"
+        }
+      },
+      "2": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "punctuation": 1
+        }
+      }
+    }
+  },
+  "plugins/session": {
+    "uid": 2,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {
+          "default": "$HEDDLE_HOME/sessions"
+        }
+      },
+      "2": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "root": 1
+        }
+      }
+    }
+  },
+  "plugins/model": {
+    "uid": 28,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {
+          "required": true
+        }
+      },
+      "2": {
+        "type": "const",
+        "meta": {},
+        "value": "openai-chat"
+      },
+      "3": {
+        "type": "const",
+        "meta": {},
+        "value": "openai-responses"
+      },
+      "4": {
+        "type": "const",
+        "meta": {},
+        "value": "anthropic-vertex"
+      },
+      "5": {
+        "type": "const",
+        "meta": {},
+        "value": "anthropic-messages"
+      },
+      "6": {
+        "type": "const",
+        "meta": {},
+        "value": "scripted"
+      },
+      "7": {
+        "type": "union",
+        "meta": {},
+        "list": [
+          2,
+          3,
+          4,
+          5,
+          6
+        ]
+      },
+      "8": {
+        "type": "string",
+        "meta": {}
+      },
+      "9": {
+        "type": "string",
+        "meta": {}
+      },
+      "10": {
+        "type": "string",
+        "meta": {}
+      },
+      "11": {
+        "type": "string",
+        "meta": {}
+      },
+      "12": {
+        "type": "string",
+        "meta": {}
+      },
+      "13": {
+        "type": "string",
+        "meta": {}
+      },
+      "14": {
+        "type": "string",
+        "meta": {}
+      },
+      "15": {
+        "type": "string",
+        "meta": {}
+      },
+      "16": {
+        "type": "dict",
+        "meta": {
+          "default": {}
+        },
+        "inner": 14,
+        "sKey": 15
+      },
+      "17": {
+        "type": "string",
+        "meta": {}
+      },
+      "18": {
+        "type": "boolean",
+        "meta": {}
+      },
+      "19": {
+        "type": "number",
+        "meta": {}
+      },
+      "20": {
+        "type": "number",
+        "meta": {}
+      },
+      "21": {
+        "type": "string",
+        "meta": {}
+      },
+      "22": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 21
+      },
+      "23": {
+        "type": "number",
+        "meta": {}
+      },
+      "24": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "name": 1,
+          "kind": 7,
+          "baseUrl": 8,
+          "model": 9,
+          "project": 10,
+          "region": 11,
+          "apiKey": 12,
+          "apiKeyFile": 13,
+          "headers": 16,
+          "proxy": 17,
+          "stream": 18,
+          "maxOutputTokens": 19,
+          "contextWindow": 20,
+          "capabilities": 22,
+          "timeoutMs": 23
+        }
+      },
+      "25": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 24
+      },
+      "26": {
+        "type": "string",
+        "meta": {}
+      },
+      "27": {
+        "type": "boolean",
+        "meta": {
+          "default": true
+        }
+      },
+      "28": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "endpoints": 25,
+          "default": 26,
+          "readLocalConfig": 27
+        }
+      }
+    }
+  },
+  "context/service": {
+    "uid": 19,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {}
+      },
+      "2": {
+        "type": "number",
+        "meta": {
+          "default": 1048576
+        }
+      },
+      "3": {
+        "type": "number",
+        "meta": {}
+      },
+      "4": {
+        "type": "number",
+        "meta": {}
+      },
+      "5": {
+        "type": "number",
+        "meta": {}
+      },
+      "6": {
+        "type": "number",
+        "meta": {}
+      },
+      "7": {
+        "type": "string",
+        "meta": {
+          "required": true
+        }
+      },
+      "8": {
+        "type": "number",
+        "meta": {}
+      },
+      "9": {
+        "type": "number",
+        "meta": {}
+      },
+      "10": {
+        "type": "number",
+        "meta": {}
+      },
+      "11": {
+        "type": "number",
+        "meta": {}
+      },
+      "12": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "endpoint": 7,
+          "thresholdRatio": 8,
+          "retainRatio": 9,
+          "thresholdTokens": 10,
+          "retainTokens": 11
+        }
+      },
+      "13": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 12
+      },
+      "14": {
+        "type": "boolean",
+        "meta": {
+          "default": true
+        }
+      },
+      "15": {
+        "type": "number",
+        "meta": {
+          "default": 65536
+        }
+      },
+      "16": {
+        "type": "string",
+        "meta": {}
+      },
+      "17": {
+        "type": "string",
+        "meta": {}
+      },
+      "18": {
+        "type": "number",
+        "meta": {}
+      },
+      "19": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "system": 1,
+          "contextWindow": 2,
+          "thresholdRatio": 3,
+          "retainRatio": 4,
+          "thresholdTokens": 5,
+          "retainTokens": 6,
+          "policies": 13,
+          "instructions": 14,
+          "instructionsMaxBytes": 15,
+          "endpoint": 16,
+          "model": 17,
+          "summarizeMaxTokens": 18
+        }
+      }
+    }
+  },
+  "workspace/service": {
+    "uid": 4,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {
+          "default": "$HEDDLE_HOME/workspaces.json"
+        }
+      },
+      "2": {
+        "type": "string",
+        "meta": {}
+      },
+      "3": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 2
+      },
+      "4": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "file": 1,
+          "generated": 3
+        }
+      }
+    }
+  },
+  "sandbox/service": {
+    "uid": 12,
+    "refs": {
+      "1": {
+        "type": "const",
+        "meta": {},
+        "value": "read-only"
+      },
+      "2": {
+        "type": "const",
+        "meta": {},
+        "value": "workspace-write"
+      },
+      "3": {
+        "type": "const",
+        "meta": {},
+        "value": "danger-full-access"
+      },
+      "4": {
+        "type": "union",
+        "meta": {
+          "default": "workspace-write"
+        },
+        "list": [
+          1,
+          2,
+          3
+        ]
+      },
+      "5": {
+        "type": "string",
+        "meta": {}
+      },
+      "6": {
+        "type": "string",
+        "meta": {}
+      },
+      "7": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 6
+      },
+      "8": {
+        "type": "const",
+        "meta": {},
+        "value": "auto"
+      },
+      "9": {
+        "type": "const",
+        "meta": {},
+        "value": "none"
+      },
+      "10": {
+        "type": "union",
+        "meta": {
+          "default": "auto"
+        },
+        "list": [
+          8,
+          9
+        ]
+      },
+      "11": {
+        "type": "string",
+        "meta": {}
+      },
+      "12": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "mode": 4,
+          "workspaceRoot": 5,
+          "extraWritableRoots": 7,
+          "backend": 10,
+          "landlockRunner": 11
+        }
+      }
+    }
+  },
+  "approvals/service": {
+    "uid": 13,
+    "refs": {
+      "1": {
+        "type": "const",
+        "meta": {},
+        "value": "allow"
+      },
+      "2": {
+        "type": "const",
+        "meta": {},
+        "value": "deny"
+      },
+      "3": {
+        "type": "const",
+        "meta": {},
+        "value": "ask"
+      },
+      "4": {
+        "type": "union",
+        "meta": {
+          "default": "allow"
+        },
+        "list": [
+          1,
+          2,
+          3
+        ]
+      },
+      "5": {
+        "type": "string",
+        "meta": {}
+      },
+      "6": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 5
+      },
+      "7": {
+        "type": "string",
+        "meta": {}
+      },
+      "8": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 7
+      },
+      "9": {
+        "type": "const",
+        "meta": {},
+        "value": "deny"
+      },
+      "10": {
+        "type": "const",
+        "meta": {},
+        "value": "allow"
+      },
+      "11": {
+        "type": "union",
+        "meta": {
+          "default": "deny"
+        },
+        "list": [
+          9,
+          10
+        ]
+      },
+      "12": {
+        "type": "number",
+        "meta": {
+          "default": 300000
+        }
+      },
+      "13": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "mode": 4,
+          "deny": 6,
+          "allow": 8,
+          "unanswered": 11,
+          "answerTimeoutMs": 12
+        }
+      }
+    }
+  },
+  "goal/service": {
+    "uid": 2,
+    "refs": {
+      "1": {
+        "type": "number",
+        "meta": {
+          "default": 100
+        }
+      },
+      "2": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "defaultMaxGoalRounds": 1
+        }
+      }
+    }
+  },
+  "plugins/subagent-tool": {
+    "uid": 3,
+    "refs": {
+      "1": {
+        "type": "number",
+        "meta": {
+          "default": 2
+        }
+      },
+      "2": {
+        "type": "number",
+        "meta": {
+          "default": 1
+        }
+      },
+      "3": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "maxDepth": 1,
+          "maxActive": 2
+        }
+      }
+    }
+  },
+  "plugins/todo-tool": {
+    "uid": 2,
+    "refs": {
+      "1": {
+        "type": "boolean",
+        "meta": {
+          "required": true,
+          "description": "Whether several todos may be in_progress at once. Required, with no default, as in DSH."
+        }
+      },
+      "2": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "allowParallelInProgress": 1
+        }
+      }
+    }
+  },
+  "plugins/locale": {
+    "uid": 4,
+    "refs": {
+      "1": {
+        "type": "const",
+        "meta": {},
+        "value": "en"
+      },
+      "2": {
+        "type": "const",
+        "meta": {},
+        "value": "zh"
+      },
+      "3": {
+        "type": "union",
+        "meta": {
+          "description": "The interface language: en or zh. Absent: the first supported language the browser asks for, else English."
+        },
+        "list": [
+          1,
+          2
+        ]
+      },
+      "4": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "preference": 3
+        }
+      }
+    }
+  },
+  "plugins/presets": {
+    "uid": 13,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {}
+      },
+      "2": {
+        "type": "string",
+        "meta": {
+          "required": true
+        }
+      },
+      "3": {
+        "type": "string",
+        "meta": {}
+      },
+      "4": {
+        "type": "string",
+        "meta": {}
+      },
+      "5": {
+        "type": "number",
+        "meta": {}
+      },
+      "6": {
+        "type": "string",
+        "meta": {}
+      },
+      "7": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 6
+      },
+      "8": {
+        "type": "const",
+        "meta": {}
+      },
+      "9": {
+        "type": "union",
+        "meta": {},
+        "list": [
+          7,
+          8
+        ]
+      },
+      "10": {
+        "type": "string",
+        "meta": {}
+      },
+      "11": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "id": 2,
+          "name": 3,
+          "description": 4,
+          "order": 5,
+          "tools": 9,
+          "persona": 10
+        }
+      },
+      "12": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 11
+      },
+      "13": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "default": 1,
+          "presets": 12
+        }
+      }
+    }
+  },
+  "plugins/team": {
+    "uid": 5,
+    "refs": {
+      "1": {
+        "type": "number",
+        "meta": {
+          "default": 8
+        }
+      },
+      "2": {
+        "type": "number",
+        "meta": {
+          "default": 256
+        }
+      },
+      "3": {
+        "type": "number",
+        "meta": {
+          "default": 64
+        }
+      },
+      "4": {
+        "type": "number",
+        "meta": {
+          "default": 65536
+        }
+      },
+      "5": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "maxMembers": 1,
+          "maxTasks": 2,
+          "maxPendingMessagesPerMember": 3,
+          "maxMessageBytes": 4
+        }
+      }
+    }
+  },
+  "plugins/schedule": {
+    "uid": 6,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {}
+      },
+      "2": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "max": 3650,
+          "default": 30
+        }
+      },
+      "3": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "max": 10000,
+          "default": 200
+        }
+      },
+      "4": {
+        "type": "boolean",
+        "meta": {
+          "default": false
+        }
+      },
+      "5": {
+        "type": "number",
+        "meta": {}
+      },
+      "6": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "file": 1,
+          "deliveryHistoryDays": 2,
+          "deliveryHistoryRecords": 3,
+          "autoStart": 4,
+          "maxRounds": 5
+        }
+      }
+    }
+  },
+  "plugins/jobs": {
+    "uid": 14,
+    "refs": {
+      "1": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "default": 10
+        }
+      },
+      "2": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "default": 262144
+        }
+      },
+      "3": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "default": 16384
+        }
+      },
+      "4": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "default": 150
+        }
+      },
+      "5": {
+        "type": "number",
+        "meta": {
+          "min": 1,
+          "default": 30000
+        }
+      },
+      "6": {
+        "type": "number",
+        "meta": {
+          "min": 1,
+          "default": 600000
+        }
+      },
+      "7": {
+        "type": "const",
+        "meta": {
+          "required": true
+        },
+        "value": "wakeup"
+      },
+      "8": {
+        "type": "const",
+        "meta": {
+          "required": true
+        },
+        "value": "quiet"
+      },
+      "9": {
+        "type": "union",
+        "meta": {
+          "default": "wakeup"
+        },
+        "list": [
+          7,
+          8
+        ]
+      },
+      "10": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1
+        }
+      },
+      "11": {
+        "type": "number",
+        "meta": {
+          "min": 0,
+          "default": 3000
+        }
+      },
+      "12": {
+        "type": "number",
+        "meta": {}
+      },
+      "13": {
+        "type": "boolean",
+        "meta": {
+          "default": true
+        }
+      },
+      "14": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "maxConcurrentJobsPerOwner": 1,
+          "retainBytes": 2,
+          "settledRetainBytes": 3,
+          "pumpPollMs": 4,
+          "waitTimeoutMs": 5,
+          "maxWaitTimeoutMs": 6,
+          "completionDelivery": 9,
+          "maxConsecutiveWakes": 10,
+          "killGraceMs": 11,
+          "maxRounds": 12,
+          "promoteOnTimeout": 13
+        }
+      }
+    }
+  },
+  "plugins/tools": {
+    "uid": 8,
+    "refs": {
+      "1": {
+        "type": "string",
+        "meta": {}
+      },
+      "2": {
+        "type": "array",
+        "meta": {
+          "default": []
+        },
+        "inner": 1
+      },
+      "3": {
+        "type": "boolean",
+        "meta": {
+          "default": true
+        }
+      },
+      "4": {
+        "type": "number",
+        "meta": {
+          "default": 30000
+        }
+      },
+      "5": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "max": 2147483647,
+          "default": 600000
+        }
+      },
+      "6": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "default": 20000
+        }
+      },
+      "7": {
+        "type": "number",
+        "meta": {
+          "step": 1,
+          "min": 1,
+          "default": 10
+        }
+      },
+      "8": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "allow": 2,
+          "includeBuiltins": 3,
+          "bashTimeoutMs": 4,
+          "bashMaxTimeoutMs": 5,
+          "bashOutputLimit": 6,
+          "maxParallelToolCalls": 7
+        }
+      }
+    }
+  }
+}
