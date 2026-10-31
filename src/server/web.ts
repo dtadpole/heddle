@@ -2267,6 +2267,11 @@ export function requestedPreset(ctx: Context, value: unknown): { readonly preset
   return { preset: wanted }
 }
 
+/** The `409` body for another preset named for a session that recorded one: a session keeps the preset it was created with. */
+function presetFixedBody(recordedPreset: string): string {
+  return `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`
+}
+
 /** The preset a new session is created under: the one the request named, else the registry's default. */
 function newSessionPreset(ctx: Context, named: string | undefined): string | undefined {
   if (named !== undefined) return named
@@ -2393,7 +2398,7 @@ export function sessionRequestSelection(
     /** A session keeps the preset it was created with (DSH): another one named for it is refused before it is opened. */
     const recordedPreset = resumed?.preset
     if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
-      respond(response, 409, 'application/json', `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`)
+      respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
       return
     }
   }
@@ -2411,7 +2416,7 @@ export function sessionRequestSelection(
    */
   const recordedPreset = ctx.session.list().find((entry) => entry.id === handle.id)?.preset
   if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
-    respond(response, 409, 'application/json', `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`)
+    respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
     return
   }
   /**
