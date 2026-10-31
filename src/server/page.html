@@ -8608,10 +8608,20 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * turn ran belongs to the session it created.
          */
         if (target === null) {
-          current = payload.session
-          rememberCurrent()
-          chooseWorkspace(null)
-          adoptSession(payload.session)
+          /**
+           * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
+           * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
+           * the created session is opened as any open is, a new generation and a redraw from its own log, because only
+           * pointing `current` at it would leave the other session's history on screen with this turn's live events
+           * appended under it.
+           */
+          if (current !== null && current !== payload.session) void showSession(payload.session)
+          else {
+            current = payload.session
+            rememberCurrent()
+            chooseWorkspace(null)
+            adoptSession(payload.session)
+          }
           /** The pending send belongs to the session it just created; the row follows it. */
           if (directTurnPending > 0) directPendingKey = payload.session
           /** The created session's mode record is what the chip must show; it did not exist a moment ago. */
