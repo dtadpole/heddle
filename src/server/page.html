@@ -382,7 +382,7 @@
     font-family: var(--code-font); font-size: .75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .settings-plugin .tag { padding: 0 .4rem; border-radius: 6px; background: var(--surface); color: var(--text-3); font-size: .75rem; }
-  .settings-plugin .tag[data-tone='failed'] { color: var(--danger-text, #ff7b72); }
+  .settings-plugin .tag[data-tone='failed'] { color: #ff7b72; }
   .settings-plugin .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--text-3); }
   .settings-plugin .dot[data-phase='ongoing'] { background: var(--accent); }
   .settings-plugin dl { display: grid; grid-template-columns: 6rem 1fr; gap: .2rem .6rem; margin: 0; padding: 0 .6rem .5rem; }
@@ -3366,7 +3366,7 @@
       <h3 data-i18n="plugins.title">Built-in plugins</h3>
       <p class="meta" data-i18n="plugins.intro">Inspect the plugins this deployment ships.</p>
       <input type="search" id="settings-plugins-search" autocomplete="off" spellcheck="false" data-i18n-placeholder="plugins.search" placeholder="Search plugins" data-i18n-aria-label="plugins.search" aria-label="Search plugins">
-      <p id="settings-plugins-status" class="meta" hidden></p>
+      <p id="settings-plugins-status" class="meta" role="status" hidden></p>
       <ul id="settings-plugins" data-i18n-aria-label="plugins.tab" aria-label="Plugin list"></ul>
     </section>
     <p id="settings-note" class="meta" data-i18n="settings.note">Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.</p>
