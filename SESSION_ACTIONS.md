@@ -242,7 +242,13 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   `activity`; `stop: true` archives it and then removes its reminders, awaited before the answer, as DSH writes the
   archive set first and then awaits every stop listener (`dsh-workspace/lib/index.js:527-541`, `:621-628`). A failing
   removal is logged (`workspace: stopping session '<id>' for archive failed: …`), never a reason to keep the session
-  visible. The turn and the subagents are still stopped before the write, as before.
+  visible.
+- **Known difference: the turn and the subagents stop before the write.** DSH writes the archive set first and only
+  then asks every `workspace/session-stop` listener — the turn's cancel and the subagents' included — so the stops'
+  wakes already meet its `agent/pre-step` gate (`dsh-workspace/lib/index.js:527-541`). Both heddle servers abort the
+  session's turn and its running subagents *before* they write the archive flag, and stop only the rows' work (the
+  reminders, and the jobs) after it. Not changed here; a failing write after those aborts leaves the work stopped and
+  the session unarchived, where DSH would have stopped nothing.
 - **The order is DSH's.** `workspace/session-activity` is a Cordis waterfall: listeners run in registration order
   (`cordis/lib/index.js:317-325`, pushed at `:335-345`) and each answers `[own, ...rest]`, so the first registered
   family comes first. They register in this order:
