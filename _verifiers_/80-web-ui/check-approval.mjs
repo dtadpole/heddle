@@ -246,3 +246,47 @@ test('Stop ends a turn that is waiting on an approval, instead of leaving it stu
     await server.close()
   }
 })
+
+test('a refused call\'s note sits before the turn\'s answer, and the answer stays one row', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-five-9: the page drew one note per refusal when the turn's own `done` arrived, which
+   * can be before the answer's last words arrive on the event stream; the late words then started a new answer row
+   * after the notes, so the answer read as two pieces around them. A refusal is part of what the turn did, so its note
+   * sits with the calls, before the answer, and the answer is one row whichever stream lands first.
+   */
+  const answer = 'The write was refused by the sandbox because the target path is outside the workspace root.'
+  const server = await startServer('denied-order', ({ outsidePath }) => [
+    { toolCall: { name: 'bash', arguments: { command: `echo outside > ${JSON.stringify(outsidePath)}` } } },
+    { text: answer },
+  ])
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    await sendMessage(browser, 'write outside the workspace')
+    assert.ok(
+      await browser.waitFor(`[...document.querySelectorAll('#log .turn.assistant')].some((row) => row.dataset.rendered === 'true' && row.textContent.includes('outside the workspace root'))`, 20_000),
+      'the answer settles',
+    )
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.denied") !== null', 10_000), 'the refusal is noted')
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    const rows = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const all = [...document.querySelectorAll('#log .turn')]
+      const start = all.map((row) => row.dataset.kind).lastIndexOf('user')
+      return all.slice(start + 1).map((row) => ({ kind: row.dataset.kind, text: (row.textContent ?? '').trim().slice(0, 200) }))
+    })())`))
+    const kinds = rows.map((row) => row.kind).join(', ')
+    const answers = rows.filter((row) => row.kind === 'assistant')
+    assert.equal(answers.length, 1, `the turn's answer is one row (${kinds})`)
+    assert.ok(answers[0].text.includes(answer), `holding the whole answer (${answers[0].text})`)
+    const answerAt = rows.findIndex((row) => row.kind === 'assistant')
+    const notes = rows.flatMap((row, index) => (row.kind === 'denied' ? [index] : []))
+    assert.ok(notes.length >= 1, `the refusal is noted (${kinds})`)
+    assert.ok(notes.every((index) => index < answerAt), `and its note sits before the answer, with the call (${kinds})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
