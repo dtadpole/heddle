@@ -30,6 +30,18 @@ grounded_in:
   every stream, numbered, and a page redraws a rename and a new workspace made elsewhere without a reload; an
   approval answered on one page closes on every page; a failed turn reaches every client and the log, and the
   transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
+- [`check-history-read-failure.mjs`](check-history-read-failure.mjs) — headless scratch-browser coverage for a rejected
+  history GET and a rejected successful response's JSON read. Two distinct named sessions are created on an owned
+  port-zero server with private home, config, session store and workspace. A opens through the current
+  `showSession(id)` boolean seam; its real SSE tail is buffered during the held read, then discarded on failure.
+  The failure alert has no invented `(0)` status, the header and disabled composer say *Session unavailable*,
+  and live rows from both A and B cannot replace it. Draft, Enter, submit and Send write nothing. Opening B returns
+  `true`, clears the failure and restores its own history and writable composer without A's rows. Authoring/syntax
+  checks are not browser evidence. Build first and run from the checkout pinned by the shared `repoRoot` helper:
+  `HEDDLE_VERIFY_UI=1 node _tools_/verify-runner/run.mjs _verifiers_/80-web-ui/check-history-read-failure.mjs --json`.
+  Unset `HEDDLE_BIN` to judge the TypeScript build; set it to the parent's already-built candidate binary to judge Rust.
+  Each scenario has a 60-second test deadline, bounded startup/fetch/browser calls and bounded cleanup, with a
+  65-second process backstop. Missing build/browser reports unjudged, including the standard browser-disabled target.
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,

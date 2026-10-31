@@ -259,8 +259,8 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
   assert.ok(page.includes('current = id\n  paintEmptyState()'), 'opening a session paints it')
   assert.ok(page.includes("document.body.dataset.ready = 'true'\n</script>"), 'and boot ends by announcing that it finished')
   assert.match(page, /paintEmptyState\(\)\n\/\*\*[\s\S]*?document\.body\.dataset\.ready/, 'which happens after the invitation is painted')
-  /** A session that no longer exists must not keep the invitation hidden. */
-  assert.ok(page.includes('current = null\n      paintSessionHeading()'), 'a vanished session releases the pointer, and the header says No session again')
+  /** A session that no longer exists releases the pointer, but its unavailable-history line wins over the invitation. */
+  assert.match(page, /current = null\n\s+paintSessionHeading\(\)/, 'a vanished session releases the pointer and the header says Session unavailable')
 })
 
 test('the navigation panel is a fixed column, and only its workspaces region scrolls', () => {
