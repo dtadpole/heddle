@@ -6120,6 +6120,8 @@ const trajectory = {
   expanded: new Set(),
   search: '',
   focus: null,
+  /** The overview's zoom (`zoomViewport`): null for the whole domain; kept across a live refetch of the same session. */
+  viewport: null,
   domainStart: undefined,
   domainEnd: undefined,
 }
@@ -6204,6 +6206,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.rows = rowsOf(data)
   trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
   trajectory.timeline = timeline_
+  if (trajectory.data?.id !== data.id) trajectory.viewport = null
   trajectory.data = data
   trajectory.tools = Array.isArray(data.tools) ? data.tools : []
   trajectory.selected = -1
@@ -6681,6 +6684,39 @@ function timelineRecordText(bar, totalMs, startsAtMs) {
 }
 /* overview-bars:end */
 
+/* overview-viewport:begin */
+/**
+ * The overview's zoom, as DSH's: a viewport `{ from, to }` over the strip's full domain (fractions 0 to 1), or `null` for
+ * the whole of it. A wheel zooms about the pointer (`zoomViewport`: the domain point under the pointer stays under it,
+ * the span scales by e^(deltaY * 0.0015), no narrower than `minSpan`, and a span that reaches the whole domain is `null`
+ * again); a right-button drag pans a zoomed viewport (`panViewport`: dragging right shows earlier time); and a point on
+ * the screen maps to the domain through the viewport (`viewportDomain`). Pure, and fenced so
+ * test/page-overview-viewport.test.ts judges it.
+ */
+function zoomViewport(viewport, anchor, deltaY, minSpan) {
+  const from = viewport?.from ?? 0
+  const span = viewport === null || viewport === undefined ? 1 : viewport.to - viewport.from
+  const floor = Math.min(1, Math.max(minSpan, 1e-6))
+  const next = Math.min(1, Math.max(floor, span * Math.exp(deltaY * 0.0015)))
+  if (next >= 0.999) return null
+  const point = from + Math.min(Math.max(anchor, 0), 1) * span
+  const start = Math.min(Math.max(point - anchor * next, 0), 1 - next)
+  return { from: start, to: start + next }
+}
+
+function panViewport(viewport, anchorFrom, deltaFraction) {
+  if (viewport === null || viewport === undefined) return null
+  const span = viewport.to - viewport.from
+  const start = Math.min(Math.max(anchorFrom - deltaFraction * span, 0), 1 - span)
+  return { from: start, to: start + span }
+}
+
+function viewportDomain(viewport, screenFraction) {
+  if (viewport === null || viewport === undefined) return screenFraction
+  return viewport.from + screenFraction * (viewport.to - viewport.from)
+}
+/* overview-viewport:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   timeline.replaceChildren()
@@ -6778,6 +6814,38 @@ function renderTimeline(timeline_, data = {}) {
       track.append(tick)
     })
   }
+  /**
+   * The zoom draws the lanes' tracks wider than the strip and shifted, so every bar keeps its domain position and the
+   * strip shows only the viewport (DSH's projected domain); the strip's overflow clips the rest. The narrowest zoom is
+   * DSH's: 20 ms of recorded time, or four records in the equal mode.
+   */
+  const minSpan = trajectory.durationActual ? Math.min(1, 20 / Math.max(total, 1)) : Math.min(1, 4 / Math.max(records.length, 1))
+  let focusDomain = null
+  const drawFocus = () => {
+    const viewport = trajectory.viewport
+    const span = viewport === null ? 1 : viewport.to - viewport.from
+    if (focusDomain === null) {
+      focusBox.style.display = 'none'
+      return
+    }
+    const left = (focusDomain.from - (viewport?.from ?? 0)) / span
+    const right = (focusDomain.to - (viewport?.from ?? 0)) / span
+    focusBox.style.display = 'block'
+    focusBox.style.left = (Math.max(left, 0) * 100).toFixed(2) + '%'
+    focusBox.style.width = (Math.max(Math.min(right, 1) - Math.max(left, 0), 0) * 100).toFixed(2) + '%'
+  }
+  const applyViewport = () => {
+    const viewport = trajectory.viewport
+    const span = viewport === null ? 1 : viewport.to - viewport.from
+    for (const track of tracks.values()) {
+      track.style.left = viewport === null ? '' : ((-viewport.from / span) * 100).toFixed(3) + '%'
+      track.style.width = viewport === null ? '' : ((1 / span) * 100).toFixed(3) + '%'
+      track.style.right = viewport === null ? '' : 'auto'
+    }
+    wrapper.dataset.zoomed = viewport === null ? 'false' : 'true'
+    drawFocus()
+  }
+  applyViewport()
   /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
   const tip = document.createElement('div')
   tip.id = 'timeline-tip'
@@ -6821,49 +6889,80 @@ function renderTimeline(timeline_, data = {}) {
   wrapper.addEventListener('pointerdown', (pointerEvent) => {
     if (tickOf(pointerEvent.target) !== null) hideTip()
   })
-  /** Drag across the strip to focus a time window; rows outside it dim, as DSH does. */
+  /**
+   * Drag across the strip to focus a time window; rows outside it dim, as DSH does. The window is kept in domain
+   * fractions, so a zoom or a pan redraws it where its time is. The right button is DSH's other gesture: a click clears
+   * the window, and a drag pans a zoomed strip (dragging right shows earlier time). The wheel zooms about the pointer.
+   */
   let dragging = false
   let startX = 0
+  let pan = null
   const fractionAt = (clientX) => {
     const bounds = timeline.getBoundingClientRect()
     return Math.min(Math.max((clientX - bounds.left) / Math.max(bounds.width, 1), 0), 1)
   }
   const setWindow = (from, to) => {
-    if (to - from < 0.01) {
-      focusBox.style.display = 'none'
+    if (to - from < 0.01 * (trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from)) {
+      focusDomain = null
       trajectory.focus = null
     } else {
-      focusBox.style.display = 'block'
-      focusBox.style.left = (from * 100).toFixed(2) + '%'
-      focusBox.style.width = ((to - from) * 100).toFixed(2) + '%'
+      focusDomain = { from, to }
       const start = trajectory.domainStart
       const end = trajectory.domainEnd
       trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
     }
+    drawFocus()
     renderRows()
   }
-  timeline.onpointerdown = (pointerEvent) => {
-    if (pointerEvent.target.closest('.tr-tick') !== null) return
-    dragging = true
-    startX = fractionAt(pointerEvent.clientX)
-    focusBox.style.display = 'block'
-    focusBox.style.left = (startX * 100).toFixed(2) + '%'
-    focusBox.style.width = '0%'
+  timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
+  timeline.onwheel = (wheelEvent) => {
+    wheelEvent.preventDefault()
+    trajectory.viewport = zoomViewport(trajectory.viewport, fractionAt(wheelEvent.clientX), wheelEvent.deltaY, minSpan)
+    applyViewport()
+  }
+  const capture = (pointerEvent) => {
     try {
       timeline.setPointerCapture?.(pointerEvent.pointerId)
     } catch {
-      // A synthetic pointer cannot be captured; the drag still works from the listeners below.
+      // A synthetic pointer cannot be captured; the gesture still works from the listeners below.
     }
   }
+  timeline.onpointerdown = (pointerEvent) => {
+    if (pointerEvent.button === 2) {
+      pan = { x: pointerEvent.clientX, from: trajectory.viewport?.from ?? 0, viewport: trajectory.viewport, moved: false }
+      capture(pointerEvent)
+      return
+    }
+    if (pointerEvent.button !== 0 || pointerEvent.target.closest('.tr-tick') !== null) return
+    dragging = true
+    startX = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
+    focusDomain = { from: startX, to: startX }
+    drawFocus()
+    capture(pointerEvent)
+  }
   timeline.onpointermove = (pointerEvent) => {
+    if (pan !== null) {
+      if (Math.abs(pointerEvent.clientX - pan.x) >= 3) pan.moved = true
+      if (pan.viewport === null) return
+      const width = Math.max(timeline.getBoundingClientRect().width, 1)
+      trajectory.viewport = panViewport(pan.viewport, pan.from, (pointerEvent.clientX - pan.x) / width)
+      applyViewport()
+      return
+    }
     if (!dragging) return
-    const x = fractionAt(pointerEvent.clientX)
+    const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     setWindow(Math.min(startX, x), Math.max(startX, x))
   }
   timeline.onpointerup = (pointerEvent) => {
+    if (pan !== null) {
+      const moved = pan.moved || Math.abs(pointerEvent.clientX - pan.x) >= 3
+      pan = null
+      if (!moved) setWindow(0, 0)
+      return
+    }
     if (!dragging) return
     dragging = false
-    const x = fractionAt(pointerEvent.clientX)
+    const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     setWindow(Math.min(startX, x), Math.max(startX, x))
   }
   const legend = document.createElement('div')
