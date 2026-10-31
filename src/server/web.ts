@@ -32,7 +32,7 @@ import { type InventoryLoader, readPluginInventory } from '../config/plugin-inve
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
+import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
@@ -1629,7 +1629,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    let forked
+    try {
+      forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    } catch (error) {
+      if (!isMissingFolder(error)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/folder-missing' })}\n`)
+      return
+    }
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
@@ -3259,6 +3266,16 @@ export function push(state: Pick<RequestState, 'log' | 'subscribers'>, event: st
       // a client that is already gone leaves through its close listener
     }
   }
+}
+
+/**
+ * A session's folder that is gone (#56): a refusal with its sentence and its code, answered `400 { error, code }` as the
+ * unwritable branch of #106 is. Recognised by code, class or name, as `SessionFlagError` is, so a second copy of the
+ * module still matches.
+ */
+function isMissingFolder(error: unknown): boolean {
+  if (error instanceof MissingFolderError) return true
+  return error instanceof Error && (error.name === 'MissingFolderError' || (error as { code?: unknown }).code === 'session/folder-missing')
 }
 
 function respondSse(response: ServerResponse): void {
