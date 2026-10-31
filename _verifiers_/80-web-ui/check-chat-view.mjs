@@ -2726,3 +2726,44 @@ test('a settled subagent\'s notice reads as its blocks, a paragraph each, live, 
     await server.close()
   }
 })
+
+test('a turn stopped from the page is marked as stopped where it ended, live', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-ten-8 (issue #34): the turn's stream ends `cancelled` with no reason, so the live page
+   * drew nothing and a stopped answer read like a finished one, while a reload showed "Stopped by the caller" from the
+   * transcript. The live page now draws the same notice. (A reload on TS cannot show it until the TS server records the
+   * stop, developer-ten-2; this check judges the live marker on both builds.)
+   */
+  const server = await startServer('stopped-mark', () => [
+    { toolCall: { name: 'bash', arguments: { command: 'sleep 6; echo slow' } } },
+    { text: 'never reached' },
+  ], { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+
+    /** The session has opened (its history drawn) before anything is sent into it: a send while it is still opening races the page's own redraw. */
+    assert.ok(await browser.waitFor(`document.getElementById('session-title')?.textContent === ${JSON.stringify(session)}`, 10_000), 'the session opens')
+    await sendMessage(browser, 'run the slow command')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.tool") !== null', 20_000), 'the slow call starts')
+    await browser.evaluate('document.getElementById("stop").click()')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 10_000), 'Stop ends the turn')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const notices = JSON.parse(await browser.evaluate('JSON.stringify([...document.querySelectorAll("#log .turn-notice")].map((notice) => notice.textContent))'))
+    assert.deepEqual(notices, ['Stopped by the caller'], `the stopped turn says so, once, as a reload draws it (${JSON.stringify(notices)})`)
+    assert.ok(!(await browser.evaluate('document.getElementById("log").innerText.includes("never reached")')), 'and nothing after the stop was drawn')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
