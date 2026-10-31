@@ -20,10 +20,12 @@ path = "src/main.rs"
 axum.workspace = true
 futures.workspace = true
 heddle-agent.workspace = true
+heddle-commands = { path = "../heddle-commands" }
 heddle-config.workspace = true
 heddle-context.workspace = true
 heddle-events.workspace = true
 heddle-llm.workspace = true
+heddle-plan = { path = "../heddle-plan" }
 heddle-goal.workspace = true
 # The jobs row (`src/plugins/jobs.ts`): background jobs, their tools, background bash and the page's routes.
 heddle-jobs.workspace = true
