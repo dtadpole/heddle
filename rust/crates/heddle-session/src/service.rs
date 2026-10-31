@@ -409,6 +409,10 @@ impl SessionService {
 
     /// Record a user turn whose content may carry attachments. Empty content records nothing. The first
     /// message names a session that has no title yet, from its text parts only.
+    ///
+    /// The name is written in the same meta write that counts the turn ([`SessionStore::user_message_named`]), so a
+    /// session list read meanwhile on another thread never shows the turn on an untitled session. The TypeScript build
+    /// writes the two one after the other, synchronously, which no request can come between.
     pub fn user_content(
         &self,
         handle: &SessionHandle,
@@ -419,7 +423,7 @@ impl SessionService {
             return Ok(());
         }
         let title = title_from(&text_of(&content));
-        self.store.message(
+        self.store.user_message_named(
             handle,
             Message {
                 role: Role::User,
@@ -427,17 +431,8 @@ impl SessionService {
                 content,
                 source,
             },
+            &title,
         )?;
-        let meta = self.list().into_iter().find(|meta| meta.id() == handle.id);
-        if let Some(meta) = meta {
-            let unnamed = meta
-                .title()
-                .map(|title| title.trim().is_empty())
-                .unwrap_or(true);
-            if unnamed && !title.is_empty() {
-                self.store.rename(&handle.id, &title)?;
-            }
-        }
         Ok(())
     }
 
@@ -983,6 +978,65 @@ mod tests {
             service.list()[0].title(),
             Some("remember the word loom"),
             "the first message keeps the title"
+        );
+    }
+
+    /// A first message's turn and the name it gives land in **one** meta write, so no reader ever sees the turn counted
+    /// on an untitled session. The web server lists sessions on another thread, without the store's lock, while a
+    /// delegated child records its first message on the child's own task: with the count and the name written one
+    /// after the other, a list in between showed the child with `turns: 1` and no `title` (80's check-subagents, three
+    /// failures in six on the Rust build; Node runs no request between the TypeScript build's two synchronous writes).
+    #[test]
+    fn a_first_message_counts_its_turn_and_names_the_session_in_one_write() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let fresh = || OpenAtOptions {
+            fresh: true,
+            ..OpenAtOptions::default()
+        };
+        let folder_path = folder.path().to_str().unwrap();
+        // Other sessions in the store, as a server holds them: naming used to list every one between the two writes.
+        for _ in 0..20 {
+            service.open_at(folder_path, fresh()).unwrap();
+        }
+        let mut untitled = Vec::new();
+        for round in 0..40 {
+            let handle = service.open_at(folder_path, fresh()).unwrap();
+            let meta = handle.meta.clone();
+            let ready = Arc::new(std::sync::Barrier::new(2));
+            let reader = {
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    // The first record that counts the turn, as a session list polling the store would read it.
+                    while std::time::Instant::now() < deadline {
+                        let Ok(text) = std::fs::read_to_string(&meta) else {
+                            continue;
+                        };
+                        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                            continue;
+                        };
+                        if value["turns"].as_u64().unwrap_or(0) >= 1 {
+                            return Some(value.get("title").cloned());
+                        }
+                    }
+                    None
+                })
+            };
+            ready.wait();
+            service
+                .user(&handle, "child task for the sidebar", None)
+                .unwrap();
+            let seen = reader.join().unwrap().expect("the turn was counted");
+            if seen != Some(json!("child task for the sidebar")) {
+                untitled.push((round, seen));
+            }
+        }
+        assert!(
+            untitled.is_empty(),
+            "a reader saw the first turn counted before the session was named, in {} of 40 rounds: {untitled:?}",
+            untitled.len()
         );
     }
 
