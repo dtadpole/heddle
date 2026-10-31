@@ -8,6 +8,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
@@ -2032,7 +2033,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const stopped = abortSession(state.controllers, id)
+    /**
+     * Every turn of the session, not only the ones this route started (#93). A goal round, a reminder's turn and a
+     * background job's notice turn are started by their rows through `runTurn`, which registers each with the
+     * live-turn registry; the route's own table never held them, so Stop answered `stopped: 0` and a goal round ran
+     * on. A turn this route started is in both tables and is counted once.
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    const live = turns?.isRunning(id) === true
+    const fromRoute = abortSession(state.controllers, id)
+    if (live) turns?.abort(id, 'stopped by the user')
+    const stopped = Math.max(fromRoute, live ? 1 : 0)
     respond(response, 200, 'application/json', `${JSON.stringify({ stopped, session: id })}\n`)
     return
   }
