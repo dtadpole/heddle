@@ -1286,6 +1286,15 @@ async fn session_view_route(
         "turns".into(),
         serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
     );
+    // How far this transcript reaches: the last recorded event's `seq`, or 0 (web.ts's `seq`). A page opening the
+    // session keeps the events the stream delivers during this read aside and draws only those past it, so an event
+    // in both reads once (live-testing draft developer-eleven-1).
+    let seq = events
+        .iter()
+        .rev()
+        .find_map(|event| event.get("seq").and_then(Value::as_u64))
+        .unwrap_or(0);
+    body.insert("seq".into(), Value::from(seq));
     if let Some(stats) = state.harness().stats.as_ref() {
         body.insert("stats".into(), stats.stats(id.as_str(), &events));
     }

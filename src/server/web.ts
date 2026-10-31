@@ -2147,6 +2147,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            */
           turns,
           /**
+           * How far this transcript reaches: the last recorded event's `seq`, or 0 for an empty session.
+           *
+           * A page opening a session clears its transcript and reads this answer, while the event stream keeps
+           * delivering. Events that arrive during the read are also in the answer when they were recorded before it
+           * was built, so drawn both ways they read twice (live-testing draft developer-eleven-1). The page keeps them
+           * aside and draws only those past this `seq`.
+           */
+          seq: events.length > 0 ? events[events.length - 1]?.seq ?? 0 : 0,
+          /**
            * The composer's bottom statistics, from the same events as everything else in this answer.
            * The reference prints turns, steps, a token total with its cache-hit share, and a context share;
            * every one of those is a fact of this record, so they travel with it rather than being re-derived

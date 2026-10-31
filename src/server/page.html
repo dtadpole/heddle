@@ -6679,7 +6679,21 @@ function restoreChatScroll(id) {
   })
 }
 
+/**
+ * Which `showSession` owns the panel, and the live events kept aside while it reads the session's history.
+ *
+ * `showSession` clears the transcript and then reads `/api/sessions/{id}`; the event stream keeps delivering in the
+ * meantime. An event that arrived during the read and was recorded before the answer was built is in that answer too,
+ * so drawing it live and again from history showed it twice. Measured on TS: a turn run while its session was opening
+ * was drawn whole, then again from history (live-testing draft developer-eleven-1). The answer's `seq` says how far it
+ * reaches, so the kept events past it are drawn and the rest dropped. A newer `showSession` takes the panel over: the
+ * older one draws nothing when its read returns.
+ */
+let sessionShows = 0
+let sessionLoading = null
+
 async function showSession(id) {
+  const ticket = ++sessionShows
   /** Where the reader left the session being replaced, before anything below changes the view. */
   rememberChatScroll()
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
@@ -6721,10 +6735,13 @@ async function showSession(id) {
    * This is the half that was missing: selecting a session used to leave the right side empty, because
    * the only thing that ever wrote to it was the live stream and those events had already happened.
    */
+  sessionLoading = { id, ticket, events: [] }
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    if (ticket !== sessionShows) return
     if (!response.ok) {
+      if (sessionLoading?.ticket === ticket) sessionLoading = null
       /**
        * A session that is no longer there is **not** the session being shown.
        *
@@ -6744,6 +6761,7 @@ async function showSession(id) {
       return
     }
     const body = await response.json()
+    if (ticket !== sessionShows) return
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6787,10 +6805,13 @@ async function showSession(id) {
         log.append(note)
       }
     }
+    /** The live events kept aside during the read: those the history already holds are dropped. */
+    drawKeptEvents(ticket, typeof body.seq === 'number' ? body.seq : null)
     /** Back where the reader left this session, or at its tail when they were following it (or never here). */
     restoreChatScroll(id)
   } catch (error) {
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
+    if (ticket === sessionShows) drawKeptEvents(ticket, null)
     const note = document.createElement('div')
     note.className = 'turn denied'
     note.textContent = 'could not read this session: ' + (error && error.message)
@@ -7190,6 +7211,20 @@ events.addEventListener('session', (message) => {
     }
   }
   if (current && payload.session !== current) return
+  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
+  if (sessionLoading !== null && payload.session === sessionLoading.id) {
+    sessionLoading.events.push(payload)
+    return
+  }
+  drawSessionEvent(payload)
+})
+
+/**
+ * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
+ * the events kept aside while the session's history was read.
+ */
+function drawSessionEvent(payload) {
+  const event = payload.event
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
     void slashReady.then((commands) => commands?.draw(event))
@@ -7280,7 +7315,27 @@ events.addEventListener('session', (message) => {
       void showLedger(current)
     }, 500)
   }
-})
+}
+
+/**
+ * Draw the events kept aside during a history read. When the answer said how far it reaches (`upTo`, its `seq`), only
+ * the events past it are drawn; an event without a `seq` is a live-only fragment the history's card already covers.
+ * Without a `seq` (a read that failed), every kept event is drawn, as the stream would have.
+ */
+function drawKeptEvents(ticket, upTo) {
+  if (sessionLoading === null || sessionLoading.ticket !== ticket) return
+  const kept = sessionLoading.events
+  sessionLoading = null
+  for (const payload of keptToDraw(kept, upTo)) drawSessionEvent(payload)
+}
+
+/* kept-events:begin */
+/** The kept events to draw: all of them without `upTo`, else only those recorded past it. */
+function keptToDraw(kept, upTo) {
+  if (upTo === null) return kept
+  return kept.filter((payload) => typeof payload?.event?.seq === 'number' && payload.event.seq > upTo)
+}
+/* kept-events:end */
 
 /** Coalesces the burst of events one turn produces into a single ledger refetch. */
 let ledgerRefetchTimer = null
