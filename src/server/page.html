@@ -10310,8 +10310,9 @@ Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSes
  *   before the parent's own sessions); `workspace` keeps every group a sibling section (DSH's `WorkSpace`).
  * - **Rows**: subagent-origin sessions are hidden (DSH hides `origin: 'subagent'`); the archive filter is DSH's three
  *   states; the order is pinned first (newest pin first), then last updated, newest first, then id.
- * - **Show more**: an open group shows 5 rows, raised to cover the last running or open session within the first 50;
- *   each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
+ * - **Show more**: an open group shows 5 conversations, raised to cover the last running or open one within the first 50,
+ *   plus the open New session placeholder, which takes none of the places; the control reads `Show {n} more sessions`
+ *   and each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -10487,38 +10488,62 @@ const WorkspaceTree = (() => {
   }
 
   /**
-   * How many of a group's rows are drawn: the watermark (5 until `Show more`), raised to cover the last running or open
-   * session among the first 50, never more than there are.
+   * How many of a group's **conversations** are drawn: the watermark (5 until `Show more`), raised to cover the last
+   * running or open conversation among the first 50, never more than there are. A New session placeholder is not one of
+   * them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
+   * `dsh-client-ui-workspace` `lib/client.js:2803-2833`), so the open blank never takes one of the five places (#54).
    */
   function shownCount(sessions, watermark, options = {}) {
-    const total = sessions.length
     const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
-    let count = Math.min(total, mark)
     const running = options.running instanceof Set ? options.running : new Set()
     const current = options.current ?? null
-    for (let index = Math.min(total, REACH) - 1; index >= count; index -= 1) {
-      const meta = sessions[index]
-      if (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current)) {
-        count = index + 1
-        break
-      }
+    let total = 0
+    let required = 0
+    for (const meta of sessions) {
+      if (placeholder(meta)) continue
+      total += 1
+      if (total <= REACH && (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current))) required = total
     }
-    return count
+    return Math.min(total, Math.max(mark, required))
   }
 
-  /** The watermark after a `Show more` click: five more rows, or all of them when five or fewer remain. */
+  /**
+   * The rows a group draws at a watermark, DSH's `watermarkRows` (`lib/client.js:2807-2819`): every placeholder, plus the
+   * first `watermark` conversations, in list order. `hidden` is how many are left out — the number the overflow control
+   * names — and `conversations` how many non-blank rows there are, which `nextWatermark` and `overflow` count against.
+   */
+  function watermarkRows(sessions, watermark) {
+    let count = 0
+    const rows = sessions.filter((meta) => {
+      if (placeholder(meta)) return true
+      count += 1
+      return count <= watermark
+    })
+    return { rows, hidden: sessions.length - rows.length, conversations: count }
+  }
+
+  /** The watermark after a `Show more` click: five more conversations, or all of them when five or fewer remain (`:3321`). */
   function nextWatermark(total, shown) {
     return Math.min(total, shown + STEP)
   }
 
-  /** The overflow control a group needs: `more`, `less` after the last batch, or none when its rows fit. */
-  function overflow(total, shown) {
-    if (total <= INITIAL) return null
+  /**
+   * The overflow control a group needs: `more`, `less` after the last batch, or none when its conversations fit at the
+   * baseline — the watermark before any `Show more`, raised as `shownCount` raises it (DSH draws the control while the
+   * collapsed rows hide one, `:3157`, `:3309`).
+   */
+  function overflow(total, shown, baseline = INITIAL) {
+    if (total <= baseline) return null
     if (shown < total) return 'more'
-    return shown > INITIAL ? 'less' : null
+    return 'less'
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+  /** The control's words, DSH's `sessions.expand` and `sessions.collapse` (`:3325`, `:4897-4898`), verbatim. */
+  function overflowLabel(mode, hidden) {
+    return mode === 'more' ? `Show ${hidden} more sessions` : 'Show less'
+  }
+
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, watermarkRows, nextWatermark, overflow, overflowLabel }
 })()
 /* workspace-tree:end */
 
@@ -10632,10 +10657,17 @@ function paintSessionRows(list, group, depth) {
   }
   const groupRows = list.querySelectorAll(':scope > li[data-slot="group"]')
   const anchor = groupRows.length > 0 ? groupRows[groupRows.length - 1].nextSibling : list.firstChild
-  const total = group.sessions.length
-  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, { running: runningSessions, current })
-  const rows = group.sessions.slice(0, shown).map((meta) => sessionRow(meta, depth))
-  const mode = WorkspaceTree.overflow(total, shown)
+  /**
+   * DSH's arithmetic (`lib/client.js:3156-3158`): the open New session placeholder is drawn on top of the watermark's
+   * conversations rather than in one of their places, and the control names how many it hides (#54).
+   */
+  const raise = { running: runningSessions, current }
+  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, raise)
+  const baseline = WorkspaceTree.shownCount(group.sessions, WorkspaceTree.INITIAL, raise)
+  const drawn = WorkspaceTree.watermarkRows(group.sessions, shown)
+  const total = drawn.conversations
+  const rows = drawn.rows.map((meta) => sessionRow(meta, depth))
+  const mode = WorkspaceTree.overflow(total, shown, baseline)
   if (mode !== null) {
     const li = document.createElement('li')
     li.dataset.kind = 'more'
@@ -10652,7 +10684,7 @@ function paintSessionRows(list, group, depth) {
     spacer.setAttribute('aria-hidden', 'true')
     const label = document.createElement('span')
     label.className = 'label'
-    label.textContent = mode === 'more' ? 'Show more' : 'Show less'
+    label.textContent = WorkspaceTree.overflowLabel(mode, drawn.hidden)
     row.append(spacer, label)
     row.onclick = () => {
       if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))

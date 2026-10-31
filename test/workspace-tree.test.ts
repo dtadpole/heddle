@@ -33,8 +33,10 @@ interface Tree {
   flatten: (groups: Group[]) => Group[]
   containsSession: (group: Group, id: string | null, deep?: boolean) => boolean
   shownCount: (sessions: unknown[], watermark: number, options?: Record<string, unknown>) => number
+  watermarkRows: (sessions: { id: string }[], watermark: number) => { rows: { id: string }[]; hidden: number; conversations: number }
   nextWatermark: (total: number, shown: number) => number
-  overflow: (total: number, shown: number) => 'more' | 'less' | null
+  overflow: (total: number, shown: number, baseline?: number) => 'more' | 'less' | null
+  overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
 }
@@ -186,6 +188,39 @@ test('Show more: five rows, raised to the last running or open session within fi
   assert.equal(tree.overflow(4, 4), null, 'a short list has no control')
   assert.equal(tree.overflow(12, 5), 'more')
   assert.equal(tree.overflow(12, 12), 'less', 'after the last batch the control folds it back')
+})
+
+test('Show more counts conversations: the open New session is drawn on top of five, and the control names how many it hides', () => {
+  /**
+   * DSH's `watermarkRows` (dsh-client-ui-workspace lib/client.js:2807-2819) shows every blank row plus the first
+   * `watermark` non-blank rows, and its control reads `Show {n} more sessions` with the hidden count (`:3325`, `:4897`).
+   * #54: the page took the five places over the whole list, blank or not, and its control said only `Show more`.
+   */
+  const blank = session('s-blank', 59, { turns: 0 })
+  const talked = Array.from({ length: 12 }, (_, index) => session(`s-${12 - index}`, 40 - index))
+  const list = [blank, ...talked]
+  const mark = tree.shownCount(list, tree.INITIAL, { current: 's-blank' })
+  assert.equal(mark, 5, 'the open placeholder does not raise the watermark, nor take a place under it')
+  const drawn = tree.watermarkRows(list, mark)
+  assert.deepEqual(
+    drawn.rows.map((meta) => meta.id),
+    ['s-blank', 's-12', 's-11', 's-10', 's-9', 's-8'],
+    'the placeholder and the five newest conversations',
+  )
+  assert.equal(drawn.hidden, 7, 'seven conversations stay behind the control')
+  assert.equal(drawn.conversations, 12)
+  assert.equal(tree.overflow(drawn.conversations, mark), 'more')
+  assert.equal(tree.overflowLabel('more', drawn.hidden), 'Show 7 more sessions', "DSH's words, with the count")
+  const next = tree.nextWatermark(drawn.conversations, mark)
+  assert.equal(tree.watermarkRows(list, next).hidden, 2, 'a click shows five more')
+  const all = tree.nextWatermark(drawn.conversations, next)
+  assert.equal(tree.watermarkRows(list, all).hidden, 0, 'and the last batch shows the rest')
+  assert.equal(tree.overflow(drawn.conversations, all), 'less')
+  assert.equal(tree.overflowLabel('less', 0), 'Show less')
+  assert.equal(tree.overflow(5, 5), null, 'five conversations and a placeholder need no control')
+  assert.equal(tree.overflow(12, 12, 12), null, 'nor do rows the open conversation already raised into view')
+  const raised = tree.shownCount(talked, tree.INITIAL, { current: 's-2' })
+  assert.equal(raised, 11, 'an open conversation further down still raises the watermark to itself')
 })
 
 test('a group knows whether it, or a group under it, holds the open session', () => {

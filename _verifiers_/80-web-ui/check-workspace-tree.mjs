@@ -12,7 +12,8 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  *
  * The claim, in DSH's terms: workspaces are groups, each with its sessions nested under it; a workspace registered
  * inside another nests under it (`Workspace Tree`) with its row **before** the parent's own sessions; a session no
- * registered workspace owns trails under **Ungrouped**; an open workspace shows five sessions and a `Show more`; the
+ * registered workspace owns trails under **Ungrouped**; an open workspace shows five sessions and a `Show {n} more
+ * sessions` control (the open New session on top of the five, not in one of their places); the
  * selected session's workspace tints its folder; a workspace's `+` starts a session there; and the `Workspace` grouping
  * draws every workspace as a sibling section.
  *
@@ -185,7 +186,8 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     const sessionLabels = inside.filter(([kind]) => kind === 'session').map(([, label]) => label)
     assert.deepEqual(sessionLabels, ['repo session 7', 'repo session 6', 'repo session 5', 'repo session 4', 'repo session 3'], 'five sessions, newest first')
     assert.ok(kinds.indexOf('more') > kinds.lastIndexOf('session'), 'then the overflow row')
-    assert.equal(inside[kinds.indexOf('more')][1], 'Show more')
+    /** DSH's `sessions.expand`, with the hidden count (dsh-client-ui-workspace lib/client.js:3325, :4897). */
+    assert.equal(inside[kinds.indexOf('more')][1], 'Show 2 more sessions')
 
     /** Show more reveals the rest, and folds back with Show less. */
     await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > ul > li[data-kind="more"] > .row').click()`)
@@ -234,6 +236,52 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     await browser.waitFor(`document.querySelectorAll('#tree > li[data-kind="workspace"]').length === 2`, 15_000)
     const siblings = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tree > li[data-kind="workspace"] > .row .label')].map((label) => label.textContent).sort())`))
     assert.deepEqual(siblings, [appLabel, repoLabel].sort(), 'both workspaces are top-level sections')
+  } finally {
+    browser.close()
+    fixture.close()
+  }
+})
+
+test('Show more counts conversations: the open New session sits on top of five, and the control says how many it hides (#54)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH shows every blank row plus the first five non-blank ones, and its control reads `Show {n} more sessions` with
+   * the hidden count (`watermarkRows` and the overflow button, dsh-client-ui-workspace lib/client.js:2807-2819,
+   * :3309-3325, :4897). Before the fix the open New session took one of the five places, so the workspace showed four
+   * conversations, and the control said only `Show more` (#54).
+   */
+  const fixture = await seeded('blank')
+  const browser = await openBrowser()
+  const group = `document.querySelector('#tree > li[data-kind="workspace"] > ul[role="group"]')`
+  const rows = `JSON.stringify({
+    ids: [...${group}.querySelectorAll(':scope > li[data-kind="session"]')].map((li) => li.dataset.sessionId),
+    labels: [...${group}.querySelectorAll(':scope > li[data-kind="session"] > .row .label')].map((label) => label.textContent),
+    control: ${group}.querySelector(':scope > li[data-kind="more"] .label')?.textContent ?? null,
+  })`
+  try {
+    await browser.goto(fixture.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`${group} !== null && ${group}.querySelectorAll(':scope > li[data-kind="session"]').length > 0`, 15_000)
+    await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row button[aria-label="New session in ${fixture.repo.title}"]').click()`)
+    const blank = `${group}.querySelector(':scope > li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    assert.ok(
+      await browser.waitFor(`(() => { const id = ${blank}; return id !== null && !${JSON.stringify(fixture.created)}.includes(id) })()`, 15_000),
+      'the workspace\'s + opens a New session in it',
+    )
+    const id = await browser.evaluate(blank)
+    const sessions = ['repo session 7', 'repo session 6', 'repo session 5', 'repo session 4', 'repo session 3']
+    const collapsed = JSON.parse(await browser.evaluate(rows))
+    assert.equal(collapsed.ids[0], id, `the open New session leads\nsaw: ${JSON.stringify(collapsed)}`)
+    assert.deepEqual(collapsed.labels.slice(1), sessions, `and the five newest conversations follow it: it took none of their places\nsaw: ${JSON.stringify(collapsed)}`)
+    assert.equal(collapsed.control, 'Show 2 more sessions', 'the control names the two it hides, in DSH\'s words')
+
+    await browser.evaluate(`${group}.querySelector(':scope > li[data-kind="more"] > .row').click()`)
+    const expanded = JSON.parse(await browser.evaluate(rows))
+    assert.equal(expanded.ids.length, 8, `a click shows the rest: the New session and all seven\nsaw: ${JSON.stringify(expanded)}`)
+    assert.equal(expanded.control, 'Show less')
+    await browser.evaluate(`${group}.querySelector(':scope > li[data-kind="more"] > .row').click()`)
+    assert.deepEqual(JSON.parse(await browser.evaluate(rows)), collapsed, 'and Show less goes back to the five and the New session')
   } finally {
     browser.close()
     fixture.close()
