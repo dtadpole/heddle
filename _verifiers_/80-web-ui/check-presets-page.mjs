@@ -153,6 +153,17 @@ test('a preset chosen on the new-session screen is the one the session runs unde
       },
       'the chooser lists the roster with its default selected',
     )
+    assert.equal(
+      await browser.evaluate(`(() => {
+        const seat = document.getElementById('preset-seat')
+        seat.hidden = true
+        const display = getComputedStyle(seat).display
+        seat.hidden = false
+        return display
+      })()`),
+      'none',
+      'a hidden chooser is not drawn: nothing to offer means no chooser',
+    )
 
     await browser.evaluate(`(() => {
       const select = document.getElementById('preset-select')
@@ -173,6 +184,11 @@ test('a preset chosen on the new-session screen is the one the session runs unde
       await browser.evaluate(LABEL_READ),
       { hidden: false, text: 'Reader', hint: 'The agent preset chosen when this task started' },
       'by its own name, with DSH\'s hint',
+    )
+    assert.equal(
+      await browser.evaluate(`document.getElementById('preset-select').value`),
+      'standard',
+      'the chosen preset was used once: the chooser is back on the default for the next session',
     )
 
     // The interface language switches the chooser and the label's hint; a declared preset keeps its own name.

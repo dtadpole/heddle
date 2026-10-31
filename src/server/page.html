@@ -1242,6 +1242,8 @@
   @media (max-width: 540px) { #session-preset { display: none; } }
   /** The new-session preset chooser, between the invitation and the composer, as DSH's hero chip sits. */
   #preset-seat { display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--text-3); }
+  /** The id rule's display beats the user agent's [hidden]; nothing to offer must mean no chooser (developer-ten F1). */
+  #preset-seat[hidden] { display: none; }
   #preset-seat select {
     height: 30px;
     padding: 0 .6rem;
@@ -7756,7 +7758,11 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     /** The preset chosen on the new-session screen goes with the turn that creates the session (inventory A96). */
     ...(target === null && stagedPreset !== null ? { preset: stagedPreset } : {}),
   })
-  if (target === null && response.ok) stagedPreset = null
+  /** The staged preset was used; the chooser returns to the default for the next session (developer-ten F2). */
+  if (target === null && response.ok) {
+    stagedPreset = null
+    paintPresetSeat()
+  }
   if (!response.ok) {
     /**
      * The server's own sentence, not only its status.
@@ -11089,6 +11095,7 @@ async function startSessionAt(node) {
     return
   }
   stagedPreset = null
+  paintPresetSeat()
   setNote('')
   activeFolder = node.path
   expanded.add(node.path)
