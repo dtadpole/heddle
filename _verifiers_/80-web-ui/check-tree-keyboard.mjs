@@ -14,7 +14,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  * :2033-2035, :2323-2327), its `Show {n} more sessions` a `<button aria-expanded>` (:3309-3326), and its row and View
  * options menus the shared `Menu` primitive, whose keyboard is arrows, Home and End, Tab and Escape with focus back on
  * the trigger (dsh-web-frontend dist/assets/index-CN7NIWNw.js:129, `Menu` exported as `k_` at :188). Heddle's rows are
- * focusable, which DSH's are not, so these checks judge that each key reaches what it is pressed on.
+ * focusable, which DSH's are not, so these checks judge that each key reaches what it is pressed on. The focusable
+ * element is the tree item itself, which carries the role and the states, as DSH's treeitem carries them with its click
+ * (developer-ten's F4 on stack-2).
  *
  * One server and one browser serve every test here, on one workspace of eight titled sessions.
  */
@@ -201,14 +203,14 @@ async function quiet(browser) {
 const rowOf = (label) => `[...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li.querySelector(':scope > .row > .label')?.textContent === ${JSON.stringify(label)})`
 
 /**
- * Focus a control of a row, the way Tab reaches it: the row first, which draws its controls (`:focus-within`), then the
- * control named `name` inside it. Answers what holds focus.
+ * Focus a control of a row, the way Tab reaches it: the tree item first, the row's one stop, which draws its controls
+ * (`:focus-within`), then the control named `name` inside it. Answers what holds focus.
  */
 async function focusControl(browser, li, name) {
   return browser.evaluate(`(() => {
     const li = ${li}
     if (li === undefined || li === null) return 'no row'
-    li.querySelector(':scope > .row').focus()
+    li.focus()
     const control = [...li.querySelectorAll(':scope > .row button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify(name)} || button.getAttribute('aria-label')?.startsWith(${JSON.stringify(name)}))
     if (control === undefined) return 'no control'
     control.focus()
@@ -285,7 +287,7 @@ test('Enter or Space on a row control acts on the control and never opens the ro
   assert.deepEqual(started, { count: before + 1, expanded: 'true' }, 'Enter on New session in starts a session and does not fold the workspace')
 })
 
-/** What holds focus, as a short name: `row:<label>` for a tree row, `li:<label>` for a list item, else the control's name. */
+/** What holds focus, as a short name: `li:<label>` for a tree item (a row's one stop), `row:<label>` for the div inside one, else the control's name. */
 const focusName = `(() => {
   const active = document.activeElement
   if (active === null || active === document.body) return 'body'
@@ -304,7 +306,8 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
 
   /**
    * From a session row, Tab visits its three controls — the `…`, Archive, Pin — and the fourth Tab is the next row,
-   * which Enter opens. The list item around a row is no stop of its own (it was, and Enter on it did nothing).
+   * which Enter opens. The row's one stop is its tree item, which carries role=treeitem and aria-selected, so a screen
+   * reader on it hears them (F4); the div inside it is no stop (focus there heard no role and no state).
    */
   const pair = JSON.parse(
     await browser.evaluate(`(() => {
@@ -320,8 +323,8 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
     })()`),
   )
   assert.notEqual(pair, null, 'the workspace draws a session row with its three controls followed by a session row that is not open')
-  await browser.evaluate(`${rowOf(pair.from)}.querySelector(':scope > .row').focus()`)
-  assert.equal(await browser.evaluate(focusName), `row:${pair.from}`, 'the walk starts on a session row')
+  await browser.evaluate(`${rowOf(pair.from)}.focus()`)
+  assert.equal(await browser.evaluate(focusName), `li:${pair.from}`, 'the walk starts on a session row\'s tree item')
   const stops = []
   for (let index = 0; index < 4; index += 1) {
     await press(browser, 'Tab')
@@ -330,7 +333,9 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
   assert.match(stops[0] ?? '', /^BUTTON:actions for /, `Tab 1 is the row's …\nsaw: ${JSON.stringify(stops)}`)
   assert.match(stops[1] ?? '', /^BUTTON:(Un)?[Aa]rchive session$/, `Tab 2 is Archive session\nsaw: ${JSON.stringify(stops)}`)
   assert.match(stops[2] ?? '', /^BUTTON:(Un)?[Pp]in session$/, `Tab 3 is Pin session\nsaw: ${JSON.stringify(stops)}`)
-  assert.equal(stops[3], `row:${pair.to}`, `one stop per row: Tab 4 is the next row itself, not its list item\nsaw: ${JSON.stringify(stops)}`)
+  assert.equal(stops[3], `li:${pair.to}`, `one stop per row: Tab 4 is the next row's tree item, not the div inside it\nsaw: ${JSON.stringify(stops)}`)
+  const states = JSON.parse(await browser.evaluate(`JSON.stringify({ role: document.activeElement.getAttribute('role'), selected: document.activeElement.getAttribute('aria-selected') })`))
+  assert.deepEqual(states, { role: 'treeitem', selected: 'false' }, `the focused stop is the treeitem with its state, what a screen reader reads\nsaw: ${JSON.stringify(states)}`)
   await press(browser, 'Enter')
   assert.ok(await settle(browser, `${openTitle}.includes(${JSON.stringify(pair.to)})`, 10_000), `Enter on that stop opens its session\nsaw: ${await browser.evaluate(openTitle)}`)
   /** Settled: the row is the selected one and the redraw that opening may bring (leaving the placeholder) is done. */
@@ -343,7 +348,7 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
    */
   const pinBefore = await browser.evaluate(`(() => {
     const li = ${rowOf(pair.to)}
-    li.querySelector(':scope > .row').focus()
+    li.focus()
     const pin = li.querySelector(':scope > .row .row-tools > .session-actions > .pin-action')
     pin?.focus()
     return pin !== null && document.activeElement === pin ? pin.getAttribute('aria-label') : 'not focused'
@@ -363,8 +368,10 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
   const back = await keptFocus()
   assert.deepEqual(back, { name: `BUTTON:${pinBefore}`, inRow: true }, `and again after the redraw that puts it back\nsaw: ${JSON.stringify(back)}`)
 
-  /** A workspace row: the row, its `…`, New session in, then the first row inside it. */
-  await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row').focus()`)
+  /** A workspace row: its tree item (with aria-expanded), its `…`, New session in, then the first row inside it. */
+  await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"]').focus()`)
+  const workspaceStates = JSON.parse(await browser.evaluate(`JSON.stringify({ role: document.activeElement.getAttribute('role'), expanded: document.activeElement.getAttribute('aria-expanded') })`))
+  assert.deepEqual(workspaceStates, { role: 'treeitem', expanded: 'true' }, `a workspace row's stop is its treeitem, open\nsaw: ${JSON.stringify(workspaceStates)}`)
   const workspaceStops = []
   for (let index = 0; index < 3; index += 1) {
     await press(browser, 'Tab')
@@ -373,7 +380,7 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
   const first = await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > ul > li')?.querySelector(':scope > .row > .label')?.textContent ?? ''`)
   assert.match(workspaceStops[0] ?? '', /^BUTTON:actions for /, `a workspace row's Tab 1 is its …\nsaw: ${JSON.stringify(workspaceStops)}`)
   assert.match(workspaceStops[1] ?? '', /^BUTTON:New session in /, `Tab 2 is New session in\nsaw: ${JSON.stringify(workspaceStops)}`)
-  assert.equal(workspaceStops[2], `row:${first}`, `Tab 3 is the first row inside it\nsaw: ${JSON.stringify(workspaceStops)}`)
+  assert.equal(workspaceStops[2], `li:${first}`, `Tab 3 is the first row inside it, its tree item\nsaw: ${JSON.stringify(workspaceStops)}`)
 
   /** Show more is a real button whose aria-expanded follows it, and the keyboard keeps its place on it. */
   const more = `document.querySelector('#tree > li[data-kind="workspace"] > ul > li[data-kind="more"] > .row')`
