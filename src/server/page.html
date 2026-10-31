@@ -4333,30 +4333,51 @@ function editedFilesPanel(files) {
 }
 
 /**
- * Attach the cards to answers that do not have one yet.
+ * Attach the turn that just ended its Edited files card, under its own answer.
  *
  * Live rows are built from the stream, so their files are not in the page: the session's own projection is fetched
- * once the turn ends and each of its last answers takes the card by its place among the answers. This is one source
- * of truth — the same `files` the history render reads — rather than a second fold in the page.
+ * once the turn ends, and the files of **that turn's** exchange — the turns after the last message — go under the
+ * newest answer, which is the exchange's last. This is one source of truth, the same `files` the history render reads.
+ *
+ * Earlier turns are not touched: each got its card when it ended, or from the history render. Measured before this:
+ * the cards of every turn that ever edited were pinned to the last answers counted from the end, so after one write
+ * every later answer — a read, a listing, a failed command — showed that write's card, and it was added again under
+ * each new answer (live-testing draft developer-five-8). A turn that edited nothing now shows no card.
  */
 async function attachEditedFiles() {
-  if (current === null) return
+  const session = current
+  if (session === null) return
   let data
   try {
-    const response = await fetch('/api/sessions/' + encodeURIComponent(current))
+    const response = await fetch('/api/sessions/' + encodeURIComponent(session))
     if (!response.ok) return
     data = await response.json()
   } catch {
     return
   }
-  const withFiles = (data.turns ?? []).filter((turn) => turn.kind === 'assistant' && Array.isArray(turn.files) && turn.files.length > 0)
-  if (withFiles.length === 0) return
-  const answers = [...log.querySelectorAll('.turn.assistant')]
-  for (let index = 0; index < withFiles.length; index += 1) {
-    const row = answers[answers.length - withFiles.length + index]
-    if (row !== undefined && row.querySelector('[data-changed-files]') === null) row.append(editedFilesPanel(withFiles[index].files))
-  }
+  /** The reader may have moved to another session while this was asked; its rows are not this turn's. */
+  if (current !== session) return
+  const files = lastExchangeFiles(data.turns ?? [])
+  if (files === null) return
+  const row = [...log.querySelectorAll('.turn.assistant')].at(-1)
+  if (row === undefined || row.querySelector('[data-changed-files]') !== null) return
+  /** Where history puts it: after the message actions, before a stopped turn's notice and the usage row. */
+  row.insertBefore(editedFilesPanel(files), row.querySelector(':scope > :is(.turn-notice, .turn-usage)'))
 }
+
+/* edited-files:begin */
+/**
+ * The files the newest exchange edited — those on its last answer, where the session projection puts them — or `null`
+ * when it edited none. An exchange is the turns after the last message; an earlier exchange's files are not its own.
+ * Pure, and fenced by these markers, so test/page-edited-files.test.ts judges it directly.
+ */
+function lastExchangeFiles(turns) {
+  let lastUser = -1
+  turns.forEach((turn, index) => { if (turn.kind === 'user') lastUser = index })
+  const answer = turns.slice(lastUser + 1).filter((turn) => turn.kind === 'assistant').at(-1)
+  return answer !== undefined && Array.isArray(answer.files) && answer.files.length > 0 ? answer.files : null
+}
+/* edited-files:end */
 
 /**
  * The person's message actions: the **sent time**, then the copy button — DSH's IconActions row for a user
@@ -4447,7 +4468,7 @@ function decorateCodeBlocks(root) {
 
 async function renderSettledAnswers() {
   for (const row of log.querySelectorAll('.turn.assistant:not([data-rendered])')) {
-    const text = row.textContent
+    const text = answerText(row)
     if (text === undefined || text.trim() === '') {
       row.dataset.rendered = 'empty'
       continue
@@ -4465,18 +4486,20 @@ async function renderSettledAnswers() {
       // can be handled before the answer's last text deltas. Drawing the snapshot then would erase those
       // deltas (80 check-chat-view #16), so a row that grew while its render was in flight is rendered
       // again from what it holds now.
-      if (row.textContent !== text) {
+      if (answerText(row) !== text) {
         delete row.dataset.rendered
         void renderSettledAnswers()
         return
       }
       if (body !== null && typeof body.html === 'string') {
+        const kept = [...row.querySelectorAll(`:scope > :is(${ANSWER_DECORATIONS})`)]
         row.classList.add('markdown')
         row.innerHTML = body.html
         decorateCodeBlocks(row)
         row.dataset.rendered = 'true'
         /** What a copy should yield is the **drawn** answer, so the snapshot is refreshed after drawing. */
         row.dataset.copyText = row.innerText
+        row.append(messageActions(row), ...kept)
       } else {
         row.dataset.rendered = 'failed'
       }
@@ -4485,6 +4508,29 @@ async function renderSettledAnswers() {
     }
     if (row.querySelector('.actions') === null) row.append(messageActions(row))
   }
+}
+
+/**
+ * What a settled answer carries below its text: the Edited files card, the per-turn usage row, and the notice of a turn
+ * that stopped early. History draws them after the message actions; a live answer gets them when its turn ends, which
+ * can be while its markdown is still being drawn.
+ */
+const ANSWER_DECORATIONS = '[data-changed-files], .turn-usage, .turn-notice'
+
+/**
+ * An answer's own text, without the card, row and notice that hang below it.
+ *
+ * The markdown is drawn from this, and a row whose text grew while it was drawn is drawn again. Read from the whole
+ * row, a card attached in that interval looked like growth: its words were drawn into the answer and the card was
+ * wiped. The same held for a stopped turn's notice, which is attached just before the answer is drawn.
+ */
+function answerText(row) {
+  let text = ''
+  for (const child of row.childNodes) {
+    if (child instanceof Element && child.matches(ANSWER_DECORATIONS)) continue
+    text += child.textContent ?? ''
+  }
+  return text
 }
 
 /**
@@ -7114,6 +7160,9 @@ events.addEventListener('session', (message) => {
       void renderSettledAnswers()
       /** DSH's turn tail exists only for a completed turn, so a turn's created-reminder cards land here. */
       renderScheduleCards()
+
+      /** A turn started elsewhere ends only here, and it may have edited files as well as the page's own. */
+      void attachEditedFiles()
     }
   }
   if (current && payload.session !== current) return
@@ -7132,7 +7181,6 @@ events.addEventListener('session', (message) => {
   }
   if (event.type === 'assistant/chunk') {
     if (event.chunk.type === 'done') {
-      void attachEditedFiles()
       /**
        * A round's span closes at the frame that carries the provider's output tokens, which is what the durable
        * fold also uses once the turn ends. A round without reported tokens is not timed here either.
@@ -8463,6 +8511,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
 
         /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
         void attachTurnUsage()
+        /** And DSH's ChangedFiles card, once per turn and only for a turn that edited something. */
+        void attachEditedFiles()
         /**
          * The turn may have created **this folder's** session, so both the tree and the list are
          * re-read.
@@ -8488,6 +8538,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         hideApproval()
         settleChat()
         void renderSettledAnswers()
+        /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
+        void attachEditedFiles()
         if (typeof payload.session === 'string') {
           runningSessions.delete(payload.session)
           runningSince.delete(payload.session)
