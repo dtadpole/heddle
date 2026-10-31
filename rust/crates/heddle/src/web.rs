@@ -184,6 +184,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref()),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
+        browser: invocation.env.get("HEDDLE_WEB_BROWSER") == Some("1"),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
         notes,
         shutdown: shutdown.clone(),

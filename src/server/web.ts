@@ -516,7 +516,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
       const html = page()
-      respond(response, 200, 'text/html; charset=utf-8', html, { 'content-security-policy': pagePolicy(html) })
+      respond(response, 200, 'text/html; charset=utf-8', html, { 'content-security-policy': pagePolicy(html, process.env['HEDDLE_WEB_BROWSER'] === '1') })
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -3176,7 +3176,7 @@ export function inlineScripts(html: string): string[] {
  * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
  * writes the same.
  */
-export function pagePolicy(html: string): string {
+export function pagePolicy(html: string, browserEnabled = false): string {
   const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
   return [
     "default-src 'self'",
@@ -3185,6 +3185,7 @@ export function pagePolicy(html: string): string {
     "img-src 'self' data: blob: https:",
     "font-src 'self' data: https:",
     "media-src 'self' https:",
+    browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
     "frame-ancestors 'none'",

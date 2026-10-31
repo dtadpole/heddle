@@ -556,3 +556,13 @@ test('the page policy carries a hash for every inline script of the served page,
   assert.match(policy, /object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'$/)
   assert.deepEqual(inlineScripts('<script src="/vendor/x.js"></script><script type="module">a()</script><scripts>no</scripts><SCRIPT>b()</SCRIPT >'), ['a()', 'b()'])
 })
+
+
+test('D-068 only explicit Browser capability adds HTTP(S) frames without weakening other directives', () => {
+  const html = '<script>const x = 1</script>'
+  const strict = pagePolicy(html)
+  const enabled = pagePolicy(html, true)
+  assert.ok(strict.includes("frame-src 'self'"))
+  assert.equal(enabled, strict.replace("frame-src 'self'", 'frame-src http: https:'))
+  assert.ok(enabled.includes("object-src 'none'") && enabled.includes("frame-ancestors 'none'"))
+})

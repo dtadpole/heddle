@@ -73,7 +73,7 @@ async function startServer(label, options = {}) {
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double', '--session-root', join(home, 'sessions')],
-    { env: { HOME: home, HEDDLE_CONFIG: config } },
+    { env: { HOME: home, HEDDLE_CONFIG: config, HEDDLE_WEB_BROWSER: options.browserFlag ?? '' } },
   )
   return { home, work, double, config, ...child, close: async () => {
     child.kill()
@@ -450,6 +450,7 @@ test('the page is served under a strict script policy that allows its own inline
       "img-src 'self' data: blob: https:",
       "font-src 'self' data: https:",
       "media-src 'self' https:",
+      "frame-src 'self'",
       "object-src 'none'",
       "base-uri 'self'",
       "frame-ancestors 'none'",
@@ -495,5 +496,25 @@ test('the page is served under a strict script policy that allows its own inline
   } finally {
     browser.close()
     await server.close()
+  }
+})
+
+
+test('D-068 page framing allowance is opt-in and changes no script directive', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  let strict = null
+  for (const flag of ['', 'true', '1']) {
+    const server = await startServer('csp-frame-' + (flag || 'default'), { browserFlag: flag })
+    try {
+      const cookie = await cookieFor(server.url)
+      const response = await fetch(server.url, { headers: { cookie }, signal: AbortSignal.timeout(5000) })
+      assert.equal(response.status, 200)
+      const policy = response.headers.get('content-security-policy')
+      assert.ok(policy !== null)
+      if (flag === '') strict = policy
+      if (flag === '1') assert.equal(policy, strict.replace("frame-src 'self'", 'frame-src http: https:'))
+      else assert.equal(policy, strict)
+      assert.ok(policy.includes("object-src 'none'") && policy.includes("frame-ancestors 'none'"))
+    } finally { await server.close() }
   }
 })

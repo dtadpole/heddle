@@ -103,6 +103,11 @@ fn has_src_attribute(attributes: &str) -> bool {
 /// inherits this policy, and a previewed document may load remote assets under its own policy (issue #50 would
 /// serve the preview at its own URL and drop them).
 pub fn page_policy(html: &str) -> String {
+    page_policy_with_browser(html, false)
+}
+
+/// D-068: remote frames are allowed only for the explicitly enabled Browser surface.
+pub fn page_policy_with_browser(html: &str, browser_enabled: bool) -> String {
     use base64::Engine as _;
     let mut script_src = String::from("script-src 'self'");
     for code in inline_scripts(html) {
@@ -119,6 +124,7 @@ pub fn page_policy(html: &str) -> String {
         "img-src 'self' data: blob: https:",
         "font-src 'self' data: https:",
         "media-src 'self' https:",
+        if browser_enabled { "frame-src http: https:" } else { "frame-src 'self'" },
         "object-src 'none'",
         "base-uri 'self'",
         "frame-ancestors 'none'",
@@ -370,5 +376,19 @@ mod tests {
     fn a_script_with_a_src_is_not_an_inline_script() {
         let html = "<script src=\"/vendor/x.js\"></script><script type=\"module\">a()</script><scripts>no</scripts><SCRIPT>b()</SCRIPT >";
         assert_eq!(inline_scripts(html), vec!["a()", "b()"]);
+    }
+}
+
+
+#[cfg(test)]
+mod browser_policy_tests {
+    use super::*;
+    #[test]
+    fn only_browser_capability_changes_the_frame_directive() {
+        let strict = page_policy("<script>const x = 1</script>");
+        let enabled = page_policy_with_browser("<script>const x = 1</script>", true);
+        assert!(strict.contains("frame-src 'self'"));
+        assert_eq!(enabled, strict.replace("frame-src 'self'", "frame-src http: https:"));
+        assert!(enabled.contains("object-src 'none'") && enabled.contains("frame-ancestors 'none'"));
     }
 }
