@@ -351,12 +351,24 @@ test('the page adds, renames and deletes a workspace with its own dialogs', asyn
     await browser.waitFor('document.getElementById("tree") !== null', 10_000)
     assert.ok(await browser.waitFor(`${row('picked')} !== undefined`, 10_000), 'and it is still there after a reload')
 
+    /**
+     * Its `+` starts another session there. The blank Add workspace opened then stops being a row: among blank sessions
+     * only the open one is (DSH `sessionVisible`, dsh-client-ui-workspace lib/client.js:964-966; C2, #54). So the server
+     * holds two sessions in the folder, and the tree draws the new one, selected.
+     */
+    const inPicked = async () => {
+      const listed = (await api(server.url, cookie, '/api/sessions')).body
+      return (Array.isArray(listed) ? listed : []).filter((meta) => meta.cwd === join(real, 'picked'))
+    }
+    const startedBefore = (await inPicked()).map((meta) => meta.id)
     await browser.evaluate(`Array.from(${row('picked')}.querySelectorAll('button')).find((entry) => entry.getAttribute('aria-label') === 'New session in picked').click()`)
+    const drawn = `Array.from(${row('picked')}.closest('li').querySelectorAll('li[data-kind=session]'))`
     assert.ok(
-      await browser.waitFor(`${row('picked')}.closest('li').querySelectorAll('li[data-kind=session]').length === 2`, 10_000),
-      'its + starts another session in it',
+      await browser.waitFor(`(() => { const rows = ${drawn}; return rows.length === 1 && !${JSON.stringify(startedBefore)}.includes(rows[0].dataset.sessionId) && rows[0].getAttribute('aria-selected') === 'true' })()`, 10_000),
+      `its + starts another session in it, the open one and the folder's one blank row\nsaw: ${await browser.evaluate(`JSON.stringify(${drawn}.map((li) => [li.dataset.sessionId, li.getAttribute('aria-selected')]))`)}`,
     )
-    const sessionId = await browser.evaluate(`${row('picked')}.closest('li').querySelector('li[data-kind=session]').dataset.sessionId`)
+    assert.equal((await inPicked()).length, startedBefore.length + 1, 'and the server holds both sessions in the folder')
+    const sessionId = await browser.evaluate(`${drawn}[0].dataset.sessionId`)
 
     const [openMenu, pickRename] = menu('picked', 'Rename')
     await browser.evaluate(openMenu)
