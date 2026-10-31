@@ -64,6 +64,9 @@ interface Tree {
   savedSelection: (raw: unknown) => string | null
   recentWorkspace: (workspaces: unknown[], sessions: unknown[]) => { id: string; path: string } | undefined
   restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'none'; id?: string; path?: string; forget?: boolean }
+  newSessionWorkspace: (tops: unknown, state?: Record<string, unknown>) => { path: string; label: string } | null
+  newConversationTarget: (tops: unknown, state?: Record<string, unknown>) => { path: string; label: string } | null
+  folderLabel: (tops: unknown, path: unknown) => string
   EMPTY_TEXT: { none: string; noneArchived: string; viewOthers: string; noRoots: string }
   emptyList: (archived: string, grouping: string, count: number) => { kind: 'placeholder' | 'note'; text: string; glyph?: string; action?: string } | null
   withOpenBlank: (rows: { id: string }[], current: unknown) => { id: string }[]
@@ -805,4 +808,88 @@ test('the page draws the empty list from those rules, and the action goes back t
   assert.match(flat, /WorkspaceTree\.emptyList\(archiveMode, 'list', visible\.length\)/)
   const paint = body('function paintEmptyList(empty) {')
   assert.match(paint, /action\.onclick = async \(\) => \{\s*archiveMode = 'hide'\s*rememberArchived\(\)\s*await renderTree\(\)/, 'View other sessions sets Hide archived, keeps it and redraws, as DSH\'s leaveArchivedOnly')
+})
+
+/** The workspace rows the page keeps from a drawing (`treeTops`): `{ kind, path, label, group }`, in drawing order. */
+function tops(workspaces: unknown[], sessions: unknown[] = []) {
+  return tree
+    .flatten(tree.deriveGroups(workspaces, sessions, { grouping: 'tree' }))
+    .filter((group) => group.workspace !== null)
+    .map((group) => ({ kind: 'workspace', path: group.path, label: group.label, group }))
+}
+
+test('New session starts where the reader acted: the chosen row, the open session\'s, the selection\'s, the aimed folder\'s, else the first drawn', () => {
+  const rows = tops(
+    [
+      workspace('w-a', '/a', { sessionIds: ['s-a'] }),
+      workspace('w-b', '/b', { sessionIds: ['s-b'] }),
+      workspace('w-c', '/c'),
+    ],
+    [session('s-a', 1), session('s-b', 2)],
+  )
+  const pick = (state: Record<string, unknown>) => tree.newSessionWorkspace(rows, state)?.path ?? null
+  assert.equal(pick({}), '/a', 'nothing to go on: the first workspace the tree draws')
+  assert.equal(pick({ current: 's-b' }), '/b', 'the open session\'s own workspace')
+  assert.equal(pick({ current: 's-b', chosen: { path: '/c', during: 's-b' } }), '/c', 'a workspace opened beside the open session wins (#25)')
+  assert.equal(pick({ current: 's-a', chosen: { path: '/c', during: 's-b' } }), '/a', 'a choice made beside another session is forgotten')
+  assert.equal(pick({ selected: '/c/notes' }), '/c', 'the selected row\'s workspace')
+  assert.equal(pick({ selected: 'session:s-b' }), '/a', 'a session row is not a place')
+  assert.equal(pick({ active: '/b/sub' }), '/b', 'the folder the prompt box was aimed at, by the workspace that owns it')
+  assert.equal(tree.newSessionWorkspace([], {}), null, 'no workspace drawn: nowhere')
+})
+
+test('with no session open, the first message goes to the Default workspace after a reload too, named as the tree names it (#134)', () => {
+  const home = '/home/u/.heddle'
+  const rows = tops([workspace('w-default', `${home}/default-workspace`, { title: 'default-workspace' })])
+  /**
+   * #134: first use aimed the composer at the Default workspace, but only in the page's memory; a reload forgot it, the
+   * hero said Choose workspace and the message ran in the server's start folder. The reload has the same tree and
+   * nothing else, and that is enough.
+   */
+  assert.deepEqual(
+    tree.newConversationTarget(rows, {}),
+    { path: `${home}/default-workspace`, label: 'Default workspace' },
+    'a reload, with nothing chosen and nothing aimed at: the first workspace the tree draws, by its display title',
+  )
+  assert.deepEqual(
+    tree.newConversationTarget(rows, { chosen: { path: `${home}/default-workspace`, during: null }, active: `${home}/default-workspace` }),
+    { path: `${home}/default-workspace`, label: 'Default workspace' },
+    'first use, which chose it and aimed the prompt box at it, names the same place the same way',
+  )
+  const two = tops([workspace('w-a', '/a'), workspace('w-b', '/b', { title: 'Beta' })])
+  assert.equal(tree.newConversationTarget(two, { chosen: { path: '/b', during: null } })?.label, 'Beta', 'a workspace row opened with no session open')
+  assert.equal(tree.newConversationTarget(two, { chosen: { path: '/b', during: 's-gone' } })?.path, '/a', 'a choice made beside a session is not one made with none open')
+  assert.deepEqual(tree.newConversationTarget([], { active: '/srv/loose' }), { path: '/srv/loose', label: 'loose' }, 'no workspace drawn: the folder the prompt box was aimed at')
+  assert.equal(tree.newConversationTarget([], {}), null, 'no workspace and no folder: nowhere, so nothing is sent')
+  assert.equal(tree.newConversationTarget(undefined, { active: '' }), null)
+})
+
+test('the note names a folder as the tree does: a workspace by its display title, any other folder by its last segment (#134)', () => {
+  const rows = tops([workspace('w-default', '/h/default-workspace', { title: 'default-workspace' }), workspace('w-x', '/x', { title: 'Project X' })])
+  assert.equal(tree.folderLabel(rows, '/h/default-workspace'), 'Default workspace')
+  assert.equal(tree.folderLabel(rows, '/x'), 'Project X')
+  assert.equal(tree.folderLabel(rows, '/x/deeper'), 'deeper', 'a folder inside a workspace is not the workspace')
+  assert.equal(tree.folderLabel([], '/somewhere/else'), 'else')
+  assert.equal(tree.folderLabel(rows, null), '')
+})
+
+test('the page aims a message with no session where the hero says, as a new conversation, and refuses one with nowhere to go (#134)', () => {
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const run = body('async function runTurn(')
+  assert.match(run, /await firstTreeReady/, 'it waits for boot\'s tree and first use before choosing')
+  assert.match(run, /const aim = newConversationTarget\(\)/, 'it posts the place the hero and the note name')
+  assert.match(run, /\.\.\.\(fresh \? \{ new: true \} : \{\}\)/, 'as a new session, never the newest one already in that folder (#17)')
+  assert.match(run, /throw new Error\(NO_WORKSPACE_REFUSAL\)/, 'and with nowhere to go it sends nothing')
+  assert.doesNotMatch(run, /folder: activeFolder,/, 'the folder is no longer whatever the prompt box last held')
+  const submit = body('function submitDraft(')
+  assert.match(submit, /if \(composerAimless\(\)\) \{\s*setNote\(NO_WORKSPACE_REFUSAL\)/, 'Enter with nowhere to send says DSH\'s Choose a workspace first.')
+  assert.match(page, /const NO_WORKSPACE_REFUSAL = 'Choose a workspace first\.'/)
+  assert.match(page, /const NO_WORKSPACE_PLACEHOLDER = 'Choose a workspace to start'/)
+  const tree = body('async function renderTree() {')
+  assert.match(tree, /newConversationTarget\(\)\?\.label/, 'the note names the first message\'s place with no session open')
+  assert.doesNotMatch(tree, /activeFolder\.split\('\/'\)\.filter\(Boolean\)\.pop\(\)/, 'not the folder\'s stored name')
 })
