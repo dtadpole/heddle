@@ -21,8 +21,11 @@ import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
+import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
+import { type InventoryLoader, readPluginInventory } from '../config/plugin-inventory.ts'
+import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
@@ -33,6 +36,8 @@ import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
+import { handleJobsRoute } from '../jobs/http.ts'
+import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -119,6 +124,17 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * The module name each configured row declared, by loader entry id, for `GET /api/plugin-inventory`
+   * (`declaredModuleNames` in `../config/plugin-inventory.ts`). Without it an entry shows the name the loader
+   * holds, which for a relative row is the `file://` URL `boot` resolved it to.
+   */
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
+  /**
+   * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
+   * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
+   */
+  readonly settings?: SettingsService
 }
 
 export interface WebServer {
@@ -181,6 +197,11 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
     for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
+  })
+
+  // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+  ctx.on('jobs/changed', () => {
+    for (const client of subscribers) client.write('event: jobs\ndata: {}\n\n')
   })
 
   /**
@@ -265,6 +286,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
+      ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
         try {
@@ -328,24 +351,50 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
-        clearInterval(heartbeat)
-        detachApprovals?.()
-        for (const client of subscribers) {
-          try {
-            client.end()
-          } catch {
-            // the client is already gone
-          }
-        }
-        subscribers.clear()
-        server.close(() => resolvePromise())
-        server.closeAllConnections?.()
-        for (const socket of sockets) socket.destroy()
+        void stopRunningTurns().finally(() => closeNow(resolvePromise))
       }),
+  }
+
+  /**
+   * A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each running
+   * command's process group is ended and its call is recorded as interrupted before the process goes. Without it the
+   * server waited for the command to finish on its own and wrote nothing (live-testing issue #6); DSH cancels its
+   * agents at teardown (`dsh-bash-local` graceMs 3000).
+   */
+  async function stopRunningTurns(): Promise<void> {
+    let stopping = 0
+    for (const id of [...controllers.keys()]) stopping += abortSession(controllers, id)
+    if (stopping === 0) return
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS
+    while ([...running.values()].some((count) => count > 0) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  /** End the subscribers, stop accepting and destroy the sockets that remain (see `close` above). */
+  function closeNow(resolvePromise: () => void): void {
+    clearInterval(heartbeat)
+    detachApprovals?.()
+    for (const client of subscribers) {
+      try {
+        client.end()
+      } catch {
+        // the client is already gone
+      }
+    }
+    subscribers.clear()
+    server.close(() => resolvePromise())
+    server.closeAllConnections?.()
+    for (const socket of sockets) socket.destroy()
   }
 }
 
+/** How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results. */
+const SHUTDOWN_GRACE_MS = 5_000
+
 interface RequestState {
+  /** The settings surface, when the server was started with one. */
+  readonly settings?: SettingsService
   readonly token: string
   readonly secret: string
   readonly host: string
@@ -387,6 +436,7 @@ interface RequestState {
   readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
 }
 
 /** One request, routed and fenced. */
@@ -515,7 +565,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page())
+      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -776,6 +826,25 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the route reuses it: a key, a key *path* and a header value are all secrets that can live in an
    * endpoint, and none of them may reach a browser.
    */
+  /**
+   * Settings: the active profile's patch, read and written the way DSH's settings controller does it. Every
+   * answer is `src/config/settings.ts`'s (the Rust port's twin is `heddle-config`), behind the fence and the
+   * token like every other route.
+   */
+  if (url.pathname === '/api/settings' || url.pathname.startsWith('/api/settings/')) {
+    if (state.settings === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ code: 'settings-rejected', error: 'this server was started without a settings surface' })}\n`)
+      return
+    }
+    const body = request.method === 'POST' ? await readText(request, response) : ''
+    if (body === null) return
+    const answer = await handleSettingsRequest(state.settings, request.method ?? 'GET', url.pathname, body)
+    if (answer !== undefined) {
+      respond(response, answer.status, 'application/json', `${JSON.stringify(answer.body, null, 2)}\n`)
+      return
+    }
+  }
+
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
     const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
@@ -795,6 +864,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return window === undefined ? entry : { ...entry, contextWindow: window, contextWindowSource: 'provider-models' }
     })
     respond(response, 200, 'application/json', `${JSON.stringify({ ...described, endpoints: withWindows }, null, 2)}\n`)
+    return
+  }
+
+  /**
+   * The plugin inventory, DSH's read-only `pluginInventory/list`: every non-group loader entry, in loader order,
+   * with its declared module name, whether it is enabled and its fiber's phase, read from the loader now. No
+   * `managementAvailable`, because nothing here can change the profile.
+   */
+  if (url.pathname === '/api/plugin-inventory' && request.method === 'GET') {
+    const loader = (ctx as unknown as { readonly loader?: InventoryLoader }).loader
+    respond(response, 200, 'application/json', `${JSON.stringify(readPluginInventory(loader, state.pluginModuleNames), null, 2)}\n`)
     return
   }
 
@@ -938,6 +1018,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    */
   // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
   if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+  // The background-job routes: DSH's job controller (list, follow, kill), answered by the jobs module.
+  if (await handleJobsRoute(ctx.get('jobs') as JobRegistry | undefined, url, request, response)) return
 
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
@@ -1262,9 +1344,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the path must be absolute' })}\n`)
       return
     }
+    /**
+     * A leading `~` is the home folder, and what is checked **and stored** is the canonical path of the expanded
+     * spelling — the Rust route's `canonical_path(expand_home(raw))` (heddle-server `add_workspace`). This route used
+     * to check the expanded path and store the raw string, which `canonicalPath` then resolved against the server's
+     * working folder: `~/x` became a record at `<cwd>/~/x`, a folder that does not exist (GitHub issue #1). heddle keeps
+     * the `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path that is not fully qualified
+     * (dsh-workspace `realpathNormalize`, lib/index.js:20-24, :48-50). The sentences keep the path as it was written.
+     */
+    const folder = canonicalPath(expandHome(path))
     let stat
     try {
-      stat = statSync(expandHome(path))
+      stat = statSync(folder)
     } catch {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${path} does not exist` })}\n`)
       return
@@ -1278,7 +1369,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a name must be lowercase letters, digits and dashes' })}\n`)
       return
     }
-    const { record, created } = workspaces.add(path, name)
+    const { record, created } = workspaces.add(folder, name)
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
   }
@@ -2178,6 +2269,19 @@ export function rejectUntrusted(request: { headers: Record<string, string | stri
  * failure mode of a helper that both reports and returns is a second response written onto a socket
  * that is already finished.
  */
+/** A request body as text, or `null` once a 413 has been sent. */
+async function readText(request: IncomingMessage, response: ServerResponse): Promise<string | null> {
+  let raw = ''
+  for await (const chunk of request) {
+    raw += chunk
+    if (raw.length > 10 * 1024 * 1024) {
+      respond(response, 413, 'text/plain', 'request too large\n')
+      return null
+    }
+  }
+  return raw
+}
+
 async function readJson(request: IncomingMessage, response: ServerResponse): Promise<Record<string, unknown> | null> {
   let raw = ''
   for await (const chunk of request) {
@@ -2188,7 +2292,13 @@ async function readJson(request: IncomingMessage, response: ServerResponse): Pro
     }
   }
   try {
-    return JSON.parse(raw.length === 0 ? '{}' : raw) as Record<string, unknown>
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    // null is the helper's already-answered sentinel, never an admitted request body (Refs #71).
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return null
+    }
+    return parsed as Record<string, unknown>
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return null
@@ -2354,7 +2464,12 @@ export function sessionRequestSelection(
     preset?: string
   }
   try {
-    body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return
+    }
+    body = parsed as typeof body
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
@@ -2442,12 +2557,17 @@ export function sessionRequestSelection(
       return
     }
   }
+  /**
+   * A session this route opens is born **untitled**, as DSH's is (#68): its first message writes the fallback name and
+   * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
+   * read as a person's name, and no title would ever be generated.
+   */
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
       ? ctx.session.start({ resume: body.session })
       : folder !== null
-        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), title: body.prompt.slice(0, 60), ...born })
-        : ctx.session.start({ cwd: process.cwd(), title: body.prompt.slice(0, 60), ...born })
+        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
+        : ctx.session.start({ cwd: process.cwd(), ...born })
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
   /**
    * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it
@@ -3166,8 +3286,19 @@ export function markedPage(html: string): string {
  * which on screen look identical. (It happened: the live daemon served a stale deployment checkout while the source
  * and the checks were already correct, and a row's geometry read as "not implemented".)
  */
-function page(): string {
-  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8'))
+function page(lang = 'en'): string {
+  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')).replace('<html lang="en">', `<html lang="${lang}">`)
+}
+
+/**
+ * The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one the
+ * browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`, as DSH
+ * writes it. The page's marker stays the file's own, so a language never reads as a different build.
+ */
+export function pageLanguage(ctx: Context, acceptLanguage: string | string[] | undefined): string {
+  const header = Array.isArray(acceptLanguage) ? acceptLanguage.join(',') : acceptLanguage
+  const locale = ctx.get('locale') as { forRequest(header: string | undefined): Locale } | undefined
+  return documentLanguage(locale?.forRequest(header) ?? negotiateLocale(undefined, acceptedLanguages(header)))
 }
 
 /** The addresses a person could reach this server on, for a LAN-aware message. */

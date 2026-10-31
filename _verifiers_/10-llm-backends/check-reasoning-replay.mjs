@@ -15,7 +15,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { isolatedHome, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 const DEEPSEEK_REFUSAL = 'The `reasoning_content` in the thinking mode must be passed back to the API'
 
@@ -37,6 +37,8 @@ async function double({ enforce }) {
         response.end()
         return
       }
+      /** A new session's title request is not one of the turn's rounds this double answers in order (#68). */
+      if (isTitleRequest(raw)) return refuseTitleRequest(response)
       let body = {}
       try {
         body = JSON.parse(raw)

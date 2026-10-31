@@ -8,6 +8,7 @@ import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
 import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
+import { interruptedTurnClosers } from './repair.ts'
 
 import { inheritsAnswer, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
 
@@ -310,9 +311,18 @@ export class SessionService extends Service {
     return this.store.deriveNode(handle, seq)
   }
 
-  /** What has already happened, for a caller that wants to show it. */
-  events(handle: SessionHandle) {
-    return this.store.read(handle)
+  /**
+   * What has already happened, for a caller that wants to show it.
+   *
+   * A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the closers the
+   * next write-open will append (`./repair.ts`), and nothing is written — DSH's cold read (`readColdSessionLog`,
+   * dsh-session-query lib/index.js:26-52). So a call cut by a restart reads as interrupted at once, not as running until
+   * somebody writes the session (issue #5). The model's view is `messages`, which reads the log itself.
+   */
+  events(handle: SessionHandle): readonly SessionEvent[] {
+    const events = this.store.read(handle)
+    const closers = interruptedTurnClosers(events)
+    return closers.length === 0 || this.store.writerHeld(handle) ? events : [...events, ...closers]
   }
 
   /** Every session, newest first. */

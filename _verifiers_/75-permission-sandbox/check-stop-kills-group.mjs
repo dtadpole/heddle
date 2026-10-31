@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -19,6 +19,11 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  * happened.
  *
  * No browser: the scripted endpoint, the built server and `ps`-level facts are enough.
+ *
+ * The wall-time scenario runs with the jobs row's `promoteOnTimeout` off, through a `--patch` overlay over the
+ * project's own patch. With it on (the default, as DSH's `dsh-tool-bash` while a job registry is loaded), a command
+ * that outlives its wall time is not killed but moves to a background job; `50-agentic-loop/check-jobs.mjs` judges
+ * that. A Stop ends the command either way, so the Stop scenario runs with the default profile.
  */
 
 const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -39,7 +44,7 @@ async function gone(pid, withinMs) {
 }
 
 /** One server whose scripted model asks for `bash` with `extra` arguments, then answers. */
-async function scenario(name, extra, body) {
+async function scenario(name, extra, body, options = {}) {
   const home = isolatedHome(`stop-group-${name}`)
   const work = fixtureDir(`stop-group-${name}-work`)
   const pidFile = join(work, 'child.pid')
@@ -48,8 +53,11 @@ async function scenario(name, extra, body) {
     home,
     steps: [{ toolCall: { name: 'bash', arguments: { command, ...extra } } }, { text: 'after the command' }],
   })
+  /** An overlay replaces the project patch, so it includes it first and then edits it. */
+  const overlay = options.overlay === undefined ? [] : ['--patch', join(home, 'overlay.yml')]
+  if (options.overlay !== undefined) writeFileSync(join(home, 'overlay.yml'), `- include: ${join(repoRoot, 'heddle.patch.yml')}\n${options.overlay}`)
   const child = spawn(
-    ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
+    ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', ...overlay, '--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
     { cwd: repoRoot, env: { ...process.env, HOME: home, HEDDLE_CONFIG: config, NO_COLOR: '1' } },
   )
   let printed = ''
@@ -154,5 +162,5 @@ test('the bash wall time ends the whole command too, and says so', async (t) => 
     await t.test('the call is recorded as timed out', async () => {
       assert.match(await log(), /error \(TIMEOUT\): the command exceeded 1500ms and was killed/, 'the bash result says it timed out')
     })
-  })
+  }, { overlay: '- patch:\n    - id: jobs\n      config:\n        promoteOnTimeout: false\n' })
 })
