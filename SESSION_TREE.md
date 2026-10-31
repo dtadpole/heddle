@@ -299,6 +299,7 @@ not need a browser.
 | `POST /api/workspaces` `{path, name?}` | register an existing absolute folder; `created: false` when it already is one; `400` for a missing, relative, absent or file path |
 | `PATCH /api/workspaces/<id\|path>` `{title}` | retitle a root; `400` on an empty name, `409 workspace/name-conflict` on another workspace's name, a no-op on its own |
 | `DELETE /api/workspaces/<id\|path>` | remove the registration only; its sessions move to the root above (`adoptedBy`) or to Ungrouped; `404` when unknown (the CLI's `workspace remove` still refuses that case without `--force`) |
+| `POST /api/workspaces/default` | first use, DSH's `workspace/initializeDefault`: `{workspace}`, the record of `$HEDDLE_HOME/default-workspace` (made when missing, reused when present) while no workspace and no session exist, else `null`; once deleted it is never given back. The page asks once at startup when it has nothing to show, labels the workspace *Default workspace*, and aims the composer at it; no session is started (D-056). `500 workspace/default-failed` when the folder cannot be made |
 | `GET /api/directories?path=<abs>`, `POST /api/directories` `{parent, name}` | the page's folder chooser: one level of folders (the home when no path), one new child folder; DSH's browse picker |
 | `POST /api/sessions/<id>/title` `{title}` | retitle a conversation; the log is untouched |
 | `GET /api/sessions`, `/api/sessions/<id>`, `/api/events`, `/api/turn` | unchanged |

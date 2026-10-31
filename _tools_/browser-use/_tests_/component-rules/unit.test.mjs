@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { decodeFrame, encodeFrame } from '../../cdp.mjs'
-import { browserPath, releaseChromeOutput, stateDir } from '../../chrome.mjs'
+import { browserPath, chromeArgs, releaseChromeOutput, stateDir } from '../../chrome.mjs'
 import { keyDescription, parseKey } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
@@ -309,6 +309,19 @@ test('a named session maps to a directory of its own, and an unnamed one to the 
 /** The browser binary can be named explicitly, which is what a machine without the default path needs. */
 test('an explicit browser path wins over discovery', () => {
   assert.equal(browserPath('/definitely/not/a/browser'), '/definitely/not/a/browser')
+})
+
+/**
+ * A fresh profile downloads Chrome's default apps into the user TMPDIR, and a killed browser leaves each
+ * download there as a hidden .com.google.Chrome.XXXXXX file: 30,000 of them, 5.3 GiB, by 31 October 2026.
+ */
+test('every start disables the default apps, headless or windowed, and keeps the caller\'s own flags last', () => {
+  for (const headless of [true, false]) {
+    const args = chromeArgs({ profile: '/p', headless, args: ['--lang=fr'] })
+    assert.ok(args.includes('--disable-default-apps'), `headless ${headless}: ${args.join(' ')}`)
+    assert.ok(args.includes('--user-data-dir=/p'))
+    assert.deepEqual(args.slice(-2), ['--lang=fr', 'about:blank'])
+  }
 })
 
 
