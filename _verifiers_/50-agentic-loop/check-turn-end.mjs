@@ -185,6 +185,8 @@ test('a turn stopped while the model streams is ended in the log as stopped', as
       assert.equal(completed.length, 1, `the stopped turn is ended in the log\n${types}`)
       assert.match(String(completed[0].ended?.join(' ')), /stopped/, 'as stopped')
       assert.equal(closed.length, 1, `and closed\n${types}`)
+      // #99: a stop is a cancellation, not a request failure, so the overflow recovery is not involved (DSH, Rust).
+      assert.equal(/compaction\/recovery/.test(types), false, `and no compaction/recovery for a call that never failed\n${types}`)
     })
   } finally {
     await double.close()
