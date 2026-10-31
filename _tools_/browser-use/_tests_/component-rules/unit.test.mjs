@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import net from 'node:net'
 import { test } from 'node:test'
 
-import { decodeFrame, encodeFrame } from '../../cdp.mjs'
-import { browserPath, chromeArgs, releaseChromeOutput, stateDir } from '../../chrome.mjs'
+import { connect, decodeFrame, encodeFrame } from '../../cdp.mjs'
+import { browserPath, chromeArgs, releaseChromeOutput, stateDir, stopChrome } from '../../chrome.mjs'
 import { keyDescription, parseKey } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
@@ -371,4 +373,74 @@ test('a navigation in another tab never hides this page\'s console messages or r
   assert.doesNotMatch(formatConsoleList(selected).text, /selected page says hi/, 'its own navigation still starts a fresh reading')
   assert.doesNotMatch(formatNetworkList(selected).text, /a\.png/)
   assert.match(formatNetworkList(selected, { includePreservedRequests: true }).text, /a\.png/, 'and the old document stays preserved')
+})
+
+/**
+ * An endpoint that takes the TCP connection and then says nothing, or hangs up: what a busy or dying Chrome
+ * looks like from `connect`, because the kernel completes a connect to a listening socket whether or not the
+ * browser reads it. `onSocket` decides what the endpoint does with each connection.
+ *
+ * Every connection is hung up after `holdMs` as a backstop: a test that times out never reaches its `finally`,
+ * so a client whose bound is broken would otherwise hold the socket, and the whole file, open for good.
+ */
+async function silentEndpoint(onSocket = () => {}, holdMs = 8_000) {
+  const sockets = new Set()
+  const server = net.createServer((socket) => {
+    sockets.add(socket)
+    socket.on('error', () => {})
+    setTimeout(() => socket.destroy(), holdMs).unref()
+    onSocket(socket)
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise))
+  server.unref()
+  return {
+    url: `ws://127.0.0.1:${server.address().port}/devtools/browser/silent`,
+    close() {
+      for (const socket of sockets) socket.destroy()
+      server.close()
+    },
+  }
+}
+
+/**
+ * Two Rust browser checks hung to the lane's 300 s timeout under 3-4 busy browser slots (integrator-one,
+ * 2026-10-31); every page-level wait is bounded, and the handshake was not. A connect that never settles must
+ * fail by name instead.
+ */
+test('a connect to an endpoint that never answers the handshake rejects within its bound', { timeout: 10_000 }, async () => {
+  const endpoint = await silentEndpoint()
+  try {
+    const at = Date.now()
+    await assert.rejects(connect(endpoint.url, { timeoutMs: 300 }), /did not answer the websocket handshake within 300ms/)
+    assert.ok(Date.now() - at < 3_000, `rejected after ${Date.now() - at}ms`)
+  } finally {
+    endpoint.close()
+  }
+})
+
+test('a connect whose endpoint hangs up before the handshake rejects at once, not at the bound', { timeout: 10_000 }, async () => {
+  const endpoint = await silentEndpoint((socket) => socket.once('data', () => socket.end())) // reads the upgrade, then a clean FIN
+  try {
+    const at = Date.now()
+    await assert.rejects(connect(endpoint.url, { timeoutMs: 5_000 }), /closed the connection before the websocket handshake/)
+    assert.ok(Date.now() - at < 2_000, `rejected after ${Date.now() - at}ms`)
+  } finally {
+    endpoint.close()
+  }
+})
+
+test('stopping a browser whose endpoint never answers falls through to the signal within seconds', { timeout: 15_000 }, async () => {
+  const endpoint = await silentEndpoint()
+  const child = spawn('sleep', ['30'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  try {
+    const at = Date.now()
+    await stopChrome({ child, wsUrl: endpoint.url })
+    const took = Date.now() - at
+    if (child.exitCode === null && child.signalCode === null) await new Promise((resolvePromise) => child.once('exit', resolvePromise))
+    assert.equal(child.signalCode, 'SIGTERM')
+    assert.ok(took < 6_000, `stopChrome took ${took}ms`)
+  } finally {
+    child.kill('SIGKILL')
+    endpoint.close()
+  }
 })

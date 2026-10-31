@@ -137,17 +137,18 @@ export interface WebServerOptions {
    */
   readonly pluginModuleNames?: ReadonlyMap<string, string>
   /**
-   * Whether the page may offer its Browser tab (#86), which frames HTTP(S) pages beside the conversation.
-   *
-   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
-   * The server only reports the choice on `/api/status`; it never fetches, proxies or probes a page.
-   */
-  readonly browser?: boolean
-  /**
    * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
    */
   readonly settings?: SettingsService
+  /**
+   * Exact Browser opt-in captured at server startup (D-068): the page policy then allows HTTP(S) frames, and
+   * `/api/status` reports it so the page offers its Browser tab (#86), which frames those pages beside the conversation.
+   *
+   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
+   * The server never fetches, proxies or probes a page.
+   */
+  readonly browser?: boolean
 }
 
 export interface WebServer {
@@ -311,6 +312,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       subscribers,
       log,
       heartbeatMs,
+      browser: options.browser === true,
       running,
       controllers,
       runningSince,
@@ -321,7 +323,6 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
       ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
-      browser: options.browser === true,
       ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
@@ -435,6 +436,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
+  /** Whether the operator enabled Browser framing and the page's Browser tab (`HEDDLE_WEB_BROWSER=1`; D-068, #86). */
+  readonly browser: boolean
   /** The settings surface, when the server was started with one. */
   readonly settings?: SettingsService
   readonly token: string
@@ -487,8 +490,6 @@ interface RequestState {
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
   readonly pluginModuleNames?: ReadonlyMap<string, string>
-  /** Whether the operator enabled the page's Browser tab (`HEDDLE_WEB_BROWSER=1`). */
-  readonly browser: boolean
 }
 
 /** One request, routed and fenced. */
@@ -617,7 +618,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
+      const html = page(pageLanguage(ctx, request.headers['accept-language']))
+      respond(response, 200, 'text/html; charset=utf-8', html, { 'content-security-policy': pagePolicy(html, state.browser) })
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -3768,6 +3770,40 @@ export function tokenFormPage(options: { readonly stale?: boolean } = {}): strin
 export function markedPage(html: string): string {
   const marker = createHash('sha256').update(html).digest('hex').slice(0, 12)
   return html.replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+}
+
+/**
+ * The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`.
+ */
+export function inlineScripts(html: string): string[] {
+  return [...html.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1] ?? '')
+}
+
+/**
+ * The page's Content-Security-Policy, sent with `page.html` only.
+ *
+ * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
+ * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
+ * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
+ * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
+ * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
+ * writes the same.
+ */
+export function pagePolicy(html: string, browserEnabled = false): string {
+  const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
+  return [
+    "default-src 'self'",
+    ["script-src 'self'", ...hashes].join(' '),
+    "style-src 'self' 'unsafe-inline' https:",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data: https:",
+    "media-src 'self' https:",
+    browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join('; ')
 }
 
 /**

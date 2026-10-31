@@ -1283,6 +1283,30 @@ mod tests {
             assert!(seen.contains(needle), "no {needle:?}; saw {seen:?}");
         }
 
+        /// Read the replay until it holds `needle`: each look is an attach whose stream is let go at once, so no
+        /// look can fall behind the terminal's output.
+        async fn until_replayed(
+            registry: &TerminalRegistry,
+            session: &str,
+            id: &str,
+            needle: &str,
+        ) -> TerminalSnapshot {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            loop {
+                let (snapshot, events, hold) = registry.attach(session, id).expect("attached");
+                drop((events, hold));
+                if snapshot.data.contains(needle) || Instant::now() >= deadline {
+                    assert!(
+                        snapshot.data.contains(needle),
+                        "no {needle:?} in the replay; saw {:?}",
+                        snapshot.data
+                    );
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
         #[tokio::test]
         async fn a_terminal_takes_input_a_resize_and_closes_with_its_jobs() {
             let cwd = scratch("io");
@@ -1513,26 +1537,28 @@ mod tests {
                 Duration::from_secs(60),
             );
             let info = spawn(&registry, "a", &cwd);
+            /*
+             * The output (400 times 你好, 2400 bytes) is over this test's 1000-byte replay, which is also a stream's
+             * budget. A stream attached while it pours out is let go when its reader falls that far behind, as a slow
+             * page is, and a busy test runner did fall behind (the stream ended before REPLAY-42 and the test failed).
+             * So the replay is read by snapshot, and the watcher attaches once the terminal is quiet.
+             */
+            registry
+                .input(
+                    "a",
+                    &info.id,
+                    "i=0; while [ $i -lt 400 ]; do printf '你好'; i=$((i+1)); done; echo; echo REPLAY-$((40+2))\n",
+                )
+                .await;
+            let snapshot = until_replayed(&registry, "a", &info.id, "REPLAY-42").await;
+            assert!(snapshot.data.len() <= 1000, "bounded in bytes");
+            assert!(snapshot.truncated);
+            assert!(!snapshot.data.contains('\u{fffd}'));
             {
-                let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
-                let mut seen = String::new();
-                registry
-                    .input(
-                        "a",
-                        &info.id,
-                        "i=0; while [ $i -lt 400 ]; do printf '你好'; i=$((i+1)); done; echo; echo REPLAY-$((40+2))\n",
-                    )
-                    .await;
-                until(&mut events, &mut seen, "REPLAY-42").await;
+                let (_, _events, _hold) = registry.attach("a", &info.id).expect("attached");
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 assert_eq!(registry.reclaim().await, 0, "a watched terminal is kept");
             }
-            let (snapshot, _, hold) = registry.attach("a", &info.id).expect("attached");
-            drop(hold);
-            assert!(snapshot.data.len() <= 1000, "bounded in bytes");
-            assert!(snapshot.truncated);
-            assert!(snapshot.data.contains("REPLAY-42"));
-            assert!(!snapshot.data.contains('\u{fffd}'));
             tokio::time::sleep(Duration::from_millis(400)).await;
             assert_eq!(
                 registry.reclaim().await,
