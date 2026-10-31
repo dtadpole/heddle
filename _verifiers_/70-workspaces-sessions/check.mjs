@@ -2569,6 +2569,115 @@ test("the Web API's tree lists only what a workspace root holds, and refuses a p
   }
 })
 
+test('a folder heddle cannot read is refused with a code, never listed as empty, and New session where heddle cannot write says why without the path (#106)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /** `chmod 000` does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * Issue #106. DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:483-489
+   * and :564-581): a failed level shows one line per code and the transport's own message otherwise, and its file
+   * backend's listing of a folder it may not read fails with "cannot list "<path>": permission denied"
+   * (dsh-fs-local lib/index.js:269) instead of answering no entries. Both builds answered `200` with `children: []`, which
+   * the page drew as "nothing inside". DSH has no code for that failure, so heddle answers its own in DSH's family,
+   * `workspace-file/unreadable`, `400` as heddle's folder picker answers `directory-picker/unreadable`, naming the folder
+   * relative to its workspace (the root by its title).
+   *
+   * New session writes a definition into the branch, so a branch heddle cannot write fails there. TS answered a raw
+   * `500 internal error: EACCES … mkdir '<home>/…'` and Rust a path; both now answer `400` with `session/unwritable` and
+   * a sentence naming the folder by its name, never its absolute path, and record no session for the refused branch.
+   * The modes are restored in `finally`, before the fixture is removed.
+   */
+  const h = harness('unreadable')
+  const root = fixtureDir('unreadable-root')
+  const locked = join(root, 'locked')
+  const { chmodSync } = await import('node:fs')
+  let live
+  try {
+    entry(join(locked, 'held.txt'), 'a file the server cannot list\n')
+    mkdirSync(join(root, 'empty'), { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const title = added.body.record?.title
+    assert.equal(typeof title, 'string', `the registration answers the root's title (${JSON.stringify(added.body)})`)
+    const canonicalRoot = realpathSync(root)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const empty = await treeOf(join(root, 'empty'))
+    assert.equal(empty.status, 200, `an empty folder still lists (${JSON.stringify(empty.body)})`)
+    assert.deepEqual(empty.body.children, [], 'as asked and empty')
+
+    chmodSync(locked, 0o000)
+    const sub = await treeOf(locked)
+    assert.equal(sub.status, 400, `an unreadable folder is refused, not listed as empty (${sub.status} ${JSON.stringify(sub.body)})`)
+    assert.deepEqual(
+      sub.body,
+      { error: 'cannot list "locked": permission denied', code: 'workspace-file/unreadable' },
+      'with a code and a sentence naming the folder relative to its workspace',
+    )
+    const cliTree = await runCli(adminArgs(h, ['tree', locked, '--json']), { env: h.env, cwd: root })
+    assert.notEqual(cliTree.code, 0, `the CLI refuses it too\n${cliTree.stdout}${cliTree.stderr}`)
+    assert.match(cliTree.stderr, /heddle: cannot list "locked": permission denied/, 'with the same sentence')
+
+    const parent = await treeOf(root)
+    assert.equal(parent.status, 200, `the readable root still lists (${JSON.stringify(parent.body)})`)
+    assert.ok(childOf(parent.body, 'locked'), 'and still names the unreadable folder in it')
+
+    chmodSync(root, 0o000)
+    const whole = await treeOf(root)
+    assert.equal(whole.status, 400, `an unreadable workspace root is refused, not listed as empty (${whole.status} ${JSON.stringify(whole.body)})`)
+    assert.deepEqual(whole.body, { error: `cannot list "${title}": permission denied`, code: 'workspace-file/unreadable' }, 'naming the root by its title')
+    const roots = await call('/api/tree')
+    assert.equal(roots.status, 200, 'the roots still list beside it')
+    const listedRoot = [...(roots.body.children ?? []), ...(roots.body.adHoc ?? [])].find((node) => node.path === canonicalRoot)
+    assert.ok(listedRoot, `the unreadable root is still one of them\n${JSON.stringify(roots.body)}`)
+    assert.equal(listedRoot.children, null, 'with its children not listed (null), never an empty list')
+
+    const created = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root }) })
+    assert.equal(created.status, 400, `New session in a folder heddle cannot write is a refusal, not an internal error (${created.status} ${JSON.stringify(created.body)})`)
+    assert.deepEqual(
+      created.body,
+      { error: `cannot write to "${root.split(sep).pop()}": permission denied`, code: 'session/unwritable' },
+      'with a code and a sentence that names the folder without its path',
+    )
+    for (const leak of [root, canonicalRoot, process.env.HOME].filter((text) => typeof text === 'string' && text.length > 1)) {
+      assert.ok(!JSON.stringify(created.body).includes(leak), `the answer carries no absolute path (${leak})`)
+    }
+    const listed = await call('/api/sessions')
+    const strays = (Array.isArray(listed.body) ? listed.body : []).filter((meta) => meta.cwd === canonicalRoot || meta.cwd === root)
+    assert.deepEqual(strays, [], 'and the refused branch holds no session record')
+  } finally {
+    live?.kill()
+    for (const dir of [root, locked]) {
+      try {
+        chmodSync(dir, 0o755)
+      } catch {
+        // already gone, or never made
+      }
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return

@@ -108,6 +108,13 @@ pub enum SessionError {
     /// the lock names one. `session "<id>" is already owned by an active write handle (process <pid>)`
     #[error("session \"{id}\" is already owned by an active write handle{}", holder_suffix(.pid))]
     AlreadyOwned { id: String, pid: Option<u32> },
+    /// A branch heddle may not write, so a session cannot be filed in it (#106):
+    /// `cannot write to "<folder>": permission denied`, the folder by its name and never its absolute path
+    /// (the I/O error carried the definition's path). DSH files no session in the folder, so the code is
+    /// heddle's, `session/unwritable`, in DSH's `session/` family; the sentence follows DSH's file backend
+    /// (`cannot write "<path>": …`, dsh-fs-local lib/index.js:495).
+    #[error("cannot write to \"{folder}\": permission denied")]
+    Unwritable { folder: String },
 }
 
 /// ` (process <pid>)` when the lock named its holder, nothing otherwise.
@@ -118,12 +125,29 @@ fn holder_suffix(pid: &Option<u32>) -> String {
 
 impl SessionError {
     /// The code DSH's session controller answers a held session with (`session/writer-held`), for
-    /// [`SessionError::AlreadyOwned`]; `None` for every other error.
+    /// [`SessionError::AlreadyOwned`]; heddle's `session/unwritable` for [`SessionError::Unwritable`];
+    /// `None` for every other error.
     pub fn code(&self) -> Option<&'static str> {
         match self {
             SessionError::AlreadyOwned { .. } => Some("session/writer-held"),
+            SessionError::Unwritable { .. } => Some("session/unwritable"),
             _ => None,
         }
+    }
+
+    /// [`SessionError::Unwritable`] for a permission error met writing into `branch`, naming the folder by
+    /// its name; any other error as it is.
+    pub fn unwritable_in(self, branch: &str) -> Self {
+        if let SessionError::Io { source, .. } = &self
+            && source.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            let folder = std::path::Path::new(branch)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| branch.to_string());
+            return SessionError::Unwritable { folder };
+        }
+        self
     }
 
     /// Wrap an I/O failure with the path it happened on.

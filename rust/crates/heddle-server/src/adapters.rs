@@ -80,6 +80,10 @@ fn failure(error: heddle_session::SessionError) -> ServiceError {
         heddle_session::SessionError::Flag(refusal) => {
             ServiceError::with_code(refusal.to_string(), refusal.code())
         }
+        // A branch heddle cannot write is a 400 the page reads by its code (#106).
+        unwritable @ heddle_session::SessionError::Unwritable { .. } => {
+            ServiceError::with_code(unwritable.to_string(), "session/unwritable")
+        }
         other => ServiceError::new(other.to_string()),
     }
 }
