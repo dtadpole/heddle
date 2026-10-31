@@ -261,7 +261,11 @@ fn requested_display_path(cwd: &std::path::Path, path: &str) -> String {
         .filter(|part| !part.is_empty() && *part != ".")
         .flat_map(|part| ["/", part])
         .collect();
-    if normalised.is_empty() { "/".to_owned() } else { normalised }
+    if normalised.is_empty() {
+        "/".to_owned()
+    } else {
+        normalised
+    }
 }
 
 fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
@@ -883,10 +887,23 @@ mod tests {
     #[test]
     fn requested_display_path_is_dshs_spelling() {
         let cwd = std::path::Path::new("/work");
-        assert_eq!(requested_display_path(cwd, "notes/missing.txt"), "/work/notes/missing.txt");
-        assert_eq!(requested_display_path(cwd, "./notes//missing.txt"), "/work/notes/missing.txt");
-        assert_eq!(requested_display_path(cwd, "/elsewhere/./x.txt"), "/elsewhere/x.txt");
-        assert_eq!(requested_display_path(cwd, "../outside/x.txt"), "/work/../outside/x.txt", "a walk up is kept as written");
+        assert_eq!(
+            requested_display_path(cwd, "notes/missing.txt"),
+            "/work/notes/missing.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "./notes//missing.txt"),
+            "/work/notes/missing.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "/elsewhere/./x.txt"),
+            "/elsewhere/x.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "../outside/x.txt"),
+            "/work/../outside/x.txt",
+            "a walk up is kept as written"
+        );
     }
 
     #[tokio::test]
@@ -897,14 +914,20 @@ mod tests {
         for path in ["notes/missing.txt", "plain.txt/inner"] {
             std::fs::write(root.path().join("plain.txt"), "x").unwrap();
             let result = read
-                .run(args(json!({ "path": path })), context_in(root.path(), SandboxMode::DangerFullAccess))
+                .run(
+                    args(json!({ "path": path })),
+                    context_in(root.path(), SandboxMode::DangerFullAccess),
+                )
                 .await
                 .unwrap();
             let error = result.error.as_ref().expect("refused");
             assert_eq!(error.code, codes::FS_NOT_FOUND, "{path}");
             assert_eq!(
                 error.message,
-                format!("cannot read \"{}/{path}\": not found", root.path().display())
+                format!(
+                    "cannot read \"{}/{path}\": not found",
+                    root.path().display()
+                )
             );
         }
     }
@@ -916,14 +939,26 @@ mod tests {
         std::fs::write(root.path().join("notes/here.txt"), "hello").unwrap();
         let read = tool("read_file", sandbox(root.path()));
         let result = read
-            .run(args(json!({ "path": "notes" })), context_in(root.path(), SandboxMode::DangerFullAccess))
+            .run(
+                args(json!({ "path": "notes" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
             .await
             .unwrap();
         let error = result.error.as_ref().expect("refused");
         assert_eq!(error.code, codes::FS_NOT_REGULAR_FILE);
-        assert_eq!(error.message, format!("cannot read \"{}/notes\": not a regular file", root.path().display()));
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot read \"{}/notes\": not a regular file",
+                root.path().display()
+            )
+        );
         let result = read
-            .run(args(json!({ "path": "notes/here.txt" })), context_in(root.path(), SandboxMode::DangerFullAccess))
+            .run(
+                args(json!({ "path": "notes/here.txt" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
             .await
             .unwrap();
         assert!(result.error.is_none());
