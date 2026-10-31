@@ -133,6 +133,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.approvals = Some(Arc::new(Approvals { service }));
     }
+    if let Some(preference) = boot
+        .services
+        .get::<Arc<heddle_config::LocalePreference>>("locale")
+    {
+        harness.locale = Some(*preference);
+    }
     harness
 }
 

@@ -1086,6 +1086,31 @@ impl Component for TurnsComponent {
     }
 }
 
+/// `src/plugins/locale.ts`: the interface language a person chose (issue #80). The settings API lists the row as
+/// namespace `locale` and validates `preference` against its schema (`en` or `zh`); a server reads the choice as
+/// [`heddle_config::LocalePreference`].
+pub struct LocaleComponent;
+
+impl Component for LocaleComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        heddle_config::locale_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let preference =
+            heddle_config::locale_preference(Some(config)).map_err(|error| error.to_string())?;
+        services.provide(
+            "locale",
+            Arc::new(heddle_config::LocalePreference(preference)),
+        );
+        Ok(())
+    }
+}
+
 /// One shape to another through their shared serialization: the crates each declare the TypeScript
 /// message and request types, so a value crosses a crate boundary by its JSON.
 fn bridge<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, String> {
