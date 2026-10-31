@@ -6417,10 +6417,16 @@ async function steerItem(id) {
   /** The row's own session and queue, captured before the request (a switch mid-request moves nothing). */
   const key = composerKey
   const queue = queueOf(key)
-  const at = queue.findIndex((item) => item.id === id)
-  if (at === -1) return
-  const item = queue[at]
-  const steered = item !== undefined && item.status !== 'sending' && item.status !== 'steering' ? await steerNow(item.text, item.attachments ?? [], key) : false
+  const item = queue.find((entry) => entry.id === id)
+  /** A row already on its way (a steer or the pump's send) or already steering is not sent twice. */
+  if (item === undefined || item.status === 'sending' || item.status === 'steering') return
+  /**
+   * Reserved before the request: the pump, the chord and a second click all skip a `sending` row, so the same
+   * message cannot reach the server twice under two steer ids (developer-twelve's review of e29c2b26).
+   */
+  item.status = 'sending'
+  renderQueue()
+  const steered = await steerNow(item.text, item.attachments ?? [], key)
   if (steered !== false) {
     settleSteered(queue, key, id, steered)
     void pumpQueue(keyOfQueue(queue, key))
@@ -6429,8 +6435,8 @@ async function steerItem(id) {
   const now = queue.findIndex((entry) => entry.id === id)
   if (now === -1) return
   const [moved] = queue.splice(now, 1)
-  if (moved !== undefined && moved.status === 'failed') moved.status = 'pending'
-  if (moved !== undefined) queue.unshift(moved)
+  moved.status = 'pending'
+  queue.unshift(moved)
   renderQueue()
   void pumpQueue(keyOfQueue(queue, key))
 }
@@ -6450,9 +6456,16 @@ async function steerQueue() {
   for (const item of queue) if (item.status === 'failed') item.status = 'pending'
   renderQueue()
   for (const item of [...queue]) {
-    if (item.status === 'sending' || item.status === 'steering') continue
+    if (item.status !== 'pending') continue
+    // Reserved before its request, as in steerItem; a refusal gives it back to the queue and ends the batch.
+    item.status = 'sending'
+    renderQueue()
     const steered = await steerNow(item.text, item.attachments ?? [], key)
-    if (steered === false) break
+    if (steered === false) {
+      item.status = 'pending'
+      renderQueue()
+      break
+    }
     settleSteered(queue, key, item.id, steered)
   }
   void pumpQueue(keyOfQueue(queue, key))
@@ -6482,6 +6495,24 @@ function claimedFor(session) {
   return claimed
 }
 
+/**
+ * Steer ids an authoritative view showed gone, per session: not waiting in a view asked for after their queueing was
+ * proven. Kept apart from the claims (nothing proves this page saw a claim) but just as final: the server never puts a
+ * claimed or cancelled steer back, so an older view that still lists one, or a late answer, cannot draw it again
+ * (developer-twelve's review of e29c2b26: a Rust claim splices the inbox before it writes the message, and a missed
+ * stream leaves the absence as the only evidence).
+ */
+const goneSteers = new Map()
+
+function goneFor(session) {
+  let gone = goneSteers.get(session)
+  if (gone === undefined) {
+    gone = new Set()
+    goneSteers.set(session, gone)
+  }
+  return gone
+}
+
 /** Mark a steer claimed and retire every row that carries it; `true` when a row went. */
 function retireSteer(session, steerId) {
   claimedFor(session).add(steerId)
@@ -6505,7 +6536,7 @@ function settleSteered(queue, key, id, steerId) {
   const at = queue.findIndex((entry) => entry.id === id)
   if (at === -1) return
   const drawn = steerId === '' ? undefined : queue.find((entry, index) => index !== at && entry.steerId === steerId)
-  if (steerId === '' || claimedFor(key).has(steerId) || drawn !== undefined) {
+  if (steerId === '' || claimedFor(key).has(steerId) || goneFor(key).has(steerId) || drawn !== undefined) {
     queue.splice(at, 1)
     // The surviving row takes this answer's tick: the answer proves the steer was queued before any view asked for
     // from now on, so an older view's silence can no longer retire it (developer-twelve's combined GET/POST race).
@@ -6539,8 +6570,9 @@ function reconcileSteers(session, body, askedAt) {
   for (const turn of Array.isArray(body?.turns) ? body.turns : []) {
     if (turn?.kind === 'user' && typeof turn.steerId === 'string') claimed.add(turn.steerId)
   }
+  const gone = goneFor(session)
   const pending = (Array.isArray(body?.pendingSteers) ? body.pendingSteers : []).filter(
-    (entry) => typeof entry?.steerId === 'string' && !claimed.has(entry.steerId),
+    (entry) => typeof entry?.steerId === 'string' && !claimed.has(entry.steerId) && !gone.has(entry.steerId),
   )
   const waiting = new Set(pending.map((entry) => entry.steerId))
   const queue = queues.get(session) ?? (pending.length > 0 ? queueOf(session) : undefined)
@@ -6550,6 +6582,7 @@ function reconcileSteers(session, body, askedAt) {
     const row = queue[at]
     if (row.status !== 'steering') continue
     const vanished = !waiting.has(row.steerId) && typeof askedAt === 'number' && typeof row.acceptedAt === 'number' && askedAt > row.acceptedAt
+    if (vanished) gone.add(row.steerId)
     if (claimed.has(row.steerId) || vanished) {
       queue.splice(at, 1)
       changed = true
