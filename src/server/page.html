@@ -313,6 +313,12 @@
     padding: 16px 20px 8px;
   }
   #settings-head h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+  /** DSH's settings-header action: an outline button before the close, its error to the left of it. */
+  #settings-head h2 { flex: 1; }
+  #settings-document { margin-right: 8px; padding: 3px 10px; border: .5px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
+  #settings-document:hover, #settings-document:focus-visible { background: var(--hover); }
+  #settings-document[hidden], #settings-document-error[hidden] { display: none; }
+  #settings-document-error { margin-right: 8px; color: var(--danger, #d14343); font-size: .8rem; }
   #settings-close {
     padding: 4px 8px;
     border: none;
@@ -3502,6 +3508,13 @@
 <dialog id="settings-dialog" aria-labelledby="settings-title">
   <header id="settings-head">
     <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
+    <!--
+      DSH's settings-header action (dsh-client-ui-settings-general `SettingsDocumentAction`): Open configuration file
+      opens the profile's patch in the person's text editor, through the pathless POST /api/settings {"open":
+      "document"} (A95). Offered only on a page on this machine and only when the run has a profile patch.
+    -->
+    <span id="settings-document-error" class="meta" role="alert" data-i18n="settings.openDocumentError" hidden>Could not open the configuration file</span>
+    <button id="settings-document" type="button" data-i18n="settings.openDocument" hidden>Open configuration file</button>
     <button id="settings-close" type="button" aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </header>
   <div id="settings-body">
@@ -3649,6 +3662,8 @@ const MESSAGES = Object.freeze({
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
+    'settings.openDocument': 'Open configuration file',
+    'settings.openDocumentError': 'Could not open the configuration file',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3660,6 +3675,8 @@ const MESSAGES = Object.freeze({
     'settings.models': '模型',
     'settings.workspaces': '工作区',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
+    'settings.openDocument': '打开配置文件',
+    'settings.openDocumentError': '无法打开配置文件',
   }),
 })
 
@@ -12185,9 +12202,53 @@ function settingsWorkspaceOrder(records) {
   return ordered
 }
 
+/** Whether this page was served from this machine: DSH withholds the native open action from any other page. */
+function loopbackPage() {
+  const host = window.location.hostname
+  return host === 'localhost' || host === '[::1]' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)
+}
+
+/** Offer Open configuration file when this page is local and the run has a profile patch to open (A95). */
+async function paintSettingsDocument() {
+  const button = document.getElementById('settings-document')
+  const failure = document.getElementById('settings-document-error')
+  failure.hidden = true
+  if (!loopbackPage()) {
+    button.hidden = true
+    return
+  }
+  try {
+    const response = await fetch('/api/settings')
+    const view = response.ok ? await response.json() : null
+    button.hidden = !(view !== null && view.writable === true)
+  } catch {
+    button.hidden = true
+  }
+}
+
+document.getElementById('settings-document').addEventListener('click', async () => {
+  const button = document.getElementById('settings-document')
+  const failure = document.getElementById('settings-document-error')
+  if (button.disabled) return
+  button.disabled = true
+  failure.hidden = true
+  try {
+    const response = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ open: 'document' }),
+    })
+    if (!response.ok) failure.hidden = false
+  } catch {
+    failure.hidden = false
+  } finally {
+    button.disabled = false
+  }
+})
+
 async function showSettings() {
   fillLanguageRow()
-  await fillSettings()
+  await Promise.all([fillSettings(), paintSettingsDocument()])
   if (!settingsDialog.open) settingsDialog.showModal()
 }
 
