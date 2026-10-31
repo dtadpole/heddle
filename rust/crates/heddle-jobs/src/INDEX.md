@@ -1,8 +1,8 @@
 ---
 title: The heddle-jobs sources
 created: 2026-10-31T01:30:00Z
-modified: 2026-10-31T02:22:29Z
-version: 0.1.1
+modified: 2026-10-31T02:38:13Z
+version: 0.1.2
 description: The sources of the heddle-jobs crate, with unit tests beside the code.
 grounded_in:
   - source: src/jobs/INDEX.md
@@ -20,6 +20,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`registry.rs`](registry.rs) | `JobRegistry`: the five statuses, `<kind>-<16 hex>` ids re-rolled on collision, preflight in DSH's order, the per-owner cap, the pump, the one consuming `read` and the non-consuming `read_at`, kill, wait, remove, first-wins settle with the kill reason merged, ownership, the `job/registered` and `job/settled` session-log events, the event stream, teardown |
 | [`tools.rs`](tools.rs) | `job_output`, `job_list`, `job_kill`: DSH's descriptions, schemas and renderings |
 | [`bash.rs`](bash.rs) | background `bash`: the producer (confined by `launch_shell`, its own process group, SIGTERM then SIGKILL after 3000 ms through `heddle_sandbox::signal_process_group`, DSH's outcome mapping and sandbox notes), the running tool call read from the log, and the runner attached to the tools row's `bash` |
+| [`prompt.rs`](prompt.rs) | DSH's `tool:jobs` prompt section at the end of the system prompt of a request that offers `job_output`, through the model service's `model/request` hook (`withJobsSection`) |
 | [`notice.rs`](notice.rs) | the completion notice's text and source, and `NoticeDelivery`: who is told, wake or inject, per-session serialization, `quiet` delivery and the wake budget |
 | [`http.rs`](http.rs) | the page's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`) |
 | [`compose.rs`](compose.rs) | the `jobs` row over `heddle-session`, `heddle-agent` and `heddle-tools`, for the binary, and its teardown |

@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Background jobs, judged as DSH's `dsh-jobs-local`, `dsh-tool-jobs`, background `dsh-tool-bash` and
@@ -24,6 +24,8 @@ import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, rep
  *    session`.
  * 7. **A57** the page's follow route reads output without consuming it — the model's next `job_output` still
  *    returns it — and the kill route stops the job with `cancelled by the user`, which still notifies.
+ * 8. **A54's guidance** a model request that offers the job tools carries DSH's `tool:jobs` prompt section at the end
+ *    of its system prompt ("Track every background job id you start. …"), as the request reaches the provider.
  *
  * It is gated on the Web command alone, never on the jobs capability, so a build without background jobs fails
  * here rather than skipping. Every model step comes from the offline scripted endpoint. The script is re-read on
@@ -379,5 +381,43 @@ test('A57: the follow route reads without consuming, and the kill route stops th
   } finally {
     stream.abort()
     await server.close()
+  }
+})
+
+/** DSH's `tool:jobs` section (dsh-tool-jobs/lib/index.js:257-261), verbatim. */
+const JOBS_SECTION =
+  "Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job's work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering."
+
+test('A54 guidance: a request that offers the job tools ends its system prompt with DSH\'s tool:jobs section', async (context) => {
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), 'a one-shot turn')) return
+  const home = isolatedHome('jobs-section')
+  const work = fixtureDir('jobs-section-work')
+  mkdirSync(work, { recursive: true })
+  const double = await chatDouble({ content: 'ok' })
+  try {
+    const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
+    const run = await runCli(['--config', join(repoRoot, 'cordis.yml'), '--session-root', join(home, 'sessions'), '--turn', 'hello'], {
+      env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+      cwd: work,
+    })
+    assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
+    const bodies = double.requests.map((entry) => {
+      try {
+        return JSON.parse(entry.body)
+      } catch {
+        return undefined
+      }
+    })
+    const body = bodies.find((value) => Array.isArray(value?.tools) && value.tools.some((tool) => (tool.function ?? tool).name === 'job_output'))
+    assert.ok(body !== undefined, `a request offered job_output\nsaw tools: ${JSON.stringify(bodies.map((value) => value?.tools?.map((tool) => (tool.function ?? tool).name)))}`)
+    const system = body.messages.find((message) => message.role === 'system')
+    const text = typeof system?.content === 'string' ? system.content : (system?.content ?? []).map((part) => part.text ?? '').join('')
+    // The section ends the system prompt, after a blank line; with no other system text it is the whole prompt.
+    assert.ok(text === JOBS_SECTION || text.endsWith(`\n\n${JOBS_SECTION}`), `the system prompt ends with the tool:jobs section\nsaw: ${JSON.stringify(text.slice(-400))}`)
+    assert.equal(text.split(JOBS_SECTION).length, 2, 'the section appears once')
+  } finally {
+    await double.close()
+    removeDir(home)
+    removeDir(work)
   }
 })

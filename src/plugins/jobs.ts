@@ -6,7 +6,7 @@ import type { TurnRegistry } from '../agent/turns.ts'
 import { bashBackground } from '../jobs/bash.ts'
 import { NoticeDelivery, type NoticeHost } from '../jobs/notice.ts'
 import { JobRegistry } from '../jobs/registry.ts'
-import { jobTools } from '../jobs/tools.ts'
+import { jobTools, withJobsSection } from '../jobs/tools.ts'
 import { pendingInbox, queueSteer } from '../session/inbox.ts'
 import { attachBashBackground } from '../tools/builtin.ts'
 
@@ -176,6 +176,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       ...(config.killGraceMs !== undefined ? { killGraceMs: config.killGraceMs } : {}),
     }),
   )
+
+  /**
+   * DSH's `tool:jobs` prompt section, on every request that offers the job tools: the `model/request` waterfall is the
+   * one seam through which a row reaches the system prompt the adapter is sent (`withJobsSection`).
+   */
+  ctx.on('model/request', (request, next) => withJobsSection(next()))
 
   /** Every lifecycle change, so the page's job views refresh. Output advances are left to the page's follow poll. */
   const unsubscribe = registry.subscribe((event) => {

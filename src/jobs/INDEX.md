@@ -1,6 +1,6 @@
 ---
 title: Jobs
-version: 1.0.1
+version: 1.0.2
 description: Background jobs a session starts and collects later - the in-memory registry and its output ring, the three job tools, background bash, the completion notice that wakes an idle session, and the page's job routes.
 grounded_in:
   - source: dsh-0.2.1-rc.2
@@ -80,10 +80,13 @@ run uses.
   person's message (a user message with no `source`) resets the wake count, as DSH's claimed user message does.
 - **Background stdin is closed.** A background command's stdin is `ignore`, since nothing can ever write to it; the
   foreground run keeps its pipe.
+- **The `tool:jobs` prompt section** reaches the model through the `model/request` waterfall (`withJobsSection`):
+  DSH's text, after a blank line, at the end of the request's first `system` message, or as that message when there
+  is none, on every request that offers `job_output`. DSH composes it into its system prompt; heddle composes no
+  sections, and the session log keeps the request as the loop built it.
 - **Not ported**: `promoteOnTimeout` (a foreground call that outlives its timeout moving to the background), the
-  `outputLimitBytes` truncation of tool answers and notices (no heddle producer sets a limit), spill files, the
-  `tool:jobs` prompt section (exported as `JOBS_PROMPT_SECTION`; heddle has no seam for a plugin's prompt section), and
-  the streamed `job.list` / `job.follow` frames — the page refreshes on the `jobs` event and polls the follow route.
+  `outputLimitBytes` truncation of tool answers and notices (no heddle producer sets a limit), spill files, and the
+  streamed `job.list` / `job.follow` frames — the page refreshes on the `jobs` event and polls the follow route.
 
 ## Tests
 

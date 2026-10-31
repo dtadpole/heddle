@@ -10,7 +10,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ApprovalService } from '../src/approvals/service.ts'
 import { bashBackground, processOutcome, runningToolCall, RUN_IN_BACKGROUND_DESCRIPTION } from '../src/jobs/bash.ts'
 import { JobRegistry, type JobEvent, type JobOutcome } from '../src/jobs/registry.ts'
-import { jobTools, renderJobList, renderModelDelta, statusLine } from '../src/jobs/tools.ts'
+import { JOBS_PROMPT_SECTION, jobTools, renderJobList, renderModelDelta, statusLine, withJobsSection } from '../src/jobs/tools.ts'
 import { killProcessGroup } from '../src/sandbox/process-group.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
 import { SessionService } from '../src/session/service.ts'
@@ -378,7 +378,44 @@ test('composed as rows, the jobs plugin gives the tools row’s bash its backgro
   const id = jobIdOf(result.output)
   const waited = await ctx.tools.call('job_output', { job_id: id, wait: true, timeout_ms: 5_000 }, { cwd: workspace, session: handle, log: () => undefined })
   assert.equal(waited.output, 'hi\n[status: completed, exit code: 0]')
+  /** DSH's `tool:jobs` section reaches the adapter on a request that offers the job tools, through the waterfall. */
+  const request = {
+    endpoint: 'scripted',
+    messages: [
+      { role: 'system' as const, content: [{ type: 'text' as const, text: 'You are heddle.' }] },
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] },
+    ],
+    tools: ctx.tools.describe(),
+  }
+  const sent = ctx.waterfall('model/request', request, () => request)
+  assert.equal((sent.messages[0]?.content[0] as { text: string }).text, `You are heddle.\n\n${JOBS_PROMPT_SECTION}`)
   await ctx.fiber.dispose()
   const after = ctx.tools?.describe?.().find((spec) => spec.name === 'bash')
   assert.ok(after === undefined || (after.parameters.properties as Record<string, unknown>).run_in_background === undefined)
+  const unloaded = ctx.waterfall('model/request', request, () => request)
+  assert.equal(unloaded, request, 'without the row, the request reaches the adapter as the loop built it')
+})
+
+test('withJobsSection: DSH\'s tool:jobs section ends the system prompt of a request that offers job_output, once', () => {
+  const tools = [{ name: 'job_output', description: 'read', parameters: {} }]
+  const system = { role: 'system' as const, content: [{ type: 'text' as const, text: 'You are heddle.' }] }
+  const user = { role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }
+  assert.equal(JOBS_PROMPT_SECTION.startsWith('Track every background job id you start.'), true)
+
+  const plain = { endpoint: 'e', messages: [system, user], tools: [{ name: 'bash', description: 'run', parameters: {} }] }
+  assert.equal(withJobsSection(plain), plain, 'no job tools: untouched')
+  const noTools = { endpoint: 'e', messages: [system, user] }
+  assert.equal(withJobsSection(noTools), noTools)
+
+  const added = withJobsSection({ endpoint: 'e', messages: [system, user], tools })
+  assert.deepEqual(added.messages, [{ role: 'system', content: [{ type: 'text', text: `You are heddle.\n\n${JOBS_PROMPT_SECTION}` }] }, user])
+  assert.equal(system.content[0]?.text, 'You are heddle.', 'the loop\'s request is not mutated')
+  assert.equal(withJobsSection(added), added, 'a request that has the section is not given it twice')
+
+  const second = { role: 'system' as const, content: [{ type: 'text' as const, text: 'a runtime note' }] }
+  const onlyFirst = withJobsSection({ endpoint: 'e', messages: [system, second, user], tools })
+  assert.deepEqual(onlyFirst.messages.slice(1), [second, user], 'only the first system message, the system prompt, carries it')
+
+  const bare = withJobsSection({ endpoint: 'e', messages: [user], tools })
+  assert.deepEqual(bare.messages, [{ role: 'system', content: [{ type: 'text', text: JOBS_PROMPT_SECTION }] }, user])
 })
