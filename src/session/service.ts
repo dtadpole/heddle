@@ -109,6 +109,8 @@ export class SessionService extends Service {
     readonly model?: string
     readonly reasoningEffort?: string
     readonly title?: string
+    /** The agent preset a new session runs under (inventory A96); ignored when resuming, since a session keeps its own. */
+    readonly preset?: string
   } = {}): SessionHandle {
     if (options.resume !== undefined) {
       const existing = this.store.open(options.resume)
@@ -121,6 +123,7 @@ export class SessionService extends Service {
       ...(options.model !== undefined ? { model: options.model } : {}),
       ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
       ...(options.title !== undefined ? { title: options.title } : {}),
+      ...(options.preset !== undefined ? { preset: options.preset } : {}),
     })
   }
 
@@ -134,7 +137,13 @@ export class SessionService extends Service {
    */
   createAt(
     branch: string,
-    options: { readonly title?: string; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } = {},
+    options: {
+      readonly title?: string
+      readonly endpoint?: string
+      readonly model?: string
+      readonly reasoningEffort?: string
+      readonly preset?: string
+    } = {},
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
     const taken = existingSessionNames(canonical)
@@ -177,6 +186,8 @@ export class SessionService extends Service {
     /** The child records its parent, which is the provenance DSH's header keeps (`parentSession`). */
     const handle = this.store.fork(id, { parentSession: id })
     if (handle === null) return null
+    /** A fork continues its source, so it runs under the source's preset (inventory A96). */
+    if (source.preset !== undefined) this.store.recordPreset(handle.id, source.preset)
     const created = this.store.list().find((one) => one.id === handle.id)
     const base = source.title !== undefined && source.title.trim().length > 0 ? source.title.trim() : 'session'
     const title = forkTitle(base, this.store.list().map((one) => one.title ?? ''))
@@ -248,7 +259,14 @@ export class SessionService extends Service {
    */
   openAt(
     folder: string,
-    options: { readonly fresh?: boolean; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string; readonly title?: string } = {},
+    options: {
+      readonly fresh?: boolean
+      readonly endpoint?: string
+      readonly model?: string
+      readonly reasoningEffort?: string
+      readonly title?: string
+      readonly preset?: string
+    } = {},
   ): SessionHandle {
     const canonical = canonicalPath(folder)
     if (options.fresh !== true) {
@@ -264,6 +282,7 @@ export class SessionService extends Service {
       ...(options.model !== undefined ? { model: options.model } : {}),
       ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
       ...(options.title !== undefined ? { title: options.title } : {}),
+      ...(options.preset !== undefined ? { preset: options.preset } : {}),
     })
   }
 

@@ -96,6 +96,12 @@ impl SessionMeta {
     pub fn selection(&self) -> SessionSelection {
         crate::selection::session_request_selection(Some(self))
     }
+
+    /// The agent preset the session runs under (inventory A96), read from `rest` so a listing keeps the store's key
+    /// order; `None` until a turn records one.
+    pub fn preset(&self) -> Option<&str> {
+        self.rest.get("preset").and_then(Value::as_str)
+    }
 }
 
 /// How `/api/turn` opens the session a turn runs in, when it names no folder.
@@ -109,6 +115,8 @@ pub struct StartSession {
     pub title: Option<String>,
     /// What a session created by this request is born with.
     pub selection: SessionSelection,
+    /// The agent preset a session created by this request runs under (inventory A96); a resumed one keeps its own.
+    pub preset: Option<String>,
 }
 
 /// How a folder's session is opened (`openAt`).
@@ -118,6 +126,9 @@ pub struct OpenAt {
     pub fresh: bool,
     pub title: Option<String>,
     pub selection: SessionSelection,
+    /// The agent preset a session this call creates runs under (inventory A96); the folder's existing one keeps its
+    /// own.
+    pub preset: Option<String>,
 }
 
 /// A session created at a branch with its definition written there.
@@ -181,9 +192,13 @@ pub trait SessionService: Send + Sync {
     /// The session a folder is bound to, created when it has none (or when `fresh`).
     fn open_at(&self, folder: &Path, options: OpenAt) -> Result<String, ServiceError>;
 
-    /// Start a session at a branch and write its definition there.
-    fn create_at(&self, branch: &Path, title: Option<&str>)
-    -> Result<CreatedSession, ServiceError>;
+    /// Start a session at a branch and write its definition there, under `preset` when one is named (inventory A96).
+    fn create_at(
+        &self,
+        branch: &Path,
+        title: Option<&str>,
+        preset: Option<&str>,
+    ) -> Result<CreatedSession, ServiceError>;
 
     /// Fork a session at its last completed turn.
     fn fork(&self, id: &str) -> ForkOutcome;
@@ -215,6 +230,14 @@ pub trait SessionService: Send + Sync {
 
     /// The folder the session belongs to, if it has one.
     fn folder(&self, id: &str) -> Option<PathBuf>;
+
+    /// Record the agent preset a session runs under, **only when it has none** (`recordPreset`, inventory A96), and
+    /// answer the record as it now is; `None` for an unknown session. The default records nothing, for a store that
+    /// keeps no presets.
+    fn record_preset(&self, id: &str, preset: &str) -> Option<SessionMeta> {
+        let _ = (id, preset);
+        None
+    }
 
     /// Content search (`GET /api/sessions/search`): the sessions whose user or assistant messages hold the query
     /// as a phrase, ranked, at most 20, with snippets (`heddle_session::SessionSearchIndex`). The route has already
@@ -556,6 +579,10 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// The agent presets (inventory A96), from the optional `presets` row: `GET /api/presets` answers them, and a
+    /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
+    /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
+    pub presets: Option<Arc<heddle_config::PresetRoster>>,
     /// The live-turn registry a Stop also asks; `None`: the server's own runs are the only turns it stops.
     pub interrupter: Option<Arc<dyn TurnInterrupter>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
@@ -585,6 +612,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            presets: None,
             interrupter: None,
             cwd,
         }
@@ -630,6 +658,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            presets: None,
             interrupter: None,
             cwd,
         }
@@ -661,6 +690,7 @@ impl SessionService for UnavailableSessions {
         &self,
         _branch: &Path,
         _title: Option<&str>,
+        _preset: Option<&str>,
     ) -> Result<CreatedSession, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
@@ -823,6 +853,12 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    /// The profile's agent presets (inventory A96).
+    pub fn presets(mut self, roster: Arc<heddle_config::PresetRoster>) -> Self {
+        self.harness.presets = Some(roster);
         self
     }
 
