@@ -311,3 +311,113 @@ test('content search: a failed host request leaves the name matches with no warn
     for (const dir of [home, root]) removeDir(dir)
   }
 })
+
+/**
+ * GitHub issue #151: a press on a search hit, or on an archived hit's Unarchive button, was lost when the hits redrew
+ * between the press and the release. `applySearch` rebuilt every hit with `replaceChildren` on each redraw — the host's
+ * content answer 250 ms after the last keystroke, and the tree's toggle re-applying a standing search — so the press and
+ * the release landed on two different elements and the browser fired no click. DSH's result list is keyed by session
+ * (dsh-client-ui-workspace, a React list), so its rows survive the update and the click lands.
+ *
+ * The host's answer is held back 1.5 s inside the page, so the press goes down before it and the release comes after the
+ * redraw it causes. Each hit is a name match whose conversation does not hold the query, so the redraw adds no snippet line
+ * that would move the control from under a still pointer.
+ */
+test('a press on a search hit, or on its Unarchive button, lands though the host\'s answer redraws the hits between the press and the release (#151)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('content-search-redraw')
+  const root = fixtureDir('content-search-redraw-repo')
+  const folders = ['desk', 'shelf'].map((name) => join(root, name))
+  for (const folder of folders) mkdirSync(folder, { recursive: true })
+  const { config } = scriptedConfig({ home, steps: [{ text: 'noted' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `registered the workspace (${added.text})`)
+    /** Two sessions named after the turn, so their titles hold the query and their conversations do not. */
+    const ids = []
+    for (const folder of folders) {
+      const ran = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'a plain question', folder }) })
+      assert.equal(ran.status, 200, `a turn ran in ${folder} (${ran.status})`)
+      const listed = JSON.parse((await api(server.url, cookie, '/api/sessions')).text)
+      const real = (await import('node:fs')).realpathSync(folder)
+      ids.push(listed.find((meta) => meta.cwd === real)?.id)
+    }
+    const [desk, shelf] = ids
+    assert.ok(desk && shelf, 'both sessions are listed')
+    for (const [id, title] of [
+      [desk, 'quokka desk'],
+      [shelf, 'quokka shelf'],
+    ]) {
+      const renamed = await api(server.url, cookie, `/api/sessions/${id}/title`, { method: 'POST', body: JSON.stringify({ title }) })
+      assert.equal(renamed.status, 200, `named ${title} (${renamed.text})`)
+    }
+    const archived = await api(server.url, cookie, `/api/sessions/${shelf}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(archived.status, 200, `archived quokka shelf (${archived.text})`)
+    const isArchived = async () => JSON.parse((await api(server.url, cookie, '/api/sessions')).text).find((meta) => meta.id === shelf)?.archived === true
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    /** All conversations, so the archived session is a hit, with its Unarchive button. */
+    await browser.evaluate(`localStorage.setItem('heddle.tree.archived.v1', 'show')`)
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      window.fetch = (input, init) => {
+        const url = String(input instanceof Request ? input.url : input)
+        if (!url.includes('/api/sessions/search')) return original(input, init)
+        return new Promise((done) => setTimeout(done, 1500)).then(() => original(input, init))
+      }
+      return true
+    })()`)
+    const type = (query) => browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    const pending = `(() => { const box = document.getElementById('search-pending'); return box !== null && !box.hidden })()`
+    const centre = async (expression) =>
+      JSON.parse(await browser.evaluate(`JSON.stringify((() => { const node = ${expression}; if (!node) return null; const r = node.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } })())`))
+    const pointer = (kind, at) => browser.send('Input.dispatchMouseEvent', { type: kind, x: at.x, y: at.y, button: 'left', clickCount: 1 })
+    const hit = (title) => `[...document.querySelectorAll('#search-results .hit')].find((entry) => entry.querySelector('.hit-title')?.textContent === ${JSON.stringify(title)})`
+
+    /** The Unarchive button: pressed while the host is still asked, released after its answer redrew the hits. */
+    await type('quokka shelf')
+    assert.ok(await browser.waitFor(`${hit('quokka shelf')}?.querySelector('.hit-unarchive') != null && ${pending}`, 10_000), 'the archived hit is drawn with its Unarchive button while the host is asked')
+    const button = await centre(`${hit('quokka shelf')}.querySelector('.hit-unarchive')`)
+    await browser.evaluate(`window.__pressed = ${hit('quokka shelf')}.querySelector('.hit-unarchive'); true`)
+    await pointer('mouseMoved', button)
+    await pointer('mousePressed', button)
+    assert.ok(await browser.waitFor(`!${pending}`, 10_000), 'the host answered and the hits redrew while the button was held')
+    assert.equal(await browser.evaluate(`window.__pressed.isConnected && ${hit('quokka shelf')}?.querySelector('.hit-unarchive') === window.__pressed`), true, 'the button under the pointer is the one the press went down on')
+    await pointer('mouseReleased', button)
+    let restored = false
+    for (const end = Date.now() + 5_000; Date.now() < end && !restored; ) {
+      restored = !(await isArchived())
+      if (!restored) await new Promise((done) => setTimeout(done, 100))
+    }
+    assert.equal(restored, true, 'the release is a click on Unarchive: the session is unarchived')
+
+    /** A hit: pressed while the host is asked, released after the redraw, and it opens. */
+    await type('quokka desk')
+    assert.ok(await browser.waitFor(`${hit('quokka desk')} != null && ${pending}`, 10_000), 'the hit is drawn while the host is asked')
+    const title = await centre(`${hit('quokka desk')}.querySelector('.hit-title')`)
+    await pointer('mouseMoved', title)
+    await pointer('mousePressed', title)
+    assert.ok(await browser.waitFor(`!${pending}`, 10_000), 'the host answered and the hits redrew while the hit was held')
+    await pointer('mouseReleased', title)
+    assert.ok(
+      await browser.waitFor(`document.getElementById('session-title').textContent.includes('quokka desk')`, 10_000),
+      `the release is a click on the hit: the session opens\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('session-title').textContent)`)}`,
+    )
+    assert.equal(await browser.evaluate(`document.getElementById('session-search').value`), '', 'and the search is put away')
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
+  }
+})

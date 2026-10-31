@@ -17343,6 +17343,122 @@ function workspaceNamer(index) {
 /** The latest search asked for; an answer to an older keystroke is dropped rather than drawn over a newer one. */
 let searchGeneration = 0
 
+/** The hit drawn for each session in the result list, `id → { archived, element, title, place, restore, snippet }` (#151). */
+const searchHits = new Map()
+
+/**
+ * Put `wanted` into `container` as its only children, in that order, taking out and moving as few elements as it can
+ * (#151): what is no longer wanted is removed, a new element is inserted where it goes, and an element that stays in order
+ * is not touched — the way a keyed React list places its rows (an element is moved only when one before it in the old
+ * order now comes after it). A press goes down on an element and a click needs the release on that same element, which
+ * an element taken out of the document in between, even to be put back, no longer is.
+ */
+function placeKeyed(container, wanted) {
+  const keep = new Set(wanted)
+  for (const child of Array.from(container.children)) if (!keep.has(child)) child.remove()
+  const at = new Map(Array.from(container.children).map((child, index) => [child, index]))
+  let last = -1
+  let previous = null
+  for (const element of wanted) {
+    const index = at.get(element)
+    if (index !== undefined && index > last) {
+      last = index
+      previous = element
+      continue
+    }
+    const next = previous === null ? container.firstElementChild : previous.nextElementSibling
+    if (next !== element) container.insertBefore(element, next)
+    previous = element
+  }
+}
+
+/**
+ * The search hit for one session, drawn the first time and updated in place after: its title, its workspace and age, the
+ * host's snippet, and for an archived hit its `Unarchive session` button, so the element under the pointer survives the
+ * redraw (#151). A hit whose archived state changed is drawn again, since the two are different elements (a `div` holding
+ * a button, or a button). The handlers are set on every redraw, so they act on the session as it was last listed.
+ */
+function searchHit(meta, workspace, snippet) {
+  /**
+   * An **archived** hit is DSH's archived `SearchResultItem`: it cannot be opened — choosing it says why, keeping the
+   * query and the view where they are — and it carries an `Unarchive session` button that restores it in place (the
+   * hit then redraws as an ordinary one). A `div` treeitem, since a button cannot hold a button.
+   */
+  const archived = meta.archived === true
+  let hit = searchHits.get(meta.id)
+  if (hit === undefined || hit.archived !== archived) {
+    const element = document.createElement(archived ? 'div' : 'button')
+    if (archived) {
+      element.tabIndex = 0
+      element.dataset.archived = 'true'
+      element.setAttribute('aria-description', SessionArchive.TEXT.archivedNotOpenable)
+    } else element.type = 'button'
+    element.className = 'hit'
+    element.setAttribute('role', 'treeitem')
+    const title = document.createElement('span')
+    title.className = 'hit-title'
+    const place = document.createElement('span')
+    place.className = 'hit-workspace'
+    element.append(title, place)
+    let restore = null
+    if (archived) {
+      restore = document.createElement('button')
+      restore.type = 'button'
+      restore.className = 'hit-unarchive'
+      restore.setAttribute('aria-label', SessionArchive.TEXT.unarchiveSession)
+      restore.title = SessionArchive.TEXT.unarchive
+      restore.append(kindIcon('archive-restore', false))
+      element.append(restore)
+    }
+    hit = { archived, element, title, place, restore, snippet: null }
+    searchHits.set(meta.id, hit)
+  }
+  /**
+   * DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`; `sessionTitle`,
+   * `:998-999`), never the id (#24). `WorkspaceTree.sessionLabel` differs only by the `New Session` it gives the open
+   * blank in the tree, and no blank is a hit, open or not (`WorkspaceTree.search`; DSH skips `summary.blank`, `:1185`).
+   */
+  if (hit.title.textContent !== (WorkspaceTree.storedTitle(meta) ?? 'Untitled')) hit.title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
+  /**
+   * The workspace, and the **age**. DSH's results read `title workspace`; the age is added because a store
+   * can hold several sessions with the same first message — measured: a search for `ready` returned 34 rows
+   * with one title between them — and a result a reader cannot tell apart is a result they cannot choose.
+   * It is the age the hits are ordered by: last written, else created.
+   */
+  const placeText = [workspace, relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part !== undefined && part.length > 0).join(' · ')
+  if (hit.place.textContent !== placeText) hit.place.textContent = placeText
+  /** The host's snippet takes a line of its own under the title and the workspace (`.hit-snippet` wraps), last in the hit. */
+  if (typeof snippet === 'string') {
+    if (hit.snippet === null) {
+      const quote = document.createElement('span')
+      quote.className = 'hit-snippet'
+      hit.element.append(quote)
+      hit.snippet = quote
+    }
+    if (hit.snippet.textContent !== snippet) hit.snippet.textContent = snippet
+  } else if (hit.snippet !== null) {
+    hit.snippet.remove()
+    hit.snippet = null
+  }
+  const element = hit.element
+  if (archived) {
+    hit.restore.onclick = async (clickEvent) => {
+      clickEvent.stopPropagation()
+      const result = await setSessionFlags({ kind: 'session', session: meta, archived: true, path: definitionOf.get(meta.id) }, { archived: false })
+      if (result.ok) await applySearch()
+    }
+    element.onclick = () => showArchiveNotice('archivedNotOpenable')
+    element.onkeydown = (keyEvent) => {
+      if (keyEvent.target !== element || (keyEvent.key !== 'Enter' && keyEvent.key !== ' ')) return
+      keyEvent.preventDefault()
+      showArchiveNotice('archivedNotOpenable')
+    }
+    return element
+  }
+  element.onclick = () => void openSearchResult(meta.id)
+  return element
+}
+
 /**
  * The search box, as DSH has it: a query **replaces** the tree with a flat result list whose rows say which
  * workspace each hit is in, and an empty query restores the tree.
@@ -17361,6 +17477,7 @@ async function applySearch() {
   if (query.length === 0) {
     results.hidden = true
     results.replaceChildren()
+    searchHits.clear()
     treeList.hidden = false
     note.hidden = true
     note.textContent = ''
@@ -17376,6 +17493,7 @@ async function applySearch() {
   if (index === null) {
     /** Nothing read and nothing held: the search did not run, which is not the same as finding nothing (#58). */
     results.replaceChildren()
+    searchHits.clear()
     paintSearchPending(0)
     note.hidden = false
     note.textContent = 'Search could not run: the session list did not load'
@@ -17387,75 +17505,19 @@ async function applySearch() {
   const remote = contentSearch.query === query ? contentSearch : { query, status: 'loading', items: [], hasMore: false }
   const pending = remote.status === 'loading'
   const { items, hasMore } = ContentSearch.merge(index.workspaces, index.sessions, query, remote, { archived: archiveMode })
-  results.replaceChildren(
-    ...items.map(({ meta, workspace, snippet }) => {
-      /**
-       * An **archived** hit is DSH's archived `SearchResultItem`: it cannot be opened — choosing it says why, keeping the
-       * query and the view where they are — and it carries an `Unarchive session` button that restores it in place (the
-       * hit then redraws as an ordinary one). A `div` treeitem, since a button cannot hold a button.
-       */
-      const archived = meta.archived === true
-      const button = document.createElement(archived ? 'div' : 'button')
-      if (archived) {
-        button.tabIndex = 0
-        button.dataset.archived = 'true'
-        button.setAttribute('aria-description', SessionArchive.TEXT.archivedNotOpenable)
-      } else button.type = 'button'
-      button.className = 'hit'
-      button.setAttribute('role', 'treeitem')
-      const title = document.createElement('span')
-      title.className = 'hit-title'
-      /**
-       * DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`; `sessionTitle`,
-       * `:998-999`), never the id (#24). `WorkspaceTree.sessionLabel` differs only by the `New Session` it gives the open
-       * blank in the tree, and no blank is a hit, open or not (`WorkspaceTree.search`; DSH skips `summary.blank`, `:1185`).
-       */
-      title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
-      const place = document.createElement('span')
-      place.className = 'hit-workspace'
-      /**
-       * The workspace, and the **age**. DSH's results read `title workspace`; the age is added because a store
-       * can hold several sessions with the same first message — measured: a search for `ready` returned 34 rows
-       * with one title between them — and a result a reader cannot tell apart is a result they cannot choose.
-       * It is the age the hits are ordered by: last written, else created.
-       */
-      place.textContent = [workspace, relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part !== undefined && part.length > 0).join(' · ')
-      button.append(title, place)
-      /** The host's snippet takes a line of its own under the title and the workspace (`.hit-snippet` wraps). */
-      const addSnippet = () => {
-        if (typeof snippet !== 'string') return
-        const quote = document.createElement('span')
-        quote.className = 'hit-snippet'
-        quote.textContent = snippet
-        button.append(quote)
-      }
-      if (archived) {
-        const restore = document.createElement('button')
-        restore.type = 'button'
-        restore.className = 'hit-unarchive'
-        restore.setAttribute('aria-label', SessionArchive.TEXT.unarchiveSession)
-        restore.title = SessionArchive.TEXT.unarchive
-        restore.append(kindIcon('archive-restore', false))
-        restore.onclick = async (clickEvent) => {
-          clickEvent.stopPropagation()
-          const result = await setSessionFlags({ kind: 'session', session: meta, archived: true, path: definitionOf.get(meta.id) }, { archived: false })
-          if (result.ok) await applySearch()
-        }
-        button.append(restore)
-        addSnippet()
-        button.onclick = () => showArchiveNotice('archivedNotOpenable')
-        button.onkeydown = (keyEvent) => {
-          if (keyEvent.target !== button || (keyEvent.key !== 'Enter' && keyEvent.key !== ' ')) return
-          keyEvent.preventDefault()
-          showArchiveNotice('archivedNotOpenable')
-        }
-        return button
-      }
-      addSnippet()
-      button.onclick = () => void openSearchResult(meta.id)
-      return button
-    }),
-  )
+  /**
+   * Each hit is the element it was on the last redraw, keyed by session (#151), as DSH's result list is a keyed React
+   * list (dsh-client-ui-workspace): a redraw comes 250 ms after the last keystroke with the host's answer, and whenever the
+   * tree's `toggle` re-applies a standing search, and one that rebuilt every hit put a press and its release on two
+   * different elements, so the browser fired no click and the hit (or its Unarchive button) did nothing.
+   */
+  const shown = new Set()
+  const hits = items.map(({ meta, workspace, snippet }) => {
+    shown.add(meta.id)
+    return searchHit(meta, workspace, snippet)
+  })
+  for (const id of [...searchHits.keys()]) if (!shown.has(id)) searchHits.delete(id)
+  placeKeyed(results, hits)
   paintSearchPending(pending ? (items.length === 0 ? 2 : 1) : 0)
   /**
    * DSH's two sentences (`search.noMatches`, `search.hasMore`, dsh-client-ui-workspace `lib/client.js:4909-4910`). "No

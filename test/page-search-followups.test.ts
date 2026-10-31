@@ -16,6 +16,7 @@ import { test } from 'node:test'
  * - N3: revealing a search hit stops once another session became the open one during any of its awaits.
  * - N4: a one-column list that could not read the sessions still ends its redraw: the held keyboard place is let go.
  * - N5: the archive notice's "filter archived sessions" redraws a standing search under the filter it switched to.
+ * - #151: a redraw of the hits keeps each hit's element (DSH's keyed list), so a press that straddles it still lands.
  */
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
@@ -64,6 +65,10 @@ class FakeElement {
   onclick: unknown = null
   onkeydown: unknown = null
   children: FakeElement[] = []
+  /** The element holding this one, as the DOM's `parentNode`. */
+  parent: FakeElement | null = null
+  /** How many times this element was taken out of the element holding it: removed, moved, or replaced with its siblings. */
+  detached = 0
   readonly dataset: Record<string, string> = {}
   readonly attributes = new Map<string, string>()
   readonly listeners = new Map<string, (event?: unknown) => unknown>()
@@ -71,6 +76,31 @@ class FakeElement {
 
   constructor(registry: Map<string, FakeElement>) {
     this.registry = registry
+  }
+
+  get firstElementChild(): FakeElement | null {
+    return this.children[0] ?? null
+  }
+
+  get nextElementSibling(): FakeElement | null {
+    if (this.parent === null) return null
+    return this.parent.children[this.parent.children.indexOf(this) + 1] ?? null
+  }
+
+  /** Take this element out of the one holding it, as the DOM's `remove()` (and every move) does. */
+  remove(): void {
+    if (this.parent === null) return
+    this.parent.children.splice(this.parent.children.indexOf(this), 1)
+    this.parent = null
+    this.detached += 1
+  }
+
+  insertBefore(node: FakeElement, reference: FakeElement | null): void {
+    node.remove()
+    const at = reference === null ? -1 : this.children.indexOf(reference)
+    if (at === -1) this.children.push(node)
+    else this.children.splice(at, 0, node)
+    node.parent = this
   }
 
   setAttribute(name: string, value: unknown): void {
@@ -86,11 +116,17 @@ class FakeElement {
   }
 
   append(...nodes: FakeElement[]): void {
-    this.children.push(...nodes)
+    for (const node of nodes) {
+      node.remove()
+      this.children.push(node)
+      node.parent = this
+    }
   }
 
+  /** Every child is taken out first, the ones put back too, as the DOM's `replaceChildren` does. */
   replaceChildren(...nodes: FakeElement[]): void {
-    this.children = nodes
+    for (const child of [...this.children]) child.remove()
+    this.append(...nodes)
   }
 
   after(node: FakeElement): void {
@@ -153,7 +189,7 @@ interface SearchPage {
  * The search's own code — from `let searchIndex = null` to `openSearchResult`, which holds the index, `applySearch` and
  * the host request — and `refreshSessions`, which is where the index goes stale. `fetch` is the test's.
  */
-function searchPage(fetch: (url: string) => Promise<Reply>, noted: Meta[][]) {
+function searchPage(fetch: (url: string) => Promise<Reply>, noted: Meta[][], options: { archive?: string } = {}) {
   const { registry, document } = fakeDocument(['session-search', 'search-results', 'search-note', 'search-more'])
   const timers: (() => void)[] = []
   const treeList = new FakeElement(registry)
@@ -169,7 +205,7 @@ function searchPage(fetch: (url: string) => Promise<Reply>, noted: Meta[][]) {
     'env',
     `const { document, fetch, treeList, noteSessions, setTimeout, clearTimeout } = env
     ${pure}
-    let archiveMode = 'hide'
+    let archiveMode = ${JSON.stringify(options.archive ?? 'hide')}
     let groupingMode = 'tree'
     let treeGroups = []
     let current = null
@@ -200,7 +236,14 @@ function searchPage(fetch: (url: string) => Promise<Reply>, noted: Meta[][]) {
       more: more.hidden ? null : more.textContent,
     }
   }
-  return { run, search }
+  /** Let every answer and the debounce run, without typing anything. */
+  const settle = async () => {
+    for (let round = 0; round < 20; round += 1) {
+      await tick(1)
+      for (const due of timers.splice(0)) due()
+    }
+  }
+  return { run, search, settle, registry }
 }
 
 /** A network whose every request waits until the test answers it. */
@@ -538,4 +581,83 @@ test('N5: "filter archived sessions" in the archive notice redraws a standing se
   await filter.listeners.get('click')!()
   assert.equal(page.mode(), 'show', 'the filter now shows archived sessions')
   assert.deepEqual(log, ['remember show', 'renderTree show', 'applySearch show'], 'the tree is redrawn, then the search, both under the new filter')
+})
+
+/**
+ * #151: the hits were rebuilt with `replaceChildren` on every redraw — the host's content answer 250 ms after the last
+ * keystroke, and the tree's `toggle` re-applying a standing search — so a press on a hit (or its Unarchive button) and its
+ * release landed on two different elements, and the browser fired no click. DSH's result list is keyed by session
+ * (dsh-client-ui-workspace, a React list), so its rows survive the update. The fake document counts every time an element
+ * is taken out of the list, which is what loses the click.
+ */
+const kestrel = [session('s-plan', 1, { title: 'Kestrel plan' }), session('s-old', 2, { title: 'Kestrel old', archived: true })]
+function kestrelRoute(contentItems: { sessionId: string; snippet: string }[]) {
+  return async (url: string): Promise<Reply> => {
+    if (url === '/api/sessions') return answer(kestrel)
+    if (url === '/api/tree') return tree
+    if (url === '/api/workspaces') return answer({ workspaces: [workspace('/code/repo', kestrel.map((meta) => meta.id))] })
+    if (url.startsWith('/api/sessions/search')) return answer({ items: contentItems, hasMore: false })
+    return answer(null, 404)
+  }
+}
+
+test('#151: the content answer redraws the hits in place: each hit, and an archived hit\'s Unarchive button, is the element it was', async () => {
+  const { run, settle, registry } = searchPage(kestrelRoute([{ sessionId: 's-plan', snippet: 'the Kestrel plan, revised' }]), [], { archive: 'show' })
+  const results = registry.get('search-results')!
+  registry.get('session-search')!.value = 'Kestrel'
+  await run.applySearch()
+  const drawn = [...results.children]
+  assert.deepEqual(
+    drawn.map((hit) => hit.children[0]?.textContent),
+    ['Kestrel old', 'Kestrel plan'],
+    'the name matches are drawn at once, newest first',
+  )
+  const restore = drawn[0]!.children.find((part) => part.className === 'hit-unarchive')
+  assert.ok(restore !== undefined, 'the archived hit carries its Unarchive button')
+
+  /** A press goes down on the hit and on the button here; the host answers 250 ms later and the hits redraw. */
+  await settle()
+  assert.deepEqual([...results.children], drawn, 'the same elements, in the same places')
+  assert.deepEqual(
+    drawn.map((hit) => hit.detached),
+    [0, 0],
+    'neither hit was ever taken out of the list, so a release on it is a click on it',
+  )
+  assert.equal(drawn[0]!.children.includes(restore), true, 'the Unarchive button is the one the press went down on')
+  assert.equal(restore.detached, 0)
+  const snippet = drawn[1]!.children.find((part) => part.className === 'hit-snippet')
+  assert.equal(snippet?.textContent, 'the Kestrel plan, revised', 'and the host\'s snippet joins the hit it belongs to')
+
+  /** The tree's toggle re-applies a standing search: one more redraw, the same elements again. */
+  await run.applySearch()
+  assert.deepEqual([...results.children], drawn)
+  assert.deepEqual(drawn.map((hit) => hit.detached), [0, 0])
+  assert.equal(drawn[1]!.children.filter((part) => part.className === 'hit-snippet').length, 1, 'the snippet is not added twice')
+})
+
+test('#151: a hit that leaves is taken out, a new one comes in, and the hits that stay are not moved', async () => {
+  const { run, settle, registry } = searchPage(kestrelRoute([]), [], { archive: 'show' })
+  const results = registry.get('search-results')!
+  registry.get('session-search')!.value = 'Kestrel'
+  await run.applySearch()
+  await settle()
+  const [old, plan] = [...results.children]
+  registry.get('session-search')!.value = 'Kestrel plan'
+  await run.applySearch()
+  await settle()
+  assert.deepEqual([...results.children], [plan], 'only the plan is left, and it is the element it was')
+  assert.equal(plan!.detached, 0, 'never taken out')
+  assert.equal(old!.parent, null, 'the old hit is gone from the list')
+  registry.get('session-search')!.value = 'Kestrel'
+  await run.applySearch()
+  await settle()
+  const again = [...results.children]
+  assert.equal(again[1], plan, 'the plan keeps its element when the old one comes back above it')
+  assert.equal(plan!.detached, 0, 'and is not moved for it')
+  assert.deepEqual(again.map((hit) => hit.children[0]?.textContent), ['Kestrel old', 'Kestrel plan'])
+
+  /** An empty query puts the search away; the next one draws fresh elements. */
+  registry.get('session-search')!.value = ''
+  await run.applySearch()
+  assert.equal(results.children.length, 0)
 })

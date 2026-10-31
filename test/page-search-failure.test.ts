@@ -69,12 +69,36 @@ class FakeElement {
   tabIndex = -1
   onclick: unknown = null
   children: FakeElement[] = []
+  /** The element holding this one: the hits are placed by key (#151), which moves and removes single elements. */
+  parent: FakeElement | null = null
   readonly dataset: Record<string, string> = {}
   readonly attributes = new Map<string, string>()
   readonly registry: Map<string, FakeElement>
 
   constructor(registry: Map<string, FakeElement>) {
     this.registry = registry
+  }
+
+  get firstElementChild(): FakeElement | null {
+    return this.children[0] ?? null
+  }
+
+  get nextElementSibling(): FakeElement | null {
+    return this.parent === null ? null : (this.parent.children[this.parent.children.indexOf(this) + 1] ?? null)
+  }
+
+  remove(): void {
+    if (this.parent === null) return
+    this.parent.children.splice(this.parent.children.indexOf(this), 1)
+    this.parent = null
+  }
+
+  insertBefore(node: FakeElement, reference: FakeElement | null): void {
+    node.remove()
+    const at = reference === null ? -1 : this.children.indexOf(reference)
+    if (at === -1) this.children.push(node)
+    else this.children.splice(at, 0, node)
+    node.parent = this
   }
 
   setAttribute(name: string, value: unknown): void {
@@ -86,11 +110,16 @@ class FakeElement {
   }
 
   append(...nodes: FakeElement[]): void {
-    this.children.push(...nodes)
+    for (const node of nodes) {
+      node.remove()
+      this.children.push(node)
+      node.parent = this
+    }
   }
 
   replaceChildren(...nodes: FakeElement[]): void {
-    this.children = nodes
+    for (const child of [...this.children]) child.remove()
+    this.append(...nodes)
   }
 
   after(node: FakeElement): void {
