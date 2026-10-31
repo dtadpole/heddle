@@ -418,6 +418,8 @@ fn request_id(id: &RequestId) -> String {
 pub struct OutsideComponent {
     row: String,
     tools: Vec<ToolSpec>,
+    /// Per declared tool, in order: whether it declared itself `concurrencySafe`.
+    safe: Vec<bool>,
     listeners: Vec<serde_json::Value>,
     child: Mutex<Option<Child>>,
     connection: Arc<Connection>,
@@ -521,6 +523,11 @@ impl OutsideComponent {
 
         Ok(Self {
             row,
+            safe: initialized
+                .tools
+                .iter()
+                .map(|tool| tool.concurrency_safe)
+                .collect(),
             tools: initialized.tools.into_iter().map(ToolSpec::from).collect(),
             listeners: initialized.listeners,
             child: Mutex::new(Some(child)),
@@ -544,15 +551,22 @@ impl OutsideComponent {
     }
 
     /// One [`ProcessTool`] per declared spec, each forwarding its calls over this connection.
+    /// A tool the component declared `concurrencySafe` may share a step's parallel group, as a built-in read does.
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools
             .iter()
-            .map(|spec| {
-                Arc::new(ProcessTool {
+            .enumerate()
+            .map(|(index, spec)| {
+                let tool = Arc::new(ProcessTool {
                     spec: spec.clone(),
                     row: self.row.clone(),
                     connection: Arc::clone(&self.connection),
-                }) as Arc<dyn Tool>
+                }) as Arc<dyn Tool>;
+                if self.safe.get(index).copied().unwrap_or(false) {
+                    crate::tool::parallel_safe(tool)
+                } else {
+                    tool
+                }
             })
             .collect()
     }
@@ -874,6 +888,11 @@ mod tests {
                     }
                     let tools = match mode.as_str() {
                         "blank" => json!([{ "name": "", "description": "" }]),
+                        // `safe` declares two tools, one of them parallel-safe.
+                        "safe" => json!([
+                            { "name": "peek", "description": "Read something.", "concurrencySafe": true },
+                            { "name": "poke", "description": "Change something." }
+                        ]),
                         // `dead` declares a real tool and then exits: the row loads, then everything fails.
                         _ => json!([{
                             "name": "shout",
@@ -989,6 +1008,25 @@ mod tests {
 
     fn sandbox_at(root: PathBuf) -> Arc<dyn SandboxGate> {
         Arc::new(TestSandbox::new(root))
+    }
+
+    #[tokio::test]
+    async fn a_tool_declared_concurrency_safe_shares_a_parallel_group_and_the_rest_do_not() {
+        let root = workspace("safe");
+        let (component_spec, _component_dir) = spec("safe");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
+            .await
+            .unwrap();
+        let registry = registry(sandbox_at(root.to_path_buf()));
+        assert_eq!(component.register_into(&registry).unwrap(), 2);
+        assert!(
+            registry.is_concurrency_safe("peek"),
+            "a declared concurrencySafe tool is parallel-safe"
+        );
+        assert!(
+            !registry.is_concurrency_safe("poke"),
+            "a tool that declares nothing runs alone"
+        );
     }
 
     #[tokio::test]

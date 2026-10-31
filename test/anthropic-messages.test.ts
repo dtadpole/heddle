@@ -98,14 +98,14 @@ test('the request names the model per call, and an endpoint with none is refused
 
 test('the conversation is translated the way Anthropic reads it, and reasoning is never replayed', () => {
   const call = anthropicMessagesCall(endpoint, request)
-  assert.equal(call.body.system, 'be brief', 'a system message becomes the top-level system field')
+  assert.deepEqual(call.body.system, [{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }], 'a system message becomes the top-level system field, marked for caching (#70)')
   const messages = call.body.messages as { role: string; content: Record<string, unknown>[] }[]
   assert.deepEqual(messages.map((message) => message.role), ['user', 'assistant', 'user'])
   assert.deepEqual(messages[1]?.content, [
     { type: 'text', text: 'checking' },
     { type: 'tool_use', id: 'call-1', name: 'list_dir', input: { path: '.' } },
   ])
-  assert.deepEqual(messages[2]?.content, [{ type: 'tool_result', tool_use_id: 'call-1', content: 'AGENTS.md' }])
+  assert.deepEqual(messages[2]?.content, [{ type: 'tool_result', tool_use_id: 'call-1', content: 'AGENTS.md', cache_control: { type: 'ephemeral' } }], 'the last user block carries the conversation breakpoint (#70)')
   assert.equal(JSON.stringify(call.body).includes('the user wants a listing'), false, 'no thinking block without a signature')
 })
 
@@ -114,7 +114,7 @@ test('tools are declared with an input schema', () => {
     ...request,
     tools: [{ name: 'bash', description: 'run a command', parameters: { type: 'object', properties: {} } }],
   })
-  assert.deepEqual(call.body.tools, [{ name: 'bash', description: 'run a command', input_schema: { type: 'object', properties: {} } }])
+  assert.deepEqual(call.body.tools, [{ name: 'bash', description: 'run a command', input_schema: { type: 'object', properties: {} }, cache_control: { type: 'ephemeral' } }])
 })
 
 test('an effort level asks for adaptive, summarized thinking with that effort', () => {

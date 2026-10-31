@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
 import { killProcessGroup } from '../sandbox/process-group.ts'
@@ -141,6 +141,16 @@ function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string |
   }
 }
 
+/**
+ * DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and normalised
+ * unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model can tell which
+ * of several reads failed (live-testing issue #4: the Rust build named no file at all).
+ */
+export function displayPath(cwd: string, path: string): string {
+  const raw = isAbsolute(path) ? path : `${cwd}${sep}${path}`
+  return /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(raw) ? raw : resolve(cwd, path)
+}
+
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
 
@@ -205,8 +215,19 @@ export function builtinTools(
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
-      context.log(`wrote ${target} (${content.length} bytes)`)
-      return { output: `wrote ${content.length} bytes to ${relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target) || target}`, data: { path: target, bytes: content.length } }
+      /**
+       * Bytes, as the sentence says: UTF-8 bytes on disk, not UTF-16 code units (five Chinese characters are 15
+       * bytes). The path is relative to the workspace only when the target is inside it; a file elsewhere (the host
+       * temp area under workspace-write) is named absolutely, never as a climb of `../`. The Rust build's twin
+       * already reports both this way (issue #3).
+       */
+      const bytes = Buffer.byteLength(content, 'utf8')
+      context.log(`wrote ${target} (${bytes} bytes)`)
+      const inside = relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target)
+      // Outside is exactly `..` or a climb (`../…`): a file inside whose name starts with two dots stays relative.
+      const climbs = inside === '..' || inside.startsWith(`..${sep}`)
+      const shown = inside.length > 0 && !climbs && !isAbsolute(inside) ? inside : target
+      return { output: `wrote ${bytes} bytes to ${shown}`, data: { path: target, bytes } }
     },
   }
 
@@ -227,6 +248,18 @@ export function builtinTools(
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
+      /**
+       * A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
+       * `resolveRegularReadTarget`): `FS_NOT_FOUND` and `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …`, not the
+       * platform's raw error (live-testing issue #4).
+       */
+      const shown = displayPath(context.cwd, path)
+      const info = await stat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+        throw error
+      })
+      if (info === undefined) return { output: '', error: { code: 'FS_NOT_FOUND', message: `cannot read "${shown}": not found` } }
+      if (!info.isFile()) return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot read "${shown}": not a regular file` } }
       // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
       const text = await readFileText(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }

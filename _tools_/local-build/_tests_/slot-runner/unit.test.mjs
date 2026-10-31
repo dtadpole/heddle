@@ -544,3 +544,133 @@ test('a ts run adds no -j, leaves a CARGO_TARGET_DIR alone, and needs a command 
   assert.match(missing.stderr, /command not found: no-such-command-xyz/)
   assert.deepEqual(tsSlotDirs(sb), [])
 })
+
+// The queue: waiters are served first come, first served, not by whoever polls first.
+const queueDir = (sb, prefix = 'slot') => join(sb.root, `${prefix}.queue`)
+const tickets = (sb, prefix = 'slot') => (existsSync(queueDir(sb, prefix)) ? readdirSync(queueDir(sb, prefix)) : [])
+/** A ticket for another waiter, queued agoS seconds ago and last polled quietS seconds ago. */
+function fakeTicket(sb, { pid = process.pid, agoS = 30, quietS = 0, seat = '-', tree = '/x/ahead', prefix = 'slot' } = {}) {
+  mkdirSync(queueDir(sb, prefix), { recursive: true })
+  const file = join(queueDir(sb, prefix), `${String(Date.now() - agoS * 1000).padStart(13, '0')}-${pid}`)
+  writeFileSync(file, `${pid} ${Math.floor(Date.now() / 1000) - agoS} ${seat} ${tree}\n`)
+  const polled = new Date(Date.now() - quietS * 1000)
+  utimesSync(file, polled, polled)
+  return file
+}
+
+test('a waiter that arrived first is served first, though a later one polls thirty times as often', async (t) => {
+  const sb = sandbox(t)
+  const one = { LOCAL_BUILD_SLOTS: '1' }
+  const release = join(sb.dir, 'release')
+  const holder = start(sb, ['check', '-p', 'holder'], { ...one, FAKE_HOLD: release })
+  await waitForStatus(sb, 'summary: busy=1 ')
+  const first = start(sb, ['check', '-p', 'first'], { ...one, LOCAL_BUILD_POLL_SECONDS: '3' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  const second = start(sb, ['check', '-p', 'second'], { ...one, LOCAL_BUILD_POLL_SECONDS: '0.1' })
+  const both = await waitForStatus(sb, 'queue: 2 waiting')
+  assert.match(both, /1\. pid=\d+ seat=- waiting=\d+s tree=.*\n {2}2\. pid=\d+ /)
+  writeFileSync(release, '')
+  const results = await Promise.all([holder.done, first.done, second.done])
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  const order = args(sb).filter((a) => ['holder', 'first', 'second'].includes(a))
+  assert.deepEqual(order, ['holder', 'first', 'second'], 'the slot went to the waiter that came first')
+  assert.match(results[2].stderr, /queued for a slot at position 2 of 2 \(cap 1\); first is pid \d+ in /)
+  assert.deepEqual(tickets(sb), [], 'every ticket left with its run')
+})
+
+test('a live waiter ahead holds its place; a dead or long-silent one is dropped, a silent one passed over', (t) => {
+  const sb = sandbox(t)
+  const one = { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_WAIT_SECONDS: '2' }
+  const ahead = fakeTicket(sb)
+  const blocked = run(sb, ['check'], one)
+  assert.equal(blocked.status, 75, blocked.stderr)
+  assert.match(blocked.stderr, /no free slot within 2s \(queue position 2 of 2\)/)
+  assert.deepEqual(args(sb), [], 'cargo never ran while a live waiter was ahead with the slot free')
+  assert.deepEqual(tickets(sb), [ahead.split('/').pop()], 'the run took its own ticket away when it gave up')
+
+  // Silent past the 60 s grace, but alive and within the 300 s bound: passed over, keeps its place.
+  utimesSync(ahead, new Date(Date.now() - 120000), new Date(Date.now() - 120000))
+  const passed = run(sb, ['check'], one)
+  assert.equal(passed.status, 0, passed.stderr)
+  assert.ok(existsSync(ahead), 'a passed-over waiter keeps its ticket')
+
+  utimesSync(ahead, new Date(Date.now() - 400000), new Date(Date.now() - 400000))
+  assert.equal(run(sb, ['check'], one).status, 0)
+  assert.ok(!existsSync(ahead), 'a ticket silent past 300 s is dropped')
+
+  const gone = fakeTicket(sb, { pid: 999999 })
+  assert.equal(run(sb, ['check'], one).status, 0)
+  assert.ok(!existsSync(gone), 'a ticket whose run is gone is dropped')
+  assert.deepEqual(tickets(sb), [])
+})
+
+test('the coordinator puts one waiter first with a .next file, used once; an old one is ignored', (t) => {
+  const sb = sandbox(t)
+  const one = { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_WAIT_SECONDS: '2' }
+  fakeTicket(sb)
+  const next = join(sb.root, 'slot.next')
+  writeFileSync(next, '-\n')
+  assert.equal(run(sb, ['check'], one).status, 75, 'a .next of "-" names no one, though seatless tickets say "-"')
+  writeFileSync(next, 'developer-x\n')
+  const status = run(sb, ['status'])
+  assert.match(status.stdout, /^next: developer-x \(from .*slot\.next; that waiter goes first, once\)$/m)
+  assert.equal(run(sb, ['check'], { ...one, HD_SEAT: 'developer-y' }).status, 75, 'another seat is not named')
+  assert.ok(existsSync(next))
+  const named = run(sb, ['check'], { ...one, HD_SEAT: 'developer-x' })
+  assert.equal(named.status, 0, named.stderr)
+  assert.ok(!existsSync(next), 'the turn is used once')
+
+  // A folder named "<repo>--<seat>" or "<repo>--<seat>-<suffix>" matches the seat key, with no HD_SEAT set.
+  const z = tree(sb, 'heddle--developer-z')
+  const zb = tree(sb, 'heddle--developer-z-b4')
+  const zz = tree(sb, 'heddle--developer-zz')
+  writeFileSync(next, 'developer-z\n')
+  assert.equal(run(sb, ['check'], one).status, 75, 'a run in another tree is not named')
+  assert.equal(run(sb, ['check'], one, zz.dir).status, 75, 'a seat whose key only starts the same is not named')
+  assert.equal(run(sb, ['check'], one, z.dir).status, 0)
+  assert.ok(!existsSync(next))
+  writeFileSync(next, 'developer-z\n')
+  assert.equal(run(sb, ['check'], one, zb.dir).status, 0, 'another worktree of the seat is named too')
+  assert.ok(!existsSync(next))
+
+  writeFileSync(next, 'developer-x\n')
+  utimesSync(next, new Date(Date.now() - 3600000), new Date(Date.now() - 3600000))
+  assert.equal(run(sb, ['check'], { ...one, HD_SEAT: 'developer-x' }).status, 75, 'a .next older than 30 minutes is ignored')
+  assert.match(run(sb, ['status']).stdout, /^next: none$/m)
+})
+
+test('status lists the queue in serving order and says why a waiter is skipped', (t) => {
+  const sb = sandbox(t)
+  assert.match(run(sb, ['status']).stdout, /^next: none\nqueue: empty\nsummary: /m)
+  fakeTicket(sb, { agoS: 50, tree: '/x/first' })
+  fakeTicket(sb, { agoS: 40, tree: '/x/quiet', quietS: 90 })
+  fakeTicket(sb, { agoS: 30, tree: '/x/named', seat: 'developer-x' })
+  fakeTicket(sb, { agoS: 20, tree: '/x/gone', pid: 999999 })
+  writeFileSync(join(sb.root, 'slot.next'), 'developer-x\n')
+  const r = run(sb, ['status'])
+  assert.equal(r.status, 0, r.stderr)
+  const lines = r.stdout.split('\n')
+  const at = lines.findIndex((l) => l.startsWith('queue: '))
+  assert.equal(lines[at], 'queue: 4 waiting, first come first served')
+  assert.match(lines[at + 1], /^ {2}1\. pid=\d+ seat=developer-x waiting=3\ds tree=\/x\/named \(named by next\)$/)
+  assert.match(lines[at + 2], /^ {2}2\. pid=\d+ seat=- waiting=5\ds tree=\/x\/first$/)
+  assert.match(lines[at + 3], /^ {2}3\. .*tree=\/x\/quiet \(silent 9\ds; passed over, keeps its place\)$/)
+  assert.match(lines[at + 4], /^ {2}4\. pid=999999 .*tree=\/x\/gone \(run gone; dropped on the next poll\)$/)
+  assert.equal(tickets(sb).length, 4, 'status changes nothing')
+  assert.match(run(sb, ['--ts', 'status']).stdout, /^queue: empty$/m, 'the ts pool has a queue of its own')
+})
+
+test('a waiter stopped by a signal leaves the queue', async (t) => {
+  const sb = sandbox(t)
+  const release = join(sb.dir, 'release')
+  const holder = start(sb, ['check'], { LOCAL_BUILD_SLOTS: '1', FAKE_HOLD: release })
+  await waitForStatus(sb, 'summary: busy=1 ')
+  const waiter = start(sb, ['check'], { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_POLL_SECONDS: '0.2' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  waiter.child.kill('SIGTERM')
+  const stopped = await waiter.done
+  assert.equal(stopped.code, 143, stopped.stderr)
+  assert.deepEqual(tickets(sb), [], 'the ticket went with the run')
+  writeFileSync(release, '')
+  assert.equal((await holder.done).code, 0)
+})
