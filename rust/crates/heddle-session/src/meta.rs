@@ -140,6 +140,34 @@ impl<'de> Deserialize<'de> for SessionMeta {
     }
 }
 
+/// Whether a session, or a session above it in its **subagent** lineage, is archived — the question DSH's
+/// archived-session gate asks before every model step (`underArchivedSession`, dsh-api-session-controller
+/// lib/index.js:2528-2541); the TypeScript build's `underArchivedSession`.
+///
+/// The walk follows `parentSession` only through `origin: "subagent"` records, as DSH's follows its durable header:
+/// a delegated child of an archived session runs no step either, while a fork (a `parentSession` with no origin) is
+/// an independent conversation. A parent whose record cannot be read ends the walk unarchived, and so does a cycle.
+pub fn under_archived_session(lookup: impl Fn(&str) -> Option<SessionMeta>, id: &str) -> bool {
+    let mut visited = std::collections::HashSet::new();
+    let mut current = lookup(id);
+    while let Some(meta) = current {
+        if !visited.insert(meta.id().to_owned()) {
+            return false;
+        }
+        if meta.archived() {
+            return true;
+        }
+        if meta.origin() != Some(SessionOrigin::Subagent) {
+            return false;
+        }
+        let Some(parent) = meta.parent_session() else {
+            return false;
+        };
+        current = lookup(parent);
+    }
+    false
+}
+
 /// Where a delegated session came from. Only one origin exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

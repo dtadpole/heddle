@@ -724,6 +724,13 @@ impl SessionStore {
         SessionMeta::from_value(value)
     }
 
+    /// Whether the session or a subagent ancestor is archived ([`crate::under_archived_session`]), read from the
+    /// records **now**: the agent loop asks before every step, so an archive written by another process stops the
+    /// next step too.
+    pub fn under_archived(&self, id: &str) -> bool {
+        crate::under_archived_session(|one| self.meta(one), id)
+    }
+
     /// Open the newest session (by `created`), if there is one.
     pub fn open_newest(&self) -> Option<SessionHandle> {
         let newest = self.list().into_iter().next()?;
