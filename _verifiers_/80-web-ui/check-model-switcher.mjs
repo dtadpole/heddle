@@ -910,6 +910,58 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
   }
 })
 
+test('a switch made while a turn runs is recorded as the request its next step sent', async (context) => {
+  /**
+   * The log must name what the provider was asked (issue #14). The request half of the running-turn rule held on both
+   * builds: the test above sees the next step reach the newly chosen endpoint. The `model/request` record for that
+   * step still named the selection the turn **started** with, because the loop wrote it from the turn's options
+   * before the session's selection rewrote the call. So a person reading the log, or a tester, saw "the whole turn
+   * stayed on the old model" when it had not. DSH's request header names the provider, model and effort actually
+   * used (`consumeSelection` retires a pending selection on a matching header). No browser: the seat is judged above;
+   * this is the record.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('recorded', { toolFirst: true })
+  try {
+    const cookie = await cookieFor(server.url)
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ prompt: 'list the folder, then answer' }),
+    })
+    assert.equal(turn.status, 200, 'the turn starts')
+    assert.ok(await until(() => server.one.turns.length === 1), 'its first step waits on the first endpoint')
+    const id = (await sessionsOf(server))[0]?.id
+    assert.ok(typeof id === 'string' && id.length > 0, 'the running turn has a session to switch')
+    const switched = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ endpoint: 'double-two', model: 'model-two', reasoningEffort: 'low' }),
+    })
+    assert.equal(switched.status, 200, 'the switch is accepted while the turn runs')
+    server.one.releaseFirst()
+    const stream = await turn.text()
+    const records = stream
+      .split('\n\n')
+      .filter((block) => block.startsWith('event: session\n'))
+      .map((block) => JSON.parse(block.slice(block.indexOf('data: ') + 'data: '.length)).event)
+      .filter((event) => event.type === 'model/request')
+    assert.equal(server.two.turns.length, 1, 'the next step asked the newly chosen endpoint')
+    const sent = JSON.parse(server.two.turns[0].body)
+    assert.equal(sent.model, 'model-two', 'with the newly chosen model')
+    assert.equal(sent.reasoning_effort, 'low', 'and the newly chosen level')
+    assert.equal(records.length, 2, `the turn recorded two model requests (${records.length})`)
+    assert.equal(records[0].endpoint, 'double-one', 'the first record names the endpoint the first step asked')
+    assert.deepEqual(
+      { endpoint: records[1].endpoint, model: records[1].model, reasoningEffort: records[1].reasoningEffort },
+      { endpoint: 'double-two', model: 'model-two', reasoningEffort: 'low' },
+      'the second record names what the second step was actually sent',
+    )
+  } finally {
+    await server.close()
+  }
+})
+
 test('a recorded model the catalogue no longer lists shows DSH’s placeholder and no effort', async (context) => {
   /**
    * Issue #47. A session keeps the model it recorded after the configuration drops it, and DSH keeps calling it too

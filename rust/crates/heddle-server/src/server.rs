@@ -88,6 +88,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/status"),
     ("GET", "/api/sessions"),
     ("POST", "/api/sessions"),
+    ("GET", "/api/sessions/search"),
     ("GET", "/api/sessions/{id}"),
     ("POST", "/api/sessions/{id}/fork"),
     ("POST", "/api/sessions/{id}/flags"),
@@ -381,6 +382,7 @@ impl ServerBuilder {
             .route("/api/events", get(events_route))
             .route("/api/status", get(status))
             .route("/api/sessions", get(list_sessions).post(create_session))
+            .route("/api/sessions/search", get(search_sessions))
             .route("/api/sessions/{id}", get(session_view_route))
             .route("/api/sessions/{id}/fork", post(fork_session))
             .route("/api/sessions/{id}/flags", post(flags_session))
@@ -904,6 +906,28 @@ async fn list_sessions(State(state): State<AppState>) -> Response {
     respond::json(StatusCode::OK, &Value::Array(sessions))
 }
 
+/// `GET /api/sessions/search?q=` — content search, DSH's `session.search` (dsh-api-session-controller
+/// lib/index.js:2010-2123): `{"items":[{"sessionId","snippet"}],"hasMore"}`, at most 20, ranked and quoted by
+/// `heddle_session::search`. A query DSH refuses answers `400` with its sentence. The static segment wins over
+/// `/api/sessions/{id}`, which would otherwise answer it as "not a session id".
+async fn search_sessions(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let raw = params.get("q").map(String::as_str).unwrap_or("");
+    let query = match heddle_session::normalize_search_query(raw) {
+        Ok(query) => query,
+        Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal.message),
+    };
+    match state.harness().sessions.search(&query) {
+        Ok(page) => respond::json(StatusCode::OK, &page),
+        Err(error) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session search failed: {}", error.message),
+        ),
+    }
+}
+
 async fn status(State(state): State<AppState>) -> Response {
     respond::json(
         StatusCode::OK,
@@ -1135,6 +1159,20 @@ async fn title_session(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     let title = title.to_owned();
+    // A title with nothing visible left once cleaned is refused, as DSH's rename refuses it
+    // (`dsh-session-title` lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838); the
+    // store cleans what it accepts (`heddle_session::title_text`). An unknown session is still a `404`
+    // first, as DSH resolves the session before it judges the title.
+    if heddle_session::title_text::clean_session_title(&title).is_empty() {
+        if !state.harness().sessions.exists(id.as_str()) {
+            return respond::no_session(id.as_str());
+        }
+        return respond::error_with_code(
+            StatusCode::BAD_REQUEST,
+            heddle_session::title_text::TITLE_INVALID_MESSAGE,
+            heddle_session::title_text::TITLE_INVALID_CODE,
+        );
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     if let Some(folder) = folder.as_ref()
         && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
@@ -1234,13 +1272,27 @@ async fn steer_session(
 }
 
 async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    let stopped = state.runs().abort(id.as_str());
+    // Every turn of the session, not only the ones this server started (#93): a goal round, a reminder's turn and a
+    // job notice's turn are registered with the agent runtime's live-turn registry, not with `runs`. A turn the
+    // server started is in both and is counted once.
+    let live = state
+        .harness()
+        .interrupter
+        .as_ref()
+        .is_some_and(|interrupter| interrupter.interrupt(id.as_str()));
+    let stopped = state.runs().abort(id.as_str()).max(usize::from(live));
     respond::json(
         StatusCode::OK,
         &json!({"stopped": stopped, "session": id.to_string()}),
     )
 }
 
+/// One level of the folder tree (web.ts's `GET /api/tree`): the registered roots without a `path`,
+/// else the children of `path` — and only when a registered root owns it. A path outside every root
+/// is refused with web.ts's `400 {"error": "<canonical> is not under any workspace root"}` before
+/// anything is read, as the CLI's `tree` and the file routes refuse it. The path is canonical
+/// first, so `..` and a symlink that leads out of a root are judged where they land. An empty
+/// `path` is the roots, as in web.ts.
 async fn tree(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1248,7 +1300,16 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
-    let path = query.get("path").map(canonical_path);
+    let path = query
+        .get("path")
+        .filter(|path| !path.is_empty())
+        .map(canonical_path);
+    if let Some(path) = path.as_deref().filter(|path| !workspaces.owns(path)) {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            format!("{} is not under any workspace root", path.display()),
+        );
+    }
     let archived =
         crate::services::ArchivedFilter::from_query(query.get("archived").map(String::as_str));
     let sessions = state.harness().sessions.list();
@@ -1628,18 +1689,17 @@ async fn purify(State(state): State<AppState>) -> Response {
     // The browser loads this as a script, so it is served as JavaScript rather than through the
     // inline/download file answer: an `attachment` content-disposition here would leave the preview
     // page without a sanitiser.
-    let Some(path) = preview::purify_path(&state.options().asset_roots) else {
-        return respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n");
-    };
-    match std::fs::read(&path) {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/javascript; charset=utf-8")
-            .header("cache-control", "no-store")
-            .body(Body::from(bytes))
-            .expect("a response builder with static headers"),
-        Err(_) => respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n"),
-    }
+    // An installed package wins, so a checkout serves the version the TypeScript build serves; without one the binary
+    // serves its own copy (live issue #39), so a Rust deployment does not depend on a Node install.
+    let bytes = preview::purify_path(&state.options().asset_roots)
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(|| preview::EMBEDDED_PURIFY.as_bytes().to_vec());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/javascript; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Body::from(bytes))
+        .expect("a response builder with static headers")
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1689,7 +1749,11 @@ fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
 }
 
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
-    let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
+    // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
+    let Some(prompt) = body
+        .str("prompt")
+        .filter(|prompt| !prompt.trim().is_empty())
+    else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
     };
     let attachments = match state.harness().attachments.as_ref() {
@@ -2651,6 +2715,133 @@ mod tests {
         );
     }
 
+    /// A registry with one root: it owns what is at or under that folder, and records every tree it
+    /// is asked for, so a test can tell a refusal from a listing that was read and then dropped.
+    struct OneRoot {
+        root: PathBuf,
+        asked: std::sync::Mutex<Vec<Option<PathBuf>>>,
+    }
+
+    impl crate::services::WorkspaceService for OneRoot {
+        fn owns(&self, path: &std::path::Path) -> bool {
+            path.starts_with(&self.root)
+        }
+        fn tree(
+            &self,
+            path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            self.asked.lock().unwrap().push(path.map(Path::to_path_buf));
+            Ok(json!({"children": ["listed"]}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// Percent-encode a path for a query string, every byte outside the unreserved set.
+    fn query_value(path: &Path) -> String {
+        path.to_string_lossy()
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (byte as char).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_tree_route_refuses_a_path_outside_every_root_as_web_ts_does() {
+        let base = std::env::temp_dir().join(format!("heddle-tree-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("root").join("inner")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::fs::write(base.join("elsewhere").join("not-yours.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), base.join("root").join("way-out"))
+            .unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let root = base.join("root");
+        let elsewhere = base.join("elsewhere");
+        let registry = Arc::new(OneRoot {
+            root: root.clone(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_root = harness();
+        with_root.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_root,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("tree-owner")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let tree = |path: &Path| format!("/api/tree?path={}", query_value(path));
+        let refusal = format!(
+            "{{\"error\":\"{} is not under any workspace root\"}}\n",
+            elsewhere.display()
+        );
+
+        // A folder outside every root, a symlink in the root that leads to it, and a `..` walk out
+        // of the root: each is web.ts's 400 naming the canonical path, and nothing is listed.
+        for (what, uri) in [
+            ("a folder outside every root", tree(&elsewhere)),
+            ("a symlink that leads out", tree(&root.join("way-out"))),
+            ("a dot-dot walk", tree(&root.join("..").join("elsewhere"))),
+        ] {
+            let (status, headers, bytes) = call(&router, Method::GET, &uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what} is refused");
+            assert_eq!(headers["content-type"], "application/json");
+            assert_eq!(body_text(&bytes), refusal, "{what} gets web.ts's answer");
+        }
+        assert!(
+            registry.asked.lock().unwrap().is_empty(),
+            "a refused path is never handed to the tree: {:?}",
+            registry.asked.lock().unwrap()
+        );
+
+        // Inside the root it lists, and no path (or an empty one, as web.ts reads it) is the roots.
+        for (uri, expected) in [
+            (tree(&root.join("inner")), Some(root.join("inner"))),
+            (tree(&root), Some(root.clone())),
+            ("/api/tree".to_owned(), None),
+            ("/api/tree?path=".to_owned(), None),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {}", body_text(&bytes));
+            assert_eq!(
+                registry.asked.lock().unwrap().pop(),
+                Some(expected),
+                "{uri}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn the_html_route_previews_only_an_html_document() {
         let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
@@ -2823,6 +3014,16 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
+        // A prompt of only whitespace is refused before anything else, as an empty one is (#32).
+        for blank in [
+            r#"{"prompt":""}"#,
+            r#"{"prompt":"   "}"#,
+            r#"{"prompt":"\n\t "}"#,
+        ] {
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, blank).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
+            assert_eq!(body_text(&bytes), "a prompt is required\n", "{blank}");
+        }
     }
 
     #[tokio::test]
@@ -2983,6 +3184,51 @@ mod tests {
         );
         let _ = runner.hub.set(builder.events());
         builder.into_router(3082).expect("the test router")
+    }
+
+    /// The agent runtime's live-turn registry, as a double: one turn this server did not start.
+    #[derive(Default)]
+    struct OneRowTurn {
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::TurnInterrupter for OneRowTurn {
+        fn interrupt(&self, session: &str) -> bool {
+            let mut seen = self.interrupted.lock().unwrap();
+            seen.push(session.to_owned());
+            seen.len() == 1
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_reaches_a_turn_a_row_started_such_as_a_goal_round() {
+        let rows = Arc::new(OneRowTurn::default());
+        let mut with_rows = harness();
+        with_rows.interrupter = Some(rows.clone());
+        let (router, _) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("stop-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let stop = "/api/sessions/session-00000000-0000-0000-0000-000000000001/stop";
+        let (status, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["stopped"], 1,
+            "the goal round was stopped, though the server never started it"
+        );
+        let (_, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["stopped"], 0, "nothing left to stop");
+        assert_eq!(rows.interrupted.lock().unwrap().len(), 2);
     }
 
     async fn post_json(
@@ -3419,16 +3665,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sanitiser_is_javascript_or_a_plain_404() {
-        // Not installed: the TypeScript sentence, in plain text rather than a JSON error.
+    async fn the_sanitiser_is_javascript_whether_installed_or_not() {
+        // Not installed: the binary's own copy (live issue #39: this answered 404, and every HTML preview showed its
+        // source on a deployment without node_modules).
         let (router, _) = app("purify-missing");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
         let (status, headers, bytes) =
             call(&router, Method::GET, "/vendor/purify.js", Some(&cookie)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(headers["content-type"], "text/plain");
-        assert_eq!(body_text(&bytes), "the sanitiser is not installed\n");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert!(
+            body_text(&bytes).starts_with("/*! @license DOMPurify "),
+            "the sanitiser itself, not a refusal"
+        );
 
         // Installed under an asset root: served as a script a browser will run, not as a download.
         let root = std::env::temp_dir().join(format!(
@@ -3894,6 +4144,125 @@ mod tests {
                 .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
             "{turns:?}"
         );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Content search over the real store (R-developer-eight-19): a phrase in an answer finds its session, in
+    /// DSH's order (more phrase marks first), with its snippet; a token fragment is no match; a refused query
+    /// answers DSH's sentence; and a session id is still a session.
+    #[tokio::test]
+    async fn content_search_finds_a_phrase_inside_an_answer() {
+        use crate::adapters::StoreSessions;
+        use crate::services::SessionService as _;
+
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-content-search-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let sessions = StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("content-search")),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+
+        let answered = |folder: &str, text: &str| -> String {
+            let cwd = scratch.join(folder);
+            std::fs::create_dir_all(&cwd).unwrap();
+            let id = sessions
+                .start(StartSession {
+                    cwd: Some(cwd),
+                    ..StartSession::default()
+                })
+                .unwrap();
+            let store = sessions.inner().store();
+            let handle = store.open(&id).unwrap();
+            store
+                .message(
+                    &handle,
+                    heddle_session::Message {
+                        role: heddle_session::Role::Assistant,
+                        tool_call_id: None,
+                        content: vec![heddle_session::ContentPart::Text {
+                            text: text.to_string(),
+                        }],
+                        source: None,
+                    },
+                )
+                .unwrap();
+            id
+        };
+        let one = answered("one", "The quokka ledger is balanced.");
+        let two = answered("two", "A quokka ledger here, another QUOKKA LEDGER there.");
+        answered("three", "quokkaledger, or the quokka and its ledger.");
+
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=Quokka%20Ledger",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            page,
+            json!({
+                "items": [
+                    {"sessionId": two, "snippet": "A quokka ledger here, another QUOKKA LEDGER there."},
+                    {"sessionId": one, "snippet": "The quokka ledger is balanced."},
+                ],
+                "hasMore": false,
+            })
+        );
+
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=quokkaled",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page, json!({"items": [], "hasMore": false}));
+
+        for path in ["/api/sessions/search", "/api/sessions/search?q=%20%20"] {
+            let (status, _, bytes) = call(&router, Method::GET, path, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(refusal["error"], "session search query must not be empty");
+        }
+        let (status, _, _) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{one}"),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a session id is still a session");
         std::fs::remove_dir_all(&scratch).ok();
     }
 
