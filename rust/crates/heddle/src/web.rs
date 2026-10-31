@@ -897,6 +897,27 @@ impl ServerSandbox for Sandbox {
             .map(|change| change.mode.to_string())
             .map_err(|refusal| refusal.reason().to_owned())
     }
+
+    /// `rootFor`, the folder a session's calls (and its page terminals, #85) run in.
+    fn root_for(&self, folder: Option<&std::path::Path>) -> std::path::PathBuf {
+        self.service.root_for(folder)
+    }
+
+    /// A page terminal is wrapped as a bash call is: the same backend and policy, rooted at the session's folder.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &std::path::Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let mode = heddle_sandbox::SandboxMode::parse(mode)
+            .ok_or_else(|| format!("'{mode}' is not a sandbox mode"))?;
+        self.service
+            .rooted_at(root)
+            .confine(argv, mode)
+            .map(|confined| confined.argv)
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// The workspace row's service as the server's port. The sessions a row counts and a removal checks
