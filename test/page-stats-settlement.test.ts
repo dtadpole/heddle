@@ -67,7 +67,7 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
 function harness(): Harness {
   const reads: Read[] = []
   const paints: Snapshot[] = []
-  const names = ['runTurn', 'drawSessionEvent', 'refreshSessionStats', 'updateStatusBar',
+  const names = ['runTurn', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'refreshSessionStats', 'updateStatusBar',
     'addUsage', 'formatTokenCount', 'formatRate', 'formatCacheHit', 'formatDurationMs',
     'formatExactCount', 'formatWindow', 'statPanelRows']
   const h = runInNewContext(`
@@ -83,14 +83,16 @@ function harness(): Harness {
     const events = { addEventListener(name, listener) {
       if (name === 'session') sessionListener = listener;
     }};
-    const endpointOptions = [], chosenEndpoint = null, endpointDefault = null;
+    const endpointOptions = [], endpointDefault = null;
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set();
+    const unavailableSession = null;
     const windowFor = () => undefined;
     const cells = new Map();
     const statusBar = { hidden: false, querySelector(selector) {
       if (!cells.has(selector)) cells.set(selector, { textContent: '', hidden: false });
       return cells.get(selector);
     }};
-    const selectionForTurn = () => ({});
     const noop = () => {};
     const settleReasoning = noop, settleChat = noop, refreshRunningStatus = noop,
       renderScheduleCards = noop, scheduleTreeRefresh = noop, scheduleGoalRefresh = noop,
