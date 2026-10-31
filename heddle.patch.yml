@@ -14,6 +14,12 @@
     - id: console
       name: ./src/plugins/console-exporter.ts
 
+    # The interface language (DSH's dsh-client-locale): the person's choice, en or zh, written by the
+    # settings API as `locale.preference`. Without one, each browser gets the first supported language
+    # it asks for, else English.
+    - id: locale
+      name: ./src/plugins/locale.ts
+
     # Sessions: the event log a turn is recorded in. The store lives under $HEDDLE_HOME/sessions
     # (~/.heddle/sessions when HEDDLE_HOME is unset), the plugin's own default, so a run with its own home
     # keeps its own sessions; a root written here would ignore HEDDLE_HOME (#74). --session-root restates it.
@@ -64,6 +70,19 @@
       config:
         defaultMaxGoalRounds: 256
 
+    # Slash commands: the host registry the composer's `/` menu lists and runs — compact, goal, feedback,
+    # permission and export (DSH's set). A run is two log-only events, command/run and command/done, so it is
+    # recorded without ever reaching the model. Goal, context, model and sandbox are read when a command runs.
+    - id: commands
+      name: ./src/commands/service.ts
+      inject: [session]
+
+    # Plan mode: /plan and /plan off, DSH's plan-mode policy on every request of a session in plan mode, and the
+    # exit_plan_mode tool, whose review goes through the user-question channel once one is loaded.
+    - id: plan
+      name: ./src/plan/service.ts
+      inject: [session, commands, tools]
+
     # The round driver: when a session goes idle with an armed goal, it continues the goal one round at a
     # time, attributed in the log. It needs a turn's whole machinery, which it declares.
     - id: goal-driver
@@ -104,6 +123,13 @@
       name: ./src/plugins/schedule.ts
       inject: [session, model, tools, sandbox, context]
 
+    # Background jobs (DSH's dsh-jobs-local, dsh-tool-jobs and background bash): the in-memory registry, the
+    # job_output / job_list / job_kill tools, bash's run_in_background, and the completion notice that wakes an idle
+    # session. A notice can start a turn, so the row declares what a turn needs.
+    - id: jobs
+      name: ./src/plugins/jobs.ts
+      inject: [session, model, tools, sandbox, context]
+
     # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
     # the loop checks for it — so a minimal profile can run turns without interruption.
     - id: turns
@@ -123,7 +149,7 @@
     # The registry and its allow list. `heddle tools` and `heddle --turn` keep only the tools the list names, and a
     # name that nothing registered fails a `--turn`; `heddle web` applies no list. So a row above that registers
     # tools adds their names here, or the command line hides them while a web turn offers them. One line per
-    # registering row: the built-ins, subagent-tool, team, goal-tool, todo-tool, schedule. `todo_read` is left out
+    # registering row: the built-ins, subagent-tool, team, goal-tool, todo-tool, schedule, plan, jobs. `todo_read` is left out
     # on purpose: DSH has no read tool and the todo-parity change removes it, and a listed name nothing registers
     # would then fail every `--turn`.
     - id: tools
@@ -137,5 +163,7 @@
             spawn_teammate, send_message, list_agents, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update,
             create_goal, get_goal, update_goal,
             todo_write,
-            schedule_create, schedule_list, schedule_update, schedule_delete
+            schedule_create, schedule_list, schedule_update, schedule_delete,
+            exit_plan_mode,
+            job_output, job_list, job_kill
           ]

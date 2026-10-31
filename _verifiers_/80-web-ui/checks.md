@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-31T08:45:00Z
 level: L3
-version: 1.1.0
+version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -21,7 +21,12 @@ grounded_in:
 - [`check-stream.mjs`](check-stream.mjs) — the live event stream against DSH's `$events` stream: it opens with
   `{ type: 'ready', clientId, host: { home } }` after its listeners are attached, so a baseline read on `ready`
   misses no increment; an idle stream gets a heartbeat every interval and a peer that stops reading is cut after
-  two (DSH parity phase B, developer-ten).
+  two; a reconnect is given every frame it missed after its cursor (`Last-Event-ID` or `?cursor=`) and a cursor
+  from another start gets `reset`; the page shows it is reconnecting while the server is down and, once back,
+  draws a session made meanwhile without a reload; renames, workspace edits and settled approvals are pushed to
+  every stream, numbered, and a page redraws a rename and a new workspace made elsewhere without a reload; an
+  approval answered on one page closes on every page; a failed turn reaches every client and the log, and the
+  transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
@@ -44,27 +49,45 @@ grounded_in:
   (a rename to another workspace's name is `409 workspace/name-conflict`), delete removing the registration while its
   sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
-  workspace* and *Delete workspace* dialogs end to end.
+  workspace* and *Delete workspace* dialogs end to end; with the server gone, *Add workspace* and *New session* say
+  that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
-  nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
-  Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
-  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections; a
+  nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
+  less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
+  the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
+  starting in the workspace row the person opened rather than the open session's, and the `Workspace` grouping
+  drawing sibling sections; the Session Intent hero's workspace picker (C36): over a blank session a `Choose
+  workspace` chip naming its workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu
+  keys, and a pick that moves the new session and its draft so the first prompt runs in the picked workspace; a
   session in the nested workspace named after that workspace, not the root above it, in a search hit and in an `In one
-  list` row (#57); its search matching a title or a workspace name, twenty at most, revealing a chosen hit, and, while `/api/sessions`
-  fails, listing the rows the tree holds rather than "No matching sessions", then reading again on the next search
-  (#58).
+  list` row (#57); and its search matching a title or a workspace name, twenty at most, revealing a chosen hit, and,
+  while `/api/sessions` fails, listing the rows the tree holds rather than "No matching sessions", then reading again
+  on the next search (#58).
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
   four keystrokes, the session found only inside its answer joining the hits with its snippet, "No matching
   sessions" only once the host has answered, and a content hit opening like any hit; a failed host request leaving
   the name matches with no warning of their own, and the same query asking the host again (#58).
+- [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
+  real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
+  relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
+  card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
+  none for Ungrouped; the card closing when the pointer leaves the list.
+- [`check-workspace-drag.mjs`](check-workspace-drag.mjs) — reordering workspaces by drag (DSH's
+  `workspace/insertBefore`, C37): a workspace header dragged onto a sibling's section lands before or after it with
+  the drop line drawn, the host stores the order (`GET /api/workspaces`) and a reload keeps it, while a nested
+  workspace or Ungrouped is not a place a top-level workspace can land.
 - [`check-narrow-layout.mjs`](check-narrow-layout.mjs) — a narrow window at DSH parity: below 1024 pixels the
   sidebar is the 56-pixel rail (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so at phone width (390 x 844, the
   protocol's device metrics) the conversation keeps a readable width and the composer and its send button stay on
   screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
   breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
   (live-testing draft developer-ten-9).
+- [`check-phone-composer.mjs`](check-phone-composer.mjs) — at phone width (390 x 844) the composer's control row and
+  the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
+  shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
+  composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
 
 ## What it deliberately does not judge
 

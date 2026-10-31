@@ -38,6 +38,14 @@ because it judges what the shipped tree composes to and what the command line th
 allow list, which the command line applies and `heddle web` does not, had not been given the goal and todo tools,
 and the plugins' boot lines reached `--json` stdout ahead of the document.
 
+`check-plugin-inventory.mjs` judges `GET /api/plugin-inventory`, DSH's read-only `pluginInventory/list`, on a
+server booted from the shipped tree with its row names left relative: one entry per row in the tree's order, with
+exactly DSH's four fields; the module name as the layer wrote it (`./src/plugins/session.ts`), never the scratch
+home, the checkout or a `file://` URL; a disabled row listed disabled with phase `null`; a row whose configuration
+its schema refuses listed `failed`; every other row enabled and `active`; no `managementAvailable`; and the route
+behind the door (`401` unsigned) and read-only (`POST` is the plain `404`). It belongs here because the inventory
+is a view of the composed tree.
+
 ## Running it
 
 ```bash

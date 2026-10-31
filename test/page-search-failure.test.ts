@@ -43,9 +43,12 @@ interface Tree {
 }
 
 const pureBlocks = `${block('workspace-tree')}\n${block('content-search')}`
-const libraries = new Function(`${pureBlocks}\nreturn { WorkspaceTree, ContentSearch: typeof ContentSearch === 'undefined' ? undefined : ContentSearch }`)() as {
+const libraries = new Function(
+  `${pureBlocks}\nreturn { WorkspaceTree, ContentSearch: typeof ContentSearch === 'undefined' ? undefined : ContentSearch, workspaceDisplayTitle: typeof workspaceDisplayTitle === 'undefined' ? (title) => title : workspaceDisplayTitle }`,
+)() as {
   WorkspaceTree: Tree
   ContentSearch: unknown
+  workspaceDisplayTitle: (title: string) => string
 }
 
 /** As much of an element as the search code touches. */
@@ -143,6 +146,7 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     'orderState',
     'shownOrders',
     'wireSessionDrag',
+    'workspaceDisplayTitle',
     `${body}\nreturn { applySearch, renderFlatList }`,
   )(
     document,
@@ -170,6 +174,7 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     { orderBy: 'updated', orders: {} },
     {},
     () => undefined,
+    libraries.workspaceDisplayTitle,
   ) as { applySearch: () => Promise<void>; renderFlatList: () => Promise<void> }
 
   /** Type a query, then let every pending answer and debounce run, as a person waiting a moment would. */

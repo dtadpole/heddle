@@ -207,7 +207,8 @@ pub struct SettingsNamespace {
     /// The fields the settings block holds that differ from the base, secrets removed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<Value>,
-    /// When a written value takes effect: `restart`.
+    /// When a written value takes effect: `live` when the server applies a write to the running tree as it lands
+    /// ([`SettingsService::with_live`]), `restart` when the next boot does.
     pub applies: String,
     /// Every secret slot.
     pub secrets: Vec<SecretSlot>,
@@ -218,6 +219,10 @@ pub struct SettingsNamespace {
     /// Why not, when it may not.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Set on a write's answer when the file was written but the running tree refused the value; the next boot
+    /// applies it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_error: Option<String>,
 }
 
 /// Every profile entry, with the facts a page renders around them (`SettingsDescribeValue`).
@@ -410,7 +415,12 @@ pub struct SettingsService {
     catalog: Box<dyn ComponentCatalog + Send + Sync>,
     revisions: SettingsRevisions,
     writing: Mutex<()>,
+    live: Vec<String>,
+    applier: Option<SettingsApplier>,
 }
+
+/// Apply entry `ns`'s newly composed, resolved config to the running tree; an error is the running tree's refusal.
+pub type SettingsApplier = Box<dyn Fn(&str, &Value) -> Result<(), String> + Send + Sync>;
 
 impl SettingsService {
     /// The surface for a run booted with `options` and the in-memory `overrides` the flags appended.
@@ -430,18 +440,36 @@ impl SettingsService {
             catalog,
             revisions: SettingsRevisions::default(),
             writing: Mutex::new(()),
+            live: Vec::new(),
+            applier: None,
         })
+    }
+
+    /// The entries in `live` apply a write to the running tree as it lands, through `apply`, and report
+    /// `applies: live`, as DSH's settings do; every other entry stays `restart`. The binary marks the model row,
+    /// whose service re-reads its composition on the next request.
+    #[must_use]
+    pub fn with_live(mut self, live: Vec<String>, apply: SettingsApplier) -> Self {
+        self.live = live;
+        self.applier = Some(apply);
+        self
     }
 
     /// Every entry's form, the target re-read.
     pub fn describe(&self) -> Result<SettingsView, ConfigError> {
-        describe_settings(
+        let mut view = describe_settings(
             &self.layers,
             self.target.as_ref(),
             &self.env,
             self.catalog.as_ref(),
             &self.revisions,
-        )
+        )?;
+        for entry in &mut view.namespaces {
+            if self.applier.is_some() && self.live.contains(&entry.ns) {
+                entry.applies = "live".to_string();
+            }
+        }
+        Ok(view)
     }
 
     /// Check, write and re-read entry `ns`; the answer is its new form.
@@ -466,13 +494,35 @@ impl SettingsService {
             expected_revision,
         )?;
         commit_settings_write(&planned)?;
+        // Applied to the running tree as it lands, for a live entry: its composed, resolved config is what the next
+        // boot would hand it. A refusal does not undo the write; the answer says so and the next boot applies it.
+        let mut apply_error = None;
+        if let Some(apply) = &self.applier
+            && self.live.iter().any(|live| live == ns)
+        {
+            let config = State::read(&self.layers, self.target.as_ref(), &self.env)
+                .and_then(|state| compose(&state.current, &self.env))
+                .map_err(|error| error.problems().join("; "))
+                .map(|rows| {
+                    rows.into_iter()
+                        .find(|row| row.row.id.as_deref() == Some(ns))
+                        .and_then(|row| row.row.config)
+                        .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
+                });
+            if let Err(error) = config.and_then(|config| apply(ns, &config)) {
+                apply_error = Some(error);
+            }
+        }
         let view = self.describe().map_err(rejected)?;
-        view.namespaces
+        let mut entry = view
+            .namespaces
             .into_iter()
             .find(|entry| entry.ns == ns)
             .ok_or_else(|| {
                 SettingsError::Rejected(format!("entry '{ns}' vanished after the write"))
-            })
+            })?;
+        entry.apply_error = apply_error;
+        Ok(entry)
     }
 }
 
@@ -820,9 +870,15 @@ impl State {
                 }
                 redact(Value::Object(fields))
             });
-        let schema = match catalog.lookup(&row.row, anchor) {
-            SchemaLookup::Schema(schema) => serde_json::to_value(*schema).unwrap_or(Value::Null),
-            _ => Value::Null,
+        // DSH's form projection where the catalog has one (every built-in with a Config, #123), else the plain schema.
+        let schema = match catalog.form(&row.row, anchor) {
+            Some(form) => form,
+            None => match catalog.lookup(&row.row, anchor) {
+                SchemaLookup::Schema(schema) => {
+                    serde_json::to_value(*schema).unwrap_or(Value::Null)
+                }
+                _ => Value::Null,
+            },
         };
         let reason = if self.target.is_none() {
             Some("this run has no profile patch to write".to_string())
@@ -838,6 +894,7 @@ impl State {
             base,
             user,
             applies: "restart".to_string(),
+            apply_error: None,
             secrets,
             revision: revisions.revision(ns, &self.digest(ns)),
             editable: reason.is_none(),
@@ -1810,6 +1867,112 @@ mod tests {
         );
         let parsed = parse_block(&text, Path::new("/tmp/x.yml"), &Env::default()).unwrap();
         assert_eq!(parsed, vec![("r".to_string(), value)]);
+    }
+
+    #[test]
+    fn a_live_entry_is_applied_to_the_running_tree_as_it_lands() {
+        let fixture = Fixture::new("live");
+        let applied: std::sync::Arc<Mutex<Vec<(String, Value)>>> = std::sync::Arc::default();
+        let seen = std::sync::Arc::clone(&applied);
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap()
+        .with_live(
+            vec!["tools".to_string()],
+            Box::new(move |ns, config| {
+                seen.lock().unwrap().push((ns.to_string(), config.clone()));
+                Ok(())
+            }),
+        );
+        let view = service.describe().unwrap();
+        let applies = |ns: &str| {
+            view.namespaces
+                .iter()
+                .find(|entry| entry.ns == ns)
+                .map(|entry| entry.applies.clone())
+        };
+        assert_eq!(applies("tools").as_deref(), Some("live"));
+        assert_eq!(
+            applies("keys").as_deref(),
+            Some("restart"),
+            "only the entries the server can apply"
+        );
+        let entry = service
+            .write(
+                "tools",
+                &SettingsWrite::Update(
+                    json!({ "bashTimeoutMs": 60000 })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                None,
+            )
+            .unwrap();
+        assert_eq!(entry.apply_error, None);
+        assert_eq!(
+            applied.lock().unwrap().clone(),
+            vec![(
+                "tools".to_string(),
+                json!({ "bashTimeoutMs": 60000, "label": "plain" })
+            )],
+            "the composed config, as the next boot would give it"
+        );
+        service
+            .write(
+                "keys",
+                &SettingsWrite::Update(json!({ "label": "edited" }).as_object().unwrap().clone()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            applied.lock().unwrap().len(),
+            1,
+            "a restart entry is not applied"
+        );
+        std::fs::remove_dir_all(&fixture.root).ok();
+    }
+
+    #[test]
+    fn a_write_the_running_tree_refuses_is_still_written_and_says_so() {
+        let fixture = Fixture::new("live-refused");
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap()
+        .with_live(
+            vec!["tools".to_string()],
+            Box::new(|_, _| Err("the entry could not be re-applied".to_string())),
+        );
+        let entry = service
+            .write(
+                "tools",
+                &SettingsWrite::Update(
+                    json!({ "bashTimeoutMs": 60000 })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            entry.apply_error.as_deref(),
+            Some("the entry could not be re-applied")
+        );
+        let written = std::fs::read_to_string(fixture.patch_file()).unwrap();
+        assert!(
+            written.contains("\"bashTimeoutMs\": 60000"),
+            "the next boot still applies it: {written}"
+        );
+        std::fs::remove_dir_all(&fixture.root).ok();
     }
 
     #[test]

@@ -1,0 +1,38 @@
+[package]
+name = "heddle-commands"
+description = "Heddle in Rust: the host's slash commands — the registry, the line parser, the built-in commands and their two routes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+# Handlers answer boxed futures, a run catches a handler's panic, and a request body is read as a stream.
+futures.workspace = true
+# `/compact`: the context service's forced reduction, priced before and after.
+heddle-context.workspace = true
+# `/goal`: the goal service's create, show, edit, pause, resume and clear.
+heddle-goal.workspace = true
+# `/compact`: the model service's default endpoint, when the session records none; an attached image's media type.
+# `/goal`: the content parts and the user message a goal objective's attachments follow up in.
+heddle-llm.workspace = true
+# `/permission`: the mode vocabulary and its ladder.
+heddle-sandbox.workspace = true
+# The session log every run writes `command/run` and `command/done` to.
+heddle-session.workspace = true
+# A command line's attachments: the reader a turn uses (`read_attachments`) over the upload directory.
+heddle-web-files.workspace = true
+serde.workspace = true
+# `preserve_order`: an answer and an event keep the TypeScript build's key order, as `JSON.stringify` writes them.
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+# A real session store in the tests needs its environment type.
+heddle-config.workspace = true
+tokio.workspace = true
+# The route tests call the router in-process, as heddle-web-composer's do.
+tower = { version = "0.5", features = ["util"] }
