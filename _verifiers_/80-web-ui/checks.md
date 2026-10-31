@@ -82,8 +82,9 @@ grounded_in:
 - [`check-shortcut-keys.mjs`](check-shortcut-keys.mjs) — the session shortcuts pressed through
   `Input.dispatchKeyEvent` with the `key` values Chrome delivers (on a Mac, ⌥⌘A arrives as `å` and ⌥⌘N as a dead
   key), matched on the physical key with DSH's `Mod`, Command on a Mac and Control elsewhere (R-developer-seven-7):
-  search, sidebar, settings, add workspace, new session, rename, fork and archive each act; a held repeat runs once;
-  an extra Shift, or Control in place of Command on a Mac, does nothing.
+  search, sidebar, settings, new session, rename, fork and archive each act (⌥⌘O, add workspace, is pressed in
+  `check-workspaces.mjs`); a held repeat runs once; an extra Shift, or Control in place of Command on a Mac, does
+  nothing.
 
 ## What it deliberately does not judge
 

@@ -34,7 +34,6 @@ const CHORDS = {
   sidebar: { code: 'KeyB', macKey: '∫', key: 'b', keyCode: 66, alt: true },
   newSession: { code: 'KeyN', macKey: 'Dead', key: 'n', keyCode: 78, alt: true },
   settings: { code: 'Comma', macKey: '≤', key: ',', keyCode: 188, alt: true },
-  addWorkspace: { code: 'KeyO', macKey: 'ø', key: 'o', keyCode: 79, alt: true },
   fork: { code: 'KeyF', macKey: 'F', key: 'F', keyCode: 70, shift: true },
 }
 
@@ -132,11 +131,25 @@ test('the session shortcuts fire on the physical key, with the key values the br
       `fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ session: ${JSON.stringify(target)}, prompt: 'seed the session' }) }).then(async (r) => ({ status: r.status, length: (await r.text()).length }))`,
     )
     assert.equal(seeded.status, 200, 'the target session has a completed turn')
+    /**
+     * Open the target from its row, as a person does. A workspace row starts closed, as DSH's tree does (main from
+     * stack-1), so the target's workspace is opened first when its sessions are not drawn.
+     */
+    const targetRow = `document.querySelector('#tree li[data-session-id="${target}"] > .row')`
+    const openTarget = async () => {
+      await browser.evaluate(`(() => {
+        if (${targetRow} !== null) return true
+        const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((each) => each.dataset.path === ${JSON.stringify(server.work)})
+        if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+        return true
+      })()`)
+      await browser.waitFor(`!!${targetRow}`)
+      await browser.evaluate(`${targetRow}.click()`)
+      await settle()
+    }
     await browser.goto(server.url)
     await browser.waitFor(`document.body.dataset.ready === 'true'`)
-    await browser.waitFor(`!!document.querySelector('#tree li[data-session-id="${target}"] > .row')`)
-    await browser.evaluate(`document.querySelector('#tree li[data-session-id="${target}"] > .row').click()`)
-    await settle()
+    await openTarget()
     const sidebarState = () => browser.evaluate(`document.body.dataset.sidebar`)
 
     await t.test('search: Mod+Alt+K opens a collapsed sidebar and focuses the field', async () => {
@@ -173,13 +186,6 @@ test('the session shortcuts fire on the physical key, with the key values the br
       await browser.evaluate(`document.getElementById('settings-dialog').close()`)
     })
 
-    await t.test('add workspace: Mod+Alt+O opens the folder chooser', async () => {
-      await press(browser, CHORDS.addWorkspace, { onMac })
-      assert.ok(await browser.waitFor(`document.getElementById('workspace-picker').open`, 10_000), 'the chooser is open')
-      await browser.evaluate('document.querySelector("#workspace-picker [data-ws-close]").click()')
-      assert.equal(await browser.evaluate(`document.getElementById('workspace-picker').open`), false, 'and closes again')
-    })
-
     await t.test('new session: Mod+Alt+N starts a session', async () => {
       const before = (await sessions(browser)).length
       await press(browser, CHORDS.newSession, { onMac })
@@ -188,9 +194,7 @@ test('the session shortcuts fire on the physical key, with the key values the br
     })
 
     await t.test('rename: Mod+Alt+G asks for a title and keeps the answer', async () => {
-      await browser.waitFor(`!!document.querySelector('#tree li[data-session-id="${target}"] > .row')`)
-      await browser.evaluate(`document.querySelector('#tree li[data-session-id="${target}"] > .row').click()`)
-      await settle()
+      await openTarget()
       await browser.evaluate(`(() => { window.__askedFor = null; window.prompt = (message) => { window.__askedFor = message; return 'renamed by chord' }; return true })()`)
       await press(browser, CHORDS.rename, { onMac })
       await settle(600)
@@ -218,8 +222,7 @@ test('the session shortcuts fire on the physical key, with the key values the br
     })
 
     await t.test('the modifier set must match: an extra Shift, or Control in place of Command on a Mac, does nothing', async () => {
-      await browser.evaluate(`document.querySelector('#tree li[data-session-id="${target}"] > .row').click()`)
-      await settle()
+      await openTarget()
       await press(browser, CHORDS.archive, { onMac, extra: SHIFT })
       await settle(900)
       const untouched = (await sessions(browser)).find((s) => s.id === target)

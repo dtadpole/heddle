@@ -72,7 +72,9 @@ fn the_matcher_compares_the_code_and_reads_mod_by_platform() {
         "nothing fires under AltGraph"
     );
     assert!(
-        source.contains("const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform"),
+        source.contains(
+            "const SHORTCUTS_ON_MAC = /darwin|mac|iphone|ipad/iu.test(navigator.platform"
+        ),
         "a Mac is read as DSH reads it, from navigator.platform and without minding case"
     );
 }
