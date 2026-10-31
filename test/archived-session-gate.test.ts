@@ -252,7 +252,7 @@ test('a turn blocked at a later step leaves the goal driver at rest: a goal resu
   assert.deepEqual(goalRounds(sessions.store.read(session)), [1], 'the resume started round 1')
 })
 
-test('a goal round refused at a later step, then at its first, is not started again by itself; a change after the unarchive starts the next', async () => {
+test('a goal round refused at a later step, then at its first, is not started again by itself; a resume after the unarchive starts the next', async () => {
   let archiveOnce = true
   let archivedBy: SessionService | undefined
   const { sessions, session, goals } = await driven(
@@ -268,7 +268,8 @@ test('a goal round refused at a later step, then at its first, is not started ag
   const created = goals.create(session, { objective: 'finish the report', maxGoalRounds: 3 })
   /**
    * Round 1 asks the model and is refused at its second step. The driver goes on to round 2, as DSH's does at the next
-   * idle, and the gate refuses that round's first step, so no message is admitted and the chain stops.
+   * idle, and the gate refuses that round's first step, so no message is admitted and the goal is blocked
+   * `prompt-rejected`, as DSH blocks it (dsh-goal-round-driver lib/index.js:326-333).
    */
   await until(() => of(sessions.store.read(session), 'turn/failed') >= 2, 'round 1 and round 2 to be refused')
   await settle(300)
@@ -277,18 +278,42 @@ test('a goal round refused at a later step, then at its first, is not started ag
   assert.equal(of(events, 'turn/failed'), 2, `two refused turns and no more: the refused round was not started again\nsaw: ${events.map((event) => event.type).join(', ')}`)
   assert.equal(of(events, 'model/request'), 1, 'only round 1\'s first step asked the model')
   assert.deepEqual(goalRounds(events), [1], 'round 2 was never admitted')
-  assert.equal(goals.get(session)?.phase, 'active', 'the goal is left as it was')
+  const refused = goals.get(session)
+  assert.equal(refused?.phase, 'blocked', 'the refused round blocks its goal, as DSH\'s does')
+  assert.deepEqual(refused?.blockedReason, { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' })
 
   sessions.flags(session.id, { archived: false })
   await settle()
   assert.equal(sessions.store.read(session).length, events.length, 'unarchiving starts nothing by itself either')
 
-  const current = goals.get(session)!
-  const edited = goals.edit(session, { id: current.id, revision: current.revision }, { objective: 'finish the report, unarchived' })
-  assert.notEqual(edited.revision, created.revision)
-  await until(() => goalRounds(sessions.store.read(session)).length > 1, 'the edited goal\'s round (the driver stayed busy after turn/failed)')
+  const resumed = goals.resume(session, { id: refused!.id, revision: refused!.revision })
+  assert.notEqual(resumed.revision, created.revision)
+  await until(() => goalRounds(sessions.store.read(session)).length > 1, 'the resumed goal\'s round (the driver stayed busy after turn/failed)')
   await until(() => goals.get(session)?.phase === 'blocked', 'the rounds to settle at their cap')
-  assert.deepEqual(goalRounds(sessions.store.read(session)), [1, 2, 3], 'the change started round 2, and round 3 followed it to the cap')
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [1, 2, 3], 'the resume started round 2, and round 3 followed it to the cap')
   const completed = sessions.store.read(session).filter((event) => event.type === 'assistant/completed')
   assert.equal(completed[0]!.finishReason, 'blocked', 'round 1, refused at its second step, ended blocked')
+})
+
+test('a goal round the gate refuses at its first step blocks the goal with DSH\'s prompt-rejected, and a resume after the unarchive runs it', async () => {
+  const { sessions, session, goals } = await driven('driver-prompt-rejected', [{ text: 'the round ran' }])
+  sessions.flags(session.id, { archived: true })
+  const created = goals.create(session, { objective: 'finish the report', maxGoalRounds: 1 })
+  await until(() => goals.get(session)?.phase !== 'active', 'the refused round to settle')
+  const blocked = goals.get(session)!
+  assert.equal(blocked.phase, 'blocked', `the goal is blocked, not left active and armed\nsaw: ${JSON.stringify(blocked)}`)
+  assert.deepEqual(blocked.blockedReason, { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' }, 'with DSH\'s code and sentence')
+  assert.equal(blocked.roundsStarted, 0, 'the round was never admitted')
+  await settle()
+  const events = [...sessions.store.read(session)]
+  assert.equal(of(events, 'model/request'), 0, 'no model request was made')
+  assert.equal(of(events, 'turn/failed'), 1, 'one refused turn, and it was not started again')
+
+  sessions.flags(session.id, { archived: false })
+  goals.resume(session, { id: blocked.id, revision: blocked.revision })
+  await until(() => goalRounds(sessions.store.read(session)).length > 0, 'the resumed goal\'s round')
+  await until(() => goals.get(session)?.blockedReason?.code === 'round-limit', 'the round to settle at its cap')
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [1], 'the resume ran round 1')
+  assert.ok(sessions.store.read(session).some((event) => event.type === 'assistant/completed' && event.text === 'the round ran'), 'and the round answered')
+  assert.notEqual(created.revision, goals.get(session)?.revision)
 })
