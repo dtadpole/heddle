@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-31T01:14:48Z
 level: L3
 version: 1.1.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -50,6 +50,10 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-archived-session.mjs`](check-archived-session.mjs) — an archived session row, drawn under *All
+  conversations*, carries DSH's "Archived sessions cannot be opened. Unarchive it to view." as its accessible
+  description, and clicking it says so and opens nothing, while a live row still opens (`dsh-client-ui-workspace`
+  `guardedOpen`).
 
 ## What it deliberately does not judge
 
