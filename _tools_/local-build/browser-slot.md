@@ -1,9 +1,9 @@
 ---
 title: Browser slot queue
 created: 2026-10-29T13:08:51Z
-modified: 2026-10-29T14:40:05Z
+modified: 2026-10-31T01:03:24Z
 level: L2
-version: 1.2.0
+version: 1.3.0
 description: How browser-slot shares the team's browser slots fairly. It covers the slot count and the integrator reservation, the queue and tickets, the coordinator's priority turn, the memory gate, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
 status: unverified
 grounded_in:
@@ -45,9 +45,10 @@ already in use exits 78 with an instruction to sync `_tools_/local-build` from m
 ticket, so it expires after 5 minutes. `status` shows each waiter's last verdict, the reason it did not take a
 slot.
 
-**Memory gate (D-061).** No new holder is admitted while `memory_pressure` reports under 25% free, the
-primary gate, or `vm.swapusage` used is at or over 7680M, the backstop for sticky macOS swap. The seat stays
-queued, and the exit-75 line says why. `browser-cap` may move the lines (`min-free=25 swap-stop=7680`).
+**Memory gate (D-061, D-063).** No new holder is admitted while `memory_pressure` reports under 25% free, the
+primary gate, or swap free (`vm.swapusage` total minus used) is under 1024M, the backstop. The backstop is
+relative because macOS grows swap. The seat stays queued, and the exit-75 line says why. `browser-cap` may move
+the lines (`min-free=25 swap-free-min=1024`), or pin an absolute line instead with `swap-stop=<MB used>`.
 
 ## Holding and releasing
 
@@ -77,4 +78,4 @@ Once every seat uses the tool, the queue is the only way in.
 
 `run` exits with the command's status. Environment for tests: `LOCAL_BUILD_SLOT_ROOT`,
 `BROWSER_SLOT_STALE_SECONDS`, `BROWSER_SLOT_TICKET_SECONDS`, `BROWSER_SLOT_NEXT_SECONDS`, `BROWSER_SLOT_POLL_MS`,
-`BROWSER_SLOT_MIN_FREE_PCT`, `BROWSER_SLOT_SWAP_STOP_MB`, and `BROWSER_SLOT_FAKE_FREE_PCT` / `BROWSER_SLOT_FAKE_SWAP_MB`, which stand in for the readings.
+`BROWSER_SLOT_MIN_FREE_PCT`, `BROWSER_SLOT_SWAP_FREE_MIN_MB`, `BROWSER_SLOT_SWAP_STOP_MB`, and `BROWSER_SLOT_FAKE_FREE_PCT` / `BROWSER_SLOT_FAKE_SWAP_MB` / `BROWSER_SLOT_FAKE_SWAP_TOTAL_MB`, which stand in for the readings.

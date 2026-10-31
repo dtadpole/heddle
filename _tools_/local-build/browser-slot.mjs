@@ -42,10 +42,12 @@ const VERSION_FILE = path.join(ROOT, 'browser-slot.version')
 // A free slot the first waiter has not taken for this long may go to the next waiter whose gate passes.
 const HEAD_GRACE_S = number('BROWSER_SLOT_HEAD_GRACE_SECONDS', 60)
 const freeSince = (n) => path.join(ROOT, `browser.free-since${n}`)
-// D-061: memory_pressure free under 25% admits no one (the primary gate); swap used at or over 7680M is the
-// backstop. browser-cap may override both ("min-free=25 swap-stop=7680"), then the environment (tests).
+// memory_pressure free under 25% admits no one (D-061, the primary gate). The swap backstop is relative (D-063):
+// no one is admitted while swap free (vm.swapusage total minus used) is under 1024M, so it follows macOS growing
+// swap. browser-cap may move the lines ("min-free=25 swap-free-min=1024"), or pin an absolute "swap-stop=<MB used>"
+// instead; the environment overrides both (tests).
 const MIN_FREE_PCT = 25
-const SWAP_STOP_MB = 7680
+const SWAP_FREE_MIN_MB = 1024
 
 export const lockDir = (n) => path.join(ROOT, n === 1 ? 'browser.lock' : `browser.lock${n}`)
 
@@ -59,8 +61,9 @@ export function config() {
   const reserve = (text.match(/reserve=([a-z0-9-]+)/) || [])[1] || null
   const key = (name, fallback) => Number((text.match(new RegExp(`${name}=(\\d+)`)) || [])[1]) || fallback
   const minFree = number('BROWSER_SLOT_MIN_FREE_PCT', key('min-free', MIN_FREE_PCT))
-  const swapStop = number('BROWSER_SLOT_SWAP_STOP_MB', key('swap-stop', SWAP_STOP_MB))
-  return { count, reserve: count >= 2 ? reserve : null, minFree, swapStop }
+  const swapStop = number('BROWSER_SLOT_SWAP_STOP_MB', key('swap-stop', null)) // absolute override, off by default
+  const swapFreeMin = number('BROWSER_SLOT_SWAP_FREE_MIN_MB', key('swap-free-min', SWAP_FREE_MIN_MB))
+  return { count, reserve: count >= 2 ? reserve : null, minFree, swapStop, swapFreeMin }
 }
 
 export const roleOf = (seat, role) => role || (seat.startsWith('integrator-') ? 'integrator' : 'developer')
@@ -83,19 +86,34 @@ function slotNumbers(cfg) {
   return [...Array.from({ length: cfg.count }, (_, i) => i + 1), ...extra.sort((a, b) => a - b)]
 }
 
-/** D-061: no new holder while memory_pressure reports under 25% free, or swap used is at or over 7680M. */
+/** No new holder while memory_pressure reports under 25% free (D-061), or swap free is under 1024M (D-063). */
 export function memoryGate(cfg = config()) {
-  const read = (fake, cmd, args, pattern) => {
-    if (env[fake] !== undefined && env[fake] !== '') return Number(env[fake])
-    const r = spawnSync(cmd, args, { encoding: 'utf8' })
-    const m = (r.stdout || '').match(pattern)
-    return m ? Number(m[1]) : null
+  const fake = (name) => (env[name] !== undefined && env[name] !== '' ? Number(env[name]) : undefined)
+  let free = fake('BROWSER_SLOT_FAKE_FREE_PCT')
+  if (free === undefined) {
+    const m = (spawnSync('memory_pressure', [], { encoding: 'utf8' }).stdout || '').match(/free percentage:\s*(\d+)%/)
+    free = m ? Number(m[1]) : null
   }
-  const free = read('BROWSER_SLOT_FAKE_FREE_PCT', 'memory_pressure', [], /free percentage:\s*(\d+)%/)
-  const swap = read('BROWSER_SLOT_FAKE_SWAP_MB', 'sysctl', ['-n', 'vm.swapusage'], /used\s*=\s*([\d.]+)M/)
-  const reading = `memory free ${free ?? '?'}%, swap ${swap === null ? '?' : Math.round(swap)}M`
+  let used = fake('BROWSER_SLOT_FAKE_SWAP_MB')
+  let total = fake('BROWSER_SLOT_FAKE_SWAP_TOTAL_MB') ?? null
+  if (used === undefined) {
+    const text = spawnSync('sysctl', ['-n', 'vm.swapusage'], { encoding: 'utf8' }).stdout || ''
+    const u = text.match(/used\s*=\s*([\d.]+)M/)
+    const t = text.match(/total\s*=\s*([\d.]+)M/)
+    used = u ? Number(u[1]) : null
+    total = t ? Number(t[1]) : null
+  }
+  const swapFree = used !== null && total !== null ? total - used : null
+  const reading =
+    `memory free ${free ?? '?'}%, swap ${used === null ? '?' : Math.round(used)}M used` +
+    (swapFree === null ? '' : ` of ${Math.round(total)}M (${Math.round(swapFree)}M free)`)
   if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-061)` }
-  if (swap !== null && swap >= cfg.swapStop) return { ok: false, reading, why: `swap ${Math.round(swap)}M >= ${cfg.swapStop}M (D-061 backstop)` }
+  if (cfg.swapStop !== null) {
+    if (used !== null && used >= cfg.swapStop)
+      return { ok: false, reading, why: `swap ${Math.round(used)}M used >= ${cfg.swapStop}M (browser-cap swap-stop)` }
+  } else if (swapFree !== null && swapFree < cfg.swapFreeMin) {
+    return { ok: false, reading, why: `swap free ${Math.round(swapFree)}M < ${cfg.swapFreeMin}M (D-063)` }
+  }
   return { ok: true, reading, why: '' }
 }
 
