@@ -910,6 +910,59 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
   }
 })
 
+test('a recorded model the catalogue no longer lists shows DSH’s placeholder and no effort', async (context) => {
+  /**
+   * Issue #47. A session keeps the model it recorded after the configuration drops it, and DSH keeps calling it too
+   * ("a saved selection can still submit requests after its catalog entry disappears", dsh-llm-deepseek). What differs
+   * is the seat: DSH "shows 'Select model' in regular weight and hides the reasoning effort caption" for a saved
+   * selection absent from the catalogue (dsh-client-ui-model-selection), while the page showed the stale raw id as if
+   * it were a choice. A turn that names an unlisted model is the shortest way to such a session: the turn route
+   * passes the id through and records it, as DSH does, and the page opens the newest session.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('removed')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ prompt: 'a session on a model since removed', endpoint: 'double-two', model: 'model-gone' }),
+    })
+    assert.equal(turn.status, 200, 'the turn runs')
+    await turn.text()
+    assert.equal((await sessionsOf(server))[0]?.model, 'model-gone', 'the session records the model the catalogue does not list')
+
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
+    assert.ok(
+      await browser.waitFor(`${SEAT}.getAttribute('aria-label') === 'Select model'`, 10_000),
+      `the seat shows DSH's placeholder (${await browser.evaluate(`${SEAT}.getAttribute('aria-label')`)})`,
+    )
+    assert.equal(await browser.evaluate(`document.getElementById('model-label').textContent`), 'Select model', 'as its label')
+    assert.equal(await browser.evaluate(`getComputedStyle(document.getElementById('model-label')).fontWeight`), '400', 'in regular weight')
+    assert.equal(await browser.evaluate(`document.getElementById('model-effort').hidden`), true, 'with no effort caption')
+    assert.equal((await browser.evaluate(`${SEAT}.innerText`)).includes('model-gone'), false, 'and without the stale id')
+
+    await openMenu(browser)
+    const menu = await browser.evaluate(MENU_READ)
+    assert.deepEqual(menu.cells.map((cell) => cell.text), ['Model|Select model'], 'the root pane keeps the placeholder and has no Effort row')
+    await drill(browser, 'Model')
+    await choose(browser, 'Model Two')
+    assert.equal(
+      await browser.evaluate(`${SEAT}.getAttribute('aria-label')`),
+      'Select model, current Model Two, reasoning effort High',
+      'choosing a listed model brings back its name and caption',
+    )
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a model or a level the endpoint does not declare is refused, and nothing is recorded', async (context) => {
   /**
    * The route is the only place a name from a browser reaches the store, so it is validated there rather than
