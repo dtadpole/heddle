@@ -233,9 +233,44 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
   )
   const browser = await openBrowser()
   try {
+    await browser.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      const realFetch = window.fetch.bind(window)
+      let firstList = true
+      window.__historyWaiting = false
+      window.__queuedSessionFrames = []
+      window.fetch = async (input, options) => {
+        const url = String(input)
+        if (url === '/api/sessions' && firstList) {
+          firstList = false
+          await new Promise((resolve) => { window.__releaseBootList = resolve })
+        }
+        const response = await realFetch(input, options)
+        if (url.startsWith('/api/sessions/session-') && !url.includes('?') && !window.__historyWaiting) {
+          window.__historyWaiting = true
+          const captured = await response.json()
+          response.json = async () => captured
+          window.__historyWaiting = true
+          await new Promise((resolve) => { window.__releaseHistory = resolve })
+        }
+        return response
+      }
+      const NativeEvents = window.EventSource
+      window.EventSource = class extends NativeEvents {
+        addEventListener(type, listener, options) {
+          if (type !== 'session') return super.addEventListener(type, listener, options)
+          return super.addEventListener(type, (event) => {
+            window.__queuedSessionFrames.push(() => listener.call(this, event))
+          }, options)
+        }
+      }
+      window.__flushSessionFrames = () => { for (const deliver of window.__queuedSessionFrames.splice(0)) deliver() }
+    ` })
     await browser.goto(child.url)
     assert.ok(await browser.waitFor('document.getElementById("log") !== null', 20_000), 'the panel is up')
     const cookie = await cookieFor(child.url)
+    await browser.waitFor('typeof window.__releaseBootList === "function"', 10000)
+    await browser.evaluate('window.__releaseBootList()')
+    await browser.waitFor('document.body.dataset.ready === "true"', 20000)
 
     const turn = await fetch(new URL('/api/turn', child.url), {
       method: 'POST',
@@ -244,6 +279,13 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
     })
     assert.equal(turn.status, 200, 'the turn ran')
     await turn.text()
+    const id = await browser.evaluate("fetch('/api/sessions').then(r => r.json()).then(rows => rows[0].id)")
+    await browser.evaluate(`void (window.__historyOpen = globalThis.showSession(${JSON.stringify(id)}))`)
+    await browser.waitFor('window.__historyWaiting === true', 10000)
+    await browser.evaluate('window.__flushSessionFrames()')
+    await browser.evaluate('window.__releaseHistory()')
+    await browser.evaluate('window.__historyOpen')
+
 
     assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 20_000), 'the answer is drawn')
     assert.ok(
@@ -272,6 +314,7 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
     const actions = JSON.parse(
       await browser.evaluate(`JSON.stringify({
         buttons: document.querySelectorAll('#log .turn.assistant .action').length,
+        rows: [...document.querySelectorAll('#log .turn.assistant')].map((row) => ({ text: row.textContent, rendered: row.dataset.rendered, actions: [...row.querySelectorAll('.action')].map((button) => ({ label: button.getAttribute('aria-label'), html: button.outerHTML })) })),
         label: (document.querySelector('#log .turn.assistant .action') || {}).getAttribute?.('aria-label') ?? null,
         copyText: (document.querySelector('#log .turn.assistant') || {}).dataset?.copyText ?? null
       })`),

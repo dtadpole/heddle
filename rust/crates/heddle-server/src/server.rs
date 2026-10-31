@@ -1158,6 +1158,12 @@ async fn session_view_route(
     }
     let mut body = Map::new();
     body.insert("id".into(), Value::String(id.to_string()));
+    let event_seq = events
+        .iter()
+        .filter_map(|event| event.get("seq").and_then(Value::as_i64))
+        .max()
+        .unwrap_or(-1);
+    body.insert("eventSeq".into(), Value::from(event_seq));
     body.insert(
         "endpoint".into(),
         meta.as_ref()

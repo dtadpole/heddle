@@ -3585,7 +3585,12 @@ function add(kind, text, merge = true, label, tool) {
     // reasoning block (a `details` whose data-kind is reasoning) was never the target — but the branch
     // still looked for `[data-body]` on whatever the last child was, and a history render passes
     // merge=false... measured, that path is what threw and left the log holding one turn of nine.
+    if (last.dataset.rendered !== undefined) {
+      last.textContent = last.dataset.rawText ?? last.dataset.copyText ?? last.textContent
+      delete last.dataset.rendered
+    }
     last.textContent += text
+    last.dataset.rawText = last.textContent
     last.dataset.state = 'running'
     followChatTail()
     return
@@ -3621,6 +3626,7 @@ function add(kind, text, merge = true, label, tool) {
      * A history row is settled by construction, so it gets its actions here — the same ones the live path
      * attaches; `dataset.copyText` is snapshotted before the button is inside the row.
      */
+    node.dataset.rawText = text
     node.dataset.copyText = node.innerText
     node.append(messageActions(node))
     if (tool !== undefined && Array.isArray(tool.files) && tool.files.length > 0) node.append(editedFilesPanel(tool.files))
@@ -3988,6 +3994,7 @@ async function renderSettledAnswers() {
       continue
     }
     row.dataset.rendered = 'pending'
+    row.dataset.rawText = text
     row.dataset.copyText = text
     try {
       const response = await fetch('/api/markdown', {
@@ -6095,7 +6102,17 @@ function renderTodo() {
   )
 }
 
-async function showSession(id) {
+const transcriptLoads = new Map()
+const transcriptWatermarks = new Map()
+let historyLoadGeneration = 0
+async function showSession(id, retry = true) {
+  const generation = ++historyLoadGeneration
+  for (const [oldId, oldLoad] of transcriptLoads) {
+    oldLoad.abandoned = true
+    oldLoad.controller.abort()
+    transcriptLoads.delete(oldId)
+  }
+  const stale = () => generation !== historyLoadGeneration || current !== id
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6116,17 +6133,21 @@ async function showSession(id) {
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
+  if (stale()) return
   syncSelectionToSession()
-  if (view === 'trajectory') await showLedger(id)
+  if (view === 'trajectory') { await showLedger(id); if (stale()) return }
   /**
    * The log is cleared and refilled from the session's own history.
    *
    * This is the half that was missing: selecting a session used to leave the right side empty, because
    * the only thing that ever wrote to it was the live stream and those events had already happened.
    */
-  log.replaceChildren()
+  const load = { events: [], bytes: 0, controller: new AbortController(), abandoned: false }
+  transcriptLoads.set(id, load)
+  let snapshotSeq = null
   try {
-    const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    const response = await fetch('/api/sessions/' + encodeURIComponent(id), { signal: load.controller.signal })
+    if (stale() || load.abandoned || transcriptLoads.get(id) !== load) return
     if (!response.ok) {
       /**
        * A session that is no longer there is **not** the session being shown.
@@ -6146,6 +6167,15 @@ async function showSession(id) {
       return
     }
     const body = await response.json()
+    if (stale() || transcriptLoads.get(id) !== load) return
+    log.replaceChildren()
+    snapshotSeq = Number.isSafeInteger(body.eventSeq) ? body.eventSeq : null
+    if (snapshotSeq === null) {
+      load.events.length = 0
+      console.warn('Transcript snapshot has no event watermark; re-reading once rather than duplicating buffered rows.')
+      if (retry) setTimeout(() => { if (!stale()) void showSession(id, false) }, 100)
+    }
+    if (snapshotSeq !== null) transcriptWatermarks.set(id, snapshotSeq)
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6181,14 +6211,28 @@ async function showSession(id) {
     }
     followChatTail(true)
   } catch (error) {
+    if (stale() || transcriptLoads.get(id) !== load) return
+    load.events.length = 0
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
     note.className = 'turn denied'
     note.textContent = 'could not read this session: ' + (error && error.message)
     log.append(note)
+  } finally {
+    if (transcriptLoads.get(id) === load) {
+      transcriptLoads.delete(id)
+      if (current === id) {
+        for (const payload of load.events) {
+          handleSessionPayload(payload, true)
+        }
+      }
+    }
   }
+  if (stale()) return
   await refreshGoal()
+  if (stale()) return
   await refreshTodo()
+  if (stale()) return
   /**
    * The reminders: the transcript's turn tails get their cards, then both sources are re-read — the cards first, so the
    * catalog read is newer than their mount and a task deleted since the turn reads "Deleted".
@@ -6298,9 +6342,10 @@ function scheduleTreeRefresh() {
     void renderTree()
   }, 400)
 }
-events.addEventListener('session', (message) => {
-  const payload = JSON.parse(message.data)
+events.addEventListener('session', (message) => handleSessionPayload(JSON.parse(message.data)))
+function handleSessionPayload(payload, replay = false) {
   const event = payload.event
+  if (!replay) {
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -6360,26 +6405,39 @@ events.addEventListener('session', (message) => {
      */
     if (queues.has(payload.session)) void pumpQueue(payload.session)
     renderComposerState()
-    /**
-     * And it is when the answer stops arriving, so the rows settle and the document is drawn.
-     *
-     * Driven from the **event** rather than only from the page's own response, because a turn posted by
-     * anything else — the CLI, another window — settles here and nowhere else, and the reader should not be
-     * able to tell whose turn it was by how the answer looks.
-     */
-    /**
-     * The same "is this the panel's session" test the rows below use, including the case where the panel has
-     * adopted nothing yet: a page that has only ever watched a turn — the CLI's, another window's — is showing
-     * that session, and its answer settles here like anyone else's.
-     */
-    if (current === null || payload.session === current) {
-      settleChat()
-      void renderSettledAnswers()
-      /** DSH's turn tail exists only for a completed turn, so a turn's created-reminder cards land here. */
-      renderScheduleCards()
-    }
+
   }
+
+  }
+  const load = transcriptLoads.get(payload.session)
+  if (load !== undefined && payload.session === current) {
+    const bytes = JSON.stringify(payload).length
+    if (load.events.length >= 4096 || load.bytes + bytes > 8 * 1024 * 1024) {
+      // Keep the live view rather than holding an unbounded snapshot backlog. Abort the obsolete snapshot,
+      // release buffered events in original order, and continue live without treating it as a loaded watermark.
+      load.abandoned = true
+      load.controller.abort()
+      transcriptLoads.delete(payload.session)
+      transcriptWatermarks.delete(payload.session)
+      add('denied', 'History loading exceeded its event budget; the previous view and live updates are retained. Reopen the session to reload history.', false)
+      for (const buffered of load.events) handleSessionPayload(buffered, true)
+      handleSessionPayload(payload, true)
+      setTimeout(() => { if (current === payload.session) void showSession(payload.session, false) }, 100)
+      return
+    }
+    load.bytes += bytes
+    load.events.push(payload)
+    return
+  }
+  const watermark = transcriptWatermarks.get(payload.session)
+  const covered = !payload.transient && !event.transient && payload.session === current && watermark !== undefined && Number.isSafeInteger(event.seq) && event.seq <= watermark
   if (current && payload.session !== current) return
+  if (covered) return
+  if (event.type === 'turn/completed') {
+    settleChat()
+    void renderSettledAnswers()
+    renderScheduleCards()
+  }
   /**
    * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
    * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.
@@ -6464,7 +6522,7 @@ events.addEventListener('session', (message) => {
       void showLedger(current)
     }, 500)
   }
-})
+}
 
 /** Coalesces the burst of events one turn produces into a single ledger refetch. */
 let ledgerRefetchTimer = null

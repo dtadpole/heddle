@@ -1994,6 +1994,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * never has to ask per turn. The live path (a turn that just ended) asks `/api/markdown` for the one
            * answer it has, and both go through `renderMarkdown`, so there is one renderer and one allow-list.
            */
+          eventSeq: events.reduce((last, event) => Math.max(last, event.seq), -1),
           turns: scopeAttachmentUrls(transcriptTurns(events), id).map((turn) =>
             turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
           ),
