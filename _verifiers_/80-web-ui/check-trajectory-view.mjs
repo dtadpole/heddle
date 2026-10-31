@@ -718,9 +718,18 @@ test('the overview draws one bar per record, and an answer bar splits at its TTF
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew per-record bars')
     const state = JSON.parse(await browser.evaluate(`JSON.stringify({
-      bars: [...document.querySelectorAll('#timeline .tr-bar')].map((bar) => ({ lane: bar.dataset.lane, kind: bar.dataset.kind, label: bar.getAttribute('aria-label') ?? '', split: bar.dataset.split === 'true', ttft: bar.style.getPropertyValue('--ttft') })),
+      bars: [...document.querySelectorAll('#timeline .tr-bar')].map((bar) => ({ lane: bar.dataset.lane, kind: bar.dataset.kind, label: bar.getAttribute('aria-label') ?? '', split: bar.dataset.split === 'true', ttft: bar.style.getPropertyValue('--ttft'), image: getComputedStyle(bar).backgroundImage })),
     })`))
     assert.ok(state.bars.every((bar) => /^turn \d+ · /.test(bar.label)), `every bar is named 'turn N · kind · …' (${state.bars.map((bar) => bar.label).join(' | ')})`)
+    /**
+     * The default equal mode lays bars out in slots, and a slot is layout only: each bar says the same clock and
+     * duration as in the actual-duration mode (developer-ten's B1 - the slot's width read as the record's duration).
+     */
+    await browser.evaluate(`document.getElementById('tr-duration').click()`)
+    const actualLabels = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#timeline .tr-bar')].map((bar) => bar.getAttribute('aria-label') ?? ''))`))
+    await browser.evaluate(`document.getElementById('tr-duration').click()`)
+    const singles = (labels) => labels.filter((label) => !/ records/.test(label)).sort()
+    assert.deepEqual(singles(state.bars.map((bar) => bar.label)), singles(actualLabels), 'a record says the same clock and duration in both duration modes')
     /**
      * The split follows the server's own data. The scripted provider can answer within one millisecond, and an answer
      * that took no time has nothing to split; so the claim is that the page draws the split exactly when the ledger's
@@ -737,6 +746,7 @@ test('the overview draws one bar per record, and an answer bar splits at its TTF
     }
     assert.ok(splitBars.length > 0, `an answer bar in the model lane carries the TTFT split (${JSON.stringify(state.bars)})`)
     assert.match(splitBars[0].ttft, /^\d+(\.\d)?%$/, 'its split is a share of the bar')
+    assert.match(splitBars[0].image, /linear-gradient/, `and the split is painted: no older rule resets the bar's gradient (${splitBars[0].image})`)
     await browser.evaluate(`document.querySelector('#timeline .tr-bar[data-split="true"]').dispatchEvent(new PointerEvent('pointerenter'))`)
     await new Promise((resolve) => setTimeout(resolve, 800))
     const tip = await browser.evaluate(`document.getElementById('timeline-tip')?.hidden === false ? document.getElementById('timeline-tip').textContent : ''`)
