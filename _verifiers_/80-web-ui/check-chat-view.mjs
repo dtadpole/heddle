@@ -2769,11 +2769,14 @@ test('a settled subagent\'s notice reads as its blocks, a paragraph each, live, 
     const session = opened.body.session?.id ?? opened.body.id
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
-    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
-    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    /**
+     * A blank session is a tree row only while it is open (DSH's sessionVisible, stack 2), and its header shows no raw id
+     * (#24), so it is opened by id: the open resolves true once its history is drawn.
+     */
+    const shown = await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
 
     /** The session has opened (its history drawn) before anything is sent into it: a send while it is still opening races the page's own redraw. */
-    assert.ok(await browser.waitFor(`document.getElementById('session-title')?.textContent === ${JSON.stringify(session)}`, 10_000), 'the session opens')
+    assert.equal(shown, true, 'the session opens')
     const turn = await fetch(new URL('/api/turn', server.url), {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
@@ -2830,11 +2833,14 @@ test('a turn stopped from the page is marked as stopped where it ended, live', a
     const session = opened.body.session?.id ?? opened.body.id
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
-    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
-    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    /**
+     * A blank session is a tree row only while it is open (DSH's sessionVisible, stack 2), and its header shows no raw id
+     * (#24), so it is opened by id: the open resolves true once its history is drawn.
+     */
+    const shown = await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
 
     /** The session has opened (its history drawn) before anything is sent into it: a send while it is still opening races the page's own redraw. */
-    assert.ok(await browser.waitFor(`document.getElementById('session-title')?.textContent === ${JSON.stringify(session)}`, 10_000), 'the session opens')
+    assert.equal(shown, true, 'the session opens')
     await sendMessage(browser, 'run the slow command')
     assert.ok(await browser.waitFor('document.querySelector("#log .turn.tool") !== null', 20_000), 'the slow call starts')
     await browser.evaluate('document.getElementById("stop").click()')
@@ -2869,7 +2875,6 @@ test('a turn that runs while its session is opening is drawn once, not live and 
     const session = opened.body.session?.id ?? opened.body.id
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
-    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
     /** Hold the read of this session's history until the check lets it go. */
     await browser.evaluate(`(() => {
       const original = window.fetch
@@ -2887,7 +2892,8 @@ test('a turn that runs while its session is opening is drawn once, not live and 
       }
       return true
     })()`)
-    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    /** A blank session is a tree row only while it is open (DSH's sessionVisible, stack 2), so it is opened by id. */
+    await browser.evaluate(`(() => { void showSession(${JSON.stringify(session)}); return true })()`)
     assert.ok(await browser.waitFor('window.__historyReads > 0', 10_000), 'the page is reading the session history')
 
     const turn = await fetch(new URL('/api/turn', server.url), {

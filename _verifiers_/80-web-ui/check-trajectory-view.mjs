@@ -616,6 +616,8 @@ test('an overview tick shows its clock and duration after a 500 ms hover, as DSH
     await turn.text()
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /** A page load opens no session of its own (#17, stack 2), so the check opens the one it ran. */
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-tick").length > 0', 20_000), 'the overview drew its ticks')
     const tipState = `JSON.stringify({ shown: document.getElementById('timeline-tip')?.hidden === false, text: document.getElementById('timeline-tip')?.textContent ?? '' })`
