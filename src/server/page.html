@@ -2803,6 +2803,15 @@
   .tr-tick:hover, .tr-tick[aria-current='true'] { outline: 1px solid var(--text-3); }
   /** A focused bar's own ring, drawn inside the lane: the browser's default ring is clipped by the strip's overflow. */
   .tr-tick:focus-visible { outline: 2px solid var(--text-2); outline-offset: 1px; }
+  /** A user record's attachment counts beside its text, and the inspector's attachment list (S151). */
+  .tr-attach-count { margin-left: .5rem; font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .tr-attachments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .tr-attachments li { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
+  .tr-attach-thumb { width: 36px; height: 36px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); cursor: zoom-in; overflow: hidden; }
+  .tr-attach-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .tr-attach-icon { width: 36px; text-align: center; }
+  .tr-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tr-attach-detail { color: var(--text-3); white-space: nowrap; }
   .tr-focus {
     position: absolute;
     top: 0;
@@ -6197,6 +6206,32 @@ function rowFolded(row, collapsedTurns, expanded) {
 }
 /* ledger-rows:end */
 
+/* ledger-attachments:begin */
+/**
+ * A user record's attachment counts, as DSH's row shows them beside the text: the nonzero image and file counts, or ''
+ * when it carried none (S151). Pure, and fenced so test/page-ledger-attachments.test.ts judges it.
+ */
+function attachmentCounts(attachments) {
+  const list = Array.isArray(attachments) ? attachments : []
+  const images = list.filter((item) => item?.kind === 'image').length
+  const files = list.filter((item) => item?.kind === 'file').length
+  return [images > 0 ? images + (images === 1 ? ' image' : ' images') : '', files > 0 ? files + (files === 1 ? ' file' : ' files') : '']
+    .filter(Boolean)
+    .join(' · ')
+}
+
+/**
+ * One inspector row's words for an attachment, DSH's: its recorded name (an unnamed image, numbered among the images),
+ * then its size and type. A zero-byte file keeps its size.
+ */
+function attachmentLine(item, imageNumber) {
+  const name = typeof item?.name === 'string' && item.name !== '' ? item.name : item?.kind === 'image' ? 'Image ' + imageNumber : 'File'
+  const bytes = typeof item?.bytes === 'number' && Number.isFinite(item.bytes) ? item.bytes : 0
+  const size = bytes < 1024 ? bytes + ' B' : bytes < 1024 * 1024 ? (bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0) + ' KB' : (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return { name, detail: [size, typeof item?.mimeType === 'string' && item.mimeType !== '' ? item.mimeType : null].filter(Boolean).join(' · ') }
+}
+/* ledger-attachments:end */
+
 function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   /**
    * The pane is cleared here, not only in the caller: switching view and finishing a live turn at the
@@ -6361,6 +6396,14 @@ function rowNode(row, index) {
     text.className = 'tr-text'
     text.textContent = (row.preview ?? previewOf(record)) + (record.inFlight === true ? ' · running' : '')
     content.append(text)
+    /** A user record counts what it carried beside its text, as DSH's does, an attachment-only record included. */
+    const counts = attachmentCounts(record.attachments)
+    if (counts !== '') {
+      const badge = document.createElement('span')
+      badge.className = 'tr-attach-count'
+      badge.textContent = counts
+      content.append(badge)
+    }
   }
   tr.append(event, content)
   tr.tabIndex = 0
@@ -6520,6 +6563,53 @@ function renderDetails(row) {
   show(0)
 }
 
+/**
+ * A user record's attachments in the inspector, DSH's ordered list after the message text (S151): each row a contained
+ * image thumbnail that opens the page's lightbox, or a file chip, then the recorded name, size and type. A long name
+ * ellipsizes and keeps the whole name in its tooltip. Each address is read for the open session, as the chat's cards are.
+ */
+function attachmentList(attachments) {
+  const list = document.createElement('ul')
+  list.className = 'tr-attachments'
+  let images = 0
+  for (const item of attachments) {
+    if (item?.kind === 'image') images += 1
+    const words = attachmentLine(item, images)
+    const url = typeof item?.url === 'string' && item.url !== '' ? item.url + (current === null ? '' : (item.url.includes('?') ? '&' : '?') + 'session=' + encodeURIComponent(current)) : null
+    const entry = document.createElement('li')
+    entry.dataset.kind = item?.kind === 'image' ? 'image' : 'file'
+    if (item?.kind === 'image' && url !== null) {
+      const open = document.createElement('button')
+      open.type = 'button'
+      open.className = 'tr-attach-thumb'
+      open.setAttribute('aria-label', 'open ' + words.name)
+      const picture = document.createElement('img')
+      picture.src = url
+      picture.alt = words.name
+      picture.loading = 'lazy'
+      open.append(picture)
+      open.addEventListener('click', () => openImagePreview(url, words.name))
+      entry.append(open)
+    } else {
+      const icon = document.createElement('span')
+      icon.className = 'tr-attach-icon'
+      icon.textContent = '📄'
+      icon.setAttribute('aria-hidden', 'true')
+      entry.append(icon)
+    }
+    const name = document.createElement('span')
+    name.className = 'tr-attach-name'
+    name.textContent = words.name
+    name.title = words.name
+    const detail = document.createElement('span')
+    detail.className = 'tr-attach-detail'
+    detail.textContent = words.detail
+    entry.append(name, detail)
+    list.append(entry)
+  }
+  return list
+}
+
 function summarySection(row, record, step) {
   /**
    * DSH's Summary is an **accordion**: Hierarchy, Status, Payload, Result, Schema and Timing, each an
@@ -6540,6 +6630,7 @@ function summarySection(row, record, step) {
   } else if (record.text !== undefined && String(record.text) !== '') {
     box.append(accOpen('Content', trPre(String(record.text))))
   }
+  if (Array.isArray(record.attachments) && record.attachments.length > 0) box.append(accOpen('Attachments', attachmentList(record.attachments)))
   box.append(accOpen('Timing', timingSection(record, trajectory.turns.get(row.turn), step)))
   if (record.note !== undefined) box.append(trEmpty(String(record.note)))
   return box
