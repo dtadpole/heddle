@@ -46,9 +46,12 @@ function harness(previousTranscript = true) {
     clearTimeout: noop,
     closeSchedulesPage: noop, closeScheduleDrawer: noop, resetScheduleList: noop,
     placeholderDrawn: () => false, chooseWorkspace: noop, jobsSessionChanged: noop,
-    slashReady: Promise.resolve(null), markRunning: noop, drawTurnFailure: noop,
+    slashReady: Promise.resolve({ sessionShown: noop, draw: () => calls.push('command-draw') }),
+    markRunning: (id: string) => calls.push(`start:${id}`), drawTurnFailure: noop,
     rememberCurrent: noop, paintComposerAccess: noop, paintSessionHeading: noop,
-    renderTree: async () => {}, markSelection: noop, noteCompletion: noop, markBranchable: noop,
+    renderTree: async () => {}, markSelection: noop,
+    noteCompletion: (id: string, wasRunning: boolean, running: boolean) => calls.push(`completion:${id}:${wasRunning}:${running}`),
+    markBranchable: (seq: number) => calls.push(`branch:${seq}`),
     paintEmptyState: noop, applySessionAccess: noop, applySessionModel: noop,
     adoptSession: noop, refreshSessions: async () => {}, syncSelectionToSession: noop,
     showLedger: async () => {}, followChatTail: noop, updateStatusBar: noop,
@@ -57,8 +60,8 @@ function harness(previousTranscript = true) {
     refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
     scheduleTreeRefresh: noop, scheduleGoalRefresh: noop, scheduleTodoRefresh: noop,
     paintRunningMarks: noop, renderComposerState: noop, refreshRunningStatus: noop,
-    refreshSessionStats: async () => {}, pumpQueue: async () => {},
-    settleChat: noop, renderSettledAnswers: async () => {}, settleReasoning: noop,
+    refreshSessionStats: async () => {}, pumpQueue: async (id: string) => { calls.push(`pump:${id}`) },
+    settleChat: () => calls.push('settle'), renderSettledAnswers: async () => { calls.push('settled-answers') }, settleReasoning: noop,
     addUsage: (previous: unknown, usage: unknown) => usage ?? previous,
     attachEditedFiles: async () => {}, renderAccess: noop,
     growLiveToolCall: noop, settleLiveToolCall: () => false, fillToolResult: () => false,
@@ -78,7 +81,9 @@ function harness(previousTranscript = true) {
     ({ show: showSession, handle: handleSessionPayload,
        loading: () => transcriptLoads.has('S'), watermark: () => transcriptWatermarks.get('S'),
        buffered: () => transcriptLoads.get('S')?.events.length ?? 0,
-       unavailable: () => unavailableSession })
+       unavailable: () => unavailableSession,
+       prepareRunning: (id) => { runningSessions.add(id); runningSince.set(id, 1); pendingInteractions.set(id, {}); queues.set(id, []); },
+       lifecycle: (id) => ({ running: runningSessions.has(id), since: runningSince.has(id), pending: pendingInteractions.has(id) }) })
   `, context, { timeout: 1000 }) as {
     show(id: string): Promise<boolean | undefined>
     unavailable(): string | null
@@ -86,6 +91,8 @@ function harness(previousTranscript = true) {
     loading(): boolean
     watermark(): number | undefined
     buffered(): number
+    prepareRunning(id: string): void
+    lifecycle(id: string): { running: boolean; since: boolean; pending: boolean }
   }
   return { ...api, rows, requests, timers, calls }
 }
@@ -129,8 +136,8 @@ test('showSession reports an HTTP snapshot failure as unavailable with the serve
   assert.equal(state.timers.length, 0)
 })
 
-for (const failure of ['fetch rejection', 'JSON rejection'] as const) {
-  test(`showSession clears old history before fetch and retains buffered live deltas after ${failure} without a stale watermark`, { timeout: 5000 }, async () => {
+for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as const) {
+  test(`showSession discards the partial live tail after ${failure} and blocks later drawing without a stale watermark`, { timeout: 5000 }, async () => {
     const state = harness()
     const initial = state.show('S')
     const first = await snapshotStarted(state, 1)
@@ -147,22 +154,66 @@ for (const failure of ['fetch rejection', 'JSON rejection'] as const) {
     state.handle(delta(91, 'buffered second'))
     assert.equal(state.buffered(), 2)
     assert.deepEqual(state.rows, rowsAtFetch, 'Live deltas wait for the in-flight snapshot')
-    if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
+    if (failure === 'HTTP refusal') request.resolve({ ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ error: 'history unavailable' }) })
+    else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
     else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
     assert.equal(await loading, false, 'A rejected snapshot must not claim that history loaded')
     assert.equal(state.unavailable(), 'S', 'Transport and JSON failures mark the session unavailable')
     assert.equal(state.loading(), false, 'Failure releases the pending load')
     assert.equal(state.watermark(), undefined, 'A failed snapshot establishes no watermark')
-    assert.deepEqual(assistantTexts(state), ['buffered first', 'buffered second'], 'Buffered deltas below the old watermark replay once in arrival order')
-    assert.ok(state.rows.some((row) => row.className === 'turn denied load-error' && row.textContent === `Failed to load history: ${failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'} (0)`), 'The visible failure is the injected snapshot error')
-    assert.deepEqual(state.rows.map((row) => row.textContent), ['buffered first', 'buffered second', `Failed to load history: ${failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'} (0)`], 'Buffered live deltas replay before the view is marked unavailable and its alert is appended')
+    assert.deepEqual(assistantTexts(state), [], 'A failed snapshot cannot turn a buffered half-tail into history')
+    const failureText = `Failed to load history: ${failure === 'HTTP refusal' ? 'history unavailable (503)' : failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'}`
+    assert.deepEqual(state.rows.map((row) => row.textContent), [failureText], 'Only the failure alert is shown; transport failures have no fake HTTP status')
+    assert.equal(state.rows[0]?.className, 'turn denied load-error')
     assert.ok(!state.rows.some((row) => /ReferenceError|is not defined/.test(row.textContent)), 'A missing mock dependency must not masquerade as a snapshot failure')
     state.handle(delta(92, 'later live delta'))
-    assert.deepEqual(assistantTexts(state), ['buffered first', 'buffered second', 'later live delta'])
+    assert.deepEqual(assistantTexts(state), [], 'Later live deltas cannot draw into the unavailable conversation')
     assert.equal(state.timers.length, 0, 'Snapshot failures do not schedule an unsolicited retry')
     assert.deepEqual(callsAtFetch, ['clear', 'fetch', 'clear', 'fetch'], 'Every snapshot fetch starts after clearing the old transcript')
     assert.deepEqual(rowsAtFetch, [], 'The prior transcript is absent while the new snapshot is pending')
     assert.equal(watermarkAtFetch, undefined, 'Reopening invalidates the previous watermark before replay')
+  })
+}
+
+test('a failed snapshot discards already-bookkept completion without replaying it', { timeout: 5000 }, async () => {
+  const state = harness()
+  const loading = state.show('S')
+  const request = await snapshotStarted(state, 1)
+  state.prepareRunning('S')
+  state.handle({ session: 'S', event: { seq: 10, type: 'turn/completed' } })
+  assert.equal(state.buffered(), 1)
+  for (const value of Object.values(state.lifecycle('S'))) assert.equal(value, false)
+  assert.equal(state.calls.filter((call) => call === 'pump:S').length, 1)
+  request.reject(new Error('network unavailable'))
+  assert.equal(await loading, false)
+  assert.equal(state.calls.filter((call) => call === 'completion:S:true:false').length, 1)
+  assert.equal(state.calls.filter((call) => call === 'pump:S').length, 1)
+  assert.ok(!state.calls.includes('settle'), 'The discarded completion must not settle a half-loaded transcript')
+  assert.ok(!state.calls.includes('branch:10'))
+})
+
+for (const session of ['S', 'other-session']) {
+  test(`unavailable history blocks ${session} drawing while completion bookkeeping still works`, { timeout: 5000 }, async () => {
+    const state = harness()
+    const loading = state.show('S')
+    const request = await snapshotStarted(state, 1)
+    request.reject(new Error('network unavailable'))
+    assert.equal(await loading, false)
+    const failureRows = [...state.rows]
+    state.prepareRunning(session)
+    state.handle({ session, event: { seq: 11, type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'must not draw' } } })
+    state.handle({ session, event: { seq: 12, type: 'message', message: { role: 'user', content: [] } } })
+    state.handle({ session, event: { seq: 13, type: 'command/run' } })
+    state.handle({ session, event: { seq: 14, type: 'turn/completed' } })
+    await flush()
+    assert.ok(!state.calls.includes('command-draw'))
+    assert.deepEqual(state.rows, failureRows, 'Neither this session nor another client replaces the unavailable alert')
+    for (const value of Object.values(state.lifecycle(session))) assert.equal(value, false)
+    assert.equal(state.calls.filter((call) => call === `completion:${session}:true:false`).length, 1)
+    assert.equal(state.calls.filter((call) => call === `pump:${session}`).length, 1)
+    assert.ok(!state.calls.includes('settle'))
+    assert.ok(!state.calls.includes('settled-answers'))
+    assert.ok(!state.calls.includes('branch:14'))
   })
 }
 

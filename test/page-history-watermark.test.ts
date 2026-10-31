@@ -17,7 +17,7 @@ function state() {
   }
   return runInNewContext(`
     const transcriptLoads = new Map(), transcriptWatermarks = new Map([['S', 10]]), pendingInteractions = new Map();
-    const current = 'S', composerKey = 'S', view = 'chat';
+    const current = 'S', composerKey = 'S', view = 'chat', unavailableSession = null;
     const runningSessions = new Set(['S']), runningSince = new Map(), queues = new Map([['S', []]]);
     let liveRounds=0,liveRoundStartedAt=null;
     ${handler}

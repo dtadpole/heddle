@@ -6522,7 +6522,7 @@ function historyFailureText(status, statusText, failure) {
     failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
       ? failure.error
       : statusText || 'no reason given'
-  return `Failed to load history: ${reason} (${status})`
+  return `Failed to load history: ${reason}${status > 0 ? ` (${status})` : ''}`
 }
 
 /** Active history loads buffer drawing only; lifecycle state is processed on first delivery. */
@@ -6611,10 +6611,10 @@ async function showSession(id, retry = true) {
   let snapshotSeq = null
   async function failHistory(status, statusText, failure) {
     if (stale() || transcriptLoads.get(id) !== load) return false
-    // Both HTTP and transport failures release live updates before marking the view unavailable.
+    // Lifecycle state was applied on first delivery. Without a snapshot, buffered deltas are only
+    // a partial tail, not history: discard them rather than drawing into the unavailable view.
     transcriptLoads.delete(id)
     transcriptWatermarks.delete(id)
-    for (const payload of load.events) handleSessionPayload(payload, true)
     load.events.length = 0
     unavailableSession = id
     current = null
@@ -7244,6 +7244,9 @@ function handleSessionPayload(payload, replay = false) {
       renderComposerState()
     }
   }
+  // An unavailable conversation draws no live transcript, even with current === null. Keep
+  // all-session lifecycle bookkeeping above active, but never append another session's rows here.
+  if (unavailableSession !== null) return
   const load = transcriptLoads.get(payload.session)
   if (load !== undefined && payload.session === current) {
     const bytes = JSON.stringify(payload).length

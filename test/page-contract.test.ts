@@ -259,8 +259,8 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
   assert.ok(page.includes('current = id\n  paintEmptyState()'), 'opening a session paints it')
   assert.ok(page.includes("document.body.dataset.ready = 'true'\n</script>"), 'and boot ends by announcing that it finished')
   assert.match(page, /paintEmptyState\(\)\n\/\*\*[\s\S]*?document\.body\.dataset\.ready/, 'which happens after the invitation is painted')
-  /** A session that no longer exists must not keep the invitation hidden. */
-  assert.ok(page.includes('current = null\n      paintSessionHeading()'), 'a vanished session releases the pointer, and the header says No session again')
+  /** A session that no longer exists releases the pointer but shows its unavailable alert, not the invitation. */
+  assert.match(page, /unavailableSession = id\s+current = null\s+paintSessionHeading\(\)/, 'a vanished session releases the pointer, and the header says Session unavailable')
 })
 
 test('the navigation panel is a fixed column, and only its workspaces region scrolls', () => {
@@ -440,7 +440,7 @@ test('a session is labelled and headed by DSH\'s words and its title, never its 
   assert.doesNotMatch(body('function learnDefinition(id, folder) {'), /textContent|\.label =/, 'learning a definition folder does not set the label')
   assert.match(body('async function renderFlatList() {'), /label\.textContent = WorkspaceTree\.sessionLabel\(meta\)/, 'and so does a flat row')
   assert.match(page, /title\.textContent = WorkspaceTree\.storedTitle\(meta\) \?\? 'Untitled'/, 'a search hit reads its title, else Untitled')
-  const show = body('async function showSession(id) {')
+  const show = body('async function showSession(id, retry = true) {')
   assert.doesNotMatch(show, /: id\n/, 'the header never falls back to the raw id')
   assert.match(show, /paintSessionHeading\(\{ \.\.\.listed,/, 'it is painted from the session\'s listed entry and its own answer')
   const paint = body('function paintSessionHeading(')

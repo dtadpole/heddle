@@ -61,7 +61,7 @@ function harness(): Harness {
     'addUsage', 'formatTokenCount', 'formatRate', 'formatCacheHit', 'formatDurationMs',
     'formatExactCount', 'formatWindow', 'statPanelRows']
   const h = runInNewContext(`
-    let current = 'S', composerKey = 'S';
+    let current = 'S', composerKey = 'S', unavailableSession = null;
     const view = 'chat';
     let sessionStats = null, liveRounds = 3, liveUsage = initialUsage;
     let liveTurns = 0, liveGenerationMs = 1000, liveDecodeTokens = 20, liveRoundStartedAt = 7;
