@@ -1,7 +1,7 @@
 import { dirname, extname } from 'node:path'
 
 import { highlightCode } from './highlight.ts'
-import { escapeHtml, renderMarkdown } from './markdown.ts'
+import { escapeHtml, renderMarkdown, renderMarkdownOffThread } from './markdown.ts'
 
 /**
  * The code renderer: a source file shown as source rather than as a wall of text.
@@ -261,4 +261,16 @@ export function renderSource(path: string, text: string): Rendered {
     return { renderer: 'html' }
   }
   return { renderer: 'text' }
+}
+
+/**
+ * {@link renderSource} for a request handler: a markdown document is rendered off the event loop.
+ *
+ * A previewed document is somebody's file, and a long one renders as slowly as a long answer does (issue #19), so the
+ * route that serves a preview must not do it on the thread every other request waits on. Every other renderer here is
+ * linear and stays where it is.
+ */
+export async function renderSourceOffThread(path: string, text: string): Promise<Rendered> {
+  if (rendererFor(path).renderer !== 'markdown') return renderSource(path, text)
+  return { renderer: 'markdown', html: `<div class="markdown">${await renderMarkdownOffThread(text, { base: dirname(path) })}</div>` }
 }
