@@ -6,6 +6,7 @@ import { after, test } from 'node:test'
 
 import * as activity from '../src/session/activity.ts'
 import { activitySessions, sessionActivity } from '../src/session/activity.ts'
+import { JobRegistry, type JobOutcome } from '../src/jobs/registry.ts'
 import { ScheduleService } from '../src/schedule/service.ts'
 
 /**
@@ -183,4 +184,69 @@ test('the refusal says what blocks the archive', () => {
     activity.refusalSentence(id, [{ kind: 'schedule', items: [{ id: 's', label: 'x' }] }]),
     'session session-a has active scheduled reminders; pass stop: true to stop them and archive',
   )
+})
+
+/** A jobs row with one way to start a job that runs until it is cancelled, recording the reason it was given. */
+function jobsRow() {
+  const jobs = new JobRegistry({ sessionExists: (id) => id.startsWith('session-') })
+  jobs.attachController('test')
+  const start = (owner: string, label: string) => {
+    const cancels: (string | undefined)[] = []
+    let finish: (outcome: JobOutcome) => void = () => undefined
+    const id = jobs.start({
+      kind: 'bash',
+      label,
+      owner,
+      run: () => ({
+        cancel: (reason) => {
+          cancels.push(reason)
+          finish({ status: 'killed', detail: 'signal: SIGTERM' })
+        },
+        done: new Promise<JobOutcome>((resolve) => (finish = resolve)),
+      }),
+    })
+    return { id, cancels }
+  }
+  return { jobs, start }
+}
+
+test("the jobs row's live jobs fill the job slot, between the turn and the subagents, beside the reminders", async () => {
+  /**
+   * The job family is the jobs row's own (`sessionJobActivity`, DSH's `runningJobs`): the running or stopping jobs the
+   * session owns. In DSH's waterfall every listener puts its own entry before `rest`, the turn's included
+   * (`dsh-agent/lib/index.js:26-31`), so the family that registered first is listed first: the turn, then the jobs.
+   */
+  const { jobs, start } = jobsRow()
+  const mine = start('session-a', 'sleep 60')
+  start('session-b', 'not mine')
+  const schedule = new ScheduleService({ file: join(scratch, 'schedule-jobs.json') })
+  const reminder = await schedule.create('session-a', { prompt: 'check the build', title: 'Build check', after_seconds: 3600 })
+  const rows = await activity.rowActivity({ jobs, schedule }, 'session-a')
+  assert.deepEqual(rows, { jobs: [{ id: mine.id, label: 'sleep 60' }], schedules: [{ id: reminder.id, label: 'Build check' }] })
+  const metas = [{ id: 'session-a' }, { id: 'child', parentSession: 'session-a', origin: 'subagent' }]
+  assert.deepEqual(
+    sessionActivity('session-a', metas, () => true, rows).map((entry) => entry.kind),
+    ['turn', 'job', 'subagent', 'schedule'],
+  )
+  assert.deepEqual(await activity.rowActivity({}, 'session-a'), { jobs: [], schedules: [] }, 'without either row there is nothing')
+  await schedule.dispose()
+})
+
+test("stop: true's row stops kill the session's jobs with \"session archived\" and remove its reminders, and nothing else", async () => {
+  const { jobs, start } = jobsRow()
+  const mine = start('session-a', 'sleep 60')
+  const other = start('session-b', 'not mine')
+  const schedule = new ScheduleService({ file: join(scratch, 'schedule-stop.json') })
+  await schedule.create('session-a', { prompt: 'check the build', title: 'Build check', after_seconds: 3600 })
+  const kept = await schedule.create('session-b', { prompt: 'not mine', title: 'Elsewhere', after_seconds: 3600 })
+  const warnings: string[] = []
+  await activity.stopRowActivity({ jobs, schedule }, 'session-a', (message) => warnings.push(message))
+  assert.deepEqual(mine.cancels, ['session archived'], "DSH's kill reason (dsh-jobs/lib/index.js:32-36)")
+  assert.deepEqual(other.cancels, [], "another session's job runs on")
+  assert.deepEqual(await schedule.list({ sessionId: 'session-a' }), [], "the session's reminders are gone (stopSessionTasks)")
+  assert.deepEqual((await schedule.list({ sessionId: 'session-b' })).map((record) => record.id), [kept.id])
+  assert.equal(warnings.length, 0, 'nothing failed')
+  await activity.stopRowActivity({}, 'session-a', (message) => warnings.push(message))
+  assert.equal(warnings.length, 0, 'without the rows there is nothing to stop')
+  await schedule.dispose()
 })
