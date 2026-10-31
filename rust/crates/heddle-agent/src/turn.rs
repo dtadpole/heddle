@@ -431,7 +431,7 @@ async fn run_turn_body(
         loop {
             input_before = user_input_seqs(runtime.session.as_ref(), session);
 
-            let request = GenerateRequest {
+            let asked = GenerateRequest {
                 endpoint: options.endpoint.clone(),
                 model: options.model.clone(),
                 messages: prepared.messages.clone(),
@@ -444,12 +444,17 @@ async fn run_turn_body(
                 purpose: options.purpose.clone(),
                 ..GenerateRequest::default()
             };
+            // The record names the request this step sends, not the one the turn started with (issue #14): the
+            // server's running-turn rule on the `model/request` waterfall moves a step to the session's current
+            // endpoint, model and level, and a record written from the turn's options logged a step that went to
+            // the new model under the old one. DSH's request header names what was actually used.
+            let request = runtime.model.resolve(asked).map_err(TurnError::Model)?;
             runtime.session.model_request(
                 session,
                 &ModelRequestRecord {
-                    endpoint: options.endpoint.clone(),
-                    model: options.model.clone(),
-                    reasoning_effort: options.reasoning_effort.clone(),
+                    endpoint: request.endpoint.clone(),
+                    model: request.model.clone(),
+                    reasoning_effort: request.reasoning_effort.clone(),
                     messages: prepared.messages.len(),
                     tools: prepared
                         .tools
@@ -1178,6 +1183,9 @@ pub(crate) mod tests {
         steps: Mutex<VecDeque<Step>>,
         requests: Mutex<Vec<GenerateRequest>>,
         on_stream: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// `(endpoint, model, level)` a selection policy moves every call to, as the server's running-turn rule
+        /// does on the `model/request` waterfall; `None` sends each request as it was built.
+        moves_to: Option<(String, String, String)>,
     }
 
     impl ScriptedModel {
@@ -1186,6 +1194,16 @@ pub(crate) mod tests {
                 steps: Mutex::new(steps.into()),
                 requests: Mutex::new(Vec::new()),
                 on_stream: None,
+                moves_to: None,
+            })
+        }
+
+        fn moving_to(steps: Vec<Step>, endpoint: &str, model: &str, level: &str) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(steps.into()),
+                requests: Mutex::new(Vec::new()),
+                on_stream: None,
+                moves_to: Some((endpoint.into(), model.into(), level.into())),
             })
         }
 
@@ -1194,6 +1212,7 @@ pub(crate) mod tests {
                 steps: Mutex::new(std::mem::take(&mut *self.steps.lock().unwrap())),
                 requests: Mutex::new(Vec::new()),
                 on_stream: Some(hook),
+                moves_to: None,
             })
         }
 
@@ -1222,6 +1241,15 @@ pub(crate) mod tests {
                 })],
             };
             Box::pin(stream::iter(items))
+        }
+
+        fn resolve(&self, mut request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+            if let Some((endpoint, model, level)) = &self.moves_to {
+                request.endpoint.clone_from(endpoint);
+                request.model = Some(model.clone());
+                request.reasoning_effort = Some(level.clone());
+            }
+            Ok(request)
         }
 
         fn default_endpoint(&self) -> Option<String> {
@@ -1721,6 +1749,49 @@ pub(crate) mod tests {
         );
         let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
         assert!(completed.fields.contains_key("ended"));
+    }
+
+    #[tokio::test]
+    async fn the_model_request_record_names_what_the_step_was_sent() {
+        // Issue #14: a selection policy moved the call to the session's current model, and the record still named
+        // the model the turn started with, so the log read as if a mid-turn switch had been ignored.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::moving_to(
+            vec![Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ])],
+            "other",
+            "model-two",
+            "low",
+        );
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "answer");
+        options.model = Some("model-one".into());
+        options.reasoning_effort = Some("high".into());
+        run_turn(&runtime, options).await.unwrap();
+        let sent = model.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            (
+                sent[0].endpoint.as_str(),
+                sent[0].model.as_deref(),
+                sent[0].reasoning_effort.as_deref()
+            ),
+            ("other", Some("model-two"), Some("low")),
+            "the call carried the resolved selection"
+        );
+        let record = session.event("model/request").unwrap();
+        assert_eq!(record.fields["endpoint"], "other");
+        assert_eq!(record.fields["model"], "model-two");
+        assert_eq!(record.fields["reasoningEffort"], "low");
     }
 
     #[tokio::test]

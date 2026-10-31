@@ -67,6 +67,14 @@ pub trait ModelPort: Send + Sync {
         cancel: Option<CancellationToken>,
     ) -> BoxStream<'static, Result<Chunk, ModelError>>;
 
+    /// The request [`ModelPort::stream`] would send, after the service's `model/request` waterfall.
+    ///
+    /// The loop records this, not the request it built, so a step a selection policy moved to the session's
+    /// current model is logged under that model (issue #14). A port with no waterfall sends what it is given.
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        Ok(request)
+    }
+
     /// The endpoint a session with none recorded runs on.
     fn default_endpoint(&self) -> Option<String>;
 }

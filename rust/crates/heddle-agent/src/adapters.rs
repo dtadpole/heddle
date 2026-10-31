@@ -81,6 +81,10 @@ impl ModelPort for LlmModel {
         }
     }
 
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        self.service.resolve(&request).map_err(ModelError::from)
+    }
+
     fn default_endpoint(&self) -> Option<String> {
         self.service.default_endpoint(None)
     }
