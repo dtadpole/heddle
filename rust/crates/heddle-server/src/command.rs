@@ -67,7 +67,9 @@ pub struct Context<'a> {
     pub views: Vec<(String, Arc<dyn SessionView>)>,
     /// Where `/vendor/purify.js` is looked for (the repository root and the working directory).
     pub asset_roots: Vec<PathBuf>,
-    /// Whether the serving invocation explicitly enabled Browser framing.
+    /// Whether the serving invocation explicitly enabled Browser framing (D-068) and so the page's Browser
+    /// tab (#86): the binary sets it from `HEDDLE_WEB_BROWSER=1`, as `runWeb` does, so this crate still
+    /// reads no process globals.
     pub browser: bool,
     /// The cookie-signing secret's path, `<heddle home>/web-secret` as the boot's environment resolves
     /// it (`token::secret_path_for`). Pass it: `None` falls back to the server reading `HEDDLE_HOME` and

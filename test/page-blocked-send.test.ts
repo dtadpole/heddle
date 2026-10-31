@@ -37,6 +37,9 @@ interface Ended {
   composerKey(): string
   cleared(): string[]
   liveRounds(): number
+  /** The sessions whose running rounds the page still holds, and those its done marked ended. */
+  counted(): string[]
+  ended(): string[]
 }
 
 /**
@@ -54,7 +57,7 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     let unavailableSession = null
     let activeFolder = null
     let workspaceRoutes = 'served'
-    let liveTurns = 0, liveRounds = 7, liveUsage, liveRoundStartedAt = null
+    let liveTurns = 0, liveRounds = (OPTIONS.running ?? {})[OPTIONS.open] ?? 0, liveUsage, liveRoundStartedAt = null
     let directTurnPending = 0, directPendingKey = null, stopRequested = false
     const stopButton = { disabled: true }
     const runningSessions = new Set(Object.keys(OPTIONS.running ?? {}))
@@ -122,6 +125,8 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
       composerKey: () => composerKey,
       cleared: () => [...cleared],
       liveRounds: () => liveRounds,
+      counted: () => [...turnRounds.keys()],
+      ended: () => [...turnsEnded],
     }))
     `,
     { OPTIONS: options, JSON, Promise, TextEncoder, TextDecoder, performance, Error, Array, Object, String, Number, Set, Map },
@@ -166,8 +171,15 @@ test('a turn that stopped early for any other reason keeps its notice under its 
 test('the end of this page\'s turn in another session leaves the open running session\'s live rounds as they are (N1)', async () => {
   const ended = await finish({ open: M, turn: S, payload: { text: 'done', finishReason: 'stop', rounds: 1, denials: [] }, running: { [M]: 3, [S]: 1 } })
   assert.equal(ended.liveRounds(), 3, "M's dock keeps the three rounds of its running turn, not 0")
+  assert.deepEqual(Array.from(ended.counted()), [M], 'and only M still counts rounds live')
+  /**
+   * The session whose turn ended keeps its live figures until its fold is read (main's 64efdee2, so the dock does not
+   * flash 0 steps); its rounds are forgotten, so that read does not count them again, and its late events add nothing.
+   */
   const own = await finish({ open: S, turn: S, payload: { text: 'done', finishReason: 'stop', rounds: 1, denials: [] }, running: { [S]: 1 } })
-  assert.equal(own.liveRounds(), 0, 'the session whose turn ended counts none live: its rounds are the fold\'s now')
+  assert.equal(own.liveRounds(), 1, 'the dock keeps the round until the fold replaces it')
+  assert.deepEqual(Array.from(own.counted()), [], 'its rounds are the fold\'s now: liveRoundsOf will count none of them')
+  assert.deepEqual(Array.from(own.ended()), [S], 'and its late stream events are marked as the ended turn\'s')
 })
 
 test('an early-end notice is drawn only into the turn\'s own session: not into the panel clearMain emptied, nor into another session (B2)', async () => {

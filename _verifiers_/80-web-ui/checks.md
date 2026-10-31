@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T17:15:00Z
+modified: 2026-10-31T23:10:00Z
 level: L3
-version: 1.5.0
+version: 1.7.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -151,6 +151,17 @@ grounded_in:
   the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
   shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
   composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
+- [`check-browser-tab.mjs`](check-browser-tab.mjs) — the right sidebar's Browser tab (#86), opt-in as DSH's Web
+  profile ships it: a default server reports no `browser` on `/api/status` and shows no entry point; with
+  `HEDDLE_WEB_BROWSER=1` the tab refuses `javascript:`, `file:`, `data:` and `blob:` input, credentials and the
+  application's own origin before anything reaches the network, frames a loopback page in DSH's default sandbox with
+  no referrer, keeps its own Back and Forward, marks a page that moved itself unknown, and covers the window at phone
+  width. On a desktop it keeps DSH's column budget whatever the left sidebar's stored or dragged width and the
+  window's: beside a track the conversation keeps 400 pixels and the track 300, a pane with no room for that covers the
+  conversation column, and opening it below 1024 pixels returns a narrow opening of the left sidebar to its rail.
+  DSH's Web chords drive it (S38, S42): Mod+Shift+B shows and hides it, the same tab coming back, and Mod+Alt+T opens
+  another tab, from the composer and not behind a dialog; the keyboard reference lists both last; a default server
+  takes neither key and lists neither.
 - [`check-reconnect.mjs`](check-reconnect.mjs) — a change that reached the server just before the connection dropped
   shows once it is back, as DSH's re-acquired baselines show it (#91): a session rename and a nested workspace's
   *Delete workspace* whose answers arrive only after the browser went offline (DevTools' Offline, through the
@@ -158,6 +169,16 @@ grounded_in:
   and a rename answered just before the server went away is drawn once the page's stream reconnects to it on the same
   port. Each time the tree's "could not read the workspaces" note goes, the Deleting… line is not left set, and no
   unhandled rejection reaches the console.
+- [`check-shortcut-keys.mjs`](check-shortcut-keys.mjs) — the session shortcuts pressed through
+  `Input.dispatchKeyEvent` with the `key` values Chrome delivers (on a Mac, ⌥⌘A arrives as `å` and ⌥⌘N as a dead
+  key), matched on the physical key with DSH's `Mod`, Command on a Mac and Control elsewhere (R-developer-seven-7):
+  search, sidebar, settings, new session, rename, fork and archive each act (⌥⌘O, add workspace, is pressed in
+  `check-workspaces.mjs`); a held repeat runs once; an extra Shift, or Control in place of Command on a Mac, does
+  nothing. Mod+/ opens DSH's keyboard reference and its search narrows it (S40); a binding recorded there replaces
+  the default, survives a reload, and Restore default brings the default back (S41); a taken or refused chord leaves the
+  keyboard on the recording row, so the next chord is recorded, and Remove and Restore default leave it on their row,
+  or on the search field when a search for the old keys no longer matches the row (another tab's change too);
+  two Escape presses within 500 ms stop the running turn, one press does not, and a queued message stays queued (S43).
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every

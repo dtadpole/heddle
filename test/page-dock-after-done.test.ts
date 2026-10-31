@@ -46,6 +46,8 @@ interface Seen {
   steps: number
   rate: boolean
   statistics: boolean
+  /** Output tokens the dock counts: the fold's and the live usage's. */
+  output: number
 }
 
 const N = 'session-55555555-5555-4555-8555-555555555555'
@@ -81,6 +83,7 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
       steps: (sessionStats?.steps ?? 0) + liveRounds,
       rate: (sessionStats?.generationMs ?? 0) + liveGenerationMs > 0 && (sessionStats?.decodeTokens ?? 0) + liveDecodeTokens > 0,
       statistics: typeof sessionStats?.llmMs === 'number',
+      output: (sessionStats?.usage?.outputTokens ?? 0) + (liveUsage?.outputTokens ?? 0),
     })
     function updateStatusBar() {
       if (current === null) return
@@ -167,18 +170,30 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
 
 test('when the turn\'s done lands before the stream\'s last chunk, the rate appears with the statistics, never before them (check-composer on TS)', async () => {
   const run = await firstTurn(['session', 'request', 'done', 'chunk', 'stats'])
-  assert.deepEqual(run.first, { steps: 1, rate: true, statistics: true }, `the rate first shows with the statistics read: one step, and LLM time to show\nsaw: ${JSON.stringify(run)}`)
-  assert.deepEqual(run.last, { steps: 1, rate: true, statistics: true })
+  assert.deepEqual(run.first, { steps: 1, rate: true, statistics: true, output: 20 }, `the rate first shows with the statistics read: one step, and LLM time to show\nsaw: ${JSON.stringify(run)}`)
+  assert.deepEqual(run.last, { steps: 1, rate: true, statistics: true, output: 20 })
 })
 
 test('in the stream\'s own order the rate may show live, and the figures it shows count the round', async () => {
   const run = await firstTurn(['session', 'request', 'chunk', 'done', 'stats'])
   assert.equal(run.first?.steps, 1, `a live rate counts the round it timed\nsaw: ${JSON.stringify(run)}`)
-  assert.deepEqual(run.last, { steps: 1, rate: true, statistics: true })
+  assert.deepEqual(run.last, { steps: 1, rate: true, statistics: true, output: 20 })
 })
 
 test('a model/request the stream delivers after the turn\'s done counts no round twice', async () => {
   const run = await firstTurn(['session', 'done', 'request', 'chunk', 'stats'])
-  assert.deepEqual(run.first, { steps: 1, rate: true, statistics: true }, `the round is the statistics' own\nsaw: ${JSON.stringify(run)}`)
-  assert.deepEqual(run.last, { steps: 1, rate: true, statistics: true }, 'and stays counted once')
+  assert.deepEqual(run.first, { steps: 1, rate: true, statistics: true, output: 20 }, `the round is the statistics' own\nsaw: ${JSON.stringify(run)}`)
+  assert.deepEqual(run.last, { steps: 1, rate: true, statistics: true, output: 20 }, 'and stays counted once')
+})
+
+test('a closing chunk or a model/request the stream delivers after the fold landed adds nothing to it (main\'s settle-on-fold lacks this)', async () => {
+  /**
+   * Main's 64efdee2 keeps the live figures until the fold is read and then replaces them at once. An event of the same
+   * turn handled after that read (the stream lagging the turn's response) was added on top of the fold until the
+   * stream's turn/completed asked for it again: the output counted twice, or the round. `turnsEnded` keeps them out.
+   */
+  const chunk = await firstTurn(['session', 'request', 'done', 'stats', 'chunk'])
+  assert.deepEqual(chunk.last, { steps: 1, rate: true, statistics: true, output: 20 }, `the late chunk's usage is not counted again\nsaw: ${JSON.stringify(chunk)}`)
+  const request = await firstTurn(['session', 'done', 'stats', 'request', 'chunk'])
+  assert.deepEqual(request.last, { steps: 1, rate: true, statistics: true, output: 20 }, `nor the late request's round\nsaw: ${JSON.stringify(request)}`)
 })
