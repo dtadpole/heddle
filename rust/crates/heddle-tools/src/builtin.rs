@@ -1111,7 +1111,10 @@ mod tests {
         let (kept, path) = cut_parts(&cut);
         assert_eq!(kept.chars().count(), BASH_OUTPUT_LIMIT);
         assert!(kept.ends_with("TAIL-PROBE") && !kept.contains("HEAD-PROBE"));
-        assert_eq!(std::fs::read_to_string(&path).expect("the spill file"), outside);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the spill file"),
+            outside
+        );
         let _ = std::fs::remove_file(path);
     }
 
@@ -1119,7 +1122,11 @@ mod tests {
     fn a_configured_output_limit_cuts_there() {
         let cut = truncate_output_at(&format!("{}é-end", "a".repeat(500)), 50);
         let (kept, path) = cut_parts(&cut);
-        assert_eq!(kept, format!("{}é-end", "a".repeat(45)), "the last 50 characters, whole");
+        assert_eq!(
+            kept,
+            format!("{}é-end", "a".repeat(45)),
+            "the last 50 characters, whole"
+        );
         let _ = std::fs::remove_file(path);
         assert_eq!(
             truncate_output_at(&"b".repeat(500), 500),
