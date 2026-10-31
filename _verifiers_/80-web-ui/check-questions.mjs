@@ -224,13 +224,14 @@ test('a timed question counts down, and Take time holds it past its deadline', a
   if (!(await capable(context))) return
   const dir = fixtureDir('questions-timed-patch')
   try {
-    await withPage('timed', [ask, { text: 'thanks for answering' }], { patch: timedPatch(dir, 2) }, async (server, browser) => {
+    await withPage('timed', [ask, { text: 'thanks for answering' }], { patch: timedPatch(dir, 5) }, async (server, browser) => {
       await sendMessage(browser, 'ask me something')
       assert.ok(await browser.waitFor('document.getElementById("question-card").hidden === false', 20_000))
-      assert.match((await cardState(browser)).countdown, /^Continues without an answer in 0:0[0-2]$/, 'a timed wait shows its countdown')
+      assert.match((await cardState(browser)).countdown, /^Continues without an answer in 0:0[0-5]$/, 'a timed wait shows its countdown')
       await click(browser, '#question-take-time')
       assert.ok(await browser.waitFor('/Taking time/.test(document.getElementById("question-countdown").textContent)', 5_000), 'Take time holds the wait')
-      await new Promise((resolve) => setTimeout(resolve, 3000))
+      /** Past the 5-second deadline (the wait used to be 2 s, which a click under load could miss). */
+      await new Promise((resolve) => setTimeout(resolve, 6000))
       assert.equal((await cardState(browser)).state, 'waiting', 'still waiting after the deadline passed')
       await click(browser, '#question-submit')
       assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("thanks for answering")', 20_000))
