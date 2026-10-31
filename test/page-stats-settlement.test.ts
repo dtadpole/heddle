@@ -9,7 +9,7 @@ import { runInNewContext } from 'node:vm'
 // an immutable old page without rewriting production files or creating another fixture file.
 const root = join(import.meta.dirname, '..')
 const page = process.env.HEDDLE_TEST_PAGE_REV
-  ? execFileSync('git', ['show', `${process.env.HEDDLE_TEST_PAGE_REV}:src/server/page.html`], { cwd: root, encoding: 'utf8', timeout: 5000 })
+  ? execFileSync('git', ['show', `${process.env.HEDDLE_TEST_PAGE_REV}:src/server/page.html`], { cwd: root, encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024 })
   : readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(root, 'src/server/page.html'), 'utf8')
 function source(name: string): string {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
