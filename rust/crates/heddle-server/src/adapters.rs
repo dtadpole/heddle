@@ -179,9 +179,12 @@ impl SessionService for StoreSessions {
             .map_err(failure)
     }
 
-    fn fork(&self, id: &str) -> ForkOutcome {
-        match self.service.fork(id) {
+    fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome {
+        match self.service.fork_at(id, at_seq) {
             Ok(heddle_session::ForkOutcome::NotFound) => ForkOutcome::NotFound,
+            Ok(heddle_session::ForkOutcome::NoSuchEvent { at_seq, last_seq }) => {
+                ForkOutcome::NoSuchEvent { at_seq, last_seq }
+            }
             Ok(heddle_session::ForkOutcome::Unavailable) | Err(_) => ForkOutcome::Unavailable {
                 code: "unavailable".to_owned(),
             },
@@ -640,12 +643,15 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            sessions.fork(&id),
+            sessions.fork(&id, None),
             ForkOutcome::Unavailable {
                 code: "unavailable".into()
             }
         );
-        assert_eq!(sessions.fork("no-such-session"), ForkOutcome::NotFound);
+        assert_eq!(
+            sessions.fork("no-such-session", None),
+            ForkOutcome::NotFound
+        );
     }
 
     #[test]

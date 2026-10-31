@@ -119,10 +119,14 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/approvals/{id}"),
     ("GET", "/api/goal"),
     ("POST", "/api/goal"),
+    ("GET", "/api/questions"),
+    ("POST", "/api/questions/{id}"),
+    ("POST", "/api/questions/{id}/hold"),
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
     ("GET", "/vendor/purify.js"),
+    ("GET", "/vendor/highlight/core.js"),
 ];
 
 /// How the server is started — the flags of `heddle web` that reach it.
@@ -449,10 +453,18 @@ impl ServerBuilder {
             .route("/api/approvals", get(list_approvals))
             .route("/api/approvals/{id}", post(answer_approval))
             .route("/api/goal", get(get_goal).post(post_goal))
+            .route("/api/questions", get(get_questions))
+            .route("/api/questions/{id}", post(answer_question))
+            .route("/api/questions/{id}/hold", post(hold_question))
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
-            .route("/vendor/purify.js", get(purify));
+            .route("/vendor/purify.js", get(purify))
+            .route("/vendor/highlight/core.js", get(highlight_core))
+            .route(
+                "/vendor/highlight/languages/{grammar}",
+                get(highlight_grammar),
+            );
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
@@ -1287,15 +1299,69 @@ async fn session_view_route(
         "turns".into(),
         serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
     );
+    // How far this transcript reaches: the last recorded event's `seq`, or 0 (web.ts's `seq`). A page opening the
+    // session keeps the events the stream delivers during this read aside and draws only those past it, so an event
+    // in both reads once (live-testing draft developer-eleven-1).
+    let seq = events
+        .iter()
+        .rev()
+        .find_map(|event| event.get("seq").and_then(Value::as_u64))
+        .unwrap_or(0);
+    body.insert("seq".into(), Value::from(seq));
     if let Some(stats) = state.harness().stats.as_ref() {
         body.insert("stats".into(), stats.stats(id.as_str(), &events));
     }
     respond::json(StatusCode::OK, &Value::Object(body))
 }
 
-async fn fork_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    match state.harness().sessions.fork(id.as_str()) {
+/// The largest integer a JavaScript number holds exactly: DSH's `atSeq` must be a safe integer.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// DSH's `atSeq` from a fork body: `Ok(None)` when absent, `Err(())` when it is not a non-negative
+/// safe integer (dsh-api-session-controller/lib/index.js:856-861). `1.0` reads as 1, as `JSON.parse` does.
+fn fork_cut(body: &JsonBody) -> Result<Option<u64>, ()> {
+    let Some(value) = body.get("atSeq") else {
+        return Ok(None);
+    };
+    if let Some(whole) = value.as_u64() {
+        return if whole <= MAX_SAFE_INTEGER {
+            Ok(Some(whole))
+        } else {
+            Err(())
+        };
+    }
+    match value.as_f64() {
+        Some(number)
+            if number.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER as f64).contains(&number) =>
+        {
+            Ok(Some(number as u64))
+        }
+        _ => Err(()),
+    }
+}
+
+async fn fork_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    body: JsonBody,
+) -> Response {
+    // An optional `atSeq` is DSH's inclusive cut: the chat's Branch action sends the seq that ended its turn.
+    let Ok(at_seq) = fork_cut(&body) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "atSeq must be a non-negative safe integer",
+        );
+    };
+    match state.harness().sessions.fork(id.as_str(), at_seq) {
         ForkOutcome::NotFound => respond::no_session(id.as_str()),
+        ForkOutcome::NoSuchEvent { at_seq, last_seq } => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "event {at_seq} does not exist in session \"{id}\" (last seq: {})",
+                last_seq.map_or_else(|| "none".to_owned(), |seq| seq.to_string())
+            ),
+            "unavailable".to_owned(),
+        ),
         ForkOutcome::Unavailable { code } => respond::error_with_code(
             StatusCode::CONFLICT,
             format!("session {id} has no completed turn to fork from"),
@@ -1323,12 +1389,33 @@ async fn flags_session(
     if pinned.is_none() && archived.is_none() {
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
-    // A session's live background jobs are activity too (DSH's job archive admission): they block the archive the
-    // same way, are listed in the refusal, and with `stop: true` are stopped once the archive is written.
+    // The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace`
+    // `archiveSession`, `details.activity`): the turn in progress and the running subagent descendants, which
+    // the page's stop-and-archive dialog lists. A turn is running when this server started it or the agent
+    // runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
+    // A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs`
+    // lib/index.js:19-31, which puts its `{ kind: "job", items }` ahead of the rest): they block the archive
+    // the same way, are listed in the refusal (also as `jobs`), and with `stop: true` are stopped once the
+    // archive is written.
     let activity = state.harness().activity.clone();
     let stop = archived == Some(true) && body.bool("stop") == Some(true);
     if archived == Some(true) {
-        let running = state.runs().is_running(id.as_str());
+        let runs = state.runs();
+        let runner = state.harness().turns.clone();
+        let is_running = |session: &str| runs.is_running(session) || runner.is_live(session);
+        let metas: Vec<heddle_session::LineageMeta> = state
+            .harness()
+            .sessions
+            .list()
+            .iter()
+            .filter_map(|meta| serde_json::to_value(meta).ok())
+            .filter_map(|value| {
+                value
+                    .as_object()
+                    .and_then(heddle_session::LineageMeta::from_map)
+            })
+            .collect();
+        let work = heddle_session::session_activity(id.as_str(), &metas, is_running);
         let jobs: Vec<Value> = activity
             .as_ref()
             .map(|activity| activity.active(id.as_str()))
@@ -1337,27 +1424,37 @@ async fn flags_session(
             .filter(|item| item.kind == crate::services::ActivityKind::Job)
             .map(|item| json!({ "id": item.id, "label": item.label }))
             .collect();
-        if running || !jobs.is_empty() {
+        if !work.is_empty() || !jobs.is_empty() {
             if !stop {
-                let error = if running {
+                let error = if !work.is_empty() {
                     format!("session {id} is running; pass stop: true to stop it and archive")
                 } else {
                     format!(
                         "session {id} has running background jobs; pass stop: true to stop them and archive"
                     )
                 };
+                let mut listed: Vec<Value> = Vec::new();
+                if !jobs.is_empty() {
+                    listed.push(json!({ "kind": "job", "items": jobs.clone() }));
+                }
+                listed.extend(
+                    work.iter()
+                        .filter_map(|entry| serde_json::to_value(entry).ok()),
+                );
                 let mut refusal = json!({
                     "error": error,
                     "code": "active",
-                    "running": state.runs().running(id.as_str()),
+                    "running": runs.running(id.as_str()),
+                    "activity": listed,
                 });
                 if !jobs.is_empty() {
                     refusal["jobs"] = Value::Array(jobs);
                 }
                 return respond::json(StatusCode::CONFLICT, &refusal);
             }
-            if running {
-                state.runs().abort(id.as_str());
+            for session in heddle_session::activity_sessions(id.as_str(), &work) {
+                runs.abort(&session);
+                runner.interrupt(&session);
             }
         }
     }
@@ -1822,6 +1919,51 @@ async fn get_goal(
     respond::json(StatusCode::OK, &json!({"session": session, "goal": goal}))
 }
 
+/// `GET /api/questions?session=<id>[&all=1]`: the session's answerable questions (`ask_user_question`).
+async fn get_questions(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let all = query.get("all").is_some_and(|value| value == "1");
+    let (status, body) = questions.get(query.get("session").map(String::as_str), all);
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        body,
+    )
+}
+
+/// `POST /api/questions/<id>`: one answer batch. A late answer comes back in the body for the page to deliver.
+async fn answer_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, false, body)
+}
+
+/// `POST /api/questions/<id>/hold`: Take time on a timed wait.
+async fn hold_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, true, body)
+}
+
+fn question_post(state: &AppState, id: &str, hold: bool, body: JsonBody) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let (status, text) = questions.post(id, hold, &Value::Object(body.0));
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        text,
+    )
+}
+
 async fn get_todo(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1971,6 +2113,34 @@ async fn html_preview(
     };
     let document = preview::prepare_document(&path, &source, metadata.len());
     respond::json(StatusCode::OK, &document)
+}
+
+/// `GET /vendor/highlight/core.js`: highlight.js's core for the page's code blocks ([`preview::highlight_asset`]).
+async fn highlight_core(State(state): State<AppState>) -> Response {
+    highlight_module(&state, "core.js")
+}
+
+/// `GET /vendor/highlight/languages/<name>.js`: one of the grammars the TypeScript server registers.
+async fn highlight_grammar(
+    State(state): State<AppState>,
+    axum::extract::Path(grammar): axum::extract::Path<String>,
+) -> Response {
+    highlight_module(&state, &format!("languages/{grammar}"))
+}
+
+fn highlight_module(state: &AppState, name: &str) -> Response {
+    match preview::highlight_asset(&state.options().asset_roots, name) {
+        Some(module) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(module))
+            .expect("a response builder with static headers"),
+        None => respond::text(
+            StatusCode::NOT_FOUND,
+            "that highlighter module is not served\n",
+        ),
+    }
 }
 
 async fn purify(State(state): State<AppState>) -> Response {
@@ -2789,6 +2959,29 @@ mod tests {
     use std::path::Path;
     use tower::ServiceExt;
 
+    #[test]
+    fn a_fork_cut_is_a_non_negative_safe_integer_or_absent() {
+        // DSH's `atSeq` (dsh-api-session-controller/lib/index.js:856-861).
+        let body = |value: Value| JsonBody(value.as_object().cloned().unwrap_or_default());
+        assert_eq!(fork_cut(&body(json!({}))), Ok(None));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 13}))), Ok(Some(13)));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 13.0}))), Ok(Some(13)));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 0}))), Ok(Some(0)));
+        for bad in [
+            json!(-1),
+            json!(1.5),
+            json!("13"),
+            json!(null),
+            json!(9_007_199_254_740_992_u64),
+        ] {
+            assert_eq!(
+                fork_cut(&body(json!({"atSeq": bad}))),
+                Err(()),
+                "refused: {bad}"
+            );
+        }
+    }
+
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
@@ -2852,7 +3045,7 @@ mod tests {
                 log: "log.zst".into(),
             })
         }
-        fn fork(&self, _id: &str) -> ForkOutcome {
+        fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
             ForkOutcome::NotFound
         }
         fn set_flags(
@@ -4797,6 +4990,110 @@ mod tests {
         assert!(text.contains(id), "{text}");
         assert!(guard.is_cancelled(), "the turn's token is cancelled");
         drop(guard);
+    }
+
+    /// DSH's `workspace/session-active` refusal names the running work (`details.activity`); the page's
+    /// stop-and-archive dialog lists it, and `{stop: true}` stops it and archives (R-developer-eight-13).
+    #[tokio::test]
+    async fn archiving_a_running_session_is_refused_with_its_activity_until_stop_is_said() {
+        let (router, state) = app("archive-activity");
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let guard = state.runs().begin(id);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let uri = format!("/api/sessions/{id}/flags");
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "active");
+        assert_eq!(body["activity"], json!([{ "kind": "turn" }]), "{body}");
+        assert!(!guard.is_cancelled(), "a refusal stops nothing");
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(guard.is_cancelled(), "stop: true cancels the turn");
+        drop(guard);
+    }
+
+    /// A runner whose agent runtime holds turns the server did not start, and records what it was asked to stop.
+    struct LiveTurns {
+        live: Vec<String>,
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TurnRunner for LiveTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Ok(TurnOutcome::default()) })
+        }
+        fn is_live(&self, session: &str) -> bool {
+            self.live.iter().any(|id| id == session)
+        }
+        fn interrupt(&self, session: &str) -> bool {
+            self.interrupted.lock().unwrap().push(session.to_owned());
+            self.is_live(session)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_with_a_running_subagent_is_refused_and_the_stop_reaches_the_child() {
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        let mut sessions = Sessions::with_one();
+        let mut rest = Map::new();
+        rest.insert("parentSession".into(), Value::String(parent.into()));
+        rest.insert("origin".into(), Value::String("subagent".into()));
+        sessions.metas.push(SessionMeta {
+            id: child.into(),
+            title: Some("look things up".into()),
+            rest,
+            ..SessionMeta::default()
+        });
+        let runner = Arc::new(LiveTurns {
+            live: vec![child.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner.clone(),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-subagent")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let uri = format!("/api/sessions/{parent}/flags");
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["activity"],
+            json!([{ "kind": "subagent", "items": [{ "id": child, "label": "look things up" }] }]),
+            "{body}"
+        );
+        assert!(runner.interrupted.lock().unwrap().is_empty());
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *runner.interrupted.lock().unwrap(),
+            vec![parent.to_owned(), child.to_owned()]
+        );
     }
 
     /// One raw HTTP/1.1 exchange, because the verifiers speak over a socket rather than through

@@ -138,28 +138,29 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * start a conversation in the workspace the reader is looking at.
      */
     /**
-     * The **empty state** — DSH's home, which this panel did not have: its centre carries the mark, a heading and the
-     * chord rather than a column headed "No session". With no conversation open (this fixture has a workspace and no
-     * sessions), the invitation is shown and the conversation's own column is put away under it.
+     * The **first visit** — DSH's `restoreSelection` with nothing saved starts a fresh New session in the most recently
+     * active workspace (dsh-client-ui-workspace lib/client.js:1620-1627; heddle since #17), so this fixture, a workspace
+     * and no sessions, opens on that blank rather than on an empty panel. The panel shows the blank's conversation, not
+     * the "Start a conversation" invitation (which is for a panel with nothing open, judged by the page's unit suite), and
+     * the header carries no title while the session is blank, as DSH's does (#24).
      */
+    assert.ok(
+      await browser.waitFor(`document.getElementById('session-title')?.hidden === true`, 20_000),
+      'a first visit opens a fresh New session, whose header shows no title',
+    )
     const empty = JSON.parse(
       await browser.evaluate(`(() => {
         const section = document.getElementById('empty-state')
-        const heading = section.querySelector('h3')
         return JSON.stringify({
           shown: !section.hidden && getComputedStyle(section).display !== 'none',
-          heading: heading === null ? null : heading.textContent.trim(),
-          hint: section.querySelector('p')?.textContent.replace(/\\s+/g, ' ').trim() ?? '',
           logHidden: document.getElementById('log').hidden,
           title: document.getElementById('session-title').textContent.trim()
         })
       })()`),
     )
-    assert.equal(empty.shown, true, 'a panel with no conversation shows the invitation')
-    assert.equal(empty.heading, 'Start a conversation', 'with a heading that says what to do')
-    assert.match(empty.hint, /⌥⌘N/, 'and the chord that does it')
-    assert.equal(empty.title, 'No session', 'the header still says there is no session')
-    assert.equal(empty.logHidden, true, 'while the conversation\'s own column is put away')
+    assert.equal(empty.shown, false, 'the invitation is not shown over the open New session')
+    assert.equal(empty.title, '', 'the header names no session while it is blank')
+    assert.equal(empty.logHidden, false, 'and the conversation\'s own column is the panel')
 
     /** The seeded workspace has to be drawn before the action has a target; the tree is a fetch of its own. */
     assert.ok(
@@ -191,11 +192,17 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     assert.equal(primary.borders, true, 'with DSH\'s 16%-white border')
     assert.equal(primary.padding, '8px 12px', 'and its padding')
 
-    /** The act: a conversation starts in the selected workspace and the tree shows its row. */
+    /**
+     * The act: a conversation starts in the selected workspace and the tree shows its row, selected. The first visit's
+     * New session is already a row, so the press is judged by the open row changing to a session that was not open
+     * before: DSH's `New session` creates a fresh session on every press (`lib/client.js:1403-1406`, `:1520`).
+     */
+    const openRow = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const firstBlank = await browser.evaluate(openRow)
     await browser.evaluate(`document.getElementById('new-session').click()`)
     assert.ok(
-      await browser.waitFor('document.querySelectorAll("#tree li[data-kind=\\"session\\"]").length > 0', 20_000),
-      'clicking the primary action starts a session, visible in the tree',
+      await browser.waitFor(`(() => { const id = ${openRow}; return id !== null && id !== ${JSON.stringify(firstBlank)} })()`, 20_000),
+      'clicking the primary action starts a session, visible in the tree as the open row',
     )
     assert.notEqual(
       await browser.evaluate(`document.getElementById('session-title').textContent`),
@@ -219,7 +226,6 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * still empty, and DSH draws an empty session as a row only while it is the open one (`sessionVisible`,
      * dsh-client-ui-workspace lib/client.js:959-966), so the new row takes its place instead of adding to the count.
      */
-    const openRow = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
     const openBefore = await browser.evaluate(openRow)
     assert.equal(typeof openBefore, 'string', 'the clicked New session is the open row')
     await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', altKey: true, metaKey: true, bubbles: true }))`)

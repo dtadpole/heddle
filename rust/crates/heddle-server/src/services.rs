@@ -152,6 +152,12 @@ pub enum ForkOutcome {
     Unavailable {
         code: String,
     },
+    /// Refused — an explicit `atSeq` names no event of the source. Answered `409` with DSH's sentence, which
+    /// cites the source's last seq (`none` for an empty log).
+    NoSuchEvent {
+        at_seq: u64,
+        last_seq: Option<u64>,
+    },
     Forked(CreatedSession),
 }
 
@@ -207,8 +213,8 @@ pub trait SessionService: Send + Sync {
         preset: Option<&str>,
     ) -> Result<CreatedSession, ServiceError>;
 
-    /// Fork a session at its last completed turn.
-    fn fork(&self, id: &str) -> ForkOutcome;
+    /// Fork a session at its last completed turn, or at `at_seq` (DSH's inclusive `atSeq`) when given.
+    fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome;
 
     /// Pin, unpin, archive or unarchive. `Ok(None)` is an unknown session; `Err` is a refusal answered
     /// `409` with its code (`archived` when the store gave none).
@@ -408,6 +414,20 @@ pub trait TurnRunner: Send + Sync {
         &self,
         request: TurnRequest,
     ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>>;
+
+    /// Whether the agent runtime has a turn in flight for `session` that this server did not start — a
+    /// subagent's, a teammate's, a settlement notice's (the TypeScript build's `ctx.get('turns').isRunning`).
+    /// The archive route asks it so a session doing work the page never started is still refused. A runner
+    /// without a live-turn registry knows of none.
+    fn is_live(&self, _session: &str) -> bool {
+        false
+    }
+
+    /// Stop every such turn of `session`; whether there was one (`turns.abort`). The stop-and-archive path
+    /// calls it for the session and each running subagent descendant.
+    fn interrupt(&self, _session: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -583,6 +603,17 @@ pub struct ActivityItem {
     pub label: String,
 }
 
+/// The questions a model asks a person (`ask_user_question`), as the three routes see them.
+///
+/// The binary adapts `heddle-questions`, whose answers are already the TypeScript route's exact status and body;
+/// the server only matches the path. A late answer comes back in the body for the page to deliver.
+pub trait QuestionService: Send + Sync {
+    /// `GET /api/questions?session=<id>[&all=1]`: the status and the body.
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String);
+    /// `POST /api/questions/<id>` (or its `/hold`): the status and the body.
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String);
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -636,6 +667,7 @@ pub struct Harness {
     pub approvals: Option<Arc<dyn ApprovalService>>,
     pub goals: Option<Arc<dyn GoalService>>,
     pub todos: Option<Arc<dyn TodoService>>,
+    pub questions: Option<Arc<dyn QuestionService>>,
     pub team: Option<Arc<dyn TeamService>>,
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
@@ -674,6 +706,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -722,6 +755,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -764,7 +798,7 @@ impl SessionService for UnavailableSessions {
     ) -> Result<CreatedSession, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
-    fn fork(&self, _id: &str) -> ForkOutcome {
+    fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
         ForkOutcome::NotFound
     }
     fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {
@@ -903,6 +937,11 @@ impl HarnessBuilder {
 
     pub fn todos(mut self, service: Arc<dyn TodoService>) -> Self {
         self.harness.todos = Some(service);
+        self
+    }
+
+    pub fn questions(mut self, service: Arc<dyn QuestionService>) -> Self {
+        self.harness.questions = Some(service);
         self
     }
 

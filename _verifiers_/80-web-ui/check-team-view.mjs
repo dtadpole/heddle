@@ -79,7 +79,7 @@ test('a team session renders its roster, board and mailbox; a session with no te
      * fixture's ids are shaped like real ones. Measured: the crafted `session-view-…` ids made the session
      * route answer 400, and the page then reported "No session" and an empty roster.
      */
-    // The teammate first, the Lead last, so the page's newest-session selection lands on the team's session.
+    // The teammate first, the Lead last. The page opens no session on its own (#17), so the Lead is opened by name below.
     const member = sessions.create({ id: 'session-22222222-2222-4222-8222-222222222222', cwd: work, parentSession: 'session-11111111-1111-4111-8111-111111111111', origin: 'subagent', delegationDepth: 1, teamId: 'session-11111111-1111-4111-8111-111111111111' })
     sessions.message(member, { role: 'user', content: [{ type: 'text', text: 'the spawn prompt' }] })
     sessions.append(member, { type: 'assistant/completed', text: 'member done' })
@@ -103,7 +103,8 @@ test('a team session renders its roster, board and mailbox; a session with no te
       // session can be opened by id without depending on a workspace branch being expanded.
       await browser.evaluate(`localStorage.setItem('heddle.tree.grouping.v1', 'list')`)
       await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(work)} }) })`)
-      await browser.goto(url)
+      /** The Lead has no turn of its own, so it is a blank, which the list draws only while it is the open session (DSH's sessionVisible). */
+      await browser.gotoSession(url, lead.id)
       await browser.waitFor('document.querySelector(\'li[data-session-id="session-11111111-1111-4111-8111-111111111111"]\') !== null', 15_000)
       await browser.evaluate(`(document.querySelector('li[data-session-id="session-11111111-1111-4111-8111-111111111111"] .row') || document.querySelector('li[data-session-id="session-11111111-1111-4111-8111-111111111111"]')).click()`)
       await browser.waitFor('document.getElementById("team-panel") !== null && document.getElementById("team-panel").hidden === false', 20_000)

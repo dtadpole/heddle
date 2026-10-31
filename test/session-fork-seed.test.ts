@@ -82,9 +82,19 @@ function forkOf(svc: SessionService, source: SessionHandle): SessionHandle {
 
 /** What a person reads in the chat, and what the model is sent: both must be the source's. */
 function sameConversation(svc: SessionService, source: SessionHandle, child: SessionHandle): void {
-  const sourceRows = transcriptTurns(svc.store.read(source))
-  const childRows = transcriptTurns(svc.store.read(child))
+  /**
+   * A closing answer's `forkSeq` names the `turn/completed` of its own log, the seq the Branch action cuts at, so it moves
+   * with the child's renumbering; the row compares by whether it can be branched from, and the child's seq is checked
+   * against the child's log.
+   */
+  const conversation = (rows: ReturnType<typeof transcriptTurns>) => rows.map(({ forkSeq, ...row }) => ({ ...row, branchable: forkSeq !== undefined }))
+  const sourceRows = conversation(transcriptTurns(svc.store.read(source)))
+  const childRows = conversation(transcriptTurns(svc.store.read(child)))
   assert.deepEqual(childRows, sourceRows, `the fork's rows are the source's\nsource: ${JSON.stringify(sourceRows)}\nfork:   ${JSON.stringify(childRows)}`)
+  const childEvents = new Map(svc.store.read(child).map((event) => [event.seq, event]))
+  for (const row of transcriptTurns(svc.store.read(child))) {
+    if (row.forkSeq !== undefined) assert.equal(childEvents.get(row.forkSeq)?.type, 'turn/completed', `a branchable answer in the fork names the fork's own turn end\nsaw: ${row.forkSeq}`)
+  }
   assert.deepEqual(svc.store.messages(child), svc.store.messages(source), "and the fork's model reads what the source's model read")
 }
 

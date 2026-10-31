@@ -262,7 +262,8 @@ test("a /goal typed in the composer shows DSH's Command input bubble and result 
       await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
       await browser.waitFor(`${FIELD} !== null`, 10_000)
     }
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await showSession()
 
     // A12: the create. The person's line is a bubble, the result is DSH's goal card, and the goal service holds it.
@@ -306,10 +307,21 @@ test("a /goal typed in the composer shows DSH's Command input bubble and result 
     }
 
     // A13: a reload rebuilds every bubble and card from the session's log, in place.
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await showSession()
     await browser.waitFor(`${BUBBLES}.length === 4 && ${SETTLED}.length === 4`, 15_000)
     assertFourRuns(await transcript(browser), 'after a reload')
+
+    /**
+     * Two opens of the session at once. A reload does this only when the boot's restoreSelection and the open above
+     * happen to overlap, and a double click on the session's row does it every time. Both opens used to append the
+     * history, so the transcript held four bubbles over eight `.hc-command` rows, four of them empty placeholders. That
+     * was seen above, after a reload, in about one run in several; this step runs the overlap on every run.
+     */
+    await browser.evaluate(`Promise.all([globalThis.showSession(${JSON.stringify(id)}), globalThis.showSession(${JSON.stringify(id)})]).then(() => true)`)
+    await browser.waitFor(`${BUBBLES}.length === 4 && ${SETTLED}.length === 4`, 15_000)
+    assertFourRuns(await transcript(browser), 'after two overlapping opens')
 
     // Clear, from the reloaded page.
     await send(browser, '/goal clear')
