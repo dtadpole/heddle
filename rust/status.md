@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-31T03:46:00Z
+modified: 2026-10-31T04:00:00Z
 level: L3
-version: 1.21.0
+version: 1.22.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-30, in `~/heddle--int-backend`, on `main` at `cb69f420` (a turn's answer is its last non-empty round; a Chat Completions stream asks for its usage; a Stop or the bash wall time kills the command's whole process group, and timeoutMs follows DSH's rule, capped; before them, on `170d773d`, a whitespace-only prompt is refused, on `0f0e9db0` a mid-step message is placed when the step closes and content search, on `5e257430` the summary budget, and on `24d250f3` six backend merges; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
+**Run 2026-10-30, in `~/heddle--int-backend`, on `main` at `1a49107d` (a prompt sent to a busy session waits for the running turn; before it, on `cb69f420`, a turn's answer is its last non-empty round; a Chat Completions stream asks for its usage; a Stop or the bash wall time kills the command's whole process group, and timeoutMs follows DSH's rule, capped; before them, on `170d773d`, a whitespace-only prompt is refused, on `0f0e9db0` a mid-step message is placed when the step closes and content search, on `5e257430` the summary budget, and on `24d250f3` six backend merges; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -26,7 +26,8 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**178 checks: 177 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 1
+**179 checks: 178 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 5
+gained `check-turn-queue.mjs`. On `cb69f420`, part 1
 gained `check-chat-usage.mjs` (two checks), part 4 `check-bash-timeout.mjs` (four), part 5 `check-final-text.mjs` (two), and
 part 8 `check-stop-kills-group.mjs` (seven). Part 5's `check-goal-tool.mjs` failed once under load and passed on its re-run
 and three runs alone. Earlier today part 5 gained `check-blank-prompt.mjs` and `check-steer-step.mjs`, part 3
@@ -48,7 +49,7 @@ list.
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 10 of 10 |
 | 4 tools | `40-pluggable-tools` | **passes** — 14 of 14 |
-| 5 agentic loop | `50-agentic-loop` | **passes** — 31 of 31 |
+| 5 agentic loop | `50-agentic-loop` | **passes** — 32 of 32 |
 | 6 hooks | `60-hooks` | **passes** — 6 of 6 |
 | 7 workspaces and sessions | `70-workspaces-sessions` | **passes** — 56 of 56 |
 | 8 sandbox | `75-permission-sandbox` | **passes** — 24 of 24 |

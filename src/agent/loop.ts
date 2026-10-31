@@ -195,7 +195,13 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
    * turns without inject". The row stays optional, which is the other half of why this is a store read.
    */
   const turns = ctx.get('turns') as TurnRegistry | undefined
-  const live = turns?.begin(options.session.id)
+  /**
+   * One turn at a time per session (#28): a turn sent to a busy session waits for the running one, as DSH's
+   * follow-up does. An idle session registers at once, without an await, so the prompt is still written before
+   * this function's first await for a caller that starts a turn and does not wait for it.
+   */
+  const ticket = turns?.enqueue(options.session.id)
+  const live = ticket === undefined ? undefined : 'live' in ticket ? ticket.live : await ticket.wait
   const signal =
     live === undefined
       ? options.signal
