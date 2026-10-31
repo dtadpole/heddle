@@ -527,3 +527,24 @@ test('every menu menuButton makes has DSH\'s menu keyboard: arrows, Home and End
   const builder = pageFunction('function menuButton(node, items, options = {}) {')
   assert.match(builder, /if \(event\.detail === 0\) \{\s*queueMicrotask\(/, 'a choice from the keyboard gives focus back to the trigger')
 })
+
+test('a tree redraw gives the keyboard its place back: the same row and the same control (#92)', () => {
+  /**
+   * DSH's tree is React, so a refresh keeps the focused row element (dsh-client-ui-workspace lib/client.js:2526-2543).
+   * This page replaces its rows on every redraw (a turn ending, leaving the New session placeholder, a pin), which dropped
+   * keyboard focus to the top of the page mid-walk (found by 80's check-tree-keyboard.mjs on its first run). Judged in
+   * that check; this detects a redraw that stops asking where focus was or stops giving it back.
+   */
+  const render = pageFunction('async function renderTree() {')
+  assert.match(render, /^async function renderTree\(\) \{\s*\/\*\*[^]*?\*\/\s*const focus = treeFocus\(\)/, 'renderTree reads the keyboard\'s place before it reads anything else')
+  assert.match(render, /heldTreeFocus = focus\s*treeList\.replaceChildren\(/, 'and holds it while it replaces the rows')
+  assert.match(render, /markSelection\(\)\s*restoreTreeFocus\(focus, true\)\s*$/, 'and gives it back once the rows are drawn')
+  const flat = pageFunction('async function renderFlatList() {')
+  assert.match(flat, /const focus = treeFocus\(\)\s*heldTreeFocus = focus\s*treeList\.replaceChildren\(\)/, 'the flat list does the same')
+  assert.match(flat, /restoreTreeFocus\(focus, true\)\s*$/)
+  const rows = pageFunction('function paintSessionRows(list, group, depth) {')
+  assert.match(rows, /^function paintSessionRows\(list, group, depth\) \{\s*const focus = treeFocus\(\)/, 'so does a group\'s session rows')
+  assert.match(rows, /restoreTreeFocus\(focus\)\s*paintRunningMarks\(\)/)
+  const read = pageFunction('function treeFocus() {')
+  assert.match(read, /active\.matches\(':focus-visible'\)/, 'only the keyboard\'s focus is given back, never a pointer\'s')
+})

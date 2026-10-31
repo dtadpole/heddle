@@ -12254,11 +12254,78 @@ function groupRow(group) {
 }
 
 /**
+ * The keyboard's place while a redraw that took it away is still drawing (its rows arrive over several awaits), so a
+ * redraw that starts meanwhile, with focus on the body, gives back the same place rather than none.
+ */
+let heldTreeFocus = null
+
+/**
+ * Where the keyboard is in the tree, so a redraw can give it back (#92): `{ row, control }`, the key of the row that holds
+ * focus and which of its stops — `row` for the row itself, `more` for its group's Show more, `tool:<n>` for its n-th
+ * control (an item of its menu counts as the menu's `…`, because a redraw closes the menu). `null` when focus is outside
+ * the tree, or is not the keyboard's (`:focus-visible`): a pointer's focus left on a control would keep the row's controls
+ * drawn, which a pointer does not expect. DSH's tree is React, which keeps the focused element through a refresh
+ * (`dsh-client-ui-workspace` lib/client.js:2526-2543 renders the same keyed rows); this page replaces its rows, and a
+ * refresh (a turn ending, leaving the New session placeholder) dropped the keyboard's place to the top of the page.
+ */
+function treeFocus() {
+  const active = document.activeElement
+  if (active === null || active === document.body) return heldTreeFocus
+  if (!(active instanceof HTMLElement) || !treeList.contains(active) || !active.matches(':focus-visible')) return null
+  const keyOf = (li) => (li === null ? undefined : li.dataset.rowKey ?? (li.dataset.sessionId !== undefined ? 'session:' + li.dataset.sessionId : undefined))
+  const more = active.closest('li[data-slot="more"]')
+  if (more !== null) {
+    const row = keyOf(more.parentElement?.closest('li[role="treeitem"]') ?? null)
+    return row === undefined ? null : { row, control: 'more' }
+  }
+  const li = active.closest('li[role="treeitem"]')
+  const row = keyOf(li)
+  if (row === undefined) return null
+  const own = li.querySelector(':scope > .row')
+  if (active === own) return { row, control: 'row' }
+  const index = treeTools(own).indexOf(active.closest('.menu-wrap')?.querySelector(':scope > button') ?? active)
+  return { row, control: index === -1 ? 'row' : 'tool:' + index }
+}
+
+/** A row's own controls in Tab order — its `…` and its quick buttons, never the items of its menu. */
+function treeTools(row) {
+  return row === null ? [] : [...row.querySelectorAll('.row-tools button')].filter((button) => button.closest('.menu') === null)
+}
+
+/**
+ * Give focus back where `treeFocus` saw it, when the redraw dropped it (focus on the page's body) and the row is still
+ * drawn. `done` ends a whole redraw, after which a place not given back is gone.
+ */
+function restoreTreeFocus(focus, done = false) {
+  if (focus === null) return
+  if (done && heldTreeFocus === focus) heldTreeFocus = null
+  const active = document.activeElement
+  if (active !== null && active !== document.body) {
+    if (heldTreeFocus === focus) heldTreeFocus = null
+    return
+  }
+  const li =
+    treeList.querySelector(`li[data-row-key="${CSS.escape(focus.row)}"]`) ??
+    (focus.row.startsWith('session:') ? treeList.querySelector(`li[data-session-id="${CSS.escape(focus.row.slice('session:'.length))}"]`) : null)
+  const row = li?.querySelector(':scope > .row') ?? null
+  if (row === null) return
+  if (heldTreeFocus === focus) heldTreeFocus = null
+  if (focus.control === 'more') {
+    ;(li.querySelector(':scope > ul > li[data-slot="more"] > button') ?? row).focus({ preventScroll: true })
+    return
+  }
+  /** The row first: its focus draws its controls (`:focus-within`), so the control can take focus next. */
+  row.focus({ preventScroll: true })
+  if (focus.control.startsWith('tool:')) treeTools(row)[Number(focus.control.slice('tool:'.length))]?.focus({ preventScroll: true })
+}
+
+/**
  * Draw (or redraw) a group's session rows and its overflow row, in place, after its child workspaces.
  *
  * In place rather than by redrawing the group, so `Show more` does not close the folders a person opened beneath it.
  */
 function paintSessionRows(list, group, depth) {
+  const focus = treeFocus()
   for (const old of list.querySelectorAll(':scope > li[data-slot="sessions"], :scope > li[data-slot="more"]')) {
     if (old.dataset.rowKey !== undefined) rowIndex.delete(old.dataset.rowKey)
     old.remove()
@@ -12303,19 +12370,18 @@ function paintSessionRows(list, group, depth) {
     label.className = 'label'
     label.textContent = WorkspaceTree.overflowLabel(mode, drawn.hidden)
     row.append(spacer, label)
+    /** DSH's button is the same element after the toggle, so it keeps focus; the redraw gives it back here (`treeFocus`). */
     row.onclick = () => {
-      const focused = document.activeElement === row
       if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))
       else watermarks.delete(group.key)
       paintSessionRows(list, group, depth)
       markSelection()
-      /** DSH's button is the same element after the toggle, so focus stays on it; the redraw here makes a new one. */
-      if (focused) list.querySelector(':scope > li[data-slot="more"] > button')?.focus()
     }
     li.append(row)
     rows.push(li)
   }
   for (const li of rows) list.insertBefore(li, anchor)
+  restoreTreeFocus(focus)
   paintRunningMarks()
 }
 
@@ -13764,6 +13830,8 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
  * could not complete would be worse than a list that does not offer it.
  */
 async function renderFlatList() {
+  const focus = treeFocus()
+  heldTreeFocus = focus
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
@@ -13823,9 +13891,12 @@ async function renderFlatList() {
     }),
   )
   setNote(visible.length === 0 ? 'no sessions to list' : '')
+  restoreTreeFocus(focus, true)
 }
 
 async function renderTree() {
+  /** The redraw replaces every row; the keyboard's place in the tree is given back once it is drawn (#92). */
+  const focus = treeFocus()
   if (groupingMode === 'list') {
     await renderFlatList()
     return
@@ -13884,6 +13955,7 @@ async function renderTree() {
   }
   if (treeTops.length === 0 && treeGroups.length === 0) setNote('no workspace root yet — register one with the + above')
   else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
+  heldTreeFocus = focus
   treeList.replaceChildren(...treeGroups.map((group) => groupRow(group)))
 
   /**
@@ -13898,6 +13970,7 @@ async function renderTree() {
   }
   if (selectedPath === null) syncSelectionToSession()
   markSelection()
+  restoreTreeFocus(focus, true)
 }
 
 /**

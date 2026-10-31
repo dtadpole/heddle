@@ -173,7 +173,10 @@ async function settle(browser, expression, timeoutMs) {
   }
 }
 
-/** Wait until the tree has drawn nothing new for 400 ms (at most 4 s), so a key is never pressed into a redraw. */
+/**
+ * Wait until the tree has drawn nothing new for 700 ms (at most 5 s), so a key is never pressed into a redraw: the page
+ * redraws the tree 400 ms after leaving the New session placeholder, plus its two reads (`scheduleTreeRefresh`).
+ */
 async function quiet(browser) {
   await browser.evaluate(`new Promise((done) => {
     const tree = document.getElementById('tree')
@@ -186,10 +189,10 @@ async function quiet(browser) {
     }
     const observer = new MutationObserver(() => {
       clearTimeout(timer)
-      timer = setTimeout(finish, 400)
+      timer = setTimeout(finish, 700)
     })
-    const cap = setTimeout(finish, 4000)
-    timer = setTimeout(finish, 400)
+    const cap = setTimeout(finish, 5000)
+    timer = setTimeout(finish, 700)
     observer.observe(tree, { childList: true, subtree: true })
   })`)
 }
@@ -330,7 +333,35 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
   assert.equal(stops[3], `row:${pair.to}`, `one stop per row: Tab 4 is the next row itself, not its list item\nsaw: ${JSON.stringify(stops)}`)
   await press(browser, 'Enter')
   assert.ok(await settle(browser, `${openTitle}.includes(${JSON.stringify(pair.to)})`, 10_000), `Enter on that stop opens its session\nsaw: ${await browser.evaluate(openTitle)}`)
+  /** Settled: the row is the selected one and the redraw that opening may bring (leaving the placeholder) is done. */
+  await settle(browser, `${rowOf(pair.to)}?.getAttribute('aria-selected') === 'true'`, 5_000)
   await quiet(browser)
+
+  /**
+   * Focus survives a redraw: Enter on that row's pin control pins (or unpins) it, which redraws the whole tree, and the
+   * keyboard stays on the same row's pin control instead of falling to the top of the page, as DSH's React rows keep it.
+   */
+  const pinBefore = await browser.evaluate(`(() => {
+    const li = ${rowOf(pair.to)}
+    li.querySelector(':scope > .row').focus()
+    const pin = li.querySelector(':scope > .row .row-tools > .session-actions > .pin-action')
+    pin?.focus()
+    return pin !== null && document.activeElement === pin ? pin.getAttribute('aria-label') : 'not focused'
+  })()`)
+  assert.match(pinBefore, /^(Un)?[Pp]in session$/, `the keyboard reaches ${pair.to}'s pin control`)
+  const pinAfter = pinBefore === 'Pin session' ? 'Unpin session' : 'Pin session'
+  const pinState = (label) => `${rowOf(pair.to)}?.querySelector('.pin-action')?.getAttribute('aria-label') === ${JSON.stringify(label)}`
+  const keptFocus = () => browser.evaluate(`JSON.stringify({ name: ${focusName}, inRow: ${rowOf(pair.to)}?.contains(document.activeElement) ?? false })`).then(JSON.parse)
+  await press(browser, 'Enter')
+  await settle(browser, pinState(pinAfter), 5_000)
+  await quiet(browser)
+  const redrawn = await keptFocus()
+  assert.deepEqual(redrawn, { name: `BUTTON:${pinAfter}`, inRow: true }, `after the redraw Enter on the pin control caused, focus is on that row's pin control\nsaw: ${JSON.stringify(redrawn)}`)
+  await press(browser, 'Enter')
+  await settle(browser, pinState(pinBefore), 5_000)
+  await quiet(browser)
+  const back = await keptFocus()
+  assert.deepEqual(back, { name: `BUTTON:${pinBefore}`, inRow: true }, `and again after the redraw that puts it back\nsaw: ${JSON.stringify(back)}`)
 
   /** A workspace row: the row, its `…`, New session in, then the first row inside it. */
   await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row').focus()`)
