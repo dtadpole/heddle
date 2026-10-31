@@ -691,3 +691,58 @@ test('an older ledger read that fails after a newer one drew leaves no error und
     await server.close()
   }
 })
+
+test('the overview draws one bar per record, and an answer bar splits at its TTFT, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH's overview draws a bar per record in its lane, and an assistant bar splits into
+   * TTFT and decoding with a tip that names both. The page drew one tick per turn per lane, with no split.
+   */
+  const server = await startServer('record-bars')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew per-record bars')
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({
+      bars: [...document.querySelectorAll('#timeline .tr-bar')].map((bar) => ({ lane: bar.dataset.lane, kind: bar.dataset.kind, label: bar.getAttribute('aria-label') ?? '', split: bar.dataset.split === 'true', ttft: bar.style.getPropertyValue('--ttft') })),
+    })`))
+    assert.ok(state.bars.every((bar) => /^turn \d+ · /.test(bar.label)), `every bar is named 'turn N · kind · …' (${state.bars.map((bar) => bar.label).join(' | ')})`)
+    /**
+     * The split follows the server's own data. The scripted provider can answer within one millisecond, and an answer
+     * that took no time has nothing to split; so the claim is that the page draws the split exactly when the ledger's
+     * record carries a TTFT and decoding that add up to a positive time, and names both in its tip.
+     */
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const answers = (view.body.timeline?.records ?? []).filter((record) => record.kind === 'assistant')
+    assert.ok(answers.length > 0, `the timeline lists the answer as a record (${JSON.stringify(view.body.timeline?.records)})`)
+    const timed = answers.some((record) => record.ttftMs !== undefined && record.decodingMs !== undefined && record.ttftMs + record.decodingMs > 0)
+    const splitBars = state.bars.filter((bar) => bar.lane === 'model' && bar.split)
+    if (!timed) {
+      assert.equal(splitBars.length, 0, 'an answer that took no time draws no split')
+      return
+    }
+    assert.ok(splitBars.length > 0, `an answer bar in the model lane carries the TTFT split (${JSON.stringify(state.bars)})`)
+    assert.match(splitBars[0].ttft, /^\d+(\.\d)?%$/, 'its split is a share of the bar')
+    await browser.evaluate(`document.querySelector('#timeline .tr-bar[data-split="true"]').dispatchEvent(new PointerEvent('pointerenter'))`)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const tip = await browser.evaluate(`document.getElementById('timeline-tip')?.hidden === false ? document.getElementById('timeline-tip').textContent : ''`)
+    assert.match(tip, /TTFT \d+(\.\d+)? (ms|s) · decoding \d+(\.\d+)? (ms|s)/, `the hover tip names the TTFT and the decoding (${tip})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
