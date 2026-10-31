@@ -50,7 +50,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     `
     let current = null, unavailableSession = null, selectedPath = null, view = 'chat';
     let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
-    let showGeneration = 0;
+    let showGeneration = 0, selectionSeq = 0;
     const schedState = { drawer: null };
     const unreadSessions = new Set();
     const sessionMetas = new Map();
@@ -91,7 +91,8 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     async function renderTree() {}
     function markSelection() {}
     function paintScheduleHeader() {}
-    function applySessionModel() {}
+    // This suite isolates history publication; the selection suite runs the real model guard.
+    function adoptViewSelection() {}
     function followChatTail() {}
     async function refreshGoal() { if (HOLD_GOAL) await hold('goal') }
     async function refreshTodo() {}
