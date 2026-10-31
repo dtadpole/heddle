@@ -95,9 +95,14 @@ async function startServer(label, options = {}) {
       },
     ],
   })
+  /**
+   * `HEDDLE_HOME` is the fixture's own, as every other page check's is: without it the server read the operator's
+   * workspace registry, and a first visit, which starts a fresh session in the most recently active workspace (#17),
+   * started it in one of the operator's real folders.
+   */
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double-one', '--session-root', join(home, 'sessions')],
-    { env: { HEDDLE_CONFIG: config } },
+    { env: { HEDDLE_CONFIG: config, HEDDLE_HOME: home } },
   )
   return {
     one,

@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T07:30:00Z
+modified: 2026-10-31T08:15:00Z
 level: L3
 version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -94,6 +94,12 @@ grounded_in:
   conversations*, carries DSH's "Archived sessions cannot be opened. Unarchive it to view." as its accessible
   description, and clicking it says so and opens nothing, while a live row still opens (`dsh-client-ui-workspace`
   `guardedOpen`).
+
+**Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
+registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every
+run read and wrote the real `~/.heddle/workspaces.json` (a leak older than #17); once a first visit started a fresh
+session in the most recently active workspace (#17), that session's definition landed in a real folder. It now has its
+own, and the checks that isolated only `HOME` name `HEDDLE_HOME` too, so an exported one cannot reach the real store.
 
 ## What it deliberately does not judge
 

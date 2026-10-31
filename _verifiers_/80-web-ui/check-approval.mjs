@@ -43,7 +43,7 @@ function startServer(label, stepsFor) {
           '--sandbox-root',
           work,
         ]),
-        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
+        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
       let settled = false
@@ -406,7 +406,8 @@ test('a session below the fold waits for approval in view, and stays in view aft
       assert.ok(await browser.waitFor(`document.getElementById('session-title').textContent.includes(${JSON.stringify(name)})`, 10_000), `${name} opens`)
     }
 
-    await browser.goto(server.url)
+    /** The page opens no session on its own (#17): the newest pin is opened by name, so no fresh blank leads the group. */
+    await browser.gotoSession(server.url, pinned[5])
     await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
     assert.ok(await browser.waitFor(`${row(pinned[5])} !== null`, 15_000), 'the group is drawn')
     await open(pinned[5], 'pinned session 6')

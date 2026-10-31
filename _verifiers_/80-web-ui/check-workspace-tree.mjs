@@ -213,10 +213,16 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     /** The nested workspace opens to its own session; its + starts another one there, selected. */
     await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > ul > li[data-kind="workspace"] > .row').click()`)
     await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]')].some((li) => li.textContent.includes('app session'))`, 10_000)
-    const before = await browser.evaluate(`document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]').length`)
+    /**
+     * Judged by a row that was not drawn before, not by a count: the first visit started its fresh New session in this
+     * workspace, the most recently active one (#17), and that blank stops being a row once another session is open
+     * (DSH's sessionVisible), which the page's next redraw may do while the + is being pressed.
+     */
+    const nestedRows = `[...document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]')]`
+    const before = JSON.parse(await browser.evaluate(`JSON.stringify(${nestedRows}.map((li) => li.dataset.sessionId))`))
     await browser.evaluate(`document.querySelector('#tree li[data-kind="workspace"] li[data-kind="workspace"] > .row button[aria-label="New session in ${appLabel}"]').click()`)
     assert.ok(
-      await browser.waitFor(`document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]').length > ${before}`, 15_000),
+      await browser.waitFor(`${nestedRows}.some((li) => !${JSON.stringify(before)}.includes(li.dataset.sessionId))`, 15_000),
       'the + starts a session in that workspace, drawn under it',
     )
     assert.ok(

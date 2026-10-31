@@ -69,7 +69,7 @@ function startServer(label, options = {}) {
          * `write_file`, and a check that let it land in the checkout would leave a file behind.
          */
         ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', endpoint, '--session-root', join(home, 'sessions'), '--sandbox-root', work]),
-        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
+        { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let output = ''
       let settled = false
