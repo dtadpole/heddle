@@ -14,6 +14,7 @@ members = [
     "crates/heddle-goal",
     "crates/heddle-todo",
     "crates/heddle-schedule",
+    "crates/heddle-jobs",
     "crates/heddle-team",
     "crates/heddle-server",
     "crates/heddle-web-trajectory",
@@ -44,6 +45,7 @@ heddle-sandbox = { path = "crates/heddle-sandbox" }
 heddle-goal = { path = "crates/heddle-goal" }
 heddle-todo = { path = "crates/heddle-todo" }
 heddle-schedule = { path = "crates/heddle-schedule" }
+heddle-jobs = { path = "crates/heddle-jobs" }
 heddle-team = { path = "crates/heddle-team" }
 heddle-server = { path = "crates/heddle-server" }
 heddle-web-trajectory = { path = "crates/heddle-web-trajectory" }

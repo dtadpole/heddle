@@ -266,17 +266,17 @@ test('a hand-made browser.lock2 holds the integrator slot; the integrator takes 
   assert.equal(take(root, 'developer-one').status, 75)
 })
 
-test('no new holder while memory free is under 25% or disk free under 20 GiB; swap is no gate (D-064)', (t) => {
+test('no new holder while memory free is under 25% (D-064) or disk free under 16 GiB (D-067); swap is no gate', (t) => {
   const root = sandbox(t)
   const low = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '24' })
   assert.equal(low.status, 75)
   assert.match(low.out, /no new holder: memory free 24% < 25% \(D-064\)/)
-  const full = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_DISK_GB: '19.9' })
+  const full = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_DISK_GB: '15.9' })
   assert.equal(full.status, 75)
-  assert.match(full.out, /no new holder: disk free 19\.9 GiB < 20 GiB \(D-064\)/)
-  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_DISK_GB: '12' }).out, /disk 12\.0 GiB free: no new holder, disk free 12\.0 GiB < 20 GiB/)
-  const edge = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_DISK_GB: '20' })
-  assert.equal(edge.status, 0, 'exactly 25% memory and 20 GiB disk admit; swap is not read at all')
+  assert.match(full.out, /no new holder: disk free 15\.9 GiB < 16 GiB \(D-067\)/)
+  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_DISK_GB: '12' }).out, /disk 12\.0 GiB free: no new holder, disk free 12\.0 GiB < 16 GiB/)
+  const edge = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_DISK_GB: '16' })
+  assert.equal(edge.status, 0, 'exactly 25% memory and 16 GiB disk admit, so the 16-20 GiB sweep band still admits; swap is not read at all')
 })
 
 test('browser-cap can move the memory lines without a code change', (t) => {
