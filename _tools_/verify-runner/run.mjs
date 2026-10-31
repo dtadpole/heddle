@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import process from 'node:process'
 
 /**
@@ -145,9 +145,70 @@ export function collectNames(stdout) {
   return names
 }
 
+/**
+ * Every process below `root`, read from `{ pid, ppid }` rows, in breadth-first order.
+ *
+ * Walked by parent rather than by process group, so a descendant that started its own group (a browser launched
+ * detached) is still found while its parent lives.
+ */
+export function descendantsOf(root, rows) {
+  const children = new Map()
+  for (const { pid, ppid } of rows) {
+    if (pid === ppid) continue
+    if (!children.has(ppid)) children.set(ppid, [])
+    children.get(ppid).push(pid)
+  }
+  const found = []
+  const queue = [root]
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()) ?? []) {
+      found.push(child)
+      queue.push(child)
+    }
+  }
+  return found
+}
+
+/** This machine's process table as `{ pid, ppid }` rows, or none when `ps` cannot be read. */
+export function processTable() {
+  const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' })
+  if (ps.status !== 0 || typeof ps.stdout !== 'string') return []
+  return ps.stdout
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/).map(Number))
+    .filter(([pid, ppid]) => Number.isInteger(pid) && Number.isInteger(ppid))
+    .map(([pid, ppid]) => ({ pid, ppid }))
+}
+
+/**
+ * End everything this runner started, at once.
+ *
+ * The lane gate stops a check file that outlives its time limit by signalling this runner. Measured on 31 Oct: when
+ * the runner was killed outright, `node --test`, the check's harness and its browser lived on as orphans for hours,
+ * holding ports and memory. The pids are read before any is signalled, so a child reparented by its parent's death is
+ * still ended.
+ */
+export function endDescendants(root = process.pid) {
+  const pids = descendantsOf(root, processTable())
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+  }
+  return pids
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   if (argv.length === 0) return usage(process.stderr, 2)
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGHUP', 129], ['SIGINT', 130]]) {
+    process.once(signal, () => {
+      endDescendants()
+      process.exit(code)
+    })
+  }
   const check = argv.find((arg) => !arg.startsWith('-'))
   const list = argv.includes('--list')
   const json = argv.includes('--json')

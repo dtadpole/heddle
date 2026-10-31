@@ -158,7 +158,12 @@ function runFile(part, check, timeoutSeconds) {
     env: { ...process.env, NO_COLOR: '1' },
     encoding: 'utf8',
     timeout: timeoutSeconds * 1000,
-    killSignal: 'SIGKILL',
+    /**
+     * SIGTERM, not SIGKILL: run.mjs answers it by ending every process below it (node --test, the check's harness,
+     * its browser) and exiting. Measured on 31 Oct: SIGKILL ended run.mjs alone, and two timed-out browser checks
+     * left their node --test and harness running for hours.
+     */
+    killSignal: 'SIGTERM',
   })
   const result = run.error ? null : parseListOutput(run.stdout, run.status)
   return { run, result, seconds: Math.round((Date.now() - at) / 100) / 10 }
