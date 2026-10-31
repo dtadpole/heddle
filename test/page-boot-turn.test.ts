@@ -56,6 +56,9 @@ function harness(created: string): Run {
     const chooseWorkspace = () => {}
     const adoptSession = (id) => { adopted.push(id) }
     const fetchSessionAccess = async () => {}
+    /** A96's new-session preset: none staged here, and its chooser is not drawn. */
+    let stagedPreset = null
+    const paintPresetSeat = () => {}
     const stopTurn = async () => {}
     /** The page's own open: it makes the session current and redraws it (here, records that it was asked). */
     const showSession = async (id) => { opened.push(id); current = id; return true }
