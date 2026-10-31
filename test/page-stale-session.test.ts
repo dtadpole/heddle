@@ -125,6 +125,9 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       growComposer: () => {},
       updateSendDisabled: () => {},
       takeAttachments: () => [],
+      // main's Stop pause (3db975b7): a new submission clears the open queue's stopped mark.
+      stoppedQueues: new WeakSet(),
+      queueOf: () => [],
       resolveSubmitMode: () => 'queue',
       BUSY_ENTER: 'queue',
       anyRunning: () => false,
