@@ -12067,13 +12067,25 @@ async function archiveSession(node) {
  * a row's menu only decides which of the two it is changing. Answers `{ ok, status, body }`; a refusal the caller
  * handles itself (`options.quiet`) is not written to the tree's note, and `options.applied` runs once the server took the
  * change, before the redraw (a pin under Manual fronts the session in its saved orders, C17).
+ *
+ * A request that fails in flight answers `{ ok: false, status: 0, body: {}, error }` and says so in the note, as DSH's
+ * pin says "Pin failed. Try again later." (`dsh-client-ui-workspace` `lib/client.js:5085-5094`) rather than leaving the
+ * rejection to the console: the row and menu buttons that call this do not catch (#91). Whether the server applied it
+ * anyway is the next read's to show, which the stream's reconnect or the browser's return online makes
+ * (`StreamBaseline`); `options.applied` does not run for it.
  */
 async function setSessionFlags(node, patch, extra = {}, options = {}) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  })
+  let response
+  try {
+    response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
+    })
+  } catch (error) {
+    if (typeof options.quiet !== 'function' || !options.quiet(0, {})) setNote('could not change that session: ' + (error && error.message))
+    return { ok: false, status: 0, body: {}, error }
+  }
   const body = await response.json().catch(() => ({}))
   /**
    * The route refuses an archive while the session still has work the page did not know about — a background job
@@ -12165,7 +12177,8 @@ document.getElementById('session-archive-confirm').addEventListener('click', asy
     const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
     settle(false)
     if (!result.ok) {
-      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      const failed = result.error !== undefined ? 'could not stop and archive that session: ' + (result.error && result.error.message) : null
+      dialogError('session-archive-error', failed ?? result.body?.error ?? 'could not stop and archive that session')
       return
     }
     stopArchiveTarget = null

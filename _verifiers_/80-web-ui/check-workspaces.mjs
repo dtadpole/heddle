@@ -489,6 +489,75 @@ test('Add workspace and New session say they failed when their request gets no a
   }
 })
 
+test('Pin and Archive on a session row say they failed when their request gets no answer, and the row stays as it was (#137)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * GitHub issue #137: offline, a session row's Pin and Archive controls changed nothing on screen and each press left
+   * an unhandled `Failed to fetch` in the console, while Rename, New session and Add workspace already said they failed
+   * (#59, the check above). Both go through the page's setSessionFlags, whose request was not caught. DSH's client
+   * resolves every call to ok or error and never rejects for a carrier problem (dsh-api-gateway README.md:60), and its
+   * pin says "Pin failed. Try again later." (dsh-client-ui-workspace lib/client.js:5085-5094). The server is stopped
+   * rather than stubbed, as in #59, so the failure is the one a person meets when the network or the server goes away.
+   */
+  const place = fixtureDir('workspaces-flags-unanswered')
+  const home = isolatedHome('workspaces-flags-unanswered')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config, HOME: place } },
+  )
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const said = (prefix) => `(() => { const note = document.getElementById('tree-note'); return !note.hidden && note.textContent.startsWith(${JSON.stringify(prefix)}) })()`
+  const clearNote = `(() => { const note = document.getElementById('tree-note'); note.textContent = ''; note.hidden = true })()`
+  try {
+    const work = join(place, 'work')
+    mkdirSync(work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    const registered = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(registered.status, 200, `registered a workspace (${JSON.stringify(registered.body)})`)
+    const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'a session to pin and archive', folder: work }) })
+    assert.equal(turn.status, 200, `a turn made a session to act on (${turn.status})`)
+    const listed = (await api(server.url, cookie, '/api/sessions')).body
+    const session = (Array.isArray(listed) ? listed : []).find((meta) => meta.cwd === realpathSync(work))?.id
+    assert.ok(session !== undefined, `the session is listed\nsaw: ${JSON.stringify(listed)}`)
+    await browser.gotoSession(server.url, session)
+    const row = `document.querySelector('#tree li[data-session-id=${JSON.stringify(session)}]')`
+    const control = (label) => `${row}?.querySelector('button[aria-label=${JSON.stringify(label)}]')`
+    assert.ok(await browser.waitFor(`${control('Pin session')} != null && ${control('Archive session')} != null`, 20_000), 'the row offers Pin and Archive')
+    await browser.evaluate(`window.__unhandled = []; window.addEventListener('unhandledrejection', (event) => window.__unhandled.push(String(event.reason && event.reason.message ? event.reason.message : event.reason)))`)
+
+    /** From here on no request gets an answer. */
+    server.kill()
+    await new Promise((done) => setTimeout(done, 300))
+
+    await browser.evaluate(clearNote)
+    await browser.evaluate(`${control('Pin session')}.click()`)
+    assert.ok(
+      await browser.waitFor(said('could not change that session: '), 10_000),
+      `Pin says in the tree's note that it failed\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('tree-note').textContent)`)}`,
+    )
+    assert.equal(await browser.evaluate(`${control('Pin session')} != null && ${control('Unpin session')} == null`), true, 'and the row is still unpinned')
+
+    await browser.evaluate(clearNote)
+    await browser.evaluate(`${control('Archive session')}.click()`)
+    assert.ok(
+      await browser.waitFor(said('could not change that session: '), 10_000),
+      `Archive says it failed too\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('tree-note').textContent)`)}`,
+    )
+    assert.equal(await browser.evaluate(`${row} !== null && ${control('Archive session')} != null`), true, 'and the row is still there, not archived')
+    assert.equal(await browser.evaluate(`document.getElementById('archive-notice').hidden`), true, 'with no "Session archived" notice for an archive that never happened')
+
+    const unhandled = JSON.parse(await browser.evaluate('JSON.stringify(window.__unhandled)'))
+    assert.deepEqual(unhandled, [], 'no failure is left to the console as an unhandled rejection')
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(place)
+  }
+})
+
 test('⌥⌘O opens Add workspace\'s folder chooser, as DSH\'s workspace.add shortcut does', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
