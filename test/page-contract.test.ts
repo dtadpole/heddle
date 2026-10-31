@@ -186,8 +186,8 @@ test('New session starts in the workspace row the person opened or added, not th
   /**
    * DSH starts a session in the workspace a person acted on: a row's `+` names it (dsh-client-ui-workspace
    * lib/client.js:3233-3236, and a named workspace wins at :1508), and Add workspace starts one there at once
-   * (:3936-3938). This page has no Session Intent picker to show and change the target, so opening workspace B's row
-   * after a session in A must make B the target; the browser check is 80's "New session starts in the workspace row the
+   * (:3936-3938). The Session Intent hero picker (C36) changes only a blank session's target, so for the panel's button
+   * and chord, opening workspace B's row after a session in A must make B the target; the browser check is 80's "New session starts in the workspace row the
    * person opened". This detects the choice no longer being recorded where the person acts.
    */
   assert.match(page, /function chooseWorkspace\(path\) \{\s*chosenWorkspace = path === null \? null : \{ path, during: current \}/, 'a choice remembers the session it was made beside')

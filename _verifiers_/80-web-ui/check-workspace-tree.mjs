@@ -293,9 +293,9 @@ test('New session starts in the workspace row the person opened, not in the open
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
    * DSH starts a session where the person acted: a workspace row's `+` names its workspace, and a named workspace wins
-   * over the open session's (dsh-client-ui-workspace lib/client.js:3233-3236, :1508). This page has no Session Intent
-   * picker to show and change the target before the first prompt, so opening workspace B's row after a session in A is
-   * that act, and the panel's New session and its chord start in B. With no workspace row opened since the session was
+   * over the open session's (dsh-client-ui-workspace lib/client.js:3233-3236, :1508). The Session Intent hero picker
+   * (C36) changes a blank session's target; for the panel's button and chord, opening workspace B's row after a session
+   * in A is that act, and New session and its chord start in B. With no workspace row opened since the session was
    * chosen, the open session's workspace is the target, as DSH's is. Before the fix both presses started in A (#25).
    */
   const home = isolatedHome('tree-target')
@@ -387,5 +387,144 @@ test('New session starts in the workspace row the person opened, not in the open
     browser.close()
     server.kill()
     for (const dir of [home, first, second]) removeDir(dir)
+  }
+})
+
+/** One key the way a keyboard sends it — the protocol's key events, as check-model-switcher.mjs's `press` does. */
+async function press(browser, key) {
+  const keys = {
+    Enter: { code: 'Enter', keyCode: 13, text: '\r' },
+    Escape: { code: 'Escape', keyCode: 27 },
+    ArrowDown: { code: 'ArrowDown', keyCode: 40 },
+    ArrowUp: { code: 'ArrowUp', keyCode: 38 },
+  }
+  const description = keys[key]
+  const common = { key, code: description.code, windowsVirtualKeyCode: description.keyCode, nativeVirtualKeyCode: description.keyCode }
+  await browser.send('Input.dispatchKeyEvent', {
+    type: description.text === undefined ? 'rawKeyDown' : 'keyDown',
+    ...common,
+    ...(description.text === undefined ? {} : { text: description.text, unmodifiedText: description.text }),
+  })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+}
+
+/**
+ * C36, DSH's Session Intent hero picker (`dsh-client-ui-conversation` `WorkspaceChip` and `selectWorkspace`,
+ * `dsh-client-ui-workspace` `WorkspacePickFlow`): over a blank session the hero row carries a chip named `Choose
+ * workspace` showing the session's workspace; its menu lists every workspace with that one checked and `Add workspace…`
+ * last; the keys move, wrap and Escape back to the chip; a pick moves the new session — draft included — to the other
+ * workspace, and the first prompt runs there while the session left behind stays empty.
+ */
+test('the Session Intent hero picks the workspace for a blank session, by keyboard, and the first prompt runs there', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('tree-hero')
+  const alphaDir = fixtureDir('tree-hero-alpha')
+  const betaDir = fixtureDir('tree-hero-beta')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser = null
+  try {
+    const cookie = await cookieFor(server.url)
+    const register = async (path) => {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      return added.body.record
+    }
+    /**
+     * Both stores list a newly added workspace first, as DSH does (TS src/workspace/service.ts:208, Rust heddle-workspace
+     * service.rs:232, DSH dsh-workspace lib/index.js:687), and the menu keeps that record order. Beta is registered
+     * first so that alpha, the blank session's workspace, is the top item.
+     */
+    const beta = await register(betaDir)
+    const alpha = await register(alphaDir)
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: alpha.path }) })
+    assert.equal(made.status, 200, `a blank session in the first workspace (${JSON.stringify(made.body)})`)
+    const alphaBlank = made.body.session
+
+    browser = await openBrowser()
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`document.getElementById('session-branch').textContent === ${JSON.stringify(alpha.path)}`, 15_000)
+    const appeared = await browser.waitFor(`document.getElementById('hero-workspace')?.hidden === false`, 10_000).catch(() => false)
+    assert.ok(appeared, 'with a blank session open the hero row shows a workspace chip above the composer')
+    const chip = JSON.parse(
+      await browser.evaluate(`(() => {
+        const chip = document.getElementById('hero-workspace-chip')
+        return JSON.stringify({ name: chip.getAttribute('aria-label'), popup: chip.getAttribute('aria-haspopup'), expanded: chip.getAttribute('aria-expanded'), label: chip.querySelector('.label').textContent })
+      })()`),
+    )
+    assert.deepEqual(chip, { name: 'Choose workspace', popup: 'menu', expanded: 'false', label: alpha.title }, 'DSH\'s chip, naming the session\'s workspace')
+
+    /** Opened from the keyboard: the workspaces in order, the current one checked, Add workspace… last. */
+    const focusedLabel = `document.activeElement?.querySelector?.('.label')?.textContent ?? document.activeElement?.id ?? null`
+    await browser.evaluate(`document.getElementById('hero-workspace-chip').focus()`)
+    await press(browser, 'Enter')
+    await browser.waitFor(`document.querySelectorAll('#hero-workspace-menu [role="menuitemradio"]').length === 2`, 10_000)
+    const menu = JSON.parse(
+      await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#hero-workspace-menu button')].map((item) => [item.getAttribute('role'), item.querySelector('.label').textContent, item.getAttribute('aria-checked')]))`),
+    )
+    assert.deepEqual(
+      menu,
+      [
+        ['menuitemradio', alpha.title, 'true'],
+        ['menuitemradio', beta.title, 'false'],
+        ['menuitem', 'Add workspace…', null],
+      ],
+      'every workspace, the current one checked, then Add workspace…',
+    )
+    await press(browser, 'ArrowDown')
+    assert.equal(await browser.evaluate(focusedLabel), alpha.title, 'ArrowDown from the chip lands on the first item')
+    await press(browser, 'ArrowDown')
+    assert.equal(await browser.evaluate(focusedLabel), beta.title)
+    await press(browser, 'ArrowDown')
+    await press(browser, 'ArrowDown')
+    assert.equal(await browser.evaluate(focusedLabel), alpha.title, 'the arrows wrap')
+    await press(browser, 'ArrowUp')
+    assert.equal(await browser.evaluate(focusedLabel), 'Add workspace…')
+    await press(browser, 'Escape')
+    const closed = JSON.parse(
+      await browser.evaluate(`JSON.stringify({ hidden: document.getElementById('hero-workspace-menu').hidden, focus: document.activeElement?.id ?? null, expanded: document.getElementById('hero-workspace-chip').getAttribute('aria-expanded') })`),
+    )
+    assert.deepEqual(closed, { hidden: true, focus: 'hero-workspace-chip', expanded: 'false' }, 'Escape closes the menu and returns to the chip')
+
+    /** A draft typed first, then the other workspace picked with Enter. */
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'where does this run'; field.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    await browser.evaluate(`document.getElementById('hero-workspace-chip').focus()`)
+    await press(browser, 'Enter')
+    await browser.waitFor(`document.querySelectorAll('#hero-workspace-menu [role="menuitemradio"]').length === 2`, 10_000)
+    await press(browser, 'ArrowDown')
+    await press(browser, 'ArrowDown')
+    await press(browser, 'Enter')
+    await browser.waitFor(`document.getElementById('session-branch').textContent === ${JSON.stringify(beta.path)}`, 15_000)
+    assert.ok(
+      await browser
+        .waitFor(`document.getElementById('hero-workspace').hidden === false && document.querySelector('#hero-workspace-chip .label')?.textContent === ${JSON.stringify(beta.title)}`, 10_000)
+        .catch(() => false),
+      'the new session is open in the picked workspace, still blank, and the chip names it',
+    )
+    assert.equal(await browser.evaluate(`document.querySelector('#prompt textarea').value`), 'where does this run', 'the draft went with it')
+
+    /** The first prompt runs in the picked workspace; the session left behind stays empty. */
+    await browser.evaluate(`document.getElementById('send').click()`)
+    let ran = null
+    for (let attempt = 0; attempt < 60 && ran === null; attempt += 1) {
+      const listed = await api(server.url, cookie, '/api/sessions')
+      ran = (Array.isArray(listed.body) ? listed.body : []).find((meta) => (meta.turns ?? 0) > 0) ?? null
+      if (ran === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(ran !== null, 'the prompt ran')
+    assert.equal(ran.cwd, beta.path, 'in the picked workspace')
+    assert.notEqual(ran.id, alphaBlank, 'not in the blank session it started from')
+    const left = (await api(server.url, cookie, '/api/sessions')).body.find((meta) => meta.id === alphaBlank)
+    assert.equal(left?.turns ?? 0, 0, 'which stays empty')
+    assert.ok(await browser.waitFor(`document.getElementById('hero-workspace').hidden === true`, 10_000).catch(() => false), 'and the hero row goes once the prompt is drawn')
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, alphaDir, betaDir]) removeDir(dir)
   }
 })
