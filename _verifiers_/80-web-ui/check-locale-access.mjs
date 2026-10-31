@@ -93,6 +93,8 @@ const CHINESE = {
 
 async function chooseLanguage(browser, id) {
   await browser.evaluate(`(() => { document.getElementById('settings-open').click(); return true })()`)
+  // Settings opens once its reads are in; close it only after that, so no modal is left over the page.
+  await browser.waitFor(`document.getElementById('settings-dialog').open === true`, 10_000)
   await browser.evaluate(`(() => {
     const select = document.getElementById('settings-language')
     select.value = '${id}'
@@ -101,6 +103,7 @@ async function chooseLanguage(browser, id) {
     return true
   })()`)
   await browser.waitFor(`document.documentElement.getAttribute('lang') === '${id === 'zh' ? 'zh-CN' : 'en'}'`, 5_000)
+  await browser.waitFor(`document.getElementById('settings-dialog').open === false`, 5_000)
 }
 
 test('the access mode, its menu and the Full access confirmation follow the interface language', async (context) => {
