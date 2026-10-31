@@ -7113,7 +7113,12 @@ events.addEventListener('reset', () => {
   void (async () => {
     await refreshSessions()
     await renderTree()
-    if (current !== null) await showSession(current)
+    /**
+     * The open session is read again, and so is one whose history could not be loaded (#56): after a server restart its
+     * read may now succeed, and the composer would otherwise stay at "Session unavailable".
+     */
+    const reopen = current ?? unavailableSession
+    if (reopen !== null) await showSession(reopen)
     await refreshApprovals()
   })()
 })
@@ -7134,6 +7139,11 @@ function scheduleTreeRefresh() {
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
+  /**
+   * The session the panel shows: the open one, or the one whose history could not be loaded (#56), under whose "Failed
+   * to load history" no other session's live turn may draw. Only with neither does the panel follow any session's turn.
+   */
+  const shown = current ?? unavailableSession
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -7188,7 +7198,7 @@ events.addEventListener('session', (message) => {
     runningSince.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
-    if (current === null || payload.session === current) {
+    if (shown === null || payload.session === shown) {
       drawTurnFailure(payload.session, event.message)
       settleChat()
     }
@@ -7225,7 +7235,7 @@ events.addEventListener('session', (message) => {
      * adopted nothing yet: a page that has only ever watched a turn — the CLI's, another window's — is showing
      * that session, and its answer settles here like anyone else's.
      */
-    if (current === null || payload.session === current) {
+    if (shown === null || payload.session === shown) {
       settleChat()
       markBranchable(event.seq)
       void renderSettledAnswers()
@@ -7233,7 +7243,7 @@ events.addEventListener('session', (message) => {
       renderScheduleCards()
     }
   }
-  if (current && payload.session !== current) return
+  if (shown && payload.session !== shown) return
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
     void slashReady.then((commands) => commands?.draw(event))
