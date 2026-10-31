@@ -1,0 +1,29 @@
+[package]
+name = "heddle-questions"
+description = "Heddle in Rust: the ask_user_question tool, its question service and its HTTP answers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Deadlines as ISO times, the TypeScript build's `new Date().toISOString()`.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+futures.workspace = true
+# The session log every request is event-sourced from: `QuestionLog` is implemented for its store.
+heddle-session.workspace = true
+# The `Tool` trait the model-facing tool implements.
+heddle-tools.workspace = true
+serde.workspace = true
+# `preserve_order`: events, views and tool answers are written with the TypeScript build's key order.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+heddle-config.workspace = true

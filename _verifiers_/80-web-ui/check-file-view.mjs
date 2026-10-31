@@ -21,10 +21,11 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, steps = [{ text: 'an answer' }]) {
   const home = isolatedHome(`file-view-${label}`)
   const work = fixtureDir(`file-view-${label}-work`)
-  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  /** An answer that names the work folder itself (an absolute link) is written once that folder is known. */
+  const { config } = scriptedConfig({ home, steps: typeof steps === 'function' ? steps(work) : steps })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config } },
@@ -578,6 +579,261 @@ test('an HTML preview applies its relative stylesheet and does not run its scrip
       return { frameRan: frame.contentWindow.__ran === true, frameTitle: frame.contentDocument.title, pageRan: window.__ran === true }
     })()`)
     assert.deepEqual(inert, { frameRan: false, frameTitle: '', pageRan: false }, 'and the page\'s script does not run')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * C62 in the parity inventory: a file link in a chat answer opens the file rather than leaving the page. DSH opens it
+ * in its right sidebar; heddle's one preview surface is the panel (the owner's rule above), so the link opens there.
+ * Measured before this test: the answer's `README.md` link navigated the page to the server's `not found`. A remote
+ * link keeps its own tab, which is what DSH does without its in-app browser.
+ */
+test('a file link in a chat answer opens the file in the preview, and does not leave the page', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const answer = 'See [the readme](README.md), [the guide](docs/guide.md#install) and [the site](https://example.com/).'
+  const server = await startServer('chat-links', [{ text: answer }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'README.md'), '# Heddle readme\n\nA line to read.\n')
+    mkdirSync(join(server.work, 'docs'), { recursive: true })
+    writeFileSync(join(server.work, 'docs', 'guide.md'), '# Guide\n\nIntro.\n\n## Install\n\nRun it.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where is the readme', folder: server.work, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]") !== null', 10_000), 'the answer carries the file link')
+    const before = await browser.evaluate('location.href')
+    await browser.evaluate('document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]").click()')
+    assert.ok(await browser.waitFor('document.getElementById("file-body").innerText.includes("A line to read.")', 10_000), 'the file opens in the preview')
+    assert.equal(await browser.evaluate('location.href'), before, 'and the page did not navigate away')
+    assert.match(await browser.evaluate('document.getElementById("file-head").textContent'), /README\.md/, 'the preview names the file')
+
+    // Back to the chat, then the link with a fragment: the file opens at the heading it names.
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    await browser.waitFor('document.querySelector("#log .turn.assistant a[href=\\"docs/guide.md#install\\"]") !== null', 10_000)
+    await browser.evaluate('document.querySelector("#log .turn.assistant a[href=\\"docs/guide.md#install\\"]").click()')
+    assert.ok(await browser.waitFor('document.getElementById("file-body").innerText.includes("Run it.")', 10_000), 'a nested path resolves against the session folder')
+    assert.equal(await browser.evaluate('location.href'), before)
+
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    /**
+     * Back in the chat, the transcript is redrawn from the session's history (showSession clears and refills it). A
+     * click dispatched while that redraw was in flight read as cancelled about one run in two on TS, so the probe waits
+     * for the redrawn answer to be the only one and settled.
+     */
+    await browser.waitFor('document.querySelectorAll("#log .turn.assistant a[href^=\\"https:\\"]").length === 1', 10_000)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const remote = await browser.evaluate(`(() => {
+      const link = document.querySelector('#log .turn.assistant a[href^="https:"]')
+      let prevented = null
+      const probe = (event) => { prevented = event.defaultPrevented; event.preventDefault() }
+      window.addEventListener('click', probe, { once: true })
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }))
+      return JSON.stringify({ prevented, target: link.getAttribute('target') })
+    })()`).then(JSON.parse)
+    assert.equal(remote.prevented, false, 'a remote link is left to the browser')
+    assert.equal(remote.target, '_blank', 'which opens it in its own tab')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The line at the top of the preview: a code file's first visible numbered row, or the plain-text line under the
+ * panel's top edge. Read in the browser, so it judges what the reader sees rather than a scroll offset.
+ */
+const TOP_LINE = `(() => {
+  const body = document.getElementById('file-body')
+  const box = body.getBoundingClientRect()
+  if (body.dataset.renderer === 'code') {
+    const row = [...body.querySelectorAll('.line')].find((line) => line.getBoundingClientRect().bottom > box.top + 2)
+    return row === undefined ? 0 : Number(row.querySelector('.ln')?.textContent ?? 0)
+  }
+  const caret = document.caretRangeFromPoint(box.left + 12, box.top + 6)
+  if (caret === null || !body.contains(caret.startContainer)) return 0
+  /** A point in the panel's own top padding lands on the panel, before its text: that is the first line. */
+  if (caret.startContainer === body) return caret.startOffset === 0 ? 1 : 0
+  if (caret.startContainer.nodeType !== Node.TEXT_NODE) return 0
+  return caret.startContainer.data.slice(0, caret.startOffset).split('\\n').length
+})()`
+
+test('a chat link to #L120 or #L80-L90 opens the file at that line, and an absolute link opens its file at the top', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('chat-lines', (work) => [
+    { text: `See [the notes](notes.txt#L120), [the same notes](${work}/notes.txt) and [the code](src/app.ts#L80-L90).` },
+  ])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    mkdirSync(join(server.work, 'src'), { recursive: true })
+    writeFileSync(join(server.work, 'src', 'app.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where are the notes', folder: server.work, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    const before = await browser.evaluate('location.href')
+    const follow = async (href, text) => {
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+      const find = `[...document.querySelectorAll('#log .turn.assistant a[href]')].find((link) => link.getAttribute('href') === ${JSON.stringify(href)})`
+      assert.ok(await browser.waitFor(`${find} !== undefined`, 10_000), `the answer carries the link ${href}`)
+      await browser.evaluate(`${find}.click()`)
+      assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes(${JSON.stringify(text)})`, 10_000), `${href} opens in the preview`)
+      await new Promise((done) => setTimeout(done, 300))
+      assert.equal(await browser.evaluate('location.href'), before, `${href} leaves the page where it is`)
+      return Number(await browser.evaluate(TOP_LINE))
+    }
+
+    const atLine = await follow('notes.txt#L120', 'line 200 of the notes')
+    assert.ok(Math.abs(atLine - 120) <= 1, `#L120 shows line 120 at the top of a plain-text file (top line ${atLine})`)
+    const atTop = await follow(`${server.work}/notes.txt`, 'line 200 of the notes')
+    assert.equal(atTop, 1, 'an absolute link with no line opens its file at the top, even after a line link scrolled it')
+    const inCode = await follow('src/app.ts#L80-L90', 'value200')
+    assert.ok(Math.abs(inCode - 80) <= 1, `#L80-L90 shows line 80 at the top of a code file (top line ${inCode})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a chat link whose file arrives after a newer link opened leaves the newer file where it is', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * developer-two's review of #41: the chat-link click placed the reader after openPath resolved, with no ticket. A link
+   * clicked first whose file arrived late scrolled the newer file to the old link's line. The page's fetch holds the
+   * first file until a second link has opened its own.
+   */
+  const server = await startServer('chat-link-race', () => [{ text: 'See [the notes](notes.txt#L120) and [the code](src/app.ts).' }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    mkdirSync(join(server.work, 'src'), { recursive: true })
+    writeFileSync(join(server.work, 'src', 'app.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where are the notes', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    const link = (href) => `[...document.querySelectorAll('#log .turn.assistant a[href]')].find((anchor) => anchor.getAttribute('href') === ${JSON.stringify(href)})`
+    assert.ok(await browser.waitFor(`${link('notes.txt#L120')} !== undefined && ${link('src/app.ts')} !== undefined`, 10_000), 'the answer carries both links')
+    /** The notes file is held until the code file has opened. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('/api/file') && address.includes('notes.txt')) {
+          held = false
+          return new Promise((resolve) => { window.__releaseNotes = () => resolve(original(input, init)) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${link('notes.txt#L120')}.click()`)
+    assert.ok(await browser.waitFor('typeof window.__releaseNotes === "function"', 10_000), 'the notes are in flight')
+    await browser.evaluate(`${link('src/app.ts')}.click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes('value200')`, 10_000), 'the newer link opened its file')
+    assert.equal(Number(await browser.evaluate(TOP_LINE)), 1, 'it opens at the top')
+    await browser.evaluate('window.__releaseNotes()')
+    await new Promise((done) => setTimeout(done, 800))
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({ code: document.getElementById('file-body').innerText.includes('value200'), top: ${TOP_LINE} })`))
+    assert.ok(state.code, 'the newer file is still the one shown')
+    assert.equal(Number(state.top), 1, `the late notes link does not scroll the newer file to its line (top line ${state.top})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a link in the preview whose file arrives after a newer selection leaves the newer file where it is', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * developer-two's review of #41, the preview's own handler: a link in a previewed document placed the reader after
+   * awaiting openPath, with no ticket, so a newer selection made meanwhile was scrolled to the old link's line.
+   */
+  const server = await startServer('preview-link-race', () => [{ text: 'ok' }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    writeFileSync(join(server.work, 'code.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    writeFileSync(join(server.work, 'guide.md'), '# Guide\n\nSee [the notes](notes.txt#L120).\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    /** Files open from the tree, as a reader opens them. */
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((row) => (row.dataset.path ?? '').endsWith(${JSON.stringify('/' + name)}))`
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(await browser.waitFor(`${row('guide.md')} !== undefined && ${row('code.ts')} !== undefined`, 10_000), 'the tree lists the guide and the code')
+    await browser.evaluate(`${row('guide.md')}.click()`)
+    const link = `[...document.querySelectorAll('#file-body a')].find((anchor) => anchor.textContent === 'the notes')`
+    assert.ok(await browser.waitFor(`${link} !== undefined`, 10_000), 'the guide shows its link to the notes')
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('/api/file') && address.includes('notes.txt')) {
+          held = false
+          return new Promise((resolve) => { window.__releaseNotes = () => resolve(original(input, init)) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${link}.click()`)
+    assert.ok(await browser.waitFor('typeof window.__releaseNotes === "function"', 10_000), 'the notes are in flight')
+    await browser.evaluate(`${row('code.ts')}.click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes('value200')`, 10_000), 'the newer selection opened its file')
+    assert.equal(Number(await browser.evaluate(TOP_LINE)), 1, 'it opens at the top')
+    await browser.evaluate('window.__releaseNotes()')
+    await new Promise((done) => setTimeout(done, 800))
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({ code: document.getElementById('file-body').innerText.includes('value200'), top: ${TOP_LINE} })`))
+    assert.ok(state.code, 'the newer file is still the one shown')
+    assert.equal(Number(state.top), 1, `the late preview link does not scroll the newer file to its line (top line ${state.top})`)
   } finally {
     browser.close()
     await server.close()

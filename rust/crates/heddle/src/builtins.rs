@@ -55,6 +55,10 @@ pub enum Builtin {
     Todo,
     /// `src/plugins/todo-tool.ts`.
     TodoTool,
+    /// `src/questions/service.ts`.
+    Questions,
+    /// `src/plugins/questions-tool.ts`.
+    QuestionsTool,
     /// `src/plugins/turns.ts`.
     Turns,
     /// `src/plugins/locale.ts`: the interface language a person chose (issue #80).
@@ -230,6 +234,24 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         None,
         &["todo", "tools"],
         "heddle-todo",
+    ),
+    spec(
+        Builtin::Questions,
+        "questions/service",
+        "questions",
+        "questions",
+        Some("questions"),
+        &["session"],
+        "heddle-questions",
+    ),
+    spec(
+        Builtin::QuestionsTool,
+        "plugins/questions-tool",
+        "questions-tool",
+        "questions-tool",
+        None,
+        &["questions", "tools"],
+        "heddle-questions",
     ),
     spec(
         Builtin::Turns,
@@ -478,6 +500,12 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Todo) => Some(Box::new(crate::adapters::TodoComponent)),
             ComponentRef::Builtin(Builtin::TodoTool) => {
                 Some(Box::new(crate::adapters::TodoToolComponent))
+            }
+            ComponentRef::Builtin(Builtin::Questions) => {
+                Some(Box::new(crate::adapters::QuestionsComponent))
+            }
+            ComponentRef::Builtin(Builtin::QuestionsTool) => {
+                Some(Box::new(crate::adapters::QuestionsToolComponent))
             }
             ComponentRef::Builtin(Builtin::Goal) => Some(Box::new(crate::adapters::GoalComponent)),
             ComponentRef::Builtin(Builtin::GoalTool) => {

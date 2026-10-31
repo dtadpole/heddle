@@ -119,10 +119,14 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/approvals/{id}"),
     ("GET", "/api/goal"),
     ("POST", "/api/goal"),
+    ("GET", "/api/questions"),
+    ("POST", "/api/questions/{id}"),
+    ("POST", "/api/questions/{id}/hold"),
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
     ("GET", "/vendor/purify.js"),
+    ("GET", "/vendor/highlight/core.js"),
 ];
 
 /// How the server is started — the flags of `heddle web` that reach it.
@@ -449,10 +453,18 @@ impl ServerBuilder {
             .route("/api/approvals", get(list_approvals))
             .route("/api/approvals/{id}", post(answer_approval))
             .route("/api/goal", get(get_goal).post(post_goal))
+            .route("/api/questions", get(get_questions))
+            .route("/api/questions/{id}", post(answer_question))
+            .route("/api/questions/{id}/hold", post(hold_question))
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
-            .route("/vendor/purify.js", get(purify));
+            .route("/vendor/purify.js", get(purify))
+            .route("/vendor/highlight/core.js", get(highlight_core))
+            .route(
+                "/vendor/highlight/languages/{grammar}",
+                get(highlight_grammar),
+            );
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
@@ -1287,6 +1299,15 @@ async fn session_view_route(
         "turns".into(),
         serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
     );
+    // How far this transcript reaches: the last recorded event's `seq`, or 0 (web.ts's `seq`). A page opening the
+    // session keeps the events the stream delivers during this read aside and draws only those past it, so an event
+    // in both reads once (live-testing draft developer-eleven-1).
+    let seq = events
+        .iter()
+        .rev()
+        .find_map(|event| event.get("seq").and_then(Value::as_u64))
+        .unwrap_or(0);
+    body.insert("seq".into(), Value::from(seq));
     if let Some(stats) = state.harness().stats.as_ref() {
         body.insert("stats".into(), stats.stats(id.as_str(), &events));
     }
@@ -1898,6 +1919,51 @@ async fn get_goal(
     respond::json(StatusCode::OK, &json!({"session": session, "goal": goal}))
 }
 
+/// `GET /api/questions?session=<id>[&all=1]`: the session's answerable questions (`ask_user_question`).
+async fn get_questions(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let all = query.get("all").is_some_and(|value| value == "1");
+    let (status, body) = questions.get(query.get("session").map(String::as_str), all);
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        body,
+    )
+}
+
+/// `POST /api/questions/<id>`: one answer batch. A late answer comes back in the body for the page to deliver.
+async fn answer_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, false, body)
+}
+
+/// `POST /api/questions/<id>/hold`: Take time on a timed wait.
+async fn hold_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, true, body)
+}
+
+fn question_post(state: &AppState, id: &str, hold: bool, body: JsonBody) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let (status, text) = questions.post(id, hold, &Value::Object(body.0));
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        text,
+    )
+}
+
 async fn get_todo(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -2047,6 +2113,34 @@ async fn html_preview(
     };
     let document = preview::prepare_document(&path, &source, metadata.len());
     respond::json(StatusCode::OK, &document)
+}
+
+/// `GET /vendor/highlight/core.js`: highlight.js's core for the page's code blocks ([`preview::highlight_asset`]).
+async fn highlight_core(State(state): State<AppState>) -> Response {
+    highlight_module(&state, "core.js")
+}
+
+/// `GET /vendor/highlight/languages/<name>.js`: one of the grammars the TypeScript server registers.
+async fn highlight_grammar(
+    State(state): State<AppState>,
+    axum::extract::Path(grammar): axum::extract::Path<String>,
+) -> Response {
+    highlight_module(&state, &format!("languages/{grammar}"))
+}
+
+fn highlight_module(state: &AppState, name: &str) -> Response {
+    match preview::highlight_asset(&state.options().asset_roots, name) {
+        Some(module) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(module))
+            .expect("a response builder with static headers"),
+        None => respond::text(
+            StatusCode::NOT_FOUND,
+            "that highlighter module is not served\n",
+        ),
+    }
 }
 
 async fn purify(State(state): State<AppState>) -> Response {
