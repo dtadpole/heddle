@@ -1258,7 +1258,15 @@ async fn steer_session(
 }
 
 async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    let stopped = state.runs().abort(id.as_str());
+    // Every turn of the session, not only the ones this server started (#93): a goal round, a reminder's turn and a
+    // job notice's turn are registered with the agent runtime's live-turn registry, not with `runs`. A turn the
+    // server started is in both and is counted once.
+    let live = state
+        .harness()
+        .interrupter
+        .as_ref()
+        .is_some_and(|interrupter| interrupter.interrupt(id.as_str()));
+    let stopped = state.runs().abort(id.as_str()).max(usize::from(live));
     respond::json(
         StatusCode::OK,
         &json!({"stopped": stopped, "session": id.to_string()}),
@@ -3162,6 +3170,51 @@ mod tests {
         );
         let _ = runner.hub.set(builder.events());
         builder.into_router(3082).expect("the test router")
+    }
+
+    /// The agent runtime's live-turn registry, as a double: one turn this server did not start.
+    #[derive(Default)]
+    struct OneRowTurn {
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::TurnInterrupter for OneRowTurn {
+        fn interrupt(&self, session: &str) -> bool {
+            let mut seen = self.interrupted.lock().unwrap();
+            seen.push(session.to_owned());
+            seen.len() == 1
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_reaches_a_turn_a_row_started_such_as_a_goal_round() {
+        let rows = Arc::new(OneRowTurn::default());
+        let mut with_rows = harness();
+        with_rows.interrupter = Some(rows.clone());
+        let (router, _) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("stop-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let stop = "/api/sessions/session-00000000-0000-0000-0000-000000000001/stop";
+        let (status, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["stopped"], 1,
+            "the goal round was stopped, though the server never started it"
+        );
+        let (_, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["stopped"], 0, "nothing left to stop");
+        assert_eq!(rows.interrupted.lock().unwrap().len(), 2);
     }
 
     async fn post_json(
