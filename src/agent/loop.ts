@@ -470,7 +470,13 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         })
       }
     }
-    text += roundText
+    /**
+     * The turn's answer is its **last non-empty round**, DSH's rule for what a run hands back (`dsh-subagent`
+     * `finalAssistantOutput`: "the last non-empty assistant message"). Adding every round's text fused the remark a
+     * model makes before a tool call to its answer ("I'll read both files.Both reads…") in the API's answer, the CLI's
+     * printed answer and a child's closing message (live-testing issue #9). The log keeps every round's own message.
+     */
+    if (roundText.length > 0) text = roundText
 
     /**
      * A message that arrived while the model was answering is answered **by this turn**.
