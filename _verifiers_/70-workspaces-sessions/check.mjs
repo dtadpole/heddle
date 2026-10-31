@@ -10,7 +10,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -312,6 +312,8 @@ async function fragmentingChatDouble(answers) {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not one of the turns this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(body)
       const fragments = answers[Math.min(requests.length, answers.length) - 1]
       response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -2987,6 +2989,79 @@ test("a session's first prompt is titled by the session's own model, not by the 
     assert.notEqual(title, 'Please summarise the quarterly revenue figures…', 'the title is not the first prompt cut short')
     assert.equal(title, generated, `the first line of the model's answer, its emphasis removed, is the session's title\nsaw: ${JSON.stringify(title)}`)
     assert.equal((await sessionsOf(h)).find((meta) => meta.id === created.session)?.title, generated, 'and the store holds it')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a conversation started through the turn route is titled by the session's own model too", async (context) => {
+  /**
+   * #68, the twin of the check above for a session no blank row opened first: `POST /api/turn {prompt, folder, new: true}`,
+   * a turn with no session and no folder (the page's send with nothing selected), and the CLI's `--new --turn`. DSH
+   * writes no title when a session is created; dsh-session-title writes the fallback from the first eligible human
+   * message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session with no title yet
+   * (:387). Measured before on both builds: the turn route and the CLI opened the session titled with the prompt cut to
+   * 60 characters, so no title call started and `Please summarise the quarterly revenue figures for the north` stayed.
+   * The CLI is judged with a title step that fails, because a one-shot process may end before an answer lands: what it
+   * leaves is the fallback the first message wrote, cut at a word.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  const h = harness('turn-route-title')
+  const generated = 'Northern revenue year on year'
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  const fallback = 'Please summarise the quarterly revenue figures…'
+  scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: 'a scripted answer' }] })
+  const folder = join(h.work, 'ws-turn-title')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const listed = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    const turnOpens = async (body) => {
+      const before = new Set((await listed()).map((meta) => meta.id))
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const stream = await turn.text()
+      assert.equal(turn.status, 200, `the turn ran\n${stream}`)
+      assert.match(stream, /a scripted answer/, 'the turn was answered by the turn step, not the title step')
+      const made = (await listed()).filter((meta) => !before.has(meta.id))
+      assert.equal(made.length, 1, `the turn opened one new session\n${JSON.stringify(made)}`)
+      return made[0].id
+    }
+    const titleSettles = async (id) => {
+      let title
+      for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+        if (attempt > 0) await new Promise((done) => setTimeout(done, 250))
+        title = (await listed()).find((meta) => meta.id === id)?.title
+      }
+      return title
+    }
+
+    const fresh = await turnOpens({ prompt, folder, new: true })
+    const freshTitle = await titleSettles(fresh)
+    assert.notEqual(freshTitle, prompt.slice(0, 60), 'the title is not the prompt cut mid-word at 60 characters')
+    assert.equal(freshTitle, generated, `new: true in a folder: the model's title replaces the fallback\nsaw: ${JSON.stringify(freshTitle)}`)
+
+    const loose = await turnOpens({ prompt })
+    const looseTitle = await titleSettles(loose)
+    assert.equal(looseTitle, generated, `no session and no folder: the same\nsaw: ${JSON.stringify(looseTitle)}`)
+
+    scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', error: { message: 'the title model is down' } }, { text: 'a scripted answer' }] })
+    const cli = await runCli(adminArgs(h, ['--new', '--turn', prompt, '--json']), { env: h.env, cwd: folder })
+    assert.equal(cli.code, 0, `the CLI turn ran\n${cli.stdout}${cli.stderr}`)
+    const made = parseJson(cli.stdout)
+    const cliTitle = (await sessionsOf(h)).find((meta) => meta.id === made.session)?.title
+    assert.equal(cliTitle, fallback, `--new --turn: the first message wrote the fallback at a word, which a failed call leaves\nsaw: ${JSON.stringify(cliTitle)}`)
   } finally {
     live?.kill()
     removeDir(h.home)

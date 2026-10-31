@@ -2492,12 +2492,17 @@ export function sessionRequestSelection(
       return
     }
   }
+  /**
+   * A session this route opens is born **untitled**, as DSH's is (#68): its first message writes the fallback name and
+   * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
+   * read as a person's name, and no title would ever be generated.
+   */
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
       ? ctx.session.start({ resume: body.session })
       : folder !== null
-        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), title: body.prompt.slice(0, 60), ...born })
-        : ctx.session.start({ cwd: process.cwd(), title: body.prompt.slice(0, 60), ...born })
+        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
+        : ctx.session.start({ cwd: process.cwd(), ...born })
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
   /**
    * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it

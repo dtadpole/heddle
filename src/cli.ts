@@ -1110,6 +1110,9 @@ async function main(): Promise<void> {
      *
      * `--resume` still addresses a session by id from anywhere, because a person who has an id is
      * asking about that session rather than about this folder.
+     *
+     * A new session is born untitled, as the turn route's is (#68): its first message writes the fallback name and
+     * the session layer asks the model for the title (`session/title.ts`).
      */
     const folder = canonicalPath(process.cwd())
     const handle =
@@ -1119,7 +1122,6 @@ async function main(): Promise<void> {
             fresh: args.fresh,
             endpoint,
             ...(args.model !== undefined ? { model: args.model } : {}),
-            title: args.turn.slice(0, 60),
           })
 
     /**
