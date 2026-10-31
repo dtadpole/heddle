@@ -2201,6 +2201,68 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test('a workspace added through the Web API with a ~ path is the folder under the home, stored canonical', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * GitHub issue #1. The route accepts a path that starts with `~` and expands it to the home folder; what it stores
+   * is the canonical path of that folder, so `~/x`, its expanded spelling, a trailing slash and (on a
+   * case-insensitive volume) a letter-case variant are one workspace. Measured on the TypeScript build: it checked
+   * the expanded path and stored the raw string, which resolved against the server's working folder — a record at
+   * `<server folder>/~/x`, a folder that does not exist, answered `200 created: true`. The Rust build stored the
+   * real folder. heddle keeps this `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path
+   * that is not fully qualified instead (dsh-workspace `realpathNormalize`), so this judges the two builds alike.
+   *
+   * `HOME` is the check's own scratch folder for the server, on either build, so nothing is read or written under a
+   * real home.
+   */
+  const h = harness('web-tilde')
+  const home = fixtureDir('web-tilde-home')
+  const folder = join(home, 'tilde-probe')
+  let live
+  try {
+    mkdirSync(folder, { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (body) => {
+      const response = await fetch(`${origin}/api/workspaces`, { method: 'POST', body: JSON.stringify(body), headers: { cookie, 'content-type': 'application/json' } })
+      return { status: response.status, body: await response.json() }
+    }
+    const canonical = realpathSync(folder)
+
+    const added = await post({ path: '~/tilde-probe', name: 'tilde-probe' })
+    assert.equal(added.status, 200, `a ~ path is added (${JSON.stringify(added.body)})`)
+    assert.equal(added.body.created, true, 'and this call created it')
+    assert.equal(added.body.record.path, canonical, 'as the canonical path of the folder under the home, not one under the server folder')
+    const views = (await (await fetch(`${origin}/api/workspaces`, { headers: { cookie } })).json()).workspaces ?? []
+    assert.deepEqual(views.map((view) => view.path), [canonical], `the listing holds that folder and nothing else\nsaw: ${JSON.stringify(views)}`)
+
+    for (const [what, path] of [
+      ['its expanded spelling', folder],
+      ['a trailing slash after ~', '~/tilde-probe/'],
+      ...(existsSync(join(home, 'TILDE-PROBE')) ? [['a letter-case variant', '~/TILDE-PROBE']] : []),
+    ]) {
+      const again = await post({ path })
+      assert.equal(again.status, 200, `${what} is not an error (${JSON.stringify(again.body)})`)
+      assert.equal(again.body.created, false, `${what} is the workspace already there`)
+      assert.equal(again.body.record.id, added.body.record.id, `${what} names the same record`)
+    }
+
+    const missing = await post({ path: '~/nowhere' })
+    assert.equal(missing.status, 400, `a ~ path that does not exist is refused (${JSON.stringify(missing.body)})`)
+    assert.equal(missing.body.error, '~/nowhere does not exist', 'naming the path as it was written')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(home)
+  }
+})
+
 test('a session title is cleaned as DSH cleans it, at creation and on rename, and one with nothing visible is refused', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**

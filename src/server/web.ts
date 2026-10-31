@@ -1300,9 +1300,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the path must be absolute' })}\n`)
       return
     }
+    /**
+     * A leading `~` is the home folder, and what is checked **and stored** is the canonical path of the expanded
+     * spelling — the Rust route's `canonical_path(expand_home(raw))` (heddle-server `add_workspace`). This route used
+     * to check the expanded path and store the raw string, which `canonicalPath` then resolved against the server's
+     * working folder: `~/x` became a record at `<cwd>/~/x`, a folder that does not exist (GitHub issue #1). heddle keeps
+     * the `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path that is not fully qualified
+     * (dsh-workspace `realpathNormalize`, lib/index.js:20-24, :48-50). The sentences keep the path as it was written.
+     */
+    const folder = canonicalPath(expandHome(path))
     let stat
     try {
-      stat = statSync(expandHome(path))
+      stat = statSync(folder)
     } catch {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${path} does not exist` })}\n`)
       return
@@ -1316,7 +1325,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a name must be lowercase letters, digits and dashes' })}\n`)
       return
     }
-    const { record, created } = workspaces.add(path, name)
+    const { record, created } = workspaces.add(folder, name)
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
   }
