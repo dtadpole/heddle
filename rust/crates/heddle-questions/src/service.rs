@@ -11,14 +11,14 @@ use std::time::Duration;
 
 use chrono::Utc;
 use heddle_session::clock::{iso_from, iso_now};
-use serde_json::{json, Map, Value};
-use tokio::sync::{oneshot, Notify};
+use serde_json::{Map, Value, json};
+use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::log::QuestionLog;
 use crate::model::{
-    codes, validate_answers, validate_questions, Answer, Question, QuestionError, DEFAULT_TIMEOUT_SECONDS,
-    MAX_TIMEOUT_SECONDS, QUESTION_EVENT_VERSION,
+    Answer, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, QUESTION_EVENT_VERSION, Question,
+    QuestionError, codes, validate_answers, validate_questions,
 };
 
 /// How a call waits: `Legacy` until an answer, `Timed` until a deadline (DSH's two tool definitions).
@@ -42,18 +42,27 @@ pub struct QuestionConfig {
 
 impl Default for QuestionConfig {
     fn default() -> Self {
-        Self { mode: Mode::Legacy, timeout: DEFAULT_TIMEOUT_SECONDS }
+        Self {
+            mode: Mode::Legacy,
+            timeout: DEFAULT_TIMEOUT_SECONDS,
+        }
     }
 }
 
 impl QuestionConfig {
     /// Read the row's `config` object: `mode` is `legacy` or `timed`, `timeout` a positive integer or `-1`.
     pub fn from_value(config: Option<&Value>) -> Self {
-        let mode = match config.and_then(|config| config.get("mode")).and_then(Value::as_str) {
+        let mode = match config
+            .and_then(|config| config.get("mode"))
+            .and_then(Value::as_str)
+        {
             Some("timed") => Mode::Timed,
             _ => Mode::Legacy,
         };
-        let timeout = config.and_then(|config| config.get("timeout")).and_then(Value::as_i64).unwrap_or(DEFAULT_TIMEOUT_SECONDS);
+        let timeout = config
+            .and_then(|config| config.get("timeout"))
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_TIMEOUT_SECONDS);
         Self { mode, timeout }
     }
 }
@@ -125,26 +134,43 @@ pub struct FoldedRequest {
 pub fn fold_questions(events: &[Value]) -> Vec<FoldedRequest> {
     let mut requests: Vec<FoldedRequest> = Vec::new();
     for event in events {
-        let Some(kind) = event.get("type").and_then(Value::as_str).filter(|kind| kind.starts_with("question/")) else {
+        let Some(kind) = event
+            .get("type")
+            .and_then(Value::as_str)
+            .filter(|kind| kind.starts_with("question/"))
+        else {
             continue;
         };
         let Some(id) = event.get("requestId").and_then(Value::as_str) else {
             continue;
         };
-        let at = event.get("at").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let at = event
+            .get("at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         if kind == "question/asked" {
             if requests.iter().any(|request| request.id == id) {
                 continue;
             }
-            let Some(questions) = event.get("questions").and_then(|value| serde_json::from_value::<Vec<Question>>(value.clone()).ok()) else {
+            let Some(questions) = event
+                .get("questions")
+                .and_then(|value| serde_json::from_value::<Vec<Question>>(value.clone()).ok())
+            else {
                 continue;
             };
             requests.push(FoldedRequest {
                 id: id.to_owned(),
                 questions,
                 timed: event.get("timed") == Some(&Value::Bool(true)),
-                asked_at: event.get("askedAt").and_then(Value::as_str).map_or(at, str::to_owned),
-                deadline: event.get("deadline").and_then(Value::as_str).map(str::to_owned),
+                asked_at: event
+                    .get("askedAt")
+                    .and_then(Value::as_str)
+                    .map_or(at, str::to_owned),
+                deadline: event
+                    .get("deadline")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
                 expired: false,
                 settled: None,
             });
@@ -159,12 +185,23 @@ pub fn fold_questions(events: &[Value]) -> Vec<FoldedRequest> {
         match kind {
             "question/pending" => current.expired = true,
             "question/answered" => {
-                if let Some(answers) = event.get("answers").and_then(|value| serde_json::from_value::<Vec<Answer>>(value.clone()).ok()) {
-                    current.settled = Some(Settled::Answered { answers, at, late: event.get("late") == Some(&Value::Bool(true)) });
+                if let Some(answers) = event
+                    .get("answers")
+                    .and_then(|value| serde_json::from_value::<Vec<Answer>>(value.clone()).ok())
+                {
+                    current.settled = Some(Settled::Answered {
+                        answers,
+                        at,
+                        late: event.get("late") == Some(&Value::Bool(true)),
+                    });
                 }
             }
             "question/cancelled" => {
-                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("cancelled").to_owned();
+                let reason = event
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("cancelled")
+                    .to_owned();
                 current.settled = Some(Settled::Cancelled { reason, at });
             }
             _ => {}
@@ -203,7 +240,11 @@ pub struct QuestionService {
 
 impl std::fmt::Debug for QuestionService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("QuestionService").field("mode", &self.mode).field("default_timeout", &self.default_timeout).finish_non_exhaustive()
+        formatter
+            .debug_struct("QuestionService")
+            .field("mode", &self.mode)
+            .field("default_timeout", &self.default_timeout)
+            .finish_non_exhaustive()
     }
 }
 
@@ -215,8 +256,17 @@ impl QuestionService {
     /// A service over `log` with the row's config.
     pub fn new(log: Arc<dyn QuestionLog>, config: QuestionConfig) -> Self {
         let timeout = config.timeout;
-        let default_timeout = if timeout == -1 || timeout > 0 { timeout } else { DEFAULT_TIMEOUT_SECONDS };
-        Self { log, mode: config.mode, default_timeout, waiters: Mutex::new(HashMap::new()) }
+        let default_timeout = if timeout == -1 || timeout > 0 {
+            timeout
+        } else {
+            DEFAULT_TIMEOUT_SECONDS
+        };
+        Self {
+            log,
+            mode: config.mode,
+            default_timeout,
+            waiters: Mutex::new(HashMap::new()),
+        }
     }
 
     /// The session's id when it exists in the log.
@@ -240,7 +290,13 @@ impl QuestionService {
             return None;
         }
         let asked = raw
-            .and_then(|value| if value.is_i64() || value.is_u64() { value.as_i64() } else { None })
+            .and_then(|value| {
+                if value.is_i64() || value.is_u64() {
+                    value.as_i64()
+                } else {
+                    None
+                }
+            })
             .filter(|seconds| *seconds == -1 || (*seconds > 0 && *seconds <= MAX_TIMEOUT_SECONDS));
         let seconds = asked.unwrap_or(self.default_timeout);
         u64::try_from(seconds).ok()
@@ -253,23 +309,42 @@ impl QuestionService {
         if let Value::Object(fields) = fields {
             event.extend(fields);
         }
-        self.log.append(session, event).map(|_| ()).map_err(log_error)
+        self.log
+            .append(session, event)
+            .map(|_| ())
+            .map_err(log_error)
     }
 
     fn fold(&self, session: &str) -> Result<Vec<FoldedRequest>, QuestionError> {
-        self.log.read(session).map(|events| fold_questions(&events)).map_err(log_error)
+        self.log
+            .read(session)
+            .map(|events| fold_questions(&events))
+            .map_err(log_error)
     }
 
     /// Ask a batch and wait: a legacy call (or a timed `-1`) until an answer or a Stop, a timed call until its
     /// deadline unless a person holds it. A Stop records the cancellation and answers `CANCELLED`.
-    pub async fn ask(&self, session: &str, raw: &Value, timeout: Option<&Value>, cancel: Option<CancellationToken>) -> Result<AskOutcome, QuestionError> {
+    pub async fn ask(
+        &self,
+        session: &str,
+        raw: &Value,
+        timeout: Option<&Value>,
+        cancel: Option<CancellationToken>,
+    ) -> Result<AskOutcome, QuestionError> {
         let questions = validate_questions(raw)?;
         let seconds = self.wait_seconds(timeout);
         if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
-            return Err(QuestionError::new(codes::CANCELLED, "the turn was stopped before the question was asked"));
+            return Err(QuestionError::new(
+                codes::CANCELLED,
+                "the turn was stopped before the question was asked",
+            ));
         }
         let id = format!("question-{}", uuid::Uuid::new_v4());
-        let deadline = seconds.map(|seconds| iso_from(Utc::now() + chrono::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX))));
+        let deadline = seconds.map(|seconds| {
+            iso_from(
+                Utc::now() + chrono::Duration::seconds(i64::try_from(seconds).unwrap_or(i64::MAX)),
+            )
+        });
         self.append(
             session,
             "question/asked",
@@ -279,9 +354,16 @@ impl QuestionService {
         let hold = Arc::new(Notify::new());
         self.waiters.lock().expect("waiters").insert(
             id.clone(),
-            Waiter { session: session.to_owned(), answer: Some(sender), hold: Arc::clone(&hold), held: false, deadline: deadline.clone() },
+            Waiter {
+                session: session.to_owned(),
+                answer: Some(sender),
+                hold: Arc::clone(&hold),
+                held: false,
+                deadline: deadline.clone(),
+            },
         );
-        let mut until = seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
+        let mut until =
+            seconds.map(|seconds| tokio::time::Instant::now() + Duration::from_secs(seconds));
         let stopped = async {
             match cancel {
                 Some(token) => token.cancelled_owned().await,
@@ -328,40 +410,76 @@ impl QuestionService {
     }
 
     /// Every request in a session, oldest first; `open` keeps those still answerable.
-    pub fn list(&self, session: &str, open: bool) -> Result<Vec<Map<String, Value>>, QuestionError> {
-        let views: Vec<Map<String, Value>> = self.fold(session)?.iter().map(|request| self.view(session, request)).collect();
+    pub fn list(
+        &self,
+        session: &str,
+        open: bool,
+    ) -> Result<Vec<Map<String, Value>>, QuestionError> {
+        let views: Vec<Map<String, Value>> = self
+            .fold(session)?
+            .iter()
+            .map(|request| self.view(session, request))
+            .collect();
         if !open {
             return Ok(views);
         }
         Ok(views
             .into_iter()
-            .filter(|view| matches!(view.get("state").and_then(Value::as_str), Some("waiting" | "pending" | "continued")))
+            .filter(|view| {
+                matches!(
+                    view.get("state").and_then(Value::as_str),
+                    Some("waiting" | "pending" | "continued")
+                )
+            })
             .collect())
     }
 
     /// One request, or `None`.
-    pub fn get(&self, session: &str, id: &str) -> Result<Option<Map<String, Value>>, QuestionError> {
-        Ok(self.fold(session)?.iter().find(|request| request.id == id).map(|request| self.view(session, request)))
+    pub fn get(
+        &self,
+        session: &str,
+        id: &str,
+    ) -> Result<Option<Map<String, Value>>, QuestionError> {
+        Ok(self
+            .fold(session)?
+            .iter()
+            .find(|request| request.id == id)
+            .map(|request| self.view(session, request)))
     }
 
     /// Answer a request: a waiting turn receives the answers as its tool result; with none waiting the answer is
     /// recorded late and `message` is the user message the caller delivers.
-    pub fn answer(&self, session: &str, id: &str, raw: &Value) -> Result<AnswerOutcome, QuestionError> {
+    pub fn answer(
+        &self,
+        session: &str,
+        id: &str,
+        raw: &Value,
+    ) -> Result<AnswerOutcome, QuestionError> {
         let requests = self.fold(session)?;
         let Some(request) = requests.iter().find(|request| request.id == id) else {
-            return Err(QuestionError::new(codes::NOT_FOUND, format!("no question request '{id}' in this session")));
+            return Err(QuestionError::new(
+                codes::NOT_FOUND,
+                format!("no question request '{id}' in this session"),
+            ));
         };
         if let Some(settled) = &request.settled {
             let kind = match settled {
                 Settled::Answered { .. } => "answered",
                 Settled::Cancelled { .. } => "cancelled",
             };
-            return Err(QuestionError::new(codes::SETTLED, format!("question request '{id}' is already {kind}")));
+            return Err(QuestionError::new(
+                codes::SETTLED,
+                format!("question request '{id}' is already {kind}"),
+            ));
         }
         let answers = validate_answers(&request.questions, raw)?;
         let waiting = self.waiters.lock().expect("waiters").contains_key(id);
         let late = !waiting;
-        self.append(session, "question/answered", json!({ "requestId": id, "answers": answers, "late": late }))?;
+        self.append(
+            session,
+            "question/answered",
+            json!({ "requestId": id, "answers": answers, "late": late }),
+        )?;
         if let Some(mut waiter) = self.release(id)
             && let Some(sender) = waiter.answer.take()
         {
@@ -369,7 +487,11 @@ impl QuestionService {
         }
         let view = self.get(session, id)?.unwrap_or_default();
         let message = late.then(|| late_answer_message(request, &answers));
-        Ok(AnswerOutcome { view, late, message })
+        Ok(AnswerOutcome {
+            view,
+            late,
+            message,
+        })
     }
 
     /// Take time: keep a timed wait from running out. Only a request a turn waits on can be held; for any other
@@ -377,9 +499,18 @@ impl QuestionService {
     pub fn hold(&self, session: &str, id: &str) -> Result<Map<String, Value>, QuestionError> {
         let requests = self.fold(session)?;
         let Some(request) = requests.iter().find(|request| request.id == id) else {
-            return Err(QuestionError::new(codes::NOT_FOUND, format!("no question request '{id}' in this session")));
+            return Err(QuestionError::new(
+                codes::NOT_FOUND,
+                format!("no question request '{id}' in this session"),
+            ));
         };
-        if let Some(waiter) = self.waiters.lock().expect("waiters").get_mut(id).filter(|waiter| waiter.session == session) {
+        if let Some(waiter) = self
+            .waiters
+            .lock()
+            .expect("waiters")
+            .get_mut(id)
+            .filter(|waiter| waiter.session == session)
+        {
             waiter.held = true;
             waiter.deadline = None;
             waiter.hold.notify_one();
@@ -403,16 +534,30 @@ impl QuestionService {
         let mut view = Map::new();
         view.insert("id".into(), Value::String(request.id.clone()));
         view.insert("session".into(), Value::String(session.to_owned()));
-        view.insert("questions".into(), serde_json::to_value(&request.questions).unwrap_or(Value::Null));
+        view.insert(
+            "questions".into(),
+            serde_json::to_value(&request.questions).unwrap_or(Value::Null),
+        );
         view.insert("timed".into(), Value::Bool(request.timed));
         view.insert("askedAt".into(), Value::String(request.asked_at.clone()));
-        view.insert("deadline".into(), waiter.and_then(|waiter| waiter.deadline.clone()).map_or(Value::Null, Value::String));
-        view.insert("held".into(), Value::Bool(waiter.is_some_and(|waiter| waiter.held)));
+        view.insert(
+            "deadline".into(),
+            waiter
+                .and_then(|waiter| waiter.deadline.clone())
+                .map_or(Value::Null, Value::String),
+        );
+        view.insert(
+            "held".into(),
+            Value::Bool(waiter.is_some_and(|waiter| waiter.held)),
+        );
         match &request.settled {
             Some(Settled::Answered { answers, at, late }) => {
                 view.insert("deadline".into(), Value::Null);
                 view.insert("state".into(), json!("answered"));
-                view.insert("answers".into(), serde_json::to_value(answers).unwrap_or(Value::Null));
+                view.insert(
+                    "answers".into(),
+                    serde_json::to_value(answers).unwrap_or(Value::Null),
+                );
                 view.insert("answeredAt".into(), Value::String(at.clone()));
                 view.insert("late".into(), Value::Bool(*late));
             }
@@ -426,7 +571,14 @@ impl QuestionService {
             }
             None => {
                 view.insert("deadline".into(), Value::Null);
-                view.insert("state".into(), json!(if request.expired { "pending" } else { "continued" }));
+                view.insert(
+                    "state".into(),
+                    json!(if request.expired {
+                        "pending"
+                    } else {
+                        "continued"
+                    }),
+                );
             }
         }
         view

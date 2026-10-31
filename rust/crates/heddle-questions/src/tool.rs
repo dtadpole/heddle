@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use heddle_tools::{Tool, ToolArgs, ToolError, ToolFuture, ToolResult, ToolRunContext, ToolSpec};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
-use crate::model::{QuestionError, MAX_TIMEOUT_SECONDS};
+use crate::model::{MAX_TIMEOUT_SECONDS, QuestionError};
 use crate::service::{AskOutcome, Mode, QuestionService};
 
 /// The tool's name.
@@ -69,14 +69,23 @@ pub fn ask_user_parameters(timed: bool, default_timeout: i64) -> Value {
 
 /// A refusal whose output is its sentence, as the TypeScript tool writes it.
 fn refusal(code: &str, message: &str) -> ToolResult {
-    ToolResult { output: message.to_owned(), error: Some(ToolError { code: code.to_owned(), message: message.to_owned() }), data: None }
+    ToolResult {
+        output: message.to_owned(),
+        error: Some(ToolError {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        }),
+        data: None,
+    }
 }
 
 /// Whether a session is a delegated child: its record names a parent.
 fn delegated_parent(meta_path: &str) -> Option<String> {
     let text = std::fs::read_to_string(meta_path).ok()?;
     let meta: Value = serde_json::from_str(&text).ok()?;
-    meta.get("parentSession").and_then(Value::as_str).map(str::to_owned)
+    meta.get("parentSession")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
 }
 
 /// The tool, bound to one question service.
@@ -106,7 +115,10 @@ impl Tool for AskUserTool {
     fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> ToolFuture<'a> {
         Box::pin(async move {
             let Some(session) = context.session.clone() else {
-                return Ok(refusal("NO_SESSION", "ask_user_question needs a session a person can answer in"));
+                return Ok(refusal(
+                    "NO_SESSION",
+                    "ask_user_question needs a session a person can answer in",
+                ));
             };
             if delegated_parent(&session.meta).is_some() {
                 return Ok(refusal(
@@ -115,9 +127,20 @@ impl Tool for AskUserTool {
                 ));
             }
             let questions = args.get("questions").cloned().unwrap_or(Value::Null);
-            match self.service.ask(&session.id, &questions, args.get("timeout"), context.cancel.clone()).await {
+            match self
+                .service
+                .ask(
+                    &session.id,
+                    &questions,
+                    args.get("timeout"),
+                    context.cancel.clone(),
+                )
+                .await
+            {
                 Ok(AskOutcome::Pending { call_id }) => {
-                    let output = json!({ "pending": true, "callId": call_id, "message": PENDING_MESSAGE }).to_string();
+                    let output =
+                        json!({ "pending": true, "callId": call_id, "message": PENDING_MESSAGE })
+                            .to_string();
                     let mut data = Map::new();
                     data.insert("callId".into(), Value::String(call_id));
                     data.insert("pending".into(), Value::Bool(true));
@@ -126,7 +149,10 @@ impl Tool for AskUserTool {
                 Ok(AskOutcome::Answered(answers)) => {
                     let output = json!({ "answers": answers }).to_string();
                     let mut data = Map::new();
-                    data.insert("answers".into(), serde_json::to_value(&answers).unwrap_or(Value::Null));
+                    data.insert(
+                        "answers".into(),
+                        serde_json::to_value(&answers).unwrap_or(Value::Null),
+                    );
                     Ok(ToolResult::ok(output).with_data(data))
                 }
                 Err(QuestionError { code, message }) => Ok(refusal(code, &message)),

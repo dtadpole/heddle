@@ -837,7 +837,10 @@ impl Component for QuestionsComponent {
         let config = heddle_questions::QuestionConfig::from_value(Some(config));
         services.provide(
             "questions",
-            Arc::new(heddle_questions::QuestionService::new(Arc::new(log), config)),
+            Arc::new(heddle_questions::QuestionService::new(
+                Arc::new(log),
+                config,
+            )),
         );
         Ok(())
     }

@@ -27,15 +27,20 @@ impl QuestionLog for SessionStore {
     }
 
     fn read(&self, session: &str) -> Result<Vec<Value>, LogError> {
-        let handle = SessionStore::open(self, session).ok_or_else(|| LogError(format!("no session {session}")))?;
-        let events = SessionStore::read(self, &handle).map_err(|error| LogError(error.to_string()))?;
+        let handle = SessionStore::open(self, session)
+            .ok_or_else(|| LogError(format!("no session {session}")))?;
+        let events =
+            SessionStore::read(self, &handle).map_err(|error| LogError(error.to_string()))?;
         Ok(events.iter().map(|event| event.to_value()).collect())
     }
 
     fn append(&self, session: &str, event: Map<String, Value>) -> Result<Value, LogError> {
-        let handle = SessionStore::open(self, session).ok_or_else(|| LogError(format!("no session {session}")))?;
-        let body = NewEvent::try_from(Value::Object(event)).map_err(|error| LogError(error.to_string()))?;
-        let written = SessionStore::append(self, &handle, body, AppendOptions::default()).map_err(|error| LogError(error.to_string()))?;
+        let handle = SessionStore::open(self, session)
+            .ok_or_else(|| LogError(format!("no session {session}")))?;
+        let body = NewEvent::try_from(Value::Object(event))
+            .map_err(|error| LogError(error.to_string()))?;
+        let written = SessionStore::append(self, &handle, body, AppendOptions::default())
+            .map_err(|error| LogError(error.to_string()))?;
         Ok(written.to_value())
     }
 }
