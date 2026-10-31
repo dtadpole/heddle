@@ -202,7 +202,7 @@ export interface FileReading {
   readonly bytes: number
   readonly lines: number
   readonly text: string
-  /** The file is longer than the limit, so `text` is its beginning and not all of it. */
+  /** The file is longer than the limit, so `text` is its beginning and not all of it: the complete characters before the limit. */
   readonly truncated: boolean
 }
 
@@ -233,15 +233,35 @@ export function readFileText(path: string, options: { readonly limit?: number } 
   const whole = readFileSync(canonical)
   const slice = whole.subarray(0, limit)
   if (slice.includes(0)) throw new Error(`${canonical} looks like a binary file, so it has no text to show`)
-  const text = slice.toString('utf8')
-  if (text.includes('\uFFFD')) throw new Error(`${canonical} is not UTF-8 text, so it has no text to show`)
+  const truncated = whole.length > slice.length
+  const text = decodeUtf8(slice, truncated)
+  if (text === undefined) throw new Error(`${canonical} is not UTF-8 text, so it has no text to show`)
   return {
     path: canonical,
     name: basename(canonical),
     bytes: stats.size,
     lines: text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0),
     text,
-    truncated: whole.length > slice.length,
+    truncated,
+  }
+}
+
+/**
+ * The slice's text, or `undefined` when its bytes are not UTF-8 (issue #78).
+ *
+ * Decoded **strictly**: a literal U+FFFD in the file is a character like any other, and only bytes that are not UTF-8
+ * are refused — DSH's reader decodes with `TextDecoder('utf-8', { fatal: true })` (dsh-fs-local lib/index.js:454). When
+ * the limit cut the file, its last character may be cut too, so the slice is decoded in **stream** mode, which holds
+ * back a trailing sequence that is incomplete but valid so far and throws on any byte that begins no character — DSH
+ * decodes its chunks the same way (:342), and it is the Rust port's `Utf8Error::error_len() == None` at the end. The
+ * text is then the complete characters before the cut. A file that is not cut has no such excuse, so a final incomplete
+ * character is refused. `ignoreBOM` keeps a leading BOM in the text, as `Buffer.toString` did and the Rust port does.
+ */
+function decodeUtf8(slice: Uint8Array, truncated: boolean): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(slice, { stream: truncated })
+  } catch {
+    return undefined
   }
 }
 
