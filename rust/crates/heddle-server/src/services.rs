@@ -215,6 +215,14 @@ pub trait SessionService: Send + Sync {
 
     /// The folder the session belongs to, if it has one.
     fn folder(&self, id: &str) -> Option<PathBuf>;
+
+    /// Content search (`GET /api/sessions/search`): the sessions whose user or assistant messages hold the query
+    /// as a phrase, ranked, at most 20, with snippets (`heddle_session::SessionSearchIndex`). The route has already
+    /// refused a query DSH refuses; `Err` is a failure it answers `500`. A store without search says so.
+    fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+        let _ = query;
+        Err(ServiceError::new("session search is unavailable"))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -239,6 +247,15 @@ impl ArchivedFilter {
             _ => ArchivedFilter::Hide,
         }
     }
+}
+
+/// DSH's refusal of a workspace the registry does not hold (dsh-api-workspace-controller lib/index.js:358-360):
+/// code `workspace/not-found`, sentence `Workspace "<id>" not found`.
+pub fn workspace_not_found(id: &str) -> ServiceError {
+    ServiceError::with_code(
+        format!("Workspace \"{id}\" not found"),
+        "workspace/not-found",
+    )
 }
 
 /// The workspace registry and the tree, as the routes use them. Paths are canonical when they arrive.
@@ -277,6 +294,16 @@ pub trait WorkspaceService: Send + Sync {
     fn views(&self, sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
         let _ = sessions;
         Ok(Value::Array(Vec::new()))
+    }
+
+    /// Move a workspace in the stored order, before `before` or last without it (ids or paths) — DSH's
+    /// `workspace/insertBefore`, `POST /api/workspaces/insertBefore` (`WorkspaceService.insertBefore` in
+    /// `src/workspace/service.ts`). Answers the complete order; `Err` with code `workspace/not-found` and
+    /// DSH's sentence, `Workspace "<id>" not found` (the workspace or the anchor is not in the order), is
+    /// answered `404`. The default knows no workspace, for doubles that do not model the registry.
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        let _ = before;
+        Err(workspace_not_found(id))
     }
 }
 
@@ -456,6 +483,14 @@ pub trait TodoService: Send + Sync {
     fn get(&self, session: &str) -> Option<Value>;
 }
 
+/// The turns a session runs besides the server's own, which a Stop must reach as well (#93): a goal round, a
+/// reminder's turn and a background job's notice turn are started by their rows through the agent runtime, which
+/// registers each with its live-turn registry. The binary supplies it from that registry.
+pub trait TurnInterrupter: Send + Sync {
+    /// Stop every turn in flight for `session`; whether there was one to stop.
+    fn interrupt(&self, session: &str) -> bool;
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -513,6 +548,8 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// The live-turn registry a Stop also asks; `None`: the server's own runs are the only turns it stops.
+    pub interrupter: Option<Arc<dyn TurnInterrupter>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
     /// `POST /api/sessions` creates one when no branch is named.
     pub cwd: PathBuf,
@@ -540,6 +577,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -584,6 +622,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -776,6 +815,11 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    pub fn interrupter(mut self, service: Arc<dyn TurnInterrupter>) -> Self {
+        self.harness.interrupter = Some(service);
         self
     }
 

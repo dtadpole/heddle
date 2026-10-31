@@ -1,9 +1,9 @@
 ---
 title: The decisions behind the heddle-llm API
 created: 2026-10-23T05:08:05Z
-modified: 2026-10-29T09:52:29Z
+modified: 2026-10-29T18:39:12Z
 level: L1
-version: 1.1.0
+version: 1.3.0
 description: Why the heddle-llm API has the shape it has — JSON parity, stream cancellation, the hook seam, the fold split and the HTTP client.
 status: unverified
 grounded_in:
@@ -39,3 +39,15 @@ grounded_in:
 11. **The two Anthropic kinds share the translation and the fold**, not the envelope: `to_anthropic_messages`,
     `anthropic_system` and `AnthropicFold` serve both; the Messages adapter turns on live tool-call fragments
     (`with_live_tool_calls`), so the publisher route's output is unchanged.
+12. **A configuration change rebuilds every adapter.** `reconfigure` builds all of them before replacing anything, so
+    a configuration no adapter can speak leaves the service as it was, and that failure is reported (`tracing::warn!`
+    from the refresh, as the TypeScript service warns). Unlike the TypeScript service it does not keep an unchanged
+    endpoint's adapter; the cost is one re-asked model-info lookup per endpoint after a change, which is harmless,
+    and keeping unchanged adapters is the change to make if that lookup ever matters.
+13. **A DeepSeek thinking continuation replays `reasoning_content`** (`replays_reasoning_content`, `chat_message`;
+    live-testing issue developer-ten-3). DeepSeek refuses a request that replays an assistant message without it,
+    and a tool round, a steer and a subagent's notice all continue a turn that way. DSH's rule, from its
+    OpenAI-completions layer (pi-ai's compat `requiresReasoningContentOnAssistantMessages`): auto-detected for a base
+    URL containing `deepseek.com`, applied while reasoning is on (a named level, or reasoning already in the
+    history); every replayed assistant message carries its thinking, blank blocks dropped and the rest joined by
+    newlines, or `""`. Every other chat endpoint is left as it was, so no gateway is sent a field it may refuse.

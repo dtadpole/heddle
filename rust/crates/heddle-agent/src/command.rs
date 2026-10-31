@@ -371,7 +371,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::adapters::tests::{SessionMessages, scripted_service, sessions_at};
+    use crate::adapters::tests::{ScratchDir, SessionMessages, scripted_service, sessions_at};
     use crate::adapters::{LlmModel, Sessions};
     use crate::ports::NoTurnHooks;
     use crate::turns::TurnRegistry;
@@ -383,19 +383,14 @@ mod tests {
         models: Arc<ModelService>,
         sessions: Arc<SessionService>,
         runtime: AgentRuntime,
+        /// The scratch folders behind `work`, the step file and the sessions, removed when the harness drops.
+        _scratch: Vec<ScratchDir>,
     }
 
-    fn scratch(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "heddle-agent-command-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+    /// A scratch workspace (its canonical path) and the guard that removes it.
+    fn scratch(label: &str) -> (PathBuf, ScratchDir) {
+        let dir = ScratchDir::new(&format!("command-{label}"));
+        (dir.path().canonicalize().unwrap(), dir)
     }
 
     fn sandbox_at(root: &Path) -> Arc<SandboxService> {
@@ -414,9 +409,9 @@ mod tests {
     }
 
     fn harness(label: &str, steps: serde_json::Value, allow: &[&str]) -> Harness {
-        let work = scratch(label);
-        let sessions = sessions_at(label);
-        let models = scripted_service(label, steps);
+        let (work, work_dir) = scratch(label);
+        let (sessions, sessions_dir) = sessions_at(label);
+        let (models, models_dir) = scripted_service(label, steps);
         let gates = gates_over(
             sandbox_at(&work),
             Arc::new(ApprovalService::new(ApprovalsConfig::default())),
@@ -444,6 +439,7 @@ mod tests {
             models,
             sessions,
             runtime,
+            _scratch: vec![work_dir, sessions_dir, models_dir],
         }
     }
 
@@ -862,13 +858,9 @@ mod tests {
             json!([{ "reasoning": "thinking", "text": "streamed answer" }]),
             &[],
         );
-        let root = std::env::temp_dir().join(format!(
-            "heddle-agent-command-stream-store-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = ScratchDir::new("command-stream-store");
         let config = heddle_session::SessionConfig {
-            root: Some(root.to_str().unwrap().to_owned()),
+            root: Some(root.path().to_str().unwrap().to_owned()),
         };
         let sessions = Arc::new(SessionService::new(
             &config,

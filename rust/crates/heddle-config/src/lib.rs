@@ -62,15 +62,17 @@ mod references;
 mod retry;
 mod schema;
 mod settings;
+mod template;
 mod validate;
 mod value;
 
 pub use compose::{ComponentName, ComposedRow, EntryRow, Provenance, compose, origin_of};
 pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,
-    ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths, default_endpoints,
-    describe_endpoint, describe_endpoints, environment_override, materialize_key, merge_endpoint,
-    read_key_file, resolve_endpoints, selection_problem,
+    PAGE_ENDPOINT_FIELDS, ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths,
+    default_endpoints, describe_endpoint, describe_endpoints, describe_page_endpoint,
+    environment_override, is_shipped_fixture, materialize_key, merge_endpoint, read_key_file,
+    resolve_endpoints, selection_problem, unscripted_fixture_message,
 };
 pub use env::Env;
 pub use error::ConfigError;
@@ -96,6 +98,7 @@ pub use settings::{
     SettingsTarget, SettingsView, SettingsWrite, commit_settings_write, describe_settings,
     handle_settings_request, is_secret_key, plan_settings_write, settings_target,
 };
+pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
     ValidationResult, read_component_manifest, validate_rows,

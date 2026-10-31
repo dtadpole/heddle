@@ -112,6 +112,8 @@ pub struct Args {
     /// (`.`, `/` or `~` starts a directory), never by the working directory, which is
     /// `heddle_config::profile_argument`'s rule; [`layer_options`] applies it.
     pub profile: Option<String>,
+    /// `--from-default-profile <template>`: replace the `--profile` with a fresh copy of a shipped template first.
+    pub from_default_profile: Option<String>,
     /// `--patch <path>`, repeatable, in order.
     pub patch: Vec<String>,
     /// `--turn <text>`.
@@ -184,6 +186,9 @@ pub fn parse_args(argv: &[String]) -> Result<Args, UsageError> {
             // A profile value is kept as typed: `layer_options` and `config_args` hand it to
             // `heddle_config::profile_argument`, which owns telling a name from a directory.
             "--profile" => args.profile = Some(take(argv, &mut index).unwrap_or_default()),
+            "--from-default-profile" => {
+                args.from_default_profile = Some(take(argv, &mut index).unwrap_or_default());
+            }
             "--patch" => args.patch.push(take(argv, &mut index).unwrap_or_default()),
             "--turn" => args.turn = take(argv, &mut index),
             "--force" => args.force = true,

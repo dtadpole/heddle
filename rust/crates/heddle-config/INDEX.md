@@ -1,7 +1,7 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T13:53:00Z
+modified: 2026-10-29T14:41:37Z
 version: 0.8.2
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
@@ -49,6 +49,7 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `endpoints` | `EndpointConfig` (catalogue methods), `EndpointPatch`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel(s)`, `ReasoningValue`, `default_endpoints`, `environment_override`, `merge_endpoint`, `read_key_file`, `materialize_key`, `resolve_endpoints`, `describe_endpoint(s)`, `EndpointsView`, `selection_problem`, `config_paths` | `src/endpoints.ts`, `src/llm/types.ts` |
 | `command` | `ConfigCommand`, `ConfigArgs`, `CommandContext`, `run` — `heddle profiles` and `heddle config [--json] [--origins] [--validate]`, output and exit codes | `runConfigCommand` |
 | `settings` | `settings_target`, `describe_settings`, `plan_settings_write`, `commit_settings_write`, `SettingsService` (`new`, `describe`, `write`), `handle_settings_request` and `SettingsResponse`, `SettingsView`, `SettingsNamespace`, `SecretSlot`, `SettingsWrite`, `SettingsPathOp`, `SettingsError` (`code`, `message`), `SettingsRevisions`, `PlannedWrite`, `is_secret_key`, `SETTINGS_BEGIN`, `SETTINGS_END` — the active profile's patch as a writable surface | `src/config/settings.ts` (DSH's `dsh-settings` over `dsh-config-editor`) |
+| `template` | `PROFILE_TEMPLATES`, `template_files`, `reset_profile_from_template` — DSH's `--from-default-profile`: profile `<name>` replaced by a fresh copy of a shipped template, written beside it and renamed into place; heddle ships `default`, the checkout's own tree with absolute row names (the Rust binary's checkout is the one it was built from, `CARGO_MANIFEST_DIR` fixed at compile time, so a binary copied elsewhere still reads its build checkout); a name that is not plain or an unknown template is refused before anything is written | `src/config/profile-template.ts` (DSH's launcher `--from-default-profile`) |
 
 **Settings.** The active profile's `heddle.patch.yml` is writable from `GET /api/settings`, `GET` and `POST
 /api/settings/{ns}`, as DSH's settings controller allows; `src/config/settings.ts` is the TypeScript twin and the

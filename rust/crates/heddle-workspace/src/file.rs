@@ -2,8 +2,9 @@
 //!
 //! Ported from `readFileText` in `src/session/tree.ts`. Three refusals, each a sentence a person can
 //! act on: a directory or a missing path is not a file; a binary (a NUL byte in what is read) is not
-//! text; bytes that are not UTF-8 are not text. A file longer than the limit is **truncated and says
-//! so** rather than refused. This is a view, not a way around the sandbox: the caller decides which paths
+//! text; bytes that are not UTF-8 are not text (a literal U+FFFD is text). A file longer than the limit is
+//! **truncated and says so** rather than refused, and when the limit cuts a character the text is the complete
+//! characters before it. This is a view, not a way around the sandbox: the caller decides which paths
 //! are readable (the command line and the server both ask [`crate::WorkspaceService::owner`] first, on
 //! the canonical path, so a symlink pointing outside every root is refused).
 
@@ -27,7 +28,7 @@ pub struct FileReading {
     /// Lines in `text`: `\n`-separated, a trailing newline not counting a line of its own; 0 when empty.
     pub lines: usize,
     pub text: String,
-    /// The file is longer than the limit, so `text` is its beginning.
+    /// The file is longer than the limit, so `text` is its beginning: the complete characters before the limit.
     pub truncated: bool,
 }
 
@@ -40,8 +41,8 @@ pub enum FileReadError {
     /// `<path> looks like a binary file, so it has no text to show`
     #[error("{0} looks like a binary file, so it has no text to show")]
     Binary(String),
-    /// `<path> is not UTF-8 text, so it has no text to show` — including a file cut by the limit in the
-    /// middle of a character, as the TypeScript build refuses it.
+    /// `<path> is not UTF-8 text, so it has no text to show` — bytes in what is read that are not UTF-8. A
+    /// character the limit cut is not one of them: the reading keeps the complete characters before it.
     #[error("{0} is not UTF-8 text, so it has no text to show")]
     NotUtf8(String),
 }
@@ -65,13 +66,11 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
     if slice.contains(&0) {
         return Err(FileReadError::Binary(canonical));
     }
-    // `buffer.toString('utf8')` replaces every byte sequence that is not UTF-8 with U+FFFD, and the
-    // TypeScript build then refuses a file whose text carries one — including one the limit cut in the
-    // middle of a character.
-    let text = String::from_utf8_lossy(slice).into_owned();
-    if text.contains('\u{FFFD}') {
+    let truncated = whole.len() > slice.len();
+    let Some(text) = decode_utf8(slice, truncated) else {
         return Err(FileReadError::NotUtf8(canonical));
-    }
+    };
+    let text = text.to_owned();
     let lines = if text.is_empty() {
         0
     } else {
@@ -88,8 +87,27 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
         bytes: whole.len() as u64,
         lines,
         text,
-        truncated: whole.len() > slice.len(),
+        truncated,
     })
+}
+
+/// The slice's text, or `None` when its bytes are not UTF-8 (issue #78).
+///
+/// Decoded **strictly**, so a literal U+FFFD in the file is a character like any other and only bytes that are not
+/// UTF-8 are refused — DSH's reader decodes with `TextDecoder('utf-8', { fatal: true })` (dsh-fs-local
+/// lib/index.js:454). When the limit cut the file, its last character may be cut too: an error with no
+/// [`error_len`](std::str::Utf8Error::error_len) is a sequence that is valid so far and ends with the slice, and the
+/// text is then the complete characters before it ([`valid_up_to`](std::str::Utf8Error::valid_up_to)). That is what
+/// the TypeScript build's stream-mode decode keeps, and how DSH decodes across chunks (:342). A file the limit did not
+/// cut has no such excuse, so a final incomplete character is refused.
+fn decode_utf8(slice: &[u8], truncated: bool) -> Option<&str> {
+    match std::str::from_utf8(slice) {
+        Ok(text) => Some(text),
+        Err(error) if truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&slice[..error.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -160,15 +178,87 @@ mod tests {
         );
     }
 
+    // Issue #78: the four controls, the same as `test/tree.test.ts`'s.
+
     #[test]
-    fn a_limit_that_cuts_a_character_makes_the_read_refused() {
+    fn a_limit_at_a_character_boundary_keeps_every_byte_it_read() {
         let dir = tempfile::tempdir().unwrap();
-        // "é" is two bytes; a limit of one byte cuts it and the reader refuses it, as Node does.
-        let path = write(&dir, "a.txt", "é".as_bytes());
-        assert!(matches!(
-            read_file_text(&path, Some(1)).unwrap_err(),
-            FileReadError::NotUtf8(_)
-        ));
+        // "ab中cd": the three bytes of 中 are 2..4.
+        let path = write(&dir, "wide.txt", "ab中cd".as_bytes());
+        let reading = read_file_text(&path, Some(5)).unwrap();
+        assert_eq!(reading.text, "ab中");
+        assert!(reading.truncated);
+        assert_eq!(reading.bytes, 7);
+    }
+
+    #[test]
+    fn a_limit_that_cuts_a_character_keeps_the_whole_characters_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "wide.txt", "ab中cd".as_bytes());
+        for limit in [3, 4] {
+            let reading = read_file_text(&path, Some(limit)).unwrap();
+            assert_eq!(reading.text, "ab", "a limit of {limit} cuts 中");
+            assert!(reading.truncated, "truncated, not refused");
+            assert_eq!(reading.lines, 1);
+            assert_eq!(reading.bytes, 7, "the size is still the whole file's");
+        }
+        // "😀" is four bytes, 1..4: cut after one, two or three of them.
+        let emoji = write(&dir, "emoji.txt", "x😀y".as_bytes());
+        for limit in [2, 3, 4] {
+            let reading = read_file_text(&emoji, Some(limit)).unwrap();
+            assert_eq!(reading.text, "x", "a limit of {limit} cuts 😀");
+            assert!(reading.truncated);
+        }
+        // "é" is two bytes: a two-byte character cut after its first byte.
+        let accent = write(&dir, "accent.txt", "abé!".as_bytes());
+        let reading = read_file_text(&accent, Some(3)).unwrap();
+        assert_eq!(reading.text, "ab");
+        assert!(reading.truncated);
+        // Nothing whole before the cut: the text is empty and still truncated.
+        let accent = write(&dir, "accent-only.txt", "é".as_bytes());
+        let reading = read_file_text(&accent, Some(1)).unwrap();
+        assert_eq!((reading.text.as_str(), reading.lines), ("", 0));
+        assert!(reading.truncated);
+    }
+
+    #[test]
+    fn a_literal_replacement_character_is_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "replacement.txt",
+            "a literal \u{FFFD} is a character\n".as_bytes(),
+        );
+        let reading = read_file_text(&path, None).unwrap();
+        assert_eq!(reading.text, "a literal \u{FFFD} is a character\n");
+        assert!(!reading.truncated);
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_refused_wherever_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let refused = |path: &str, limit: Option<usize>| {
+            let error = read_file_text(path, limit).unwrap_err();
+            assert!(matches!(error, FileReadError::NotUtf8(_)), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .ends_with("is not UTF-8 text, so it has no text to show")
+            );
+        };
+        let invalid = write(&dir, "invalid.txt", &[0x61, 0xff, 0x62, 0x0a]);
+        refused(&invalid, None);
+        refused(&invalid, Some(3));
+        // A file that itself ends inside a character: no limit cut it, so it is not UTF-8.
+        refused(
+            &write(&dir, "ends-cut.txt", &[0x61, 0x62, 0xe4, 0xb8]),
+            None,
+        );
+        // Bytes at the cut that begin no character (E0 80) are refused, not dropped as a cut character.
+        refused(
+            &write(&dir, "bad-lead.txt", &[0x61, 0x62, 0xe0, 0x80, 0x80]),
+            Some(4),
+        );
     }
 
     #[test]

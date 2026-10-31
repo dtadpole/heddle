@@ -8,6 +8,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
@@ -18,7 +19,7 @@ import { createDirectory, DirectoryError, listDirectory } from './directories.ts
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
-import { PREVIEW_CSP, rewriteResources } from './html.ts'
+import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
@@ -26,8 +27,11 @@ import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
+import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
+import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -40,6 +44,7 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
+import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
 
 /**
  * The Web UI.
@@ -172,6 +177,11 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     }
   })
 
+  // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
+  ctx.on('schedule/changed', () => {
+    for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
+  })
+
   /**
    * A running turn's **next** model call is answered by the session's current record.
    *
@@ -271,6 +281,26 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     socket.on('close', () => sockets.delete(socket))
   })
 
+  /**
+   * The heartbeat: every interval each stream gets a `heartbeat` frame, and every connection that took no bytes for
+   * two intervals while it still had some to send is destroyed (DSH's dead-peer rule, see `stream.ts`). One timer
+   * for the server, unref'd so it never keeps a process alive on its own.
+   */
+  const heartbeatMs = heartbeatInterval()
+  const stalls = new StallWatch(heartbeatMs)
+  const heartbeat = setInterval(() => {
+    const frame = heartbeatFrame()
+    for (const client of subscribers) {
+      try {
+        client.write(frame)
+      } catch {
+        // a client that is already gone leaves through its close listener
+      }
+    }
+    stalls.sweep(sockets, Date.now())
+  }, heartbeatMs)
+  heartbeat.unref()
+
   await new Promise<void>((resolvePromise, reject) => {
     server.once('error', reject)
     server.listen(port, host, () => resolvePromise())
@@ -297,6 +327,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
+        clearInterval(heartbeat)
         detachApprovals?.()
         for (const client of subscribers) {
           try {
@@ -640,6 +671,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: 'that path is not under any workspace root' })}\n`)
       return
     }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or not, is refused.
+    if (!isHtmlDocument(wanted)) {
+      respond(response, 415, 'application/json', `${JSON.stringify({ error: NOT_AN_HTML_DOCUMENT })}\n`)
+      return
+    }
     try {
       const stats = statSync(wanted)
       if (!stats.isFile()) {
@@ -682,6 +718,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       }
     })
     respond(response, 200, 'application/json', `${JSON.stringify(sessions, null, 2)}\n`)
+    return
+  }
+
+  /**
+   * Content search: DSH's `session.search` (dsh-api-session-controller lib/index.js:2010-2123), the sessions whose
+   * user or assistant messages hold `q` as a phrase, ranked, at most 20, each with its snippet, and `hasMore`. The
+   * rules live in `src/session/search.ts`; a refused query answers 400 with DSH's sentence. Matched before the
+   * `/api/sessions/<id>` routes below, which would otherwise answer it as "not a session id".
+   */
+  if (url.pathname === '/api/sessions/search' && request.method === 'GET') {
+    try {
+      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '')
+      respond(response, 200, 'application/json', `${JSON.stringify(page, null, 2)}\n`)
+    } catch (error) {
+      const refused = error instanceof SessionSearchQueryError
+      const message = refused ? error.message : `session search failed: ${String(error)}`
+      respond(response, refused ? 400 : 500, 'application/json', `${JSON.stringify({ error: message })}\n`)
+    }
     return
   }
 
@@ -855,6 +909,9 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Errors carry the goal service's own stable code next to the sentence, so a client can distinguish "the
    * goal moved while you were looking" (409) from "no goal is current" (404) without parsing prose.
    */
+  // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
+  if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
     if (goals === undefined) {
@@ -1257,6 +1314,44 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * Move a workspace in the stored order — DSH's `workspace/insertBefore` (dsh-api-workspace-controller lib/index.js:
+   * 262-269), what dropping a dragged workspace row asks for.
+   *
+   * `{workspaceId, beforeWorkspaceId?}` (an id or a path each): before the anchor, or last without one. The answer is
+   * DSH's `{workspaceIds}`, the complete order; a workspace or anchor not in it is `404` with DSH's
+   * `workspace/not-found` and sentence. The order lives with the host, in the record file, so it holds across a
+   * reload, a restart and the other build.
+   */
+  if (url.pathname === '/api/workspaces/insertBefore' && request.method === 'POST') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    if (typeof body.workspaceId !== 'string' || body.workspaceId.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a workspaceId is required' })}\n`)
+      return
+    }
+    const before = body.beforeWorkspaceId
+    if (before !== undefined && before !== null && (typeof before !== 'string' || before.length === 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'beforeWorkspaceId must be a workspace id' })}\n`)
+      return
+    }
+    try {
+      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
+    } catch (error) {
+      const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
+      if (!missing) throw error
+      const id = String((error as { workspaceId?: unknown }).workspaceId)
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `Workspace "${id}" not found`, code: 'workspace/not-found' })}\n`)
+    }
+    return
+  }
+
+  /**
    * Fork a session — `Fork session` in its menu, DSH's item.
    *
    * The answer carries the new session's id, name and definition so the page can redraw the tree; the view is
@@ -1403,8 +1498,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Retitle a conversation — the `Rename…` item in a session's or an instance's menu.
    *
    * The session's own log is append-only and stays that way: this rewrites the meta record, which is
-   * what a listing and a tree row read. The title is a label rather than a fact about the run, and the
-   * empty string clears it.
+   * what a listing and a tree row read. The title is a label rather than a fact about the run; the store
+   * cleans it as DSH does, and a title with nothing visible left is refused (`400 session/title-invalid`).
    *
    * `folder` is the session's **definition** folder when the caller knows it, and it is why one rename
    * reaches both halves: the store holds the label this UI reads, while the definition is the record a
@@ -1420,6 +1515,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     if (body === null) return
     if (typeof body.title !== 'string') {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a title is required' })}\n`)
+      return
+    }
+    /**
+     * A title with nothing visible left once cleaned is **refused**, as DSH's rename refuses it (`dsh-session-title`
+     * `rename`, lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838, `session/title-invalid`). The store
+     * cleans what it accepts (`src/session/title-text.ts`). Measured before: three spaces cleared the title with a 200.
+     * An unknown session is still a `404` first, as DSH resolves the session before it judges the title.
+     */
+    if (normalizeSessionTitle(body.title).length === 0) {
+      if (!ctx.session.list().some((meta) => meta.id === id)) {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+        return
+      }
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: TITLE_INVALID.message, code: TITLE_INVALID.code })}\n`)
       return
     }
     const folder = typeof body.folder === 'string' && body.folder.length > 0 ? canonicalPath(body.folder) : undefined
@@ -1774,8 +1883,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/events' && request.method === 'GET') {
     respondSse(response)
+    /**
+     * Subscribed **before** `ready` is written, so every frame published after a client reads `ready` reaches it:
+     * a baseline read that starts on `ready` cannot race an increment (DSH's opening rule, see `stream.ts`).
+     */
     state.subscribers.add(response)
     request.on('close', () => state.subscribers.delete(response))
+    response.write(readyFrame(newClientId()))
     return
   }
 
@@ -1919,7 +2033,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const stopped = abortSession(state.controllers, id)
+    /**
+     * Every turn of the session, not only the ones this route started (#93). A goal round, a reminder's turn and a
+     * background job's notice turn are started by their rows through `runTurn`, which registers each with the
+     * live-turn registry; the route's own table never held them, so Stop answered `stopped: 0` and a goal round ran
+     * on. A turn this route started is in both tables and is counted once.
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    const live = turns?.isRunning(id) === true
+    const fromRoute = abortSession(state.controllers, id)
+    if (live) turns?.abort(id, 'stopped by the user')
+    const stopped = Math.max(fromRoute, live ? 1 : 0)
     respond(response, 200, 'application/json', `${JSON.stringify({ stopped, session: id })}\n`)
     return
   }
@@ -2063,6 +2187,34 @@ export function abortSession(controllers: Map<string, Set<AbortController>>, id:
   return stopped
 }
 
+/**
+ * The refusal a turn into a one-shot subagent's session gets, or `null` when the session takes turns.
+ *
+ * DSH's generic session route leaves a subagent's child to subagent routing and answers a prompt into it with
+ * `session/agent-busy`, `session "<id>" is owned by subagent routing`, reason `use subagent delivery for this child
+ * session` (dsh-api-session-controller `lib/index.js:128-142`, reached from `prompt` at `:925-926` through
+ * `resolveAgent` `:221-246`). A one-shot child has no delivery at all: heddle's `delegate` runs it for one task and
+ * settles it. Phase A measured `POST /api/turn` into one answering `200` and growing its log from one turn to two
+ * (R-developer-eight-26). The answer is `409`, the status this server gives the steer refusal DSH words the same way,
+ * with DSH's code, sentence and reason in the body.
+ *
+ * A teammate (`teamId`) is a continuable child — DSH's teammates are — and this route is the delivery heddle's page
+ * uses for it, so it is not refused here.
+ */
+export function subagentTurnRefusal(
+  meta: Pick<SessionMeta, 'id' | 'origin' | 'teamId'> | undefined,
+): { readonly status: 409; readonly body: { readonly error: string; readonly code: 'session/agent-busy'; readonly reason: string } } | null {
+  if (meta?.origin !== 'subagent' || (typeof meta.teamId === 'string' && meta.teamId.length > 0)) return null
+  return {
+    status: 409,
+    body: {
+      error: `session "${meta.id}" is owned by subagent routing`,
+      code: 'session/agent-busy',
+      reason: 'use subagent delivery for this child session',
+    },
+  }
+}
+
 export function resolveTurnEndpoint(sources: {
   readonly requested?: string
   readonly recorded?: string
@@ -2137,7 +2289,12 @@ export function sessionRequestSelection(
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
   }
-  if (typeof body.prompt !== 'string' || body.prompt.length === 0) {
+  /**
+   * A prompt of only whitespace is no prompt (#32). Measured: `"   "` was accepted and ran a model turn while `""`
+   * was refused. DSH refuses content without non-whitespace text (`hasPromptContent`, "prompt content must include
+   * non-whitespace text or an attachment"); a prompt here always carries its text, so blank text is refused.
+   */
+  if (typeof body.prompt !== 'string' || body.prompt.trim().length === 0) {
     respond(response, 400, 'text/plain', 'a prompt is required\n')
     return
   }
@@ -2187,6 +2344,18 @@ export function sessionRequestSelection(
     ...(requested !== undefined ? { endpoint: requested } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(requestedEffort !== undefined ? { reasoningEffort: requestedEffort } : {}),
+  }
+  /**
+   * A one-shot subagent's session takes no turn from here (`subagentTurnRefusal`), and the refusal comes before the session
+   * is opened, so a refused request writes nothing into the child's log.
+   */
+  if (typeof body.session === 'string' && body.session.length > 0) {
+    const resumeId = body.session
+    const refusal = subagentTurnRefusal(ctx.session.list().find((entry) => entry.id === resumeId))
+    if (refusal !== null) {
+      respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
+      return
+    }
   }
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
@@ -2414,7 +2583,7 @@ function respondSse(response: ServerResponse): void {
     connection: 'keep-alive',
     'x-accel-buffering': 'no',
   })
-  response.write(': heddle stream open\n\n')
+  response.write(STREAM_OPEN)
 }
 
 /**

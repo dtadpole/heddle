@@ -67,6 +67,24 @@ pub trait ModelPort: Send + Sync {
         cancel: Option<CancellationToken>,
     ) -> BoxStream<'static, Result<Chunk, ModelError>>;
 
+    /// The request [`ModelPort::stream`] would send, after the service's `model/request` waterfall.
+    ///
+    /// The loop records this, not the request it built, so a step a selection policy moved to the session's
+    /// current model is logged under that model (issue #14). A port with no waterfall sends what it is given.
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        Ok(request)
+    }
+
+    /// Stream a request [`ModelPort::resolve`] already answered, without running the waterfall again, so a call runs
+    /// its request hooks exactly once and sends what was recorded. A port with no waterfall streams it as given.
+    fn stream_resolved(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        self.stream(request, cancel)
+    }
+
     /// The endpoint a session with none recorded runs on.
     fn default_endpoint(&self) -> Option<String>;
 }
@@ -252,6 +270,14 @@ pub trait TurnHooks: Send + Sync {
         let _ = payload;
         Box::pin(async { None })
     }
+
+    /// Right after a round's runtime-context snapshot is recorded, before its request is assembled: the harness's
+    /// own per-step notes (the time context, `recordTimeContext` in `src/agent/loop.ts`). `step` is the round's
+    /// number in its turn, from 1. A failure fails the turn, as a failed snapshot does.
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        let _ = (session, step);
+        Ok(())
+    }
 }
 
 /// A [`TurnHooks`] with no listeners.
@@ -297,6 +323,12 @@ impl TurnHooks for ChainedTurnHooks {
             }
             None
         })
+    }
+
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        self.hooks
+            .iter()
+            .try_for_each(|hooks| hooks.record_step_context(session, step))
     }
 }
 

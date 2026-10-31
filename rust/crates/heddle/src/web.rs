@@ -125,6 +125,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.team = Some(Arc::new(Team { service }));
     }
+    // The live-turn registry: a Stop also reaches the turns the rows start themselves (#93).
+    if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
+        harness.interrupter = Some(Arc::new(LiveTurns { turns }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -321,6 +325,12 @@ fn page_routers(
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
+    // The reminder routes: DSH's remote `schedule` namespace; 503 when the profile has no schedule row.
+    routers.push(heddle_schedule::http::router(
+        boot.services
+            .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+            .map(|schedule| Arc::clone(&schedule.service)),
+    ));
     routers
 }
 
@@ -822,6 +832,17 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         // The booted store's own records, as `tree` and `remove` read them.
         serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
     }
+
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.service
+            .insert_before(id, before)
+            .map_err(|error| match error {
+                heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
+                    heddle_server::services::workspace_not_found(&missing)
+                }
+                other => refusal(other),
+            })
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under
@@ -865,6 +886,23 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         && let Some(note) = heddle_team::command::web_start_note(&team).await
     {
         notes.push(note);
+    }
+    // Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule); a
+    // committed reminder write reaches the page's subscribers as `event: schedule`.
+    if let Some(schedule) = boot
+        .services
+        .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+    {
+        if let Some(hub) = boot.services.get::<heddle_server::EventHub>("event-hub") {
+            schedule.service.on_change(Arc::new(move || {
+                hub.publish(heddle_server::SseFrame::new(
+                    "schedule",
+                    &serde_json::json!({}),
+                ));
+                Ok(())
+            }));
+        }
+        schedule.start_delivery();
     }
     notes
 }
@@ -1005,6 +1043,17 @@ impl heddle_server::services::GoalService for Goals {
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
+}
+
+/// The agent runtime's live-turn registry as the server's interrupter: what `turns.abort` is in web.ts's stop route.
+struct LiveTurns {
+    turns: heddle_agent::TurnRegistry,
+}
+
+impl heddle_server::services::TurnInterrupter for LiveTurns {
+    fn interrupt(&self, session: &str) -> bool {
+        self.turns.abort(session, Some("stopped by the user"))
+    }
 }
 
 impl heddle_server::services::TodoService for Todos {
@@ -1186,8 +1235,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            3,
-            "files, trajectory and the composer"
+            4,
+            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }
