@@ -99,6 +99,7 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
         tools,
         hooks,
         turns: services.get::<heddle_agent::TurnRegistry>("turns"),
+        presets: None,
     })
 }
 

@@ -161,6 +161,23 @@ pub trait SessionPort: Send + Sync {
     fn has_pending_input(&self, _session: &SessionHandle) -> bool {
         false
     }
+
+    /// The agent preset the session recorded (`SessionMeta.preset`, inventory A96), or `None` for a session that
+    /// recorded none. The default knows no record, for a session that does not keep one.
+    fn recorded_preset(&self, _session: &SessionHandle) -> Option<String> {
+        None
+    }
+
+    /// Record `preset` as the session's agent preset **only when it has none** (`SessionStore::record_preset`), and
+    /// answer the preset the session now records. A session keeps its preset, so this never replaces one. The default
+    /// records nothing and answers `None`, and the loop then runs the preset it asked to record.
+    fn record_preset(
+        &self,
+        _session: &SessionHandle,
+        _preset: &str,
+    ) -> Result<Option<String>, PortError> {
+        Ok(None)
+    }
 }
 
 /// The context service, narrowed to the three questions a turn asks.
