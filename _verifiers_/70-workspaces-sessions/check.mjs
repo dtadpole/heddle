@@ -1657,7 +1657,8 @@ test('a folder opens and closes with the same control, including a leaf with not
            * Reveal the row's controls first: the tail swaps them in for the age on hover/focus, so a quiet row has no control
            * box at all and "the menu is to the right of the name" could not be judged from one.
            */
-          row.closest('li')?.focus()
+          /** The row is the tree item's one Tab stop since #92; its focus is what the focus-within rule reveals the controls on. */
+          row.focus()
           const buttons = [...row.querySelectorAll('button')]
           /**
            * Found by what the control **says**, so a renamed class or a new wrapper cannot break it.
@@ -3725,7 +3726,8 @@ test("a session row's controls appear on hover, and a search replaces the tree w
          * Focus the **row**, not one of its controls: the controls are not rendered until the row is focused, so a control cannot
          * be the thing that receives focus first. A row is a focusable treeitem, which is the keyboard path a person takes.
          */
-        target.focus()
+        /** The row element, the tree item's one Tab stop since #92 (the item itself is no longer focusable). */
+        target.querySelector(':scope > .row').focus()
         await wait(200)
         const focused = {
           display: getComputedStyle(target.querySelector(':scope > .row .row-tools')).display,
@@ -5660,14 +5662,14 @@ test('a written session moves to the top of its folder, its age follows, and a r
         const padding = parseFloat(getComputedStyle(row).paddingRight)
         const slot = row.querySelector('.row-right > .pin-slot')
         const marker = slot.getBoundingClientRect()
-        /** Focus the row: the controls replace the age and the marker in the same right-aligned flow. */
-        pinnedRow.focus()
+        /** Focus the row (the item's one Tab stop since #92): the controls replace the age and the marker in the same right-aligned flow. */
+        row.focus()
         await wait(120)
         const pin = [...row.querySelectorAll('.row-right > .row-tools > .session-actions > button')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
         const pinBox = pin === null || pin === undefined ? null : pin.getBoundingClientRect()
         const markerOnHover = getComputedStyle(slot).display
         const pinGlyphs = [...row.querySelectorAll('svg')].filter((svg) => svg.closest('.row-tools') !== null || svg.closest('.pin-slot') !== null).length
-        pinnedRow.blur()
+        row.blur()
         return JSON.stringify({
           contentRight: Math.round(rowBox.right - padding),
           markerRight: Math.round(marker.right),
@@ -5744,7 +5746,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
           paths: markerPaths,
           tailQuad,
         }
-        pinnedRow.focus()
+        pinnedRow.querySelector(':scope > .row').focus()
         await wait(150)
         const control = pinnedRow.querySelector('.row-right > .row-tools > .session-actions > .pin-action')
         const controlSvg = control.querySelector('svg')
@@ -5754,7 +5756,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
           filled: [...controlSvg.querySelectorAll('path')].filter((path) => getComputedStyle(path).fill !== 'none').length,
           markerDisplay: getComputedStyle(slot).display,
         }
-        pinnedRow.blur()
+        pinnedRow.querySelector(':scope > .row').blur()
         const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim().toLowerCase()
         return JSON.stringify({ marker, hovered, accent })
       })()`),
