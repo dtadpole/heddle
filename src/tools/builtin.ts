@@ -1,9 +1,13 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
-import { dirname, join, relative } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
+import { killProcessGroup } from '../sandbox/process-group.ts'
 import type { SandboxService } from '../sandbox/service.ts'
 import type { ToolDefinition, ToolResult } from './service.ts'
 
@@ -46,15 +50,145 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
   }
 }
 
+/** The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB). */
+export const BASH_SPILL_MAX_BYTES = 64 * 1024 * 1024
+
+/**
+ * What the model is shown of a command's output: all of it within `limit` characters, otherwise its **end** and the
+ * path of a file holding the whole of it.
+ *
+ * Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long command's
+ * closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream and names the
+ * spill file, `[output truncated; full output: <path>]` (`dsh-tool-bash` streamText; `(unavailable)` when no file could
+ * be written). Stated differences: heddle cuts the combined stdout and stderr, by characters (`bashOutputLimit`),
+ * where DSH cuts each stream at 64,000 bytes.
+ */
+export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH_SPILL_MAX_BYTES, io: SpillIo = NODE_SPILL_IO): string {
+  if (combined.length <= limit) return combined
+  let tail = combined.slice(combined.length - limit)
+  // Never start on the second half of a surrogate pair.
+  const first = tail.charCodeAt(0)
+  if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1)
+  return `${tail}\n[output truncated; full output: ${spillOutput(combined, spillMaxBytes, io) ?? '(unavailable)'}]`
+}
+
+/** The file operations a spill makes. A test replaces them to model a failed write or a failed cleanup. */
+export interface SpillIo {
+  /** Create the file exclusively (`wx`, mode 0600) and answer its descriptor; throws when it cannot. */
+  readonly open: (path: string) => number
+  readonly write: (fd: number, bytes: Buffer) => void
+  readonly close: (fd: number) => void
+  readonly unlink: (path: string) => void
+}
+
+const NODE_SPILL_IO: SpillIo = {
+  open: (path) => openSync(path, 'wx', 0o600),
+  write: (fd, bytes) => {
+    let offset = 0
+    while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset)
+  },
+  close: (fd) => closeSync(fd),
+  unlink: (path) => rmSync(path, { force: true }),
+}
+
+/**
+ * Write a command's whole output to a private temporary file and return its path, or none.
+ *
+ * Only a complete copy is ever named: an output over `spillMaxBytes` gets no file, and a write that fails removes what
+ * it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the marker never
+ * points at a partial file (developer-five's review of #83). A completed file stays in the temporary directory, as DSH's do.
+ */
+function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string | undefined {
+  /**
+   * The spill is optional, so nothing in it may fail the command: every step, the name included, is contained,
+   * and any failure answers "no file". Ownership is tracked rather than guessed. A file is removed only after this
+   * call's exclusive open succeeded, so an open that fails (an existing name, a missing or unwritable directory)
+   * removes nothing. A cleanup that fails is ignored, as the Rust twin ignores `remove_file`'s error
+   * (developer-five's review of #83).
+   */
+  try {
+    const bytes = Buffer.from(full, 'utf8')
+    if (bytes.length > spillMaxBytes) return undefined
+    const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
+    let fd: number
+    try {
+      fd = io.open(path)
+    } catch {
+      return undefined
+    }
+    let closed = false
+    try {
+      io.write(fd, bytes)
+      closed = true
+      io.close(fd)
+      return path
+    } catch {
+      if (!closed) {
+        try {
+          io.close(fd)
+        } catch {
+          // Best effort: a close that fails here is not retried, and the answer is still (unavailable).
+        }
+      }
+      try {
+        io.unlink(path)
+      } catch {
+        // Best effort: a cleanup failure must not replace the command's result.
+      }
+      return undefined
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and normalised
+ * unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model can tell which
+ * of several reads failed (live-testing issue #4: the Rust build named no file at all).
+ */
+export function displayPath(cwd: string, path: string): string {
+  const raw = isAbsolute(path) ? path : `${cwd}${sep}${path}`
+  return /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(raw) ? raw : resolve(cwd, path)
+}
+
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
+
+/** The default for `bashMaxTimeoutMs`: the most wall time a call may ask for, DSH's `maxTimeoutMs` (ten minutes). */
+export const BASH_MAX_TIMEOUT_MS = 600_000
+
+/**
+ * The longest delay one Node timer can hold (2^31-1 ms, about 24.8 days). `setTimeout` runs a larger one after a
+ * millisecond, so no cap or request may exceed it: the setting refuses a larger `bashMaxTimeoutMs`, and the wall time is
+ * cut to it here as well (developer-five's review of #13; DSH bounds its grace by the same `MAX_TIMER_DELAY_MS`).
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
+ *
+ * DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the default; a
+ * value that is not a finite positive number is refused; a larger one is cut to the cap. Before it, the value went
+ * straight into `setTimeout`, which runs `0`, a negative delay or one above 2^31-1 ms after one millisecond, so the
+ * command was killed before it ran and the result claimed it had timed out (live-testing issue #13).
+ */
+export function bashWallTime(requested: unknown, defaultMs: number, maxMs: number): { readonly ms: number } | { readonly refusal: string } {
+  const cap = Math.min(maxMs, MAX_TIMER_DELAY_MS)
+  if (requested === undefined || requested === null) return { ms: Math.min(defaultMs, cap) }
+  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+    return { refusal: `invalid timeoutMs: expected a positive number, got ${JSON.stringify(requested)}` }
+  }
+  return { ms: Math.min(Math.max(1, Math.round(requested)), cap) }
+}
 
 /** Build the standard tools around one sandbox. */
 export function builtinTools(
   sandbox: SandboxService,
-  options: { readonly bashTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
+  options: { readonly bashTimeoutMs?: number; readonly bashMaxTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
 ): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  const maxTimeoutMs = Math.min(options.bashMaxTimeoutMs ?? BASH_MAX_TIMEOUT_MS, MAX_TIMER_DELAY_MS)
   /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
   const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)
@@ -82,8 +216,19 @@ export function builtinTools(
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
-      context.log(`wrote ${target} (${content.length} bytes)`)
-      return { output: `wrote ${content.length} bytes to ${relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target) || target}`, data: { path: target, bytes: content.length } }
+      /**
+       * Bytes, as the sentence says: UTF-8 bytes on disk, not UTF-16 code units (five Chinese characters are 15
+       * bytes). The path is relative to the workspace only when the target is inside it; a file elsewhere (the host
+       * temp area under workspace-write) is named absolutely, never as a climb of `../`. The Rust build's twin
+       * already reports both this way (issue #3).
+       */
+      const bytes = Buffer.byteLength(content, 'utf8')
+      context.log(`wrote ${target} (${bytes} bytes)`)
+      const inside = relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target)
+      // Outside is exactly `..` or a climb (`../…`): a file inside whose name starts with two dots stays relative.
+      const climbs = inside === '..' || inside.startsWith(`..${sep}`)
+      const shown = inside.length > 0 && !climbs && !isAbsolute(inside) ? inside : target
+      return { output: `wrote ${bytes} bytes to ${shown}`, data: { path: target, bytes } }
     },
   }
 
@@ -104,6 +249,18 @@ export function builtinTools(
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
+      /**
+       * A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
+       * `resolveRegularReadTarget`): `FS_NOT_FOUND` and `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …`, not the
+       * platform's raw error (live-testing issue #4).
+       */
+      const shown = displayPath(context.cwd, path)
+      const info = await stat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+        throw error
+      })
+      if (info === undefined) return { output: '', error: { code: 'FS_NOT_FOUND', message: `cannot read "${shown}": not found` } }
+      if (!info.isFile()) return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot read "${shown}": not a regular file` } }
       // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
       const text = await readFileText(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
@@ -144,7 +301,7 @@ export function builtinTools(
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Command line, run through sh -c.' },
-          timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
+          timeoutMs: { type: 'number', description: `Wall time before the command is killed, in milliseconds; default ${timeoutMs}, at most ${maxTimeoutMs}.` },
           ...escalation,
         },
         required: ['command'],
@@ -154,6 +311,9 @@ export function builtinTools(
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
+      const wallTime = bashWallTime(args.timeoutMs, timeoutMs, maxTimeoutMs)
+      if ('refusal' in wallTime) return { output: '', error: { code: 'BAD_ARGS', message: wallTime.refusal } }
+      const limit = wallTime.ms
       const mode = context.mode
 
       /**
@@ -182,33 +342,74 @@ export function builtinTools(
       // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
       const cwd = context.cwd
-      const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
-        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
+        /**
+         * The command leads its own process group (`detached`), so a Stop or the wall time reaches everything it
+         * started, as DSH's launcher does. Killing only the shell left its children running orphaned, and the turn
+         * waited for them because they still held the output pipes (live-testing draft developer-five-5).
+         *
+         * Stdin is `ignore` (`/dev/null`), so a command that reads it gets end-of-file at once. The tool has no
+         * input to give, and DSH's shell leaves stdin closed when no input is supplied. Node's default, an open pipe
+         * that nothing writes or ends, made `read` and any stdin reader wait until the wall time killed them (#97).
+         * The Rust build gave EOF only when the server's own stdin was /dev/null, as under a daemon; it now uses
+         * `Stdio::null()` too.
+         */
+        const child = spawn(argv[0] as string, argv.slice(1), {
+          cwd,
+          env: { ...process.env, NO_COLOR: '1' },
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
         let stdout = ''
         let stderr = ''
         let timedOut = false
+        let stopped = false
+        const stop = () => {
+          if (!killProcessGroup(child.pid)) child.kill('SIGKILL')
+        }
         const timer = setTimeout(() => {
           timedOut = true
-          child.kill('SIGKILL')
+          stop()
         }, limit)
+        // One decoder per stream holds a character's bytes until the rest arrive: a UTF-8 sequence split across two
+        // chunks used to decode as replacement characters (live-testing issue #96). DSH concatenates the bytes first.
+        const stdoutText = new StringDecoder('utf8')
+        const stderrText = new StringDecoder('utf8')
         child.stdout.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString()
+          stdout += stdoutText.write(chunk)
         })
         child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString()
+          stderr += stderrText.write(chunk)
         })
-        context.signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true })
+        context.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true
+            stop()
+          },
+          { once: true },
+        )
         child.on('error', (error) => {
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
         })
         child.on('close', (code) => {
           clearTimeout(timer)
+          stdout += stdoutText.end()
+          stderr += stderrText.end()
           const combined = stdout + stderr
-          const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
+          const trimmed = tailOutput(combined, outputLimit)
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
+          /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
+          if (stopped) {
+            resolve({
+              output: trimmed,
+              error: { code: 'INTERRUPTED', message: 'the command was stopped before it finished' },
+              data: { sandbox: { ...sandboxFacts, denied: false } },
+            })
+            return
+          }
           if (timedOut) {
             resolve({
               output: trimmed,

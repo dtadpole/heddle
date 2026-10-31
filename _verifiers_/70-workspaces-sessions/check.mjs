@@ -733,6 +733,67 @@ test('a file under a root reads, and what cannot be shown is refused with a reas
   }
 })
 
+test('a file the 256 KiB cap cuts inside a character previews its whole characters, a literal U+FFFD is text, and only bytes that are not UTF-8 are refused', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * Issue #78 (found by developer-two in both builds): the reader decoded the first 256 KiB lossily and refused any text
+   * holding U+FFFD, so the preview answered 415 "is not UTF-8 text" for a valid file whose character the cap cut, and for
+   * a valid file holding a literal U+FFFD. DSH decodes strictly and across chunk boundaries (dsh-fs-local
+   * lib/index.js:451-470 with TextDecoder fatal at :454 and stream decoding at :342), refusing only content that is not
+   * decodable UTF-8. Judged through both surfaces that call the reader: the preview route and the command line.
+   */
+  const h = harness('file-utf8-prefix')
+  const CAP = 256 * 1024
+  const notUtf8 = 'is not UTF-8 text, so it has no text to show'
+  let live
+  try {
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its root\n${added.stdout}${added.stderr}`)
+    /** name, content, and the whole characters the preview keeps (undefined for a refusal). */
+    const cases = [
+      ['aligned.txt', `${'a'.repeat(CAP - 3)}中tail\n`, `${'a'.repeat(CAP - 3)}中`],
+      ['accent-cut.txt', `${'a'.repeat(CAP - 1)}étail\n`, 'a'.repeat(CAP - 1)],
+      ['wide-cut.txt', `${'a'.repeat(CAP - 1)}中tail\n`, 'a'.repeat(CAP - 1)],
+      ['emoji-cut.txt', `${'a'.repeat(CAP - 2)}😀tail\n`, 'a'.repeat(CAP - 2)],
+      ['replacement.txt', 'a literal \uFFFD is a character\n', 'a literal \uFFFD is a character\n'],
+      ['invalid.txt', Buffer.from([...Buffer.from('valid, then '), 0xff, ...Buffer.from(' is not\n')]), undefined],
+    ]
+    for (const [name, content] of cases) entry(join(h.work, name), content)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    for (const [name, content, kept] of cases) {
+      const path = join(h.work, name)
+      const size = Buffer.byteLength(content)
+      const response = await fetch(new URL(`/api/file?path=${encodeURIComponent(path)}`, live.url), { headers: { cookie } })
+      const body = await response.json()
+      const cli = await runCli(adminArgs(h, ['file', path, '--json']), { env: h.env, cwd: h.work })
+      if (kept === undefined) {
+        assert.equal(response.status, 415, `${name}: bytes that are not UTF-8 are refused (HTTP ${response.status})`)
+        assert.ok(String(body.error).endsWith(`${realpathSync(path)} ${notUtf8}`), `${name}: with the reader's sentence\nsaw: ${body.error}`)
+        assert.notEqual(cli.code, 0, `${name}: and refused on the command line`)
+        assert.ok(cli.stderr.includes(notUtf8), `${name}: with the same sentence\nsaw: ${cli.stderr.slice(0, 300)}`)
+        continue
+      }
+      const expected = { text: kept, truncated: size > CAP, bytes: size, kept: Buffer.byteLength(kept) }
+      const seen = (reading) => ({ text: reading.text, truncated: reading.truncated, bytes: reading.bytes, kept: Buffer.byteLength(String(reading.text)) })
+      assert.equal(response.status, 200, `${name}: the preview answers (HTTP ${response.status}: ${String(body.error ?? '').slice(0, 200)})`)
+      assert.deepEqual(seen(body), expected, `${name}: the preview is the whole characters before the cap, and says when it is truncated`)
+      assert.equal(cli.code, 0, `${name}: the command line reads it\n${cli.stderr.slice(0, 300)}`)
+      assert.deepEqual(seen(parseJson(cli.stdout)), expected, `${name}: and gives the same reading`)
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a type folder is a type, and its badge names it without the underscores', async (context) => {
   if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -2024,6 +2085,144 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test('a session title is cleaned as DSH cleans it, at creation and on rename, and one with nothing visible is refused', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH cleans an accepted title (dsh-session-title normalizeSessionTitle, lib/index.js:10-54): escape sequences,
+   * non-whitespace controls and directional or invisible characters removed, whitespace collapsed to one line, at most
+   * maxTitleBytes UTF-8 bytes on a code point, 80 in its shipped profile (dsh-base cordis.patch.yml:60-65); a title with
+   * nothing visible left is refused, session/title-invalid (dsh-api-session-controller lib/index.js:827-840). Measured
+   * on both builds before this check (live-testing draft developer-six-1): every title was stored as sent, and three
+   * spaces cleared the title with a 200.
+   */
+  const h = harness('title-clean')
+  let live
+  try {
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (path, body) => {
+      const response = await fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const text = await response.text()
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        parsed = text
+      }
+      return { status: response.status, body: parsed }
+    }
+    const stored = async (id) => {
+      const response = await fetch(`${origin}/api/sessions`, { headers: { cookie } })
+      return (await response.json()).find((meta) => meta.id === id)?.title
+    }
+
+    const made = await post('/api/sessions', { branch: h.work, title: 'made\u001b[31m red\u001b[0m\n\there \u202e' })
+    assert.equal(made.status, 200, `a session is created with a title (${JSON.stringify(made.body)})`)
+    const id = made.body.session
+    assert.equal(await stored(id), 'made red here', 'and the title is stored cleaned')
+
+    for (const [what, sent, kept] of [
+      ['300 ASCII letters', 'a'.repeat(300), 'a'.repeat(80)],
+      ['60 CJK characters', '\u5b57'.repeat(60), '\u5b57'.repeat(26)],
+      ['an ANSI colour sequence', 'a\u001b[31mred\u001b[0m b', 'ared b'],
+      ['a newline and a tab', 'line1\n\tline2', 'line1 line2'],
+      ['a right-to-left override', 'abc\u202edcba', 'abcdcba'],
+      ['a zero-width space', 'zero\u200bwidth', 'zerowidth'],
+      ['NUL and BEL', 'nul\u0000ctl\u0007x', 'nulctlx'],
+    ]) {
+      const renamed = await post(`/api/sessions/${id}/title`, { title: sent })
+      assert.equal(renamed.status, 200, `${what}: the rename is accepted`)
+      assert.equal(renamed.body.title, kept, `${what}: the answer carries the cleaned title`)
+      assert.equal(await stored(id), kept, `${what}: and the store holds it`)
+    }
+
+    for (const [what, sent] of [
+      ['three spaces', '   '],
+      ['only invisible and control characters', '\u200b\u0007\u202e'],
+    ]) {
+      const refused = await post(`/api/sessions/${id}/title`, { title: sent })
+      assert.equal(refused.status, 400, `${what}: refused rather than clearing the title (${JSON.stringify(refused.body)})`)
+      assert.equal(refused.body.code, 'session/title-invalid', `${what}: with DSH's code`)
+      assert.equal(refused.body.error, 'session title must contain visible characters', `${what}: and DSH's sentence`)
+      assert.equal(await stored(id), 'nulctlx', `${what}: and the title is left as it was`)
+    }
+    const unknown = await post('/api/sessions/session-00000000-0000-0000-0000-000000000000/title', { title: '   ' })
+    assert.equal(unknown.status, 404, 'an unknown session is still not found first')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a session title of only control or escape characters is refused on rename, as a blank one is', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH cleans a title before it judges it (dsh-session-title rename, lib/index.js:295-299), so a title that is only a
+   * terminal sequence and whitespace - a clear-screen and a tab, an empty window-title command, a C1 introducer - has
+   * nothing visible left and takes the path three spaces take: 400 session/title-invalid with DSH's sentence
+   * (dsh-api-session-controller lib/index.js:827-840), the title left alone. It must neither clear the title nor store
+   * the sequence, which the CLI's session list would print to a terminal. Measured on origin/main c9b9cc75 through both
+   * builds: each rename answered 200 and stored the sequence as sent less its surrounding whitespace.
+   */
+  const h = harness('title-controls')
+  let live
+  try {
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (path, body) => {
+      const response = await fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const text = await response.text()
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        parsed = text
+      }
+      return { status: response.status, body: parsed }
+    }
+    const stored = async (id) => {
+      const response = await fetch(`${origin}/api/sessions`, { headers: { cookie } })
+      return (await response.json()).find((meta) => meta.id === id)?.title
+    }
+
+    const made = await post('/api/sessions', { branch: h.work, title: 'kept title' })
+    assert.equal(made.status, 200, `a session is created with a title (${JSON.stringify(made.body)})`)
+    const id = made.body.session
+    assert.equal(await stored(id), 'kept title', 'and it holds that title')
+
+    for (const [what, sent] of [
+      ['a clear-screen sequence and a tab', '\u001b[2J\t'],
+      ['an empty window-title command', '\u001b]0;\u0007'],
+      ['a C1 control sequence, a reverse index and a line break', '\u009b31m\u001bM\r\n'],
+    ]) {
+      const refused = await post(`/api/sessions/${id}/title`, { title: sent })
+      assert.equal(refused.status, 400, `${what}: refused as three spaces are (${JSON.stringify(refused.body)})`)
+      assert.equal(refused.body.code, 'session/title-invalid', `${what}: with DSH's code`)
+      assert.equal(refused.body.error, 'session title must contain visible characters', `${what}: and DSH's sentence`)
+      assert.equal(await stored(id), 'kept title', `${what}: and the title is left as it was`)
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a workspace moved before another keeps its place across a restart, as DSH workspace/insertBefore does', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
@@ -2118,6 +2317,77 @@ test('a workspace moved before another keeps its place across a restart, as DSH 
     removeDir(h.home)
     removeDir(h.work)
     for (const folder of [...folders, late]) removeDir(folder)
+  }
+})
+
+test("the Web API's tree lists only what a workspace root holds, and refuses a path outside every root as the CLI does", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * The CLI refuses a tree outside every root (the check above, "a folder outside every root is refused rather than
+   * walked"); this judges the route the page calls. A folder no root owns, a link inside a root that leads to it, and a
+   * dot-dot walk out of a root are each refused before anything is listed: "400" with web.ts's sentence naming the
+   * canonical path, which is where a link or a dot-dot walk lands. DSH confines a listing the same way: it resolves the
+   * path and refuses a directory its workspace root does not contain (dsh-api-workspace-files list and confine,
+   * workspace-file/outside-workspace). A folder inside the root still lists.
+   */
+  const h = harness('tree-fence')
+  const root = fixtureDir('tree-fence-root')
+  const outside = fixtureDir('tree-fence-outside')
+  let live
+  try {
+    entry(join(root, 'inner', 'kept.txt'), 'inside\n')
+    entry(join(outside, 'not-yours.txt'), 'outside\n')
+    mkdirSync(join(outside, 'a-folder'), { recursive: true })
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(outside, join(root, 'way-out'))
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const sentence = `${realpathSync(outside)} is not under any workspace root`
+    for (const [what, path] of [
+      ['a folder outside every root', outside],
+      ['a link inside the root that leads out of it', join(root, 'way-out')],
+      // Spelled by hand: join() would fold the dot-dot away before the server saw it.
+      ['a dot-dot walk out of the root', `${root}${sep}..${sep}${outside.split(sep).pop()}`],
+    ]) {
+      const refused = await treeOf(path)
+      const listed = Array.isArray(refused.body?.children) ? refused.body.children.map((node) => node.label).join(', ') : ''
+      assert.equal(refused.status, 400, `${what} is refused, not listed (${refused.status}${listed ? `, listed: ${listed}` : ''})`)
+      assert.deepEqual(refused.body, { error: sentence }, `and ${what} gets the sentence that names the rule and the canonical path`)
+    }
+
+    const inside = await treeOf(join(root, 'inner'))
+    assert.equal(inside.status, 200, `a folder inside the root still lists (${JSON.stringify(inside.body)})`)
+    assert.deepEqual(
+      (inside.body.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['file:kept.txt'],
+      'with what it holds',
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+    removeDir(outside)
   }
 })
 
@@ -2891,6 +3161,114 @@ test('a session forks into a new one named after it, with its conversation and i
     assert.ok(labels.length >= 2, 'and the parent is still there')
   } finally {
     live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+/**
+ * Fork a session through the server and read both conversations as the chat draws them.
+ *
+ * The rows are compared on what a person reads — the kind, the text, a call's name and its result — so the claim is
+ * the one DSH makes: a fork is seeded with its source's own events (dsh-session fork.js buildForkSeed, cut at the last
+ * completed turn by the session controller), so the branch shows the source's turns as they were.
+ */
+async function forkAndRead(h, source) {
+  const live = await startServer(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+    { ...h.env, HOME: h.home },
+  )
+  try {
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const response = await fetch(new URL(`/api/sessions/${source}/fork`, live.url), { method: 'POST', headers: { cookie } })
+    assert.equal(response.status, 200, `the session forks\n${await response.clone().text()}`)
+    const forked = await response.json()
+    const rows = async (id) =>
+      ((await (await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })).json()).turns ?? []).map((turn) => ({
+        kind: turn.kind,
+        text: turn.text,
+        ...(turn.name !== undefined ? { name: turn.name } : {}),
+        ...(turn.result !== undefined ? { result: turn.result } : {}),
+      }))
+    return { fork: forked.session, source: await rows(source), forked: await rows(forked.session) }
+  } finally {
+    live.kill()
+  }
+}
+
+test("a fork of a reasoning turn shows the reasoning as its own row, the answer alone, and the call by name (#52)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-reasoning')
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    /** One turn of two rounds: reasoning and a tool call, then the answer — the shape a thinking model streams. */
+    scriptedConfig({
+      home: h.home,
+      steps: [{ reasoning: '17 × 23 = 391.', toolCall: { name: 'bash', arguments: { command: 'echo FORKTOOL-77' } } }, { text: '391' }],
+    })
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    const turn = await runCli(adminArgs(h, ['--resume', made.session, '--turn', 'What is 17 times 23? Think it through, then reply with the number only.']), { env: h.env, cwd: branch })
+    assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+
+    const read = await forkAndRead(h, made.session)
+    const kinds = read.source.map((row) => row.kind)
+    assert.deepEqual(kinds, ['user', 'reasoning', 'tool', 'assistant'], `the source shows a reasoning row, a call and an answer\nsaw: ${JSON.stringify(read.source)}`)
+    /**
+     * Measured on both builds before the fix: the fork drew one answer row "17 × 23 = 391.391" with no reasoning row,
+     * and the call as an empty answer row plus a tool row with no name or command.
+     */
+    assert.deepEqual(read.forked, read.source, `the fork shows the same rows\nsource: ${JSON.stringify(read.source)}\nfork:   ${JSON.stringify(read.forked)}`)
+    assert.equal(read.forked.find((row) => row.kind === 'assistant')?.text, '391', 'so its answer is the answer alone')
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a fork of a compacted session shows every turn of its source, not only the ones after the summary (#55)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-compacted')
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const steps = [
+      { reasoning: 'thinking about the part', text: `part answer ${'x'.repeat(2000)}` },
+      { purpose: 'compaction', text: 'the briefing: the code word is WALRUS-9' },
+    ]
+    scriptedConfig({ home: h.home, steps })
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    const say = async (prompt) => {
+      const turn = await runCli(adminArgs(h, ['--resume', made.session, '--turn', prompt]), { env: h.env, cwd: branch })
+      assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+    }
+    const first = 'Remember the code word WALRUS-9. Reply with only: noted.'
+    await say(first)
+    /**
+     * The window is set from what the first request measured, so the compaction lands a couple of turns later whatever
+     * the profile's tools and prompt weigh: the trigger is 80% of the endpoint's window, a little above the first request.
+     */
+    const measured = readTranscript(join(h.home, 'sessions', made.session)).find((event) => event.type === 'model/request')?.estimatedTokens
+    assert.ok(typeof measured === 'number' && measured > 0, 'the first request recorded what it weighed')
+    writeFileSync(h.config, `${JSON.stringify({ default: 'scripted', endpoints: [{ name: 'scripted', kind: 'scripted', baseUrl: join(h.home, 'script.json'), model: 'scripted', contextWindow: Math.ceil((measured + 1300) / 0.8) }] })}\n`)
+    for (const part of [1, 2, 3, 4]) await say(`Write about bridges, part ${part} ${'y'.repeat(1500)}`)
+    const events = readTranscript(join(h.home, 'sessions', made.session))
+    assert.ok(
+      events.some((event) => event.type === 'compaction/end'),
+      `the source was compacted, which is what this check is about\nrequests: ${JSON.stringify(events.filter((event) => event.type === 'model/request').map((event) => [event.estimatedTokens, event.thresholdTokens]))}`,
+    )
+
+    const read = await forkAndRead(h, made.session)
+    assert.equal(read.source[0]?.text, first, 'the source still shows its first turn')
+    /** Measured on both builds before the fix: the source showed 15 rows and the fork 4, starting at part 3. */
+    assert.equal(read.forked[0]?.text, first, `the fork starts where its source started\nfork: ${JSON.stringify(read.forked.map((row) => [row.kind, row.text.slice(0, 40)]))}`)
+    assert.deepEqual(read.forked, read.source, `and shows the same rows (${read.source.length} in the source, ${read.forked.length} in the fork)`)
+    const copied = readTranscript(join(h.home, 'sessions', read.fork))
+    assert.ok(copied.some((event) => event.type === 'compaction/end'), "the fork's log carries the compaction where it happened")
+  } finally {
     removeDir(h.home)
     removeDir(h.work)
   }
@@ -4579,7 +4957,8 @@ test('a clipped session title crawls on hover and returns on leave', async (cont
         headers: { cookie, 'content-type': 'application/json' },
         body: JSON.stringify({ title: text, folder }),
       })
-    const longTitle = 'a session name long enough to overflow the sidebar and crawl while the pointer rests on its row'
+    /** 78 bytes: under DSH's 80-byte title cap (normalizeSessionTitle), which a longer title would be cut by, yet far wider than the sidebar. */
+    const longTitle = 'a session name long enough to overflow the sidebar and crawl under the pointer'
     /** Each session's definition folder comes from the CLI's own record, not from a guessed name. */
     assert.equal((await title(longId, longTitle, dirname(longRecord.definition))).status, 200, 'the long title is written')
     assert.equal((await title(shortId, 'short', dirname(shortRecord.definition))).status, 200, 'the short title is written')
@@ -5210,6 +5589,120 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
     )
     assert.equal(reduced.animations, 0, `reduced motion skips the glide\nsaw: ${JSON.stringify(reduced)}`)
     assert.notEqual(reduced.first, result.beforeOrder[1], 'while the order still changes')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('the later pin leads, and the tree and the flat list put the same sessions in the same order', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * R-developer-eight-17 (DSH parity C13), measured on both builds: two pins showed in one order in the tree and in the
+   * other order in In one list, because the tree ordered pins by when they were pinned and the flat list by when the
+   * sessions were created. DSH keeps one registry-global pin list, most recent pin first, and fronts a new pin in both the
+   * group and the flat list. The flat list also ordered the unpinned rows by creation while the tree and the View options
+   * item (Last updated) order them by the last write.
+   *
+   * The fixture makes every one of those rules disagree with creation order: four sessions in one workspace, the third
+   * pinned before the second, and the first written to last.
+   */
+  const h = harness('session-pin-order')
+  let live
+  let browser
+  try {
+    entry(join(h.work, 'INDEX.md'), '# a workspace for the pin order\n')
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its root\n${added.stdout}${added.stderr}`)
+    const made = []
+    for (let index = 0; index < 4; index += 1) {
+      const created = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(created.code, 0, `session ${index + 1} was created\n${created.stdout}${created.stderr}`)
+      made.push(parseJson(created.stdout).session)
+      const turn = await runCli(adminArgs(h, ['--turn', `pin order conversation ${index + 1}`]), { env: h.env, cwd: h.work })
+      assert.equal(turn.code, 0, `session ${index + 1} took a turn\n${turn.stdout}${turn.stderr}`)
+      await new Promise((done) => setTimeout(done, 30))
+    }
+    const [first, second, third, fourth] = made
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    /** The first session is written to last, so it is the most recently updated of the unpinned two. */
+    const written = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest written', folder: h.work }),
+    })
+    assert.equal(written.status, 200, `the follow-up turn runs\n${await written.clone().text()}`)
+    await written.text()
+    /** The third session is pinned, then the second: the second is the later pin, though it was created earlier. */
+    const pin = (id) =>
+      fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ pinned: true }),
+      })
+    assert.equal((await pin(third)).status, 200, 'the first pin was accepted')
+    await new Promise((done) => setTimeout(done, 30))
+    assert.equal((await pin(second)).status, 200, 'the second pin was accepted')
+    const metas = await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json()
+    const metaOf = (id) => metas.find((meta) => meta.id === id)
+    assert.ok(String(metaOf(second)?.pinnedAt) > String(metaOf(third)?.pinnedAt), `the store says which pin is later\nsaw: ${JSON.stringify(metas)}`)
+    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which session was written last\nsaw: ${JSON.stringify(metas)}`)
+    const expected = [second, third, first, fourth]
+
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const sessionIds = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId ?? null)
+        /** The workspace is opened only if closed: a first visit opens the first workspace on its own. */
+        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
+        const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
+        if (workspaceLi === null) return JSON.stringify({ error: 'no workspace row' })
+        for (let attempt = 0; attempt < 30 && workspaceLi.dataset.open !== 'true'; attempt += 1) {
+          if (attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
+          await wait(200)
+        }
+        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
+        const tree = sessionIds()
+        const treePinned = [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.pinned === 'true')
+        document.querySelector('#view-options button').click()
+        await wait(250)
+        const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === 'In one list')
+        if (item === undefined) return JSON.stringify({ error: 'no In one list item', tree })
+        item.click()
+        for (let attempt = 0; attempt < 30 && document.querySelector('#tree li[data-kind="workspace"]') !== null; attempt += 1) await wait(150)
+        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
+        await wait(300)
+        const flat = sessionIds()
+        const ages = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .age')].map((age) => age.textContent)
+        return JSON.stringify({ tree, treePinned, flat, ages })
+      })()`, 30_000),
+    )
+    assert.equal(reading.error, undefined, `the page drew the workspace and offered In one list\nsaw: ${JSON.stringify(reading)}`)
+    const name = (ids) => ids.map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
+    /** The tree: the later pin first, then the earlier pin, then the rest by their last write. */
+    assert.deepEqual(name(reading.tree), name(expected), `the tree puts the later pin first, then the latest written\nsaw: ${JSON.stringify(name(reading.tree))}`)
+    assert.deepEqual(reading.treePinned, [true, true, false, false], 'and draws the two leading rows as pinned')
+    /** The flat list: the same rule, so the same order — which is the regression this check was written for. */
+    assert.deepEqual(
+      name(reading.flat),
+      name(expected),
+      `In one list puts the later pin first and orders the rest by their last write, as the tree does\nsaw: ${JSON.stringify({ flat: name(reading.flat), tree: name(reading.tree) })}`,
+    )
+    assert.equal(reading.ages.length, 4, `every flat row says where it lives and when\nsaw: ${JSON.stringify(reading.ages)}`)
   } finally {
     browser?.close()
     live?.kill()

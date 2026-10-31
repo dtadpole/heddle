@@ -48,6 +48,9 @@ pub struct StartOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub title: Option<String>,
+    /// The agent preset a new session runs under (inventory A96); ignored when resuming, since a session keeps
+    /// its own.
+    pub preset: Option<String>,
 }
 
 /// What `open_at` is told. `fresh` starts a new session even when the folder has one (`--new`).
@@ -58,6 +61,8 @@ pub struct OpenAtOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub title: Option<String>,
+    /// The agent preset a session this call creates runs under (inventory A96); an existing one keeps its own.
+    pub preset: Option<String>,
 }
 
 /// What `create_at` is told.
@@ -67,6 +72,8 @@ pub struct CreateAtOptions {
     pub endpoint: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// The agent preset the new session runs under (inventory A96).
+    pub preset: Option<String>,
 }
 
 /// What a fork came to.
@@ -240,6 +247,7 @@ impl SessionService {
             model: options.model,
             reasoning_effort: options.reasoning_effort,
             title: options.title,
+            preset: options.preset,
             ..Default::default()
         })
     }
@@ -262,6 +270,7 @@ impl SessionService {
                 model: options.model.clone(),
                 reasoning_effort: options.reasoning_effort.clone(),
                 title: options.title.clone(),
+                preset: options.preset.clone(),
             },
         )?;
         let created = self
@@ -309,6 +318,10 @@ impl SessionService {
         else {
             return Ok(ForkOutcome::Unavailable);
         };
+        // A fork continues its source, so it runs under the source's preset (inventory A96).
+        if let Some(preset) = source.preset() {
+            self.store.record_preset(&handle.id, preset)?;
+        }
         let created = self
             .list()
             .into_iter()
@@ -439,6 +452,7 @@ impl SessionService {
             model: options.model,
             reasoning_effort: options.reasoning_effort,
             title: options.title,
+            preset: options.preset,
             ..Default::default()
         })
     }
@@ -503,6 +517,16 @@ impl SessionService {
     /// Pin, unpin, archive or unarchive.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
         self.store.flags(id, patch)
+    }
+
+    /// Record the agent preset a session runs under, only when it has none (inventory A96); see
+    /// [`SessionStore::record_preset`]. Answers the record as it now is; `Ok(None)` for an unknown session.
+    pub fn record_preset(
+        &self,
+        id: &str,
+        preset: &str,
+    ) -> Result<Option<SessionMeta>, SessionError> {
+        self.store.record_preset(id, preset)
     }
 
     /// Switch a session onto an endpoint, replacing any model override it carried.
@@ -910,6 +934,110 @@ mod tests {
                 .title(),
             Some("Source (1)")
         );
+    }
+
+    /// Inventory A96: a session is created with the preset it is given (start, open_at, create_at), a folder's existing
+    /// session keeps its own, a fork runs under its source's, and `record_preset` never replaces one.
+    #[test]
+    fn a_session_is_created_with_its_preset_keeps_it_and_a_fork_copies_it() {
+        let (_dir, service) = service();
+        let preset_of = |id: &str| {
+            service
+                .meta(id)
+                .and_then(|meta| meta.preset().map(str::to_string))
+        };
+
+        let started = service
+            .start(StartOptions {
+                preset: Some("reader".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(preset_of(&started.id).as_deref(), Some("reader"));
+        let resumed = service
+            .start(StartOptions {
+                resume: Some(started.id.clone()),
+                preset: Some("standard".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            preset_of(&resumed.id).as_deref(),
+            Some("reader"),
+            "a resumed session keeps its own"
+        );
+
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let opened = service
+            .open_at(
+                folder_path,
+                OpenAtOptions {
+                    preset: Some("reader".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(preset_of(&opened.id).as_deref(), Some("reader"));
+        let again = service
+            .open_at(
+                folder_path,
+                OpenAtOptions {
+                    preset: Some("standard".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(again.id, opened.id);
+        assert_eq!(preset_of(&again.id).as_deref(), Some("reader"));
+
+        let other = branch();
+        let created = service
+            .create_at(
+                other.path().to_str().unwrap(),
+                CreateAtOptions {
+                    preset: Some("reader".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(preset_of(&created.handle.id).as_deref(), Some("reader"));
+
+        // A fork of a session under `reader` runs under `reader`.
+        service.user(&opened, "a question", None).unwrap();
+        service
+            .store()
+            .message(
+                &opened,
+                Message {
+                    role: Role::Assistant,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: "an answer".to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        service
+            .store()
+            .append(&opened, NewEvent::new("turn/completed"), Default::default())
+            .unwrap();
+        let ForkOutcome::Forked(forked) = service.fork(&opened.id).unwrap() else {
+            panic!("the fork should have been made");
+        };
+        assert_eq!(preset_of(&forked.handle.id).as_deref(), Some("reader"));
+
+        // A session with none takes one once, and keeps it.
+        let plain = service.start(StartOptions::default()).unwrap();
+        assert_eq!(preset_of(&plain.id), None);
+        let recorded = service
+            .record_preset(&plain.id, "standard")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.preset(), Some("standard"));
+        service.record_preset(&plain.id, "reader").unwrap();
+        assert_eq!(preset_of(&plain.id).as_deref(), Some("standard"));
     }
 
     #[test]

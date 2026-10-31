@@ -112,6 +112,7 @@ fn endpoint(name: &str, kind: EndpointKind, base_url: &str, model: &str) -> Endp
         input_modalities: None,
         proxy: None,
         timeout_ms: None,
+        prompt_cache: None,
     }
 }
 
@@ -1241,7 +1242,11 @@ async fn the_messages_shape_streams_thinking_text_and_a_live_tool_call() {
     assert_eq!(body["model"], serde_json::json!("claude-model"));
     assert_eq!(body["stream"], serde_json::json!(true));
     assert_eq!(body["max_tokens"], serde_json::json!(64));
-    assert_eq!(body["system"], serde_json::json!("be brief"));
+    assert_eq!(
+        body["system"],
+        serde_json::json!([{ "type": "text", "text": "be brief", "cache_control": { "type": "ephemeral" } }]),
+        "the system prompt goes out marked for caching (#70)"
+    );
 }
 
 /// The claim 20-streaming makes, on this kind: a delta is seen before the provider has finished writing.
