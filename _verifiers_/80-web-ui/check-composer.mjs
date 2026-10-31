@@ -1795,7 +1795,7 @@ test('a queued message runs as a turn with Stop on offer, and a message typed me
 test('switching to idle Y keeps X queued messages moving and Y offers Send', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
-  const server = await startServer('session-queues', { holdOpenMs: 2500 })
+  const server = await startServer('session-queues', { holdOpenMs: 8000 })
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
     mkdirSync(server.work, { recursive: true })
@@ -1817,7 +1817,7 @@ test('switching to idle Y keeps X queued messages moving and Y offers Send', asy
     await open(x)
     await type(browser, 'FIRST-X')
     await press(browser, { key: 'Enter' })
-    await browser.waitFor(`document.getElementById('log').innerText.includes('the answer')`, 15000)
+    await browser.waitFor(`document.getElementById('stop').hidden === false`, 15000)
     await type(browser, 'QUEUED-X')
     await press(browser, { key: 'Enter' })
     await browser.waitFor(`document.getElementById('queue').innerText.includes('QUEUED-X')`, 10000)
