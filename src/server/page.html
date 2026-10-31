@@ -9465,7 +9465,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * reason travels on the completed event, so a reload shows it again from the transcript.
          */
         const placement = TurnFailure.endedPlacement(payload)
-        if (placement === 'answer') {
+        /**
+         * Drawn only into the turn's own session (developer-ten's B2 on fbbe52d0): the panel may have moved on by now, to
+         * another session or to nothing (`clearMain`, when a stop-and-archive answers before this `done`), and the
+         * notice then sat on another session's answer, or in the emptied panel above the next conversation. A reload
+         * draws it from the turn's own record.
+         */
+        const turnSession = typeof payload.session === 'string' ? payload.session : (adopted ?? target)
+        if (placement === 'answer' && turnSession === current) {
           const last = lastTurnRow()
           if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
           else log.append(turnNotice(payload.ended))

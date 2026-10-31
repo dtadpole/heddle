@@ -169,3 +169,14 @@ test('the end of this page\'s turn in another session leaves the open running se
   const own = await finish({ open: S, turn: S, payload: { text: 'done', finishReason: 'stop', rounds: 1, denials: [] }, running: { [S]: 1 } })
   assert.equal(own.liveRounds(), 0, 'the session whose turn ended counts none live: its rounds are the fold\'s now')
 })
+
+test('an early-end notice is drawn only into the turn\'s own session: not into the panel clearMain emptied, nor into another session (B2)', async () => {
+  const stopped = { text: '', finishReason: 'stopped', rounds: 1, denials: [], ended: ['stopped by the caller'] }
+  /** A stop-and-archive answered before this done: the page let the session go, and nothing is open. */
+  const emptied = await finish({ open: null, turn: S, payload: stopped })
+  assert.deepEqual(Array.from(emptied.rows()), [], `nothing is drawn into the emptied panel, so nothing sits above the next conversation\nsaw: ${JSON.stringify(emptied.rows())}`)
+  const elsewhere = await finish({ open: M, turn: S, payload: stopped })
+  assert.deepEqual(Array.from(elsewhere.rows()), ['assistant:the previous answer'], 'nor onto the answer of the session the person opened since')
+  const own = await finish({ open: S, turn: S, payload: stopped })
+  assert.deepEqual(Array.from(own.rows()), ['assistant:the previous answer>Stopped by the caller'], 'its own session still carries it, on its answer')
+})
