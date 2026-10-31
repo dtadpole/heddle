@@ -8,8 +8,9 @@
 //! the anonymous feedback id lives in, and the upload directory a line's attachments are read from (the one a
 //! turn reads its attachments from).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 use heddle_context::{ContextService, PrepareOptions};
@@ -49,6 +50,8 @@ pub const FEEDBACK_USER_FILE: &str = "feedback-user-id";
 
 /// The log event a compaction's summary is recorded as.
 const COMPACTION_SUMMARY_EVENT: &str = "compaction/summary";
+/// The log event a refused or failed compaction is recorded as.
+const COMPACTION_FAILED_EVENT: &str = "compaction/failed";
 
 /// What the built-in commands are wired to.
 #[derive(Clone)]
@@ -68,7 +71,13 @@ pub struct CommandServices {
     /// The upload directory (`<heddle home>/uploads`): a line's attachments must be stored files inside it, as a
     /// turn's must. The binary passes the directory its turn route reads from.
     pub upload_dir: PathBuf,
+    /// Whether a session has a running turn (the agent's turn registry). `/compact` answers DSH's `busy` while
+    /// one does; `None` when the profile has no registry, and then only a compaction in flight is busy.
+    pub turn_running: Option<TurnRunning>,
 }
+
+/// Whether a session has a running turn, by session id.
+pub type TurnRunning = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// The commands host the routes read: the registry, the session service its runs write through, the upload
 /// directory a line's attachments are read from, and the contributed commands the registry refused.
@@ -108,6 +117,8 @@ impl Commands {
                 sessions: Arc::clone(&services.sessions),
                 context: services.context.clone(),
                 models: services.models.clone(),
+                turn_running: services.turn_running.clone(),
+                compacting: Mutex::new(HashSet::new()),
             })),
             feedback_command(log, anonymous),
             permission_command(Arc::new(ServicePermission {
@@ -302,6 +313,37 @@ struct ServiceCompaction {
     sessions: Arc<SessionService>,
     context: Option<Arc<ContextService<SessionStore>>>,
     models: Option<Arc<ModelService>>,
+    turn_running: Option<TurnRunning>,
+    /// Sessions with a manual compaction in flight in this process.
+    compacting: Mutex<HashSet<String>>,
+}
+
+/// A session's place in `compacting`, given back when the compaction ends, however it ends.
+struct Compacting<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    session: String,
+}
+
+impl<'a> Compacting<'a> {
+    fn claim(set: &'a Mutex<HashSet<String>>, session: &str) -> Option<Self> {
+        let mut held = set.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !held.insert(session.to_owned()) {
+            return None;
+        }
+        Some(Self {
+            set,
+            session: session.to_owned(),
+        })
+    }
+}
+
+impl Drop for Compacting<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.session);
+    }
 }
 
 impl CompactionHost for ServiceCompaction {
@@ -314,6 +356,23 @@ impl CompactionHost for ServiceCompaction {
         session: &'a SessionHandle,
     ) -> BoxFuture<'a, Result<CompactionOutcome, String>> {
         Box::pin(async move {
+            // DSH compacts by hand only an idle session: an open turn or another compaction answers `busy`
+            // (dsh-compaction-basic compactSurfaceRegion and compactNow). A compaction under a running turn would
+            // replace the history that turn is still writing, its own prompt included (#133).
+            let busy = CompactionOutcome {
+                busy: true,
+                ..CompactionOutcome::default()
+            };
+            if self
+                .turn_running
+                .as_ref()
+                .is_some_and(|running| running(&session.id))
+            {
+                return Ok(busy);
+            }
+            let Some(_compacting) = Compacting::claim(&self.compacting, &session.id) else {
+                return Ok(busy);
+            };
             let Some(context) = self.context.as_ref() else {
                 return Err(NO_CONTEXT_SERVICE.to_owned());
             };
@@ -332,6 +391,13 @@ impl CompactionHost for ServiceCompaction {
             let before = context
                 .measure(session, &[])
                 .map_err(|error| error.to_string())?;
+            let last_seq = self
+                .sessions
+                .events(session)
+                .map_err(|error| error.to_string())?
+                .last()
+                .map(|event| event.seq)
+                .unwrap_or(0);
             // `meta?.cwd ?? handle.dir`: a recorded folder, even an empty one, else the session's own folder.
             let cwd = meta
                 .as_ref()
@@ -357,7 +423,30 @@ impl CompactionHost for ServiceCompaction {
                 .await
                 .map_err(|error| error.to_string())?;
             if !report.compacted {
-                return Ok(CompactionOutcome::default());
+                // A summary the engine refused is recorded as `compaction/failed {refused: true}`; DSH reports it
+                // as an error (#132).
+                let events = self
+                    .sessions
+                    .events(session)
+                    .map_err(|error| error.to_string())?;
+                let refused = events
+                    .iter()
+                    .find(|event| {
+                        event.seq > last_seq
+                            && event.kind == COMPACTION_FAILED_EVENT
+                            && event.get("refused") == Some(&Value::Bool(true))
+                    })
+                    .map(|event| {
+                        event
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("refused")
+                            .to_owned()
+                    });
+                return Ok(CompactionOutcome {
+                    refused,
+                    ..CompactionOutcome::default()
+                });
             }
             let after = context
                 .measure(session, &[])
@@ -377,6 +466,7 @@ impl CompactionHost for ServiceCompaction {
                 items: Some(replaced as u64),
                 tokens: Some(before.total_tokens.saturating_sub(after.total_tokens)),
                 summary_seq,
+                ..CompactionOutcome::default()
             })
         })
     }
@@ -447,6 +537,7 @@ mod tests {
 
     fn services(fixture: &Fixture) -> CommandServices {
         CommandServices {
+            turn_running: None,
             sessions: Arc::new(SessionService::from_store(fixture.store.clone())),
             goals: None,
             context: None,

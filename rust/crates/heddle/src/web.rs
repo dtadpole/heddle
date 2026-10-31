@@ -495,6 +495,12 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
         heddle_home: host.home.clone(),
         // The directory `compose_uploads` gives the turn route: a command line's attachments are read as a turn's.
         upload_dir: heddle_web_files::uploads::upload_directory(&host.home),
+        // `/compact` is refused while a turn of the session runs, as DSH's is (#133).
+        turn_running: services
+            .get::<heddle_agent::TurnRegistry>("turns")
+            .map(|turns| {
+                Arc::new(move |id: &str| turns.is_running(id)) as heddle_commands::TurnRunning
+            }),
     })
     .with_contributed(contributed);
     for refusal in commands.refused() {

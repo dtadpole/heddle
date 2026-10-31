@@ -249,6 +249,23 @@ test('/compact takes no arguments, reports what it compacted, and says when ther
   assert.deepEqual(await run('/compact'), { kind: 'success', text: 'Compacted older history.' })
 })
 
+test("/compact answers DSH's errors for a session that is not idle and for a summary that was refused (#132)", async () => {
+  const { handle, log } = session()
+  const outcomes: CompactionOutcome[] = [{ compacted: false, busy: true }, { compacted: false, refused: 'the summary is not smaller (310 >= 233)' }]
+  const registry = new CommandRegistry()
+  registry.register(compactCommand({ compactNow: async () => outcomes.shift() ?? { compacted: false } }))
+  const run = async (line: string) => (await registry.execute(log, handle, line))?.result
+  assert.deepEqual(await run('/compact'), {
+    kind: 'error',
+    text: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.',
+  })
+  assert.deepEqual(
+    await run('/compact'),
+    { kind: 'error', text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.' },
+    'a refused summary is not "No compactable history yet."',
+  )
+})
+
 test('/compact passes a compaction failure on as the run error', async () => {
   const { handle, log } = session()
   const registry = new CommandRegistry()

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isTitleRequest, isolatedHome, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The slash-command layer, judged at the server (C78-C83, R-developer-twelve-1, R-developer-six-5).
@@ -235,29 +235,57 @@ test('/export answers a download of exactly the bytes Download log serves, witho
 })
 
 /** A Chat Completions double that answers every request with the same short text and records each body. */
-async function providerDouble(text) {
+/** The compaction engine's own instruction, the same words in both builds: how a summary request is told apart. */
+const COMPACTION_MARK = 'You are now acting as a compaction engine'
+
+/**
+ * `options.summary` answers a summary request with its own text. `options.refuseTitles` refuses the session-title
+ * request (C6) as lib.mjs's doubles do. `holdNext()` holds the next turn request open after its first delta, until
+ * its release is called, so a check can act while a turn runs.
+ */
+async function providerDouble(text, options = {}) {
   const bodies = []
+  let hold = null
+  const double = { holding: false }
   const server = createServer((request, response) => {
     let raw = ''
     request.on('data', (chunk) => {
       raw += chunk
     })
-    request.on('end', () => {
+    request.on('end', async () => {
+      if (options.refuseTitles === true && isTitleRequest(raw)) return refuseTitleRequest(response)
       try {
         bodies.push(JSON.parse(raw))
       } catch {
         bodies.push({ raw })
       }
+      const summary = raw.includes(COMPACTION_MARK)
+      const answer = summary && options.summary !== undefined ? options.summary : text
       response.writeHead(200, { 'content-type': 'text/event-stream' })
-      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`)
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: answer }, finish_reason: null }] })}\n\n`)
+      if (!summary && hold !== null) {
+        const released = hold
+        hold = null
+        double.holding = true
+        await released
+        double.holding = false
+      }
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`)
       response.end('data: [DONE]\n\n')
     })
   })
+  double.holdNext = () => {
+    let release
+    hold = new Promise((resolve) => {
+      release = resolve
+    })
+    return release
+  }
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
   return {
     baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
     bodies,
+    double,
     /** Kept-alive sockets are closed too, or the file's process could outlive its tests. */
     close: () => {
       server.closeAllConnections?.()
@@ -267,11 +295,11 @@ async function providerDouble(text) {
 }
 
 /** A server whose one endpoint is the double, for checks that need real turns and a summary. */
-async function startDoubleServer(label, text) {
+async function startDoubleServer(label, text, options = {}) {
   const home = isolatedHome(`slash-${label}`)
   const work = fixtureDir(`slash-${label}-work`)
   mkdirSync(work, { recursive: true })
-  const provider = await providerDouble(text)
+  const provider = await providerDouble(text, options)
   const config = join(home, 'heddle.json')
   writeFileSync(config, `${JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'double-model', apiKey: 'a-test-key' }] }, null, 2)}\n`)
   const child = await startCli(
@@ -320,6 +348,89 @@ test('/compact summarises the conversation now: a compaction is logged and the c
     const measured = events.filter((event) => event.type === 'compaction/measured').at(-1)
     assert.ok(measured !== undefined && measured.after < measured.before, `the context shrank: ${JSON.stringify(measured)}`)
     assert.ok(events.some((event) => event.type === 'command/done' && event.kind === 'success'), 'the run is recorded as a command')
+  } finally {
+    server.close()
+  }
+})
+
+/** Poll until `predicate` holds, or give up after `timeoutMs`. */
+async function until(predicate, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return true
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  return predicate()
+}
+
+/** One whole turn of the session, posted the way a script posts one, and read to its end. */
+async function turnOn(server, cookie, id, prompt) {
+  const response = await fetch(new URL('/api/turn', server.url), {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt, folder: server.work, session: id }),
+  })
+  assert.equal(response.status, 200, `the turn ran: ${prompt.slice(0, 40)}`)
+  return response.text()
+}
+
+test('/compact is refused while a turn of the session runs, as DSH refuses a compaction of a session that is not idle', { timeout: TEST_TIMEOUT_MS }, async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startDoubleServer('compact-busy', 'noted', { refuseTitles: true })
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    for (const topic of ['the registry', 'the menu']) await turnOn(server, cookie, id, `Tell me about ${topic}. ${'Some context. '.repeat(40)}`)
+    /** A second session of the same server, with history of its own: the refusal is per session. */
+    const opened = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: server.work, title: 'the other session' }) })
+    const other = opened.body.session?.id ?? opened.body.session ?? opened.body.id
+    assert.match(String(other), /^session-/, `a second session was opened: ${JSON.stringify(opened.body)}`)
+    for (const topic of ['the store', 'the stream']) await turnOn(server, cookie, other, `Tell me about ${topic}. ${'Some context. '.repeat(40)}`)
+    const release = server.provider.double.holdNext()
+    const running = turnOn(server, cookie, id, 'And now the routes.')
+    try {
+      assert.ok(await until(() => server.provider.double.holding, 15_000), 'the third turn is running, held by the double')
+      const result = await runLine(server, cookie, id, '/compact')
+      assert.equal(result.body.matched, true)
+      assert.deepEqual(
+        { kind: result.body.kind, text: result.body.text },
+        { kind: 'error', text: 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.' },
+        `DSH's busy answer (${JSON.stringify(result.body)})`,
+      )
+      /** Another session of the server is idle, so it compacts while the first one's turn runs. */
+      const elsewhere = await runLine(server, cookie, other, '/compact')
+      assert.equal(elsewhere.body.kind, 'success', `another session is not refused: the check is per session (${JSON.stringify(elsewhere.body)})`)
+    } finally {
+      release()
+      await running
+    }
+    const { events } = await sessionLog(server, cookie, id)
+    assert.ok(!events.some((event) => event.type === 'compaction/start' || event.type === 'compaction/summary'), 'and nothing was compacted under the running turn')
+    assert.ok(events.some((event) => event.type === 'command/done' && event.kind === 'error'), 'the refusal is recorded as the run')
+  } finally {
+    server.close()
+  }
+})
+
+test('/compact whose summary is refused as not smaller says so, as DSH does, not that there was nothing to compact (#132)', { timeout: TEST_TIMEOUT_MS }, async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /** Every summary is far longer than the short history it would replace, so the engine refuses it. */
+  const server = await startDoubleServer('compact-refused', 'noted', { refuseTitles: true, summary: 'An over-long checkpoint. '.repeat(400) })
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    for (const topic of ['the registry', 'the menu', 'the routes']) await turnOn(server, cookie, id, `Tell me about ${topic}.`)
+    const result = await runLine(server, cookie, id, '/compact')
+    assert.equal(result.body.matched, true)
+    const { events } = await sessionLog(server, cookie, id)
+    const refused = events.filter((event) => event.type === 'compaction/failed' && event.refused === true)
+    assert.equal(refused.length, 1, `the engine refused the summary and recorded it (${JSON.stringify(events.map((event) => event.type))})`)
+    assert.deepEqual(
+      { kind: result.body.kind, text: result.body.text },
+      { kind: 'error', text: 'Compaction could not produce a useful summary. The attempt is recorded in the session log.' },
+      `DSH's summary answer, not "No compactable history yet." (${JSON.stringify(result.body)})`,
+    )
   } finally {
     server.close()
   }
