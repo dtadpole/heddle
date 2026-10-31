@@ -380,7 +380,9 @@ test('a reconnecting client is given every frame it missed after its cursor, and
     await first.next((frame) => frame.event === 'session' && frame.data?.event?.type === 'turn/completed')
     const numbered = first.frames.filter((frame) => frame.event === 'session')
     assert.ok(numbered.every((frame) => /^[0-9a-f]+-\d+$/.test(frame.id ?? '')), 'every session frame has an id')
-    const seqs = numbered.map((frame) => seqOf(frame.id))
+    // The count runs over every numbered frame, not the session frames alone: a turn's bash call also publishes `jobs`
+    // frames (main's jobs, 04f454c4), and those are numbered in the same sequence, so they sit between session ids.
+    const seqs = first.frames.filter((frame) => typeof frame.id === 'string' && frame.id.length > 0).map((frame) => seqOf(frame.id))
     assert.deepEqual(seqs, seqs.map((_, index) => seqs[0] + index), 'ids count up by one with no gap')
     const lastSeen = numbered.at(-1).id
     first.close()
