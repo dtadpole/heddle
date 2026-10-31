@@ -427,6 +427,31 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_empty_files_are_admitted_but_empty_rasters_are_refused() {
+        let base = scratch("empty-admission");
+        let directory = base.join("uploads");
+        let path = directory.join("empty.txt");
+        std::fs::write(&path, b"").unwrap();
+        let part = read_attachment(&directory, &serde_json::json!(path.to_string_lossy())).unwrap();
+        match part {
+            AttachmentPart::File { bytes, sha256, .. } => {
+                assert_eq!(bytes, 0);
+                assert_eq!(sha256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+            }
+            other => panic!("expected an ordinary file, got {other:?}"),
+        }
+        for extension in ["png", "PNG", "jpg", "jpeg", "webp", "gif"] {
+            let path = directory.join(format!("empty.{extension}"));
+            std::fs::write(&path, b"").unwrap();
+            assert_eq!(
+                read_attachment(&directory, &serde_json::json!(path.to_string_lossy())).unwrap_err().to_string(),
+                "an empty image is not valid"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn every_refusal_names_what_is_wrong() {
         let base = scratch("refusals");
         let directory = base.join("uploads");

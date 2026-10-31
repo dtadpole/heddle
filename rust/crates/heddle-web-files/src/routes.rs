@@ -1419,17 +1419,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_upload_is_refused() {
+    async fn ordinary_empty_uploads_are_stored_and_admitted() {
         let (base, host) = scratch("uploads-empty");
+        let directory = upload_directory(&host.heddle_home());
         let (status, _, bytes) = call(
-            routes_of(host),
-            "POST",
-            "/api/uploads?name=a.txt",
-            Some(Vec::new()),
-        )
-        .await;
-        assert_eq!(status, Status::BAD_REQUEST);
-        assert_eq!(body_text(&bytes), "an empty file has nothing to add\n");
+            routes_of(host), "POST", "/api/uploads?name=a.txt", Some(Vec::new()),
+        ).await;
+        assert_eq!(status, Status::OK);
+        let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(saved["bytes"], 0);
+        let path = saved["path"].as_str().unwrap();
+        assert!(std::fs::read(path).unwrap().is_empty());
+        assert!(matches!(
+            crate::attachments::read_attachment(&directory, &serde_json::json!(path)).unwrap(),
+            crate::attachments::AttachmentPart::File { bytes: 0, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn an_empty_raster_upload_is_refused_without_storing() {
+        let (base, host) = scratch("uploads-empty-image");
+        let directory = upload_directory(&host.heddle_home());
+        let routes = routes_of(host);
+        for extension in ["png", "PNG", "jpg", "jpeg", "webp", "gif"] {
+            let (status, _, bytes) = call(
+                routes.clone(), "POST", &format!("/api/uploads?name=empty.{extension}"), Some(Vec::new()),
+            ).await;
+            assert_eq!(status, Status::BAD_REQUEST);
+            assert_eq!(body_text(&bytes), "an empty image is not valid\n");
+        }
+        assert!(!directory.exists(), "refused images leave no orphan uploads");
         let _ = std::fs::remove_dir_all(&base);
     }
 
