@@ -280,8 +280,26 @@ pub fn purify_path(roots: &[PathBuf]) -> Option<PathBuf> {
 /// The grammars the page's code-block highlighter loads: exactly the set `src/server/highlight.ts` registers, so
 /// a fence is coloured the same in the page whichever server drew it (C60).
 pub const HIGHLIGHT_GRAMMARS: [&str; 20] = [
-    "bash", "c", "cpp", "css", "diff", "go", "ini", "java", "javascript", "json", "markdown", "php", "plaintext",
-    "python", "ruby", "rust", "sql", "typescript", "xml", "yaml",
+    "bash",
+    "c",
+    "cpp",
+    "css",
+    "diff",
+    "go",
+    "ini",
+    "java",
+    "javascript",
+    "json",
+    "markdown",
+    "php",
+    "plaintext",
+    "python",
+    "ruby",
+    "rust",
+    "sql",
+    "typescript",
+    "xml",
+    "yaml",
 ];
 
 /// One highlight.js module for the page, as the TypeScript route serves it, or `None` for any other name:
@@ -448,19 +466,48 @@ mod tests {
         let package = root.join("node_modules/highlight.js");
         std::fs::create_dir_all(package.join("lib")).unwrap();
         std::fs::create_dir_all(package.join("es/languages")).unwrap();
-        std::fs::write(package.join("lib/core.js"), "module.exports = { core: true };").unwrap();
-        std::fs::write(package.join("es/languages/rust.js"), "export default function rust() {}").unwrap();
-        std::fs::write(package.join("es/languages/haskell.js"), "export default function haskell() {}").unwrap();
+        std::fs::write(
+            package.join("lib/core.js"),
+            "module.exports = { core: true };",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("es/languages/rust.js"),
+            "export default function rust() {}",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("es/languages/haskell.js"),
+            "export default function haskell() {}",
+        )
+        .unwrap();
         let roots = vec![PathBuf::from("/nowhere"), root.clone()];
         assert_eq!(
             highlight_asset(&roots, "core.js").as_deref(),
-            Some("const module = { exports: {} };\nconst exports = module.exports;\nmodule.exports = { core: true };\nexport default module.exports;\n")
+            Some(
+                "const module = { exports: {} };\nconst exports = module.exports;\nmodule.exports = { core: true };\nexport default module.exports;\n"
+            )
         );
-        assert_eq!(highlight_asset(&roots, "languages/rust.js").as_deref(), Some("export default function rust() {}"));
-        assert_eq!(highlight_asset(&roots, "languages/haskell.js"), None, "a grammar the server does not register is not served");
-        assert_eq!(highlight_asset(&roots, "languages/../lib/core.js"), None, "nor any other file");
+        assert_eq!(
+            highlight_asset(&roots, "languages/rust.js").as_deref(),
+            Some("export default function rust() {}")
+        );
+        assert_eq!(
+            highlight_asset(&roots, "languages/haskell.js"),
+            None,
+            "a grammar the server does not register is not served"
+        );
+        assert_eq!(
+            highlight_asset(&roots, "languages/../lib/core.js"),
+            None,
+            "nor any other file"
+        );
         assert_eq!(highlight_asset(&roots, "lib/core.js"), None);
-        assert_eq!(highlight_asset(&[PathBuf::from("/nowhere")], "core.js"), None, "no package, no module");
+        assert_eq!(
+            highlight_asset(&[PathBuf::from("/nowhere")], "core.js"),
+            None,
+            "no package, no module"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

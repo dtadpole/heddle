@@ -459,7 +459,10 @@ impl ServerBuilder {
             .route("/api/html", get(html_preview))
             .route("/vendor/purify.js", get(purify))
             .route("/vendor/highlight/core.js", get(highlight_core))
-            .route("/vendor/highlight/languages/{grammar}", get(highlight_grammar));
+            .route(
+                "/vendor/highlight/languages/{grammar}",
+                get(highlight_grammar),
+            );
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
@@ -1840,7 +1843,10 @@ async fn get_questions(
     };
     let all = query.get("all").is_some_and(|value| value == "1");
     let (status, body) = questions.get(query.get("session").map(String::as_str), all);
-    respond::raw_json(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), body)
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        body,
+    )
 }
 
 /// `POST /api/questions/<id>`: one answer batch. A late answer comes back in the body for the page to deliver.
@@ -1866,7 +1872,10 @@ fn question_post(state: &AppState, id: &str, hold: bool, body: JsonBody) -> Resp
         return respond::plugin_missing("questions");
     };
     let (status, text) = questions.post(id, hold, &Value::Object(body.0));
-    respond::raw_json(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), text)
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        text,
+    )
 }
 
 async fn get_todo(
@@ -2041,7 +2050,10 @@ fn highlight_module(state: &AppState, name: &str) -> Response {
             .header("cache-control", "no-store")
             .body(Body::from(module))
             .expect("a response builder with static headers"),
-        None => respond::text(StatusCode::NOT_FOUND, "that highlighter module is not served\n"),
+        None => respond::text(
+            StatusCode::NOT_FOUND,
+            "that highlighter module is not served\n",
+        ),
     }
 }
 
