@@ -1250,9 +1250,10 @@ async fn steer_session(
     content.extend(attachments);
     // Queued, not written: the running loop writes it at its next step boundary (#31).
     match state.harness().sessions.queue_steer(id.as_str(), content) {
-        Ok(()) => respond::json(
+        // The steer's id lets the page keep the row as "steering" until the claimed message names it (#31).
+        Ok(steer_id) => respond::json(
             StatusCode::OK,
-            &json!({"accepted": true, "session": id.to_string()}),
+            &json!({"accepted": true, "session": id.to_string(), "steerId": steer_id}),
         ),
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }

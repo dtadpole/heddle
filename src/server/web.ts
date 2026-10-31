@@ -1,5 +1,5 @@
 import { contextWindowFromModelList } from '../llm/model-info.ts'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { networkInterfaces } from 'node:os'
@@ -1998,8 +1998,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * the page drew it above the tool row. A turn that ends with the steer still pending takes another step
      * for it, and a stopped turn leaves it for the next turn to claim before its prompt.
      */
-    queueSteer(ctx.session.store, handle, [{ type: 'text', text: prompt }, ...steerAttachments])
-    respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id }, null, 2)}\n`)
+    /**
+     * The steer's id travels in its source, so the message the loop writes when it claims the steer names it, and in
+     * the answer, so the page keeps the row as "steering" until that message arrives (DSH's queue shows a steer until
+     * it is claimed). Without it the page dropped the row on this 200 and the steer was visible nowhere until the
+     * step boundary (#31).
+     */
+    const steerId = `steer-${randomUUID()}`
+    queueSteer(ctx.session.store, handle, [{ type: 'text', text: prompt }, ...steerAttachments], { kind: 'steer', steerId })
+    respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id, steerId }, null, 2)}\n`)
     return
   }
 

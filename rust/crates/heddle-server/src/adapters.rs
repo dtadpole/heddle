@@ -262,7 +262,7 @@ impl SessionService for StoreSessions {
             .map_err(failure)
     }
 
-    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError> {
+    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<String, ServiceError> {
         let handle = self
             .handle(id)
             .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
@@ -271,8 +271,17 @@ impl SessionService for StoreSessions {
             .map(serde_json::from_value::<heddle_session::ContentPart>)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ServiceError::new(format!("a content part is malformed: {error}")))?;
-        heddle_session::inbox::queue_steer(self.service.store(), &handle, parts, None)
-            .map(|_| ())
+        // Unique within this server: the clock in nanoseconds and a process-wide counter.
+        static STEERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let count = STEERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let steer_id = format!("steer-{nanos:x}-{count}");
+        let source = serde_json::json!({ "kind": "steer", "steerId": steer_id });
+        heddle_session::inbox::queue_steer(self.service.store(), &handle, parts, Some(source))
+            .map(|_| steer_id)
             .map_err(|error| ServiceError::new(error.to_string()))
     }
 

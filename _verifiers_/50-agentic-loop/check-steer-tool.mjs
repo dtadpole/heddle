@@ -155,7 +155,10 @@ test('a steer sent during a step that calls a tool is written after the result, 
       method: 'POST',
       body: JSON.stringify({ prompt: 'STEER: reply with only the word STEERED' }),
     })
-    assert.equal(steer.status, 200, `the steer was accepted while the turn ran\n${await steer.text()}`)
+    const accepted = await steer.text()
+    assert.equal(steer.status, 200, `the steer was accepted while the turn ran\n${accepted}`)
+    const steerId = JSON.parse(accepted).steerId
+    assert.ok(typeof steerId === 'string' && steerId.length > 0, `the answer names the steer, so a page can follow it until it is claimed\n${accepted}`)
     const text = await turn.done
     assert.doesNotMatch(text, /^event: error$/m, `the turn did not fail\n${text.slice(-1500)}`)
 
@@ -165,6 +168,7 @@ test('a steer sent during a step that calls a tool is written after the result, 
     const steered = events.findIndex((event) => event.type === 'message' && event.message?.role === 'user' && textOf(event).includes('STEER:'))
     assert.ok(result >= 0 && steered >= 0, `the tool result and the steer are both logged\n${types}`)
     assert.ok(steered > result, `the steer is written after the tool's result, not between the call and it\n${types}`)
+    assert.equal(events[steered].message?.source?.steerId, steerId, 'and the claimed message names the steer it was')
 
     const next = double.requests.find((messages) => JSON.stringify(messages).includes('STEER:'))
     assert.ok(next, 'the steer reached the model')

@@ -5562,6 +5562,7 @@ function scheduleTreeRefresh() {
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
+  if (event.type === 'message' && event.message?.role === 'user') claimSteer(payload.session, event.message)
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -6307,11 +6308,26 @@ function enqueue(text, where, attachments = []) {
  * window closed. So a refusal falls back rather than failing: the message is not lost, it is next in the wait.
  */
 async function deliverSteered(text, attachments = []) {
-  if (await steerNow(text, attachments)) return
-  enqueue(text, 'steer', attachments)
+  const steered = await steerNow(text, attachments)
+  if (steered === false) {
+    enqueue(text, 'steer', attachments)
+    return
+  }
+  if (steered !== '') {
+    queueOf().unshift({ id: `queued-${++queueSeq}`, text, attachments, status: 'steering', steerId: steered })
+    renderQueue()
+  }
 }
 
-/** One steer attempt. `true` means the message is in the running turn; `false` means it was refused. */
+/**
+ * One steer attempt: the steer's id when the running turn accepted it, `''` when the server wrote it at once, or
+ * `false` when it was refused.
+ *
+ * An accepted steer waits in the session's next-step inbox until the loop claims it at its step boundary (#31,
+ * DSH's steer). Its row stays in the dock as "steering" until the message the claim writes, whose source names the
+ * steer's id, arrives on the stream (`claimSteer`). DSH's queue shows a steer the same way. Dropping the row on
+ * this answer left the steer visible nowhere until the claim, for up to a whole model step.
+ */
 async function steerNow(text, attachments = []) {
   if (composerKey === QUEUE_KEY_NONE) return false
   try {
@@ -6320,7 +6336,10 @@ async function steerNow(text, attachments = []) {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: text, ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}) }),
     })
-    if (response.ok) return true
+    if (response.ok) {
+      const body = await response.json().catch(() => ({}))
+      return typeof body.steerId === 'string' ? body.steerId : ''
+    }
     if (response.status === 409) return false
     const detail = await response.text().catch(() => '')
     add('denied', `could not steer: ${detail.trim().replace(/\s+/g, ' ').slice(0, 200) || response.status}`)
@@ -6343,10 +6362,9 @@ async function steerItem(id) {
   const at = queue.findIndex((item) => item.id === id)
   if (at === -1) return
   const item = queue[at]
-  if (item !== undefined && item.status !== 'sending' && (await steerNow(item.text, item.attachments ?? []))) {
-    const landed = queue.findIndex((entry) => entry.id === id)
-    if (landed !== -1) queue.splice(landed, 1)
-    renderQueue()
+  const steered = item !== undefined && item.status !== 'sending' && item.status !== 'steering' ? await steerNow(item.text, item.attachments ?? []) : false
+  if (steered !== false) {
+    settleSteered(queue, id, steered)
     void pumpQueue()
     return
   }
@@ -6370,13 +6388,40 @@ async function steerQueue() {
   for (const item of queue) if (item.status === 'failed') item.status = 'pending'
   renderQueue()
   for (const item of [...queue]) {
-    if (item.status === 'sending') continue
-    if (!(await steerNow(item.text, item.attachments ?? []))) break
-    const at = queue.findIndex((entry) => entry.id === item.id)
-    if (at !== -1) queue.splice(at, 1)
-    renderQueue()
+    if (item.status === 'sending' || item.status === 'steering') continue
+    const steered = await steerNow(item.text, item.attachments ?? [])
+    if (steered === false) break
+    settleSteered(queue, item.id, steered)
   }
   void pumpQueue()
+}
+
+/** A row the running turn accepted as a steer: kept as "steering" until its claim arrives, or retired at once. */
+function settleSteered(queue, id, steerId) {
+  const at = queue.findIndex((entry) => entry.id === id)
+  if (at === -1) return
+  if (steerId === '') queue.splice(at, 1)
+  else {
+    queue[at].status = 'steering'
+    queue[at].steerId = steerId
+  }
+  renderQueue()
+}
+
+/**
+ * The loop claimed a steer: the message it wrote names the steer's id in its source, and the row retires.
+ *
+ * Read for every session's stream, since the row lives in that session's queue whichever session the panel shows.
+ */
+function claimSteer(session, message) {
+  const steerId = message?.source?.kind === 'steer' ? message.source.steerId : undefined
+  if (typeof steerId !== 'string') return
+  const queue = queues.get(session)
+  if (queue === undefined) return
+  const at = queue.findIndex((entry) => entry.steerId === steerId)
+  if (at === -1) return
+  queue.splice(at, 1)
+  if (session === composerKey) renderQueue()
 }
 
 function removeItem(id) {
@@ -6392,7 +6437,8 @@ function removeItem(id) {
 function queueActions(item, isEditing) {
   const wrap = document.createElement('div')
   wrap.className = 'actions'
-  const sending = item.status === 'sending'
+  // A row being sent, or a steer waiting for the loop to claim it, refuses all three (DSH's rule for an in-flight row).
+  const sending = item.status === 'sending' || item.status === 'steering'
   /** A queue action's mark is DSH's outline artwork, not a font glyph: the page's own icons come from the same set. */
   const action = (icon, label, disabled, run) => {
     const button = document.createElement('button')
@@ -6484,10 +6530,10 @@ function queueRow(item) {
   preview.textContent = queuePreview(item.text)
   preview.title = item.text
   row.append(preview)
-  if (item.status === 'sending' || item.status === 'failed') {
+  if (item.status === 'sending' || item.status === 'failed' || item.status === 'steering') {
     const status = document.createElement('span')
     status.className = 'status'
-    status.textContent = item.status === 'sending' ? 'Sending…' : 'Not sent'
+    status.textContent = item.status === 'sending' ? 'Sending…' : item.status === 'steering' ? 'Steering…' : 'Not sent'
     row.append(status)
   }
   row.append(queueActions(item, false))

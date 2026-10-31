@@ -214,10 +214,11 @@ pub trait SessionService: Send + Sync {
     fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError>;
 
     /// Queue a steer in the session's next-step inbox: the running loop writes it at its next step boundary,
-    /// after the result of any tool call still running (#31; DSH's steer). A service with no inbox writes it at
-    /// once.
-    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError> {
-        self.user_content(id, content)
+    /// after the result of any tool call still running (#31; DSH's steer). Answers the steer's id, which the
+    /// claimed message carries in its source (`{"kind": "steer", "steerId": ...}`) so the page can keep the row
+    /// as "steering" until then. A service with no inbox writes it at once and answers an empty id.
+    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<String, ServiceError> {
+        self.user_content(id, content).map(|()| String::new())
     }
 
     /// The folder the session belongs to, if it has one.
