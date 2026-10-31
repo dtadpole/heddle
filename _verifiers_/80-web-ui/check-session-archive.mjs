@@ -287,12 +287,12 @@ test('an archived session is restored from Archived only and from search, and a 
       'naming the session and the way back',
     )
     /**
-     * The work the server named, family by family: the turn, and its running bash call, which is a job as well (dsh-tool-bash
-     * registers every call's process with `ctx.jobs` as it starts, lib/index.js:210-216). Judged as a set: DSH's order is
-     * turn, job, subagent, schedule, and the server's order, with the schedule family, is fixed in
-     * hd/developer-eight-archive-activity (R-developer-eight-13).
+     * The work the server named, family by family, in the order it named it: the turn, then its running bash call, which
+     * is a job as well (dsh-tool-bash registers every call's process as an owned job as it starts, lib/index.js:386-410).
+     * DSH's order is turn, job, subagent, schedule — each listener puts its family before the rest and the turn's is
+     * registered first (src/session/activity.ts) — and the dialog draws the families as received, as DSH's does.
      */
-    assert.deepEqual([...dialog.work].sort(), ['1 background job: sleep 40', 'The turn in progress'], `and listing the work the server named\nsaw: ${JSON.stringify(dialog.work)}`)
+    assert.deepEqual(dialog.work, ['The turn in progress', '1 background job: sleep 40'], `and listing the work the server named, in DSH's order\nsaw: ${JSON.stringify(dialog.work)}`)
     assert.equal(dialog.action, 'Stop and archive')
     await browser.evaluate(`[...document.querySelectorAll('#session-archive [data-ws-close]')].find((button) => button.textContent.trim() === 'Cancel').click()`)
     assert.equal(await browser.evaluate(`document.getElementById('session-archive').open`), false, 'Cancel closes it')
