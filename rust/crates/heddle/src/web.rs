@@ -133,6 +133,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
         harness.interrupter = Some(Arc::new(LiveTurns { turns }));
     }
+    // The jobs row: a session's live background jobs block its archive and are stopped by `stop: true`.
+    if let Some(jobs) = boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs") {
+        harness.activity = Some(Arc::new(JobActivity {
+            jobs: jobs.registry.clone(),
+        }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -1179,6 +1185,29 @@ struct LiveTurns {
 impl heddle_server::services::TurnInterrupter for LiveTurns {
     fn interrupt(&self, session: &str) -> bool {
         self.turns.abort(session, Some("stopped by the user"))
+    }
+}
+
+/// The jobs row as the server's archive admission (`sessionJobActivity` / `stopSessionJobs` in the TypeScript
+/// build's `src/jobs/http.ts`).
+struct JobActivity {
+    jobs: heddle_jobs::JobRegistry,
+}
+
+impl heddle_server::services::SessionActivity for JobActivity {
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        heddle_jobs::http::session_job_activity(&self.jobs, session)
+            .into_iter()
+            .map(|(id, label)| heddle_server::services::ActivityItem {
+                kind: heddle_server::services::ActivityKind::Job,
+                id,
+                label,
+            })
+            .collect()
+    }
+
+    fn stop(&self, session: &str) {
+        heddle_jobs::http::stop_session_jobs(&self.jobs, session);
     }
 }
 
