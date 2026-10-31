@@ -23,6 +23,17 @@ a display or a window.
 `check-bash-timeout.mjs` holds a bash call's own `timeoutMs` to DSH's rule: a value that is not a finite positive number
 is refused and the command does not run, a larger one is cut to the tools row's `bashMaxTimeoutMs` (DSH's `maxTimeoutMs`,
 ten minutes by default; live-testing issue #13).
+`check-read-errors.mjs` holds a failed `read_file` to DSH's sentences: a missing file is `FS_NOT_FOUND` and a directory
+`FS_NOT_REGULAR_FILE`, each naming the path (live-testing issue #4).
+`check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
+(live-testing issue #96: the TypeScript build decoded each chunk alone).
+`check-output-limit.mjs` holds bash output to the tools row's `bashOutputLimit`: a cut keeps the **end** of the output
+and names a file holding all of it, `[output truncated; full output: <path>]`, as DSH's bash does (live-testing issue #83).
+`check-failed-output.mjs` holds a failed bash call to keeping what it printed: the error line first, then its stdout
+and stderr, as DSH's renderResult keeps the body of a non-zero exit (live-testing issue #82).
+`check-stdin-eof.mjs` holds a bash command that reads stdin to end-of-file at once, as DSH's shell leaves stdin closed.
+It covers a harness started with its own stdin ignored and one started with an open pipe on stdin, which the command
+must not inherit (live-testing issue #97).
 
 ## Under `HEDDLE_BIN`
 

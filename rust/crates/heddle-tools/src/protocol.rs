@@ -229,6 +229,14 @@ pub struct DeclaredTool {
     /// JSON Schema for the arguments; an empty object when the component omitted it.
     #[serde(default = "empty_object")]
     pub parameters: serde_json::Value,
+    /// Whether a call may share a model step's parallel group (DSH's `isConcurrencySafe`, the TypeScript build's
+    /// `concurrencySafe` on a plugin's tool). Absent or `false`: the call runs alone, as before.
+    #[serde(
+        default,
+        rename = "concurrencySafe",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub concurrency_safe: bool,
 }
 
 fn empty_object() -> serde_json::Value {

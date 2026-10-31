@@ -263,11 +263,94 @@ impl BegunTurn {
             started,
             live,
         } = self;
-        let result = run_turn_body(&runtime, &options, cancel, started).await;
+        let stopped = cancel.clone();
+        let mut progress = TurnProgress::default();
+        let result = run_turn_body(&runtime, &options, cancel, started, &mut progress).await;
+        if let Err(error) = &result {
+            record_unfinished(
+                &runtime,
+                &options.session,
+                error,
+                stopped
+                    .as_ref()
+                    .is_some_and(CancellationToken::is_cancelled),
+                &progress,
+            );
+        }
         if let Some(live) = &live {
             live.settle();
         }
         result
+    }
+}
+
+/// What a turn has done so far, kept where [`BegunTurn::run`] can read it when the body returns an error.
+#[derive(Debug, Default)]
+struct TurnProgress {
+    text: String,
+    reasoning: String,
+    rounds: u32,
+    denials: usize,
+    /// Whether the turn's `assistant/completed` is already in the log.
+    completed: bool,
+}
+
+/// End a turn that returned an error, durably (#16, #29; `recordUnfinished` in the TypeScript build).
+///
+/// A turn whose model call failed (a refused connection, a timeout, a provider error) returned before its
+/// `assistant/completed` and `turn/completed`: the live stream showed the error, but the log kept only the
+/// prompt, so a reload or a second tab saw a message with no answer and no failure. DSH's loop appends
+/// `turn/end` with its reason in a `finally`. Here the turn ends the way a stopped turn already does:
+/// `assistant/completed` names the reason in `ended`, which the transcript draws as the turn's notice, and
+/// `turn/completed` closes it. A failure to write the record is ignored; the caller still gets the turn's error.
+///
+/// The record keeps what the turn did before it failed: the answer of its earlier rounds, its reasoning, its
+/// round and denial counts (developer-five's review). A turn whose completion was already written (only the
+/// closing `turn/completed` failed) is not completed twice.
+fn record_unfinished(
+    runtime: &AgentRuntime,
+    session: &SessionHandle,
+    error: &TurnError,
+    stopped: bool,
+    progress: &TurnProgress,
+) {
+    let message = error.to_string();
+    let reason = if stopped {
+        "stopped by the caller".to_owned()
+    } else {
+        format!("failed: {message}")
+    };
+    let mut completed = serde_json::Map::from_iter([
+        ("text".to_owned(), serde_json::json!(progress.text)),
+        (
+            "reasoning".to_owned(),
+            serde_json::json!(progress.reasoning),
+        ),
+        (
+            "finishReason".to_owned(),
+            serde_json::json!(if stopped { "aborted" } else { "error" }),
+        ),
+        ("rounds".to_owned(), serde_json::json!(progress.rounds)),
+        ("denials".to_owned(), serde_json::json!(progress.denials)),
+        ("ended".to_owned(), serde_json::json!([reason])),
+    ]);
+    let mut closed =
+        serde_json::Map::from_iter([("rounds".to_owned(), serde_json::json!(progress.rounds))]);
+    if stopped {
+        closed.insert("stopped".to_owned(), serde_json::json!(true));
+    } else {
+        completed.insert("error".to_owned(), serde_json::json!(message));
+        closed.insert("error".to_owned(), serde_json::json!(message));
+    }
+    if progress.completed
+        || runtime
+            .session
+            .append(session, events::ASSISTANT_COMPLETED, completed)
+            .is_ok()
+    {
+        let _ = runtime
+            .session
+            .append(session, events::TURN_COMPLETED, closed);
     }
 }
 
@@ -281,6 +364,16 @@ pub fn begin_turn(runtime: &AgentRuntime, options: RunTurnOptions) -> Result<Beg
         .turns
         .as_ref()
         .map(|turns| turns.begin(&options.session.id, options.cancel.as_ref()));
+    begin_registered(runtime, options, live)
+}
+
+/// [`begin_turn`] with the registration already made: at once by `begin_turn`, or after the session's queue by
+/// [`run_turn`].
+fn begin_registered(
+    runtime: &AgentRuntime,
+    options: RunTurnOptions,
+    live: Option<crate::turns::LiveTurn>,
+) -> Result<BegunTurn, TurnError> {
     let cancel = match (&live, &options.cancel) {
         (Some(live), _) => Some(live.token().clone()),
         (None, Some(caller)) => Some(caller.clone()),
@@ -329,7 +422,18 @@ pub async fn run_turn(
     runtime: &AgentRuntime,
     options: RunTurnOptions,
 ) -> Result<TurnResult, TurnError> {
-    begin_turn(runtime, options)?.run().await
+    // One turn at a time per session (#28): a turn sent to a busy session waits for the running one, as DSH's
+    // follow-up does. `begin_turn` keeps registering at once, for a caller that needs the prompt durable before
+    // it polls anything and starts turns only on idle sessions.
+    let live = match runtime.turns.as_ref() {
+        Some(turns) => Some(
+            turns
+                .begin_queued(&options.session.id, options.cancel.as_ref())
+                .await,
+        ),
+        None => None,
+    };
+    begin_registered(runtime, options, live)?.run().await
 }
 
 /// One turn's body, after [`begin_turn`] wrote the prompt.
@@ -338,6 +442,7 @@ async fn run_turn_body(
     options: &RunTurnOptions,
     cancel: Option<CancellationToken>,
     started: usize,
+    progress: &mut TurnProgress,
 ) -> Result<TurnResult, TurnError> {
     let session = &options.session;
     let max_rounds = match options.max_rounds {
@@ -378,6 +483,7 @@ async fn run_turn_body(
         // them is written now, after them. A stop is checked first, so a stopped turn leaves its steer pending.
         runtime.session.claim_pending_input(session)?;
         rounds += 1;
+        progress.rounds = rounds;
 
         // Keep the runtime-context snapshot current before the round measures what the person has said, so
         // the harness's own snapshot is never mistaken for a steered message.
@@ -431,7 +537,7 @@ async fn run_turn_body(
         loop {
             input_before = user_input_seqs(runtime.session.as_ref(), session);
 
-            let request = GenerateRequest {
+            let asked = GenerateRequest {
                 endpoint: options.endpoint.clone(),
                 model: options.model.clone(),
                 messages: prepared.messages.clone(),
@@ -444,18 +550,21 @@ async fn run_turn_body(
                 purpose: options.purpose.clone(),
                 ..GenerateRequest::default()
             };
+            // The record names the request this step sends, not the one the turn started with (issue #14): the
+            // server's running-turn rule on the `model/request` waterfall moves a step to the session's current
+            // endpoint, model and level, and a record written from the turn's options logged a step that went to
+            // the new model under the old one. DSH's request header names what was actually used. The request is
+            // resolved once: the record (route and counts) and the call both take that answer, and the call goes out
+            // through `stream_resolved`, which does not run the waterfall again.
+            let request = runtime.model.resolve(asked).map_err(TurnError::Model)?;
             runtime.session.model_request(
                 session,
                 &ModelRequestRecord {
-                    endpoint: options.endpoint.clone(),
-                    model: options.model.clone(),
-                    reasoning_effort: options.reasoning_effort.clone(),
-                    messages: prepared.messages.len(),
-                    tools: prepared
-                        .tools
-                        .iter()
-                        .map(|tool| tool.name.clone())
-                        .collect(),
+                    endpoint: request.endpoint.clone(),
+                    model: request.model.clone(),
+                    reasoning_effort: request.reasoning_effort.clone(),
+                    messages: request.messages.len(),
+                    tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
                     estimated_tokens: report.estimated_tokens,
                     threshold_tokens: report.threshold_tokens,
                     pruned: report.pruned,
@@ -465,7 +574,7 @@ async fn run_turn_body(
                 },
             )?;
 
-            let mut stream = runtime.model.stream(request, cancel.clone());
+            let mut stream = runtime.model.stream_resolved(request, cancel.clone());
             let mut failure: Option<ModelError> = None;
             while let Some(item) = stream.next().await {
                 match item {
@@ -473,8 +582,17 @@ async fn run_turn_body(
                         // Recorded as it arrives: an interrupted turn shows the half of the answer that came.
                         runtime.session.assistant_chunk(session, &chunk)?;
                         match &chunk {
-                            Chunk::TextDelta { text: delta } => round_text.push_str(delta),
-                            Chunk::ReasoningDelta { text: delta } => reasoning.push_str(delta),
+                            Chunk::TextDelta { text: delta } => {
+                                round_text.push_str(delta);
+                                // The round's partial answer is the turn's answer so far (the last non-empty
+                                // round), should the stream fail before the round ends; a round with no text
+                                // yet leaves the previous answer.
+                                progress.text.clone_from(&round_text);
+                            }
+                            Chunk::ReasoningDelta { text: delta } => {
+                                reasoning.push_str(delta);
+                                progress.reasoning.push_str(delta);
+                            }
                             Chunk::ToolCall(call) => calls.push((
                                 call.id.clone(),
                                 call.name.clone(),
@@ -567,7 +685,14 @@ async fn run_turn_body(
             attempt += 1;
         }
 
-        text.push_str(&round_text);
+        // The turn's answer is its last non-empty round, DSH's rule for what a run hands back (`dsh-subagent`
+        // `finalAssistantOutput`: "the last non-empty assistant message"). Adding every round's text fused the remark a
+        // model makes before a tool call to its answer in the API's answer, the CLI's printed answer and a child's
+        // closing message (live-testing issue #9). The log keeps every round's own message.
+        if !round_text.is_empty() {
+            text.clone_from(&round_text);
+        }
+        progress.text.clone_from(&text);
 
         // A message that arrived while the model was answering is answered by this turn (steering): one that
         // waits in the inbox (a steer) or one written straight to the log (a teammate's mail). DSH takes
@@ -657,6 +782,7 @@ async fn run_turn_body(
                         code: error.code.clone(),
                         message: error.message.clone(),
                     });
+                    progress.denials = denials.len();
                 }
                 let mut answer = Message::new(
                     Role::Tool,
@@ -690,6 +816,7 @@ async fn run_turn_body(
     runtime
         .session
         .append(session, events::ASSISTANT_COMPLETED, completed)?;
+    progress.completed = true;
     runtime.session.append(
         session,
         events::TURN_COMPLETED,
@@ -761,8 +888,19 @@ pub fn parse_arguments(raw: &str) -> ToolArgs {
 
 /// The text of the `tool` message that answers a call: `error (<code>): <message>` for an error, the output
 /// otherwise, and `(the tool produced no output)` for an empty one.
+///
+/// A failed result keeps what it printed below its error line (live-testing issue #82: a bash call that exited 7
+/// reached the model as the bare error sentence, its stdout and stderr dropped). DSH's bash `renderResult` keeps the
+/// body and adds an exit marker; the error line stays first because the page reads the first line as the failed
+/// row's summary.
 pub fn tool_message_text(result: &ToolResult) -> String {
     match &result.error {
+        Some(error) if !result.output.is_empty() => {
+            format!(
+                "error ({}): {}\n{}",
+                error.code, error.message, result.output
+            )
+        }
         Some(error) => format!("error ({}): {}", error.code, error.message),
         None if result.output.is_empty() => "(the tool produced no output)".to_owned(),
         None => result.output.clone(),
@@ -796,6 +934,27 @@ pub(crate) mod tests {
     use super::*;
     use crate::ports::ModelRequestRecord;
     use crate::upstream::{Chunk, Message, SurfaceView};
+
+    #[test]
+    fn a_failed_result_keeps_its_output_below_the_error_line() {
+        // Live-testing issue #82: the output of a failed bash call was dropped from the model-facing text.
+        let failed = ToolResult::ok("stdout-marker\nstderr-marker\n")
+            .with_error("EXIT", "the command exited 7");
+        assert_eq!(
+            tool_message_text(&failed),
+            "error (EXIT): the command exited 7\nstdout-marker\nstderr-marker\n"
+        );
+        let bare = ToolResult::refused("INTERRUPTED", "the command was stopped before it finished");
+        assert_eq!(
+            tool_message_text(&bare),
+            "error (INTERRUPTED): the command was stopped before it finished"
+        );
+        assert_eq!(tool_message_text(&ToolResult::ok("ok\n")), "ok\n");
+        assert_eq!(
+            tool_message_text(&ToolResult::ok("")),
+            "(the tool produced no output)"
+        );
+    }
 
     #[test]
     fn new_input_is_a_position_that_was_not_there_before() {
@@ -1171,6 +1330,8 @@ pub(crate) mod tests {
     enum Step {
         Chunks(Vec<Chunk>),
         Fail(ModelError),
+        /// Some chunks, then a failure mid-stream.
+        ChunksThenFail(Vec<Chunk>, ModelError),
     }
 
     /// A model double: one scripted step per call, and every request kept for the assertions.
@@ -1178,6 +1339,12 @@ pub(crate) mod tests {
         steps: Mutex<VecDeque<Step>>,
         requests: Mutex<Vec<GenerateRequest>>,
         on_stream: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// `(endpoint, model, level)` a selection policy moves every call to, as the server's running-turn rule
+        /// does on the `model/request` waterfall; `None` sends each request as it was built.
+        moves_to: Option<(String, String, String)>,
+        /// How many times the loop resolved a request, and how many resolved requests it streamed.
+        resolves: std::sync::atomic::AtomicUsize,
+        resolved_streams: std::sync::atomic::AtomicUsize,
     }
 
     impl ScriptedModel {
@@ -1186,6 +1353,20 @@ pub(crate) mod tests {
                 steps: Mutex::new(steps.into()),
                 requests: Mutex::new(Vec::new()),
                 on_stream: None,
+                moves_to: None,
+                resolves: Default::default(),
+                resolved_streams: Default::default(),
+            })
+        }
+
+        fn moving_to(steps: Vec<Step>, endpoint: &str, model: &str, level: &str) -> Arc<Self> {
+            Arc::new(Self {
+                steps: Mutex::new(steps.into()),
+                requests: Mutex::new(Vec::new()),
+                on_stream: None,
+                moves_to: Some((endpoint.into(), model.into(), level.into())),
+                resolves: Default::default(),
+                resolved_streams: Default::default(),
             })
         }
 
@@ -1194,6 +1375,9 @@ pub(crate) mod tests {
                 steps: Mutex::new(std::mem::take(&mut *self.steps.lock().unwrap())),
                 requests: Mutex::new(Vec::new()),
                 on_stream: Some(hook),
+                moves_to: None,
+                resolves: Default::default(),
+                resolved_streams: Default::default(),
             })
         }
 
@@ -1216,12 +1400,38 @@ pub(crate) mod tests {
             let items: Vec<Result<Chunk, ModelError>> = match step {
                 Some(Step::Chunks(chunks)) => chunks.into_iter().map(Ok).collect(),
                 Some(Step::Fail(error)) => vec![Err(error)],
+                Some(Step::ChunksThenFail(chunks, error)) => chunks
+                    .into_iter()
+                    .map(Ok)
+                    .chain(std::iter::once(Err(error)))
+                    .collect(),
                 None => vec![Ok(Chunk::Done {
                     finish_reason: "stop".into(),
                     usage: None,
                 })],
             };
             Box::pin(stream::iter(items))
+        }
+
+        fn resolve(&self, mut request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+            self.resolves
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some((endpoint, model, level)) = &self.moves_to {
+                request.endpoint.clone_from(endpoint);
+                request.model = Some(model.clone());
+                request.reasoning_effort = Some(level.clone());
+            }
+            Ok(request)
+        }
+
+        fn stream_resolved(
+            &self,
+            request: GenerateRequest,
+            cancel: Option<CancellationToken>,
+        ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+            self.resolved_streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.stream(request, cancel)
         }
 
         fn default_endpoint(&self) -> Option<String> {
@@ -1683,6 +1893,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_answer_is_the_last_non_empty_round_not_every_round_fused() {
+        // Live-testing issue #9: "I'll read both files." and the answer arrived as one run-on text in the API's
+        // answer, the CLI's printed answer and a child's closing message. DSH hands back the last non-empty
+        // assistant message (dsh-subagent finalAssistantOutput).
+        for (last, expected) in [
+            ("It says hello.", "It says hello."),
+            ("", "I'll read the note."),
+        ] {
+            let session = RecordingSession::new();
+            let model = ScriptedModel::new(vec![
+                Step::Chunks(vec![
+                    Chunk::TextDelta {
+                        text: "I'll read the note.".into(),
+                    },
+                    call_chunk("c1", "read_file", serde_json::json!({ "path": "note.txt" })),
+                    done("tool_calls"),
+                ]),
+                Step::Chunks(vec![Chunk::TextDelta { text: last.into() }, done("stop")]),
+            ]);
+            let runtime = runtime(
+                Arc::clone(&model),
+                Arc::clone(&session),
+                registry_with(vec![answering_tool("read_file", "hello")]),
+                Arc::new(crate::ports::NoTurnHooks),
+            );
+            let result = run_turn(
+                &runtime,
+                RunTurnOptions::new(session_handle(), "scripted", "read the note"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.rounds, 2);
+            assert_eq!(result.text, expected, "last round {last:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn the_round_limit_ends_the_turn_and_says_so() {
         let session = RecordingSession::new();
         let model = ScriptedModel::new(vec![
@@ -1721,6 +1968,91 @@ pub(crate) mod tests {
         );
         let completed = session.event(events::ASSISTANT_COMPLETED).unwrap();
         assert!(completed.fields.contains_key("ended"));
+    }
+
+    #[tokio::test]
+    async fn the_model_request_record_names_what_the_step_was_sent() {
+        // Issue #14: a selection policy moved the call to the session's current model, and the record still named
+        // the model the turn started with, so the log read as if a mid-turn switch had been ignored.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::moving_to(
+            vec![Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ])],
+            "other",
+            "model-two",
+            "low",
+        );
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "answer");
+        options.model = Some("model-one".into());
+        options.reasoning_effort = Some("high".into());
+        run_turn(&runtime, options).await.unwrap();
+        let sent = model.requests();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            (
+                sent[0].endpoint.as_str(),
+                sent[0].model.as_deref(),
+                sent[0].reasoning_effort.as_deref()
+            ),
+            ("other", Some("model-two"), Some("low")),
+            "the call carried the resolved selection"
+        );
+        let record = session.event("model/request").unwrap();
+        assert_eq!(record.fields["endpoint"], "other");
+        assert_eq!(record.fields["model"], "model-two");
+        assert_eq!(record.fields["reasoningEffort"], "low");
+    }
+
+    #[tokio::test]
+    async fn each_round_resolves_its_request_once_and_streams_that_request() {
+        // Issue #14: the request hooks run once per call; the loop streams the very request it recorded.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "list_dir", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![answering_tool("list_dir", "a")]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "list, then answer"),
+        )
+        .await
+        .unwrap();
+        let ordering = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(
+            model.resolves.load(ordering),
+            2,
+            "one resolution per model call"
+        );
+        assert_eq!(
+            model.resolved_streams.load(ordering),
+            2,
+            "each call streamed its resolved request"
+        );
+        assert_eq!(model.requests().len(), 2);
     }
 
     #[tokio::test]
@@ -1890,7 +2222,9 @@ pub(crate) mod tests {
             "the steered message was answered by this turn"
         );
         assert_eq!(model.requests().len(), 2);
-        assert_eq!(result.text, "first second");
+        // The answer is the last non-empty round, the reply to the steered message (DSH's finalAssistantOutput;
+        // issue #9), not both rounds fused.
+        assert_eq!(result.text, " second");
     }
 
     /// Hooks that grant one retry after a failure, the way a compaction listener does.
@@ -2037,6 +2371,202 @@ pub(crate) mod tests {
                 .iter()
                 .any(|kind| kind == events::TURN_RETRY)
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_turn_is_ended_in_the_log_with_its_error() {
+        // Before #16 the log kept only the prompt: a reload or a second tab saw no answer and no failure.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Fail(ModelError {
+            code: None,
+            message: "the provider broke".into(),
+        })]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["failed: the provider broke"])
+        );
+        assert_eq!(completed.fields["error"], "the provider broke");
+        let closed = session.event(events::TURN_COMPLETED).expect("and closed");
+        assert_eq!(closed.fields["error"], "the provider broke");
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_fails_after_a_round_keeps_that_rounds_progress_in_its_record() {
+        // developer-five's review of #16: the record used to say text "", rounds 0, whatever the turn had done.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "looking ".into(),
+                },
+                call_chunk("c1", "nope", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Fail(ModelError {
+                code: None,
+                message: "the provider broke".into(),
+            }),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(completed.fields["text"], "looking ");
+        assert_eq!(completed.fields["rounds"], 2);
+        assert_eq!(completed.fields["denials"], 1, "the unknown tool's refusal");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["failed: the provider broke"])
+        );
+        assert_eq!(
+            session
+                .kinds()
+                .iter()
+                .filter(|kind| *kind == events::ASSISTANT_COMPLETED)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_fails_after_text_keeps_that_partial_text_in_the_record() {
+        // developer-five's re-review: the round's text was copied into the progress only when its stream finished.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::ChunksThenFail(
+            vec![Chunk::TextDelta {
+                text: "partial ".into(),
+            }],
+            ModelError {
+                code: None,
+                message: "the stream broke".into(),
+            },
+        )]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(completed.fields["text"], "partial ");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["failed: the stream broke"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_cut_by_a_stop_after_text_keeps_that_text_in_the_unfinished_record() {
+        // developer-five's third review: the stop must cut a stream that has already streamed text, so the turn
+        // reaches record_unfinished (a stream that ends normally after a stop is the ordinary completion).
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::ChunksThenFail(
+            vec![Chunk::TextDelta {
+                text: "partial ".into(),
+            }],
+            ModelError {
+                code: None,
+                message: "the stream was cancelled".into(),
+            },
+        )]);
+        let token = CancellationToken::new();
+        let stop = token.clone();
+        let model = model.with_stream_hook(Arc::new(move || stop.cancel()));
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "go");
+        options.cancel = Some(token);
+        run_turn(&runtime, options).await.unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the stopped turn is ended in the log");
+        assert_eq!(completed.fields["text"], "partial ");
+        assert_eq!(completed.fields["finishReason"], "aborted");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["stopped by the caller"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_round_cut_after_text_records_that_text_as_the_answer() {
+        // The record follows the last-non-empty-round rule (#9): the cut round's partial text replaces the first
+        // round's remark; a cut round with no text would keep it (a_turn_that_fails_after_a_round_...).
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "looking ".into(),
+                },
+                call_chunk("c1", "nope", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::ChunksThenFail(
+                vec![Chunk::TextDelta {
+                    text: "the answer is".into(),
+                }],
+                ModelError {
+                    code: None,
+                    message: "the stream broke".into(),
+                },
+            ),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(completed.fields["text"], "the answer is");
+        assert_eq!(completed.fields["rounds"], 2);
+        assert_eq!(completed.fields["finishReason"], "error");
     }
 
     #[tokio::test]
