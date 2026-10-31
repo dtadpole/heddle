@@ -1724,7 +1724,12 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
    * append points only, so the view sometimes sat above the bottom while the answer was still growing (the owner's
    * "sometimes it does not follow").
    */
-  const longText = Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n')
+  /**
+   * Forty paragraphs, not forty lines: the settled answer is rendered as markdown without soft breaks, so lines joined
+   * by a single newline collapse into one paragraph once the turn ends. The transcript then shrinks, and a reader
+   * scrolled to the top could sit 0-78 px from the floor (developer-twelve's diagnosis, #94).
+   */
+  const longText = Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n\n')
   const steps = () => [
     ...Array.from({ length: 8 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } } })),
     { toolCall: { name: 'write_file', arguments: { path: join(fixtureDir('unused'), 'never.txt'), content: 'x\n' } } },
@@ -1778,6 +1783,9 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
     /** The settled document and the final layout land after the last append — still at the floor. */
     await new Promise((resolve) => setTimeout(resolve, 1200))
     assert.ok((await distance()) <= 1, `the settled answer is still at the floor (${await distance()}px away)`)
+    /** The precondition for the scroll-back steps below: the settled transcript is tall enough to leave the floor. */
+    const overflow = Number(await browser.evaluate('(() => { const log = document.getElementById("log"); return Math.round(log.scrollHeight - log.clientHeight) })()'))
+    assert.ok(overflow > 300, `the settled transcript overflows its view enough to scroll back (${overflow}px)`)
 
     /**
      * A reader who scrolls back is not yanked, and a second turn keeps growing above them. The wheel is what
@@ -1786,6 +1794,15 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
      */
     await sendMessage(browser, 'one more')
     assert.ok(await browser.waitFor('document.getElementById("send").hidden === true', 10_000), 'the second turn is running')
+    /**
+     * Scrolling back means something only while the transcript overflows its view by more than the claim's 100 px.
+     * Gate runs saw the reader 0 and 78 px from the floor right after scrolling to the top, a transcript momentarily
+     * barely taller than its view (#94). The second turn is still adding rows, so the check waits for the overflow.
+     */
+    assert.ok(
+      await browser.waitFor('(() => { const log = document.getElementById("log"); return log.scrollHeight - log.clientHeight > 300 })()', 10_000).catch(() => false),
+      'the transcript overflows its view enough to scroll back',
+    )
     const markAway = await rows()
     await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = 0 })()')
     await new Promise((resolve) => setTimeout(resolve, 250))
