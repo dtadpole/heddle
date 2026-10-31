@@ -1164,6 +1164,20 @@ async fn title_session(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     let title = title.to_owned();
+    // A title with nothing visible left once cleaned is refused, as DSH's rename refuses it
+    // (`dsh-session-title` lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838); the
+    // store cleans what it accepts (`heddle_session::title_text`). An unknown session is still a `404`
+    // first, as DSH resolves the session before it judges the title.
+    if heddle_session::title_text::clean_session_title(&title).is_empty() {
+        if !state.harness().sessions.exists(id.as_str()) {
+            return respond::no_session(id.as_str());
+        }
+        return respond::error_with_code(
+            StatusCode::BAD_REQUEST,
+            heddle_session::title_text::TITLE_INVALID_MESSAGE,
+            heddle_session::title_text::TITLE_INVALID_CODE,
+        );
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     if let Some(folder) = folder.as_ref()
         && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
@@ -1263,7 +1277,15 @@ async fn steer_session(
 }
 
 async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    let stopped = state.runs().abort(id.as_str());
+    // Every turn of the session, not only the ones this server started (#93): a goal round, a reminder's turn and a
+    // job notice's turn are registered with the agent runtime's live-turn registry, not with `runs`. A turn the
+    // server started is in both and is counted once.
+    let live = state
+        .harness()
+        .interrupter
+        .as_ref()
+        .is_some_and(|interrupter| interrupter.interrupt(id.as_str()));
+    let stopped = state.runs().abort(id.as_str()).max(usize::from(live));
     respond::json(
         StatusCode::OK,
         &json!({"stopped": stopped, "session": id.to_string()}),
@@ -3281,6 +3303,51 @@ mod tests {
         );
         let _ = runner.hub.set(builder.events());
         builder.into_router(3082).expect("the test router")
+    }
+
+    /// The agent runtime's live-turn registry, as a double: one turn this server did not start.
+    #[derive(Default)]
+    struct OneRowTurn {
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::TurnInterrupter for OneRowTurn {
+        fn interrupt(&self, session: &str) -> bool {
+            let mut seen = self.interrupted.lock().unwrap();
+            seen.push(session.to_owned());
+            seen.len() == 1
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_reaches_a_turn_a_row_started_such_as_a_goal_round() {
+        let rows = Arc::new(OneRowTurn::default());
+        let mut with_rows = harness();
+        with_rows.interrupter = Some(rows.clone());
+        let (router, _) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("stop-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let stop = "/api/sessions/session-00000000-0000-0000-0000-000000000001/stop";
+        let (status, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["stopped"], 1,
+            "the goal round was stopped, though the server never started it"
+        );
+        let (_, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["stopped"], 0, "nothing left to stop");
+        assert_eq!(rows.interrupted.lock().unwrap().len(), 2);
     }
 
     async fn post_json(

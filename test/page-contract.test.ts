@@ -89,7 +89,8 @@ test('the collapsed state is not remembered, so a reload cannot hide the tree', 
    */
   assert.doesNotMatch(page, /heddle\.layout\.collapsed/, 'no storage key for the collapsed state')
   assert.doesNotMatch(page, /setItem\(SIDEBAR_COLLAPSED_KEY/, 'and nothing written when it changes')
-  assert.match(page, /\/\*\* Every visit starts wide[\s\S]*?setSidebarCollapsed\(false\)/, 'a load puts the panel back')
+  // Below DSH's 1024-pixel breakpoint the first paint is the rail (live-testing draft developer-ten-9); wide, the panel.
+  assert.match(page, /Every visit starts wide on a wide window[\s\S]*?\npaintSidebarCollapse\(\)\n/, 'a load puts the panel back on a wide window')
 })
 
 test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the panel first", () => {
@@ -100,7 +101,7 @@ test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the pan
    */
   assert.match(page, /\{ key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table')
   assert.match(page, /if \(action === 'sidebar'\) \{/, 'and the handler acts on it')
-  assert.match(page, /if \(sidebarCollapsed\(\)\) setSidebarCollapsed\(false\)/, 'search opens the panel first')
+  assert.match(page, /if \(sidebarCollapsed\(\)\) openSidebar\(\)/, 'search opens the panel first')
 })
 
 test('the right panel is a tablist, with a tab and a panel for each view', () => {
@@ -194,11 +195,18 @@ test('New session starts in the workspace row the person opened or added, not th
   assert.match(page, /if \(node\.kind === 'workspace'\) \{\s*if \(li\.dataset\.open !== 'true'\) chooseWorkspace\(node\.path\)/, 'opening a workspace row chooses it')
   const show = page.slice(page.indexOf('async function showSession(id) {'))
   assert.match(show.slice(0, show.indexOf('\n}\n')), /if \(current !== id\) chooseWorkspace\(null\)\s*current = id/, 'and opening another session forgets the choice')
-  /** Add workspace shows what it registered through showNewWorkspace, which first use's default workspace shares (C39). */
+  /**
+   * Add workspace shows what it registered through showNewWorkspace, which first use's default workspace shares (C39);
+   * only Add workspace then opens a session there (#22), and first use opens none (D-056).
+   */
   const adopt = page.slice(page.indexOf('async function adoptWorkspace(path) {'))
-  assert.match(adopt.slice(0, adopt.indexOf('\n}\n')), /await showNewWorkspace\(/, 'adding one shows the workspace it registered')
-  const shown = page.slice(page.indexOf('async function showNewWorkspace(added) {'))
-  assert.match(shown.slice(0, shown.indexOf('\n}\n')), /chooseWorkspace\(added\)/, 'and so does adding one')
+  assert.match(adopt.slice(0, adopt.indexOf('\n}\n')), /await showNewWorkspace\([^\n]*\{ openSession: true \}\)/, 'adding one shows the workspace it registered and opens a session')
+  const shown = page.slice(page.indexOf('async function showNewWorkspace(added, '))
+  const shownBody = shown.slice(0, shown.indexOf('\n}\n'))
+  assert.match(shownBody, /chooseWorkspace\(added\)/, 'and so does adding one')
+  assert.match(shownBody, /if \(openSession\) await startSessionAt\(\{ path: added \}\)\s*else chooseSelected\(added\)/, 'a session only when asked')
+  const first = page.slice(page.indexOf('async function initializeDefaultWorkspace() {'))
+  assert.doesNotMatch(first.slice(0, first.indexOf('\n}\n')), /openSession/, 'first use opens no session')
   const select = page.slice(page.indexOf('async function selectSession(node) {'))
   assert.match(
     select.slice(0, select.indexOf('\n}\n')),
