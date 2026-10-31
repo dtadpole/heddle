@@ -1455,6 +1455,46 @@
     #tree .status-dot .spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
   }
 
+  /* hover-card-style:begin */
+  /**
+   * The row hover card (C22 session rows, C41 workspace rows), measured from DSH: the `HoverCard` primitive's compact card
+   * (fixed, 244px wide, 12px 16px padding, radius 16, `#2C2C2E` in both themes) and the workspace browser's `hover*` row
+   * styles (a column 8px apart; the title white 14/20, the path and time `#cfd3d6` 12/16, a status line `#adb2b8` 12/20
+   * after its dot) with the schedule plugin's task section (`mBt53q_task*`). A copyable card is a hand, as DSH's is.
+   */
+  .hover-card {
+    position: fixed; z-index: 100; box-sizing: border-box; width: 244px; padding: 12px 16px; border-radius: 16px;
+    background: #2c2c2e; box-shadow: 0 8px 24px -6px #0008, 0 0 0 .5px #ffffff14; color: #fff;
+    display: flex; flex-direction: column; gap: 8px; font-size: 12px; line-height: 16px; text-align: left;
+  }
+  .hover-card[hidden] { display: none; }
+  .hover-card[role='button'] { cursor: pointer; }
+  .hover-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .hover-card.copied { align-items: center; justify-content: center; }
+  .hover-card .hover-copied, .hover-card .hover-title { color: #fff; font-size: 14px; line-height: 20px; overflow-wrap: break-word; }
+  .hover-card .hover-path { color: #cfd3d6; word-break: break-all; }
+  .hover-card .hover-time, .hover-card .hover-task-timing, .hover-card .hover-task-icon { color: #cfd3d6; }
+  .hover-card .hover-status { display: flex; align-items: center; gap: 8px; color: #adb2b8; line-height: 20px; }
+  .hover-card .hover-status svg { flex: none; }
+  .hover-card .hover-tasks { display: flex; flex-direction: column; gap: 8px; }
+  .hover-card .hover-task { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+  .hover-card .hover-task-icon { flex: none; display: inline-flex; align-items: center; height: 16px; }
+  .hover-card .hover-task-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .hover-card .hover-task-name { color: #fff; overflow-wrap: break-word; }
+  .hover-card .hover-task-relative, .hover-card .hover-more { color: #adb2b8; overflow-wrap: anywhere; }
+  .hover-card .hover-dot { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; color: #adb2b8; }
+  .hover-card .hover-dot:not([data-state='ongoing'])::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .hover-card .hover-dot[data-state='warning'] { color: #f5a623; }
+  .hover-card .hover-dot .spinner-motion { transform-origin: center; animation: heddle-spin 1.5s linear infinite; }
+  .hover-card .hover-dot circle { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  .hover-card .hover-dot .spinner-track { opacity: .25; }
+  .hover-card .hover-dot .spinner-arc { stroke-dasharray: 12 150; animation: heddle-dash 1.5s ease-in-out infinite; }
+  .hover-card-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  @media (prefers-reduced-motion: reduce) {
+    .hover-card .hover-dot .spinner-motion, .hover-card .hover-dot .spinner-arc { animation: none; }
+  }
+  /* hover-card-style:end */
+
   /**
    * A menu item, measured from DSH's own `._item`: **full width, min-height 34px, padding 6px 8px, gap 6px, radius 12px**,
    * with a **16px** glyph. Its earlier near-copies per area also inherited the row-action button rule through a
@@ -11474,6 +11514,642 @@ function titleMarquee(label) {
   }
   return { enter, leave }
 }
+
+/* hover-card:begin */
+/**
+ * The sidebar's row hover cards — DSH's `HoverCard` on its workspace browser's rows (C22, C41) — the pure half.
+ *
+ * DSH (`dsh-client-ui-workspace` lib/client.js): a session row (`SessionNodeItem`, 2254-2367) and a real workspace row
+ * (`ProjectRowItem`, 1950-2058; the Ungrouped bucket has no `createdAt`, so no card) open a card after an **800 ms** dwell
+ * (`openDelayMs: 800`). The rows share one `HoverCardGroup` (3331, 3376), so once a card has shown, moving to another row
+ * opens that row's card at once. A row's card is off while its menu is open, a press on the row closes it, and a click
+ * on the card copies the session's stored title or the workspace's full path. Contents: `SessionHoverContent`
+ * (2141-2165) — the full title, the relative time (not for a blank row), the session's own scheduled tasks (the schedule
+ * plugin's `sidebar.session.row.hover` seat, `dsh-client-ui-schedule` 6384-6430), each status line, an archived line;
+ * `WorkspaceHoverContent` (1912-1930) — the title, the folder with the home directory abbreviated, `Created y-m-d hh:mm`.
+ *
+ * Pure on purpose — no DOM, no fetch, no page state — so `test/hover-cards.test.ts` loads this block out of the page.
+ */
+const HoverCards = (() => {
+  /** `openDelayMs: 800` on both rows; the primitive's close grace (200 ms) and its `Copied` feedback (1000 ms). */
+  const OPEN_DELAY_MS = 800
+  const CLOSE_DELAY_MS = 200
+  const COPIED_MS = 1000
+  /** The compact card's gap to its row and to the viewport's bottom edge (8px each). */
+  const GAP = 8
+  /** A session card lists at most two tasks, then `{count} more`. */
+  const TASK_LIMIT = 2
+  const DAY_MS = 86_400_000
+
+  /** The primitives' `relativeTime`: whole units, floored, from `now` up to years. */
+  function relativeTime(then, now) {
+    const span = Math.max(0, now - then)
+    if (span < 60_000) return { unit: 'now', n: 0 }
+    if (span < 3_600_000) return { unit: 'minutes', n: Math.floor(span / 60_000) }
+    if (span < DAY_MS) return { unit: 'hours', n: Math.floor(span / 3_600_000) }
+    if (span < 30 * DAY_MS) return { unit: 'days', n: Math.floor(span / DAY_MS) }
+    if (span < 365 * DAY_MS) return { unit: 'months', n: Math.floor(span / (30 * DAY_MS)) }
+    return { unit: 'years', n: Math.floor(span / (365 * DAY_MS)) }
+  }
+  const SHORT_UNIT = { minutes: 'min', hours: 'h', days: 'd', months: 'mo', years: 'y' }
+
+  /** `hoverTimeLabel`: `now`, else the compact distance in DSH's `{t} ago` — `5min ago`, `3h ago`, `2mo ago`. */
+  function timeAgo(stamp, now) {
+    const at = Date.parse(String(stamp ?? ''))
+    if (!Number.isFinite(at)) return ''
+    const { unit, n } = relativeTime(at, now)
+    return unit === 'now' ? 'now' : `${n}${SHORT_UNIT[unit]} ago`
+  }
+
+  /** `createdLabel`: `Created {y}-{m}-{d} {hh}:{mm}` on the reader's clock, month and day unpadded as DSH's `date.ymd`. */
+  function createdLabel(stamp) {
+    const at = new Date(String(stamp ?? ''))
+    if (Number.isNaN(at.getTime())) return ''
+    const pad = (value) => String(value).padStart(2, '0')
+    return `Created ${at.getFullYear()}-${at.getMonth() + 1}-${at.getDate()} ${pad(at.getHours())}:${pad(at.getMinutes())}`
+  }
+
+  /** `abbreviateHomePath`: `~` for the host's home and `~/…` beneath it; no home, or a Windows path, keeps the path. */
+  function abbreviateHome(path, home) {
+    const text = String(path ?? '')
+    if (typeof home !== 'string' || home === '') return text
+    const windows = (value) => /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\')
+    if (windows(text) || windows(home)) return text
+    const root = home.replace(/\/+$/, '')
+    if (root === '' || root === '/') return text
+    if (text.replace(/\/+$/, '') === root) return '~'
+    if (text.startsWith(`${root}/`)) return `~${text.slice(root.length)}`
+    return text
+  }
+
+  /**
+   * `sessionStatuses` over what this page knows of any session: a pending approval first, then a running turn, else idle.
+   * DSH also draws plan-review and question waits, a running-subagent count and an unread `Completed`; the page tracks
+   * none of those for other sessions, so the card does not claim them. An archived card drops idle, as DSH's does.
+   */
+  function sessionStatuses(facts) {
+    let statuses
+    if (facts.pendingApproval === true) statuses = [{ state: 'warning', label: 'Waiting for approval' }]
+    else if (facts.running === true) statuses = [{ state: 'ongoing', label: 'Running' }]
+    else statuses = [{ state: 'idle', label: 'Idle' }]
+    return facts.archived === true ? statuses.filter((status) => status.state !== 'idle' && status.state !== 'done') : statuses
+  }
+
+  /**
+   * A session row's card. `facts` is `{label, title, blank, stamp, running, pendingApproval, archived}`: `label` is what the
+   * row reads (the card shows it unclipped), `title` the stored title, which is what a click copies — nothing for a blank
+   * or untitled row, as DSH's `copyText`.
+   */
+  function sessionCard(facts, now) {
+    const blank = facts.blank === true
+    const stored = typeof facts.title === 'string' ? facts.title : ''
+    return {
+      kind: 'session',
+      title: String(facts.label ?? stored),
+      time: blank ? '' : timeAgo(facts.stamp, now),
+      statuses: sessionStatuses(facts),
+      archived: facts.archived === true,
+      copyText: blank || stored === '' ? undefined : stored,
+    }
+  }
+
+  /** A workspace row's card from `{label, path, createdAt}`, or `null` without a creation time (DSH's Ungrouped bucket). */
+  function workspaceCard(workspace, home) {
+    if (workspace === null || typeof workspace !== 'object' || typeof workspace.createdAt !== 'string') return null
+    const path = typeof workspace.path === 'string' ? workspace.path : ''
+    return {
+      kind: 'workspace',
+      title: String(workspace.label ?? ''),
+      path: abbreviateHome(path, home),
+      created: createdLabel(workspace.createdAt),
+      copyText: path === '' ? undefined : path,
+    }
+  }
+
+  const UNITS = [['day', 86_400], ['hour', 3_600], ['minute', 60], ['second', 1]]
+  const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+  const unitWord = (unit, value) => (value === 1 ? unit : `${unit}s`)
+
+  /** `clockLabel`: a stored `HH:MM:SS(.mmm)` without its fraction and without zero seconds. */
+  function clockLabel(time) {
+    return String(time ?? '').replace(/\.\d+$/, '').replace(/:00$/, '')
+  }
+
+  /** `zoneLabel`: `UTC±hh:mm`, then ICU's long generic name when it has one — `UTC+08:00 · China Standard Time`. */
+  function zoneLabel(zone, at = Date.now()) {
+    let offset
+    try {
+      const value = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'longOffset' }).formatToParts(at).find((part) => part.type === 'timeZoneName')?.value
+      const match = value === 'GMT' ? [value, '+', '00', '00'] : /^GMT([+-])(\d{2}):(\d{2})$/.exec(value ?? '')
+      if (match !== null) offset = `UTC${match[1]}${match[2]}:${match[3]}`
+    } catch {
+      offset = undefined
+    }
+    try {
+      const name = new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'longGeneric' }).formatToParts(at).find((part) => part.type === 'timeZoneName')?.value
+      if (offset === undefined) return name ?? zone
+      return name === undefined || /^GMT(?:[+-]|$)/.test(name) ? offset : `${offset} · ${name}`
+    } catch {
+      return offset === undefined ? zone : `${offset} · ${zone}`
+    }
+  }
+
+  /**
+   * `formatScheduleFrequency` with no host zone, in DSH's English: `Once`, `Every 2 hours`, `Daily at 09:00 (zone)`,
+   * `Weekly on Mon, Wed at 09:00 (zone)`. A cron rule reads `Cron {expression} (zone)`, DSH's form for an expression its
+   * sentence parser cannot read; the sentence (`cronPreview`) is not ported here.
+   */
+  function frequencyLabel(record, at = Date.now()) {
+    switch (record.kind) {
+      case 'after':
+      case 'at':
+        return 'Once'
+      case 'every': {
+        const seconds = Number(record.everySeconds)
+        const [unit, size] = UNITS.find(([, each]) => seconds % each === 0) ?? UNITS[UNITS.length - 1]
+        const value = seconds / size
+        return `Every ${value} ${unitWord(unit, value)}`
+      }
+      case 'daily':
+        return `Daily at ${clockLabel(record.time)} (${zoneLabel(record.timeZone, at)})`
+      case 'weekly': {
+        const days = (Array.isArray(record.weekdays) ? record.weekdays : []).map((day) => WEEKDAYS[day - 1] ?? WEEKDAYS[0]).join(', ')
+        return `Weekly on ${days} at ${clockLabel(record.time)} (${zoneLabel(record.timeZone, at)})`
+      }
+      case 'cron':
+        return `Cron ${record.expression} (${zoneLabel(record.timeZone, at)})`
+      default:
+        return ''
+    }
+  }
+
+  /** `formatScheduleAbsolute` in English: `Oct 30, 2026, 15:00` in the reader's zone; the raw value when unparseable. */
+  function absoluteLabel(scheduledAt) {
+    const at = Date.parse(scheduledAt)
+    if (Number.isNaN(at)) return String(scheduledAt)
+    return new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
+  }
+
+  /** `formatScheduleRelative`, parenthesised as `nextRunParts` has it: `(in 5 hours)`, `(3 minutes overdue)`, `(Due now)`. */
+  function relativeLabel(scheduledAt, now) {
+    const difference = Date.parse(scheduledAt) - now
+    if (Number.isNaN(difference)) return ''
+    if (difference === 0) return '(Due now)'
+    const seconds = Math.abs(difference) / 1000
+    const [unit, size] = UNITS.find(([, each]) => seconds >= each) ?? UNITS[UNITS.length - 1]
+    const value = Math.max(1, difference > 0 ? Math.ceil(seconds / size) : Math.floor(seconds / size))
+    return difference > 0 ? `(in ${value} ${unitWord(unit, value)})` : `(${value} ${unitWord(unit, value)} overdue)`
+  }
+
+  /** `orderScheduleRecords`: overdue first, then by target, keeping the input order for equal targets. */
+  function orderTasks(records, now) {
+    return records
+      .map((record, index) => ({ record, index }))
+      .sort((left, right) => {
+        const leftAt = Date.parse(left.record.scheduledAt)
+        const rightAt = Date.parse(right.record.scheduledAt)
+        const leftOverdue = leftAt <= now
+        const rightOverdue = rightAt <= now
+        if (leftOverdue !== rightOverdue) return Number(rightOverdue) - Number(leftOverdue)
+        return leftAt - rightAt || left.index - right.index
+      })
+      .map(({ record }) => record)
+  }
+
+  /**
+   * A session card's task section from `GET /api/schedule/catalog`'s `tasks`: this session's **active** tasks
+   * (`selectSessionScheduleFacts`), ordered, the first two drawn and the rest counted — `{tasks, more}`.
+   */
+  function sessionTasks(catalog, sessionId, now) {
+    const records = (Array.isArray(catalog) ? catalog : []).filter((record) => record !== null && typeof record === 'object' && record.sessionId === sessionId && record.status === 'active')
+    const ordered = orderTasks(records, now)
+    const shown = ordered.slice(0, TASK_LIMIT)
+    return {
+      tasks: shown.map((record) => ({
+        id: record.id,
+        name: String(record.title ?? ''),
+        frequency: frequencyLabel(record, now),
+        scheduledAt: record.scheduledAt,
+        absolute: absoluteLabel(record.scheduledAt),
+        relative: relativeLabel(record.scheduledAt, now),
+      })),
+      more: ordered.length - shown.length,
+    }
+  }
+
+  /** The compact card's place: 8px right of its row, level with the row's top, lifted to stay 8px above the bottom. */
+  function place(row, cardHeight, viewportHeight) {
+    const top = row.top + cardHeight > viewportHeight - GAP ? viewportHeight - cardHeight - GAP : row.top
+    return { left: row.right + GAP, top }
+  }
+
+  return { OPEN_DELAY_MS, CLOSE_DELAY_MS, COPIED_MS, GAP, TASK_LIMIT, relativeTime, timeAgo, createdLabel, abbreviateHome, sessionStatuses, sessionCard, workspaceCard, clockLabel, zoneLabel, frequencyLabel, absoluteLabel, relativeLabel, orderTasks, sessionTasks, place }
+})()
+/* hover-card:end */
+
+/**
+ * The row hover cards, the page's half: one card at a time, on the body, placed beside its row, driven by pointer events
+ * delegated from the tree so every redraw's rows have it without a hook in the row builders.
+ *
+ * It reads only what the page already has or already asks the server for: the drawn row's node (in `In one list`, the
+ * listing that list was drawn from), `runningSessions`, the host home from the event stream's `ready` frame,
+ * `GET /api/approvals`, and `GET /api/schedule/catalog` — read once, and again after each `event: schedule` (DSH's
+ * `schedule/changed`). Both servers serve all of them; a profile without the schedule plugin answers 503, which is a card
+ * with no task section. A row the card covers loses its native `title`, because DSH's rows have none and two tooltips
+ * would stack.
+ */
+const rowHoverCard = (() => {
+  let home = ''
+  let catalog = null
+  let catalogRead = null
+  let catalogGeneration = 0
+  let approvals = []
+  let approvalsRead = null
+  /** The row under the pointer, the key of the row whose card shows (a redraw replaces row elements), and the timers. */
+  let pointerRow = null
+  let shownKey = null
+  let openTimer = 0
+  let closeTimer = 0
+  let copiedTimer = 0
+  let copying = false
+  /** DSH's `HoverCardGroup`: once a card has shown inside the list, the next row's card opens without the dwell. */
+  let inList = false
+  let warm = false
+
+  const card = document.createElement('div')
+  card.className = 'hover-card'
+  card.hidden = true
+  const announcer = document.createElement('span')
+  announcer.className = 'hover-card-status'
+  announcer.setAttribute('role', 'status')
+  document.body.append(card, announcer)
+
+  events.addEventListener('ready', (message) => {
+    try {
+      const data = JSON.parse(message.data)
+      if (typeof data?.host?.home === 'string') home = data.host.home
+    } catch {
+      // A frame without host facts leaves paths whole, as DSH does without a home.
+    }
+  })
+  events.addEventListener('schedule', () => {
+    catalogGeneration += 1
+    catalog = null
+    catalogRead = null
+    if (shownKey !== null) void refresh().then(redraw)
+  })
+
+  /** Approvals on every dwell (they come and go), the catalog once per change; both resolve, never throw. */
+  function refresh() {
+    if (approvalsRead === null) {
+      approvalsRead = fetch('/api/approvals')
+        .then((response) => (response.ok ? response.json() : { requests: [] }))
+        .then((body) => {
+          approvals = Array.isArray(body?.requests) ? body.requests : []
+        })
+        .catch(() => {})
+        .finally(() => {
+          approvalsRead = null
+        })
+    }
+    if (catalog === null && catalogRead === null) {
+      const generation = catalogGeneration
+      catalogRead = fetch('/api/schedule/catalog')
+        .then(async (response) => {
+          const tasks = response.ok ? ((await response.json())?.tasks ?? []) : []
+          if (generation === catalogGeneration) catalog = Array.isArray(tasks) ? tasks : []
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (generation === catalogGeneration) catalogRead = null
+        })
+    }
+    return Promise.all([approvalsRead, catalogRead ?? Promise.resolve()])
+  }
+
+  /** The carded row an event target is in — a session or workspace row of the tree or the flat list — else `null`. */
+  function rowOf(target) {
+    const row = target instanceof Element ? target.closest('.row') : null
+    if (row === null || !treeList.contains(row)) return null
+    const li = row.parentElement
+    if (li === null || li.tagName !== 'LI' || (li.dataset.kind !== 'session' && li.dataset.kind !== 'workspace')) return null
+    return row
+  }
+  function keyOf(row) {
+    const li = row.parentElement
+    return li.dataset.rowKey ?? (li.dataset.sessionId !== undefined ? 'session:' + li.dataset.sessionId : null)
+  }
+  function rowFor(key) {
+    if (key === null) return null
+    const row = treeList.querySelector(`li[data-row-key="${CSS.escape(key)}"] > .row`)
+    if (row !== null || !key.startsWith('session:')) return row
+    return treeList.querySelector(`li[data-session-id="${CSS.escape(key.slice('session:'.length))}"] > .row`)
+  }
+  /** DSH turns a row's card off while that row's menu is open. */
+  const disabled = (row) => row.querySelector('.menu-wrap > .menu:not([hidden])') !== null
+
+  /** The card a row shows now, or `null` when it has none. */
+  function modelOf(row, now) {
+    const li = row.parentElement
+    const entry = rowIndex.get(row.dataset.path)
+    const label = row.querySelector(':scope > .label')?.textContent ?? ''
+    if (li.dataset.kind === 'workspace') {
+      const workspace = entry?.node?.group?.workspace
+      if (workspace === null || workspace === undefined) return null
+      return HoverCards.workspaceCard({ label: entry.node.label ?? label, path: workspace.path, createdAt: workspace.createdAt }, home)
+    }
+    const drawn = entry?.node?.kind === 'session' && entry.node.session ? entry.node.session : null
+    const session = drawn ?? (searchIndex?.sessions ?? []).find((meta) => meta?.id === li.dataset.sessionId)
+    if (session === null || session === undefined || typeof session.id !== 'string') return null
+    const title = typeof session.title === 'string' ? session.title : ''
+    const model = HoverCards.sessionCard(
+      {
+        label: drawn !== null ? label : sessionLabel(session),
+        title,
+        blank: (session.turns ?? 0) === 0 && title.trim() === '',
+        stamp: session.updated ?? session.created,
+        running: runningSessions.has(session.id),
+        pendingApproval: approvals.some((request) => request?.session === session.id),
+        archived: entry?.node?.archived === true || session.archived === true || li.dataset.archived === 'true',
+      },
+      now,
+    )
+    return { ...model, schedule: HoverCards.sessionTasks(catalog, session.id, now) }
+  }
+
+  const element = (tag, className, text) => {
+    const node = document.createElement(tag)
+    if (className !== '') node.className = className
+    if (text !== undefined) node.textContent = text
+    return node
+  }
+  function clockIcon() {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 16 16')
+    svg.setAttribute('width', '12')
+    svg.setAttribute('height', '12')
+    svg.setAttribute('fill', 'none')
+    svg.setAttribute('stroke', 'currentColor')
+    svg.setAttribute('stroke-width', '1.3')
+    svg.setAttribute('stroke-linecap', 'round')
+    const face = document.createElementNS('http://www.w3.org/2000/svg', 'circle')
+    for (const [name, value] of [['cx', '8'], ['cy', '8'], ['r', '6.2']]) face.setAttribute(name, value)
+    const hands = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    hands.setAttribute('d', 'M8 4.8V8l2.2 1.4')
+    svg.append(face, hands)
+    return svg
+  }
+
+  function draw(model) {
+    clearTimeout(copiedTimer)
+    card.classList.remove('copied')
+    card.style.minHeight = ''
+    card.dataset.hoverCard = model.kind
+    const lines = [element('div', 'hover-title', model.title)]
+    if (model.kind === 'workspace') {
+      lines.push(element('div', 'hover-path', model.path))
+      if (model.created !== '') lines.push(element('div', 'hover-time', model.created))
+    } else {
+      if (model.time !== '') lines.push(element('div', 'hover-time', model.time))
+      if (model.schedule.tasks.length > 0) {
+        const section = element('div', 'hover-tasks')
+        section.dataset.sessionScheduleTasks = ''
+        for (const task of model.schedule.tasks) {
+          const row = element('div', 'hover-task')
+          row.dataset.sessionScheduleTask = ''
+          const icon = element('span', 'hover-task-icon')
+          icon.setAttribute('aria-hidden', 'true')
+          icon.append(clockIcon())
+          const body = element('span', 'hover-task-body')
+          const timing = element('span', 'hover-task-timing')
+          const time = element('time', '', task.absolute)
+          time.dateTime = task.scheduledAt
+          timing.append(`${task.frequency} · `, time, ' ', element('span', 'hover-task-relative', task.relative))
+          body.append(element('span', 'hover-task-name', task.name), timing)
+          row.append(icon, body)
+          section.append(row)
+        }
+        if (model.schedule.more > 0) section.append(element('div', 'hover-more', `${model.schedule.more} more`))
+        lines.push(section)
+      }
+      for (const status of model.statuses) {
+        const line = element('div', 'hover-status')
+        const dot = element('span', 'hover-dot')
+        dot.dataset.state = status.state
+        dot.setAttribute('aria-hidden', 'true')
+        if (status.state === 'ongoing') dot.append(runningSpinner())
+        line.append(dot, element('span', '', status.label))
+        lines.push(line)
+      }
+      if (model.archived) {
+        const line = element('div', 'hover-status hover-archived')
+        line.append(kindIcon('archive'), element('span', '', 'Archived'))
+        lines.push(line)
+      }
+    }
+    card.replaceChildren(...lines)
+    if (model.copyText !== undefined) {
+      card.dataset.copyText = model.copyText
+      card.setAttribute('role', 'button')
+      card.tabIndex = 0
+      card.setAttribute('aria-label', `Copy: ${model.copyText}`)
+    } else {
+      delete card.dataset.copyText
+      card.removeAttribute('role')
+      card.removeAttribute('tabindex')
+      card.removeAttribute('aria-label')
+    }
+  }
+
+  function position(row) {
+    const { left, top } = HoverCards.place(row.getBoundingClientRect(), card.offsetHeight, window.innerHeight)
+    card.style.left = `${left}px`
+    card.style.top = `${top}px`
+  }
+
+  function show(row) {
+    clearTimeout(openTimer)
+    clearTimeout(closeTimer)
+    const model = modelOf(row, Date.now())
+    if (model === null) {
+      hide()
+      return
+    }
+    shownKey = keyOf(row)
+    card.dataset.hoverKey = shownKey ?? ''
+    draw(model)
+    card.hidden = false
+    position(row)
+    if (inList) warm = true
+  }
+
+  /** Redraw the showing card from fresh facts, unless it is showing its `Copied` feedback. */
+  function redraw() {
+    if (shownKey === null || card.classList.contains('copied')) return
+    const row = rowFor(shownKey)
+    if (row === null) {
+      hide()
+      return
+    }
+    const model = modelOf(row, Date.now())
+    if (model === null) {
+      hide()
+      return
+    }
+    draw(model)
+    position(row)
+  }
+
+  function hide() {
+    clearTimeout(openTimer)
+    clearTimeout(closeTimer)
+    clearTimeout(copiedTimer)
+    shownKey = null
+    card.hidden = true
+    card.classList.remove('copied')
+    announcer.textContent = ''
+    if (!inList) warm = false
+  }
+
+  function enterRow(row) {
+    if (disabled(row)) return
+    row.removeAttribute('title')
+    const key = keyOf(row)
+    if (key !== null && key === shownKey) {
+      clearTimeout(closeTimer)
+      return
+    }
+    clearTimeout(openTimer)
+    const ready = refresh()
+    if (warm) {
+      show(row)
+      void ready.then(() => {
+        if (shownKey === key) redraw()
+      })
+      return
+    }
+    openTimer = setTimeout(() => {
+      /** A redraw during the dwell replaced the row: the card goes beside the row that stands in its place. */
+      const target = row.isConnected ? row : rowFor(key)
+      if (target === null) return
+      show(target)
+      void ready.then(() => {
+        if (shownKey === key) redraw()
+      })
+    }, HoverCards.OPEN_DELAY_MS)
+  }
+
+  function leaveRow(row, next) {
+    clearTimeout(openTimer)
+    if (keyOf(row) !== shownKey || (next instanceof Node && card.contains(next))) return
+    clearTimeout(closeTimer)
+    closeTimer = setTimeout(hide, HoverCards.CLOSE_DELAY_MS)
+  }
+
+  treeList.addEventListener('pointerover', (event) => {
+    inList = true
+    const row = rowOf(event.target)
+    if (row === pointerRow) return
+    if (pointerRow !== null) leaveRow(pointerRow, event.target)
+    pointerRow = row
+    if (row !== null) enterRow(row)
+  })
+  treeList.addEventListener('pointerout', (event) => {
+    const next = event.relatedTarget instanceof Node ? event.relatedTarget : null
+    if (next !== null && treeList.contains(next)) return
+    if (pointerRow !== null) leaveRow(pointerRow, next)
+    pointerRow = null
+    if (next !== null && card.contains(next)) return
+    inList = false
+    if (shownKey === null) warm = false
+  })
+  /** A press on a row closes its card and cancels a pending one, as DSH's anchor does on pointer-down. */
+  treeList.addEventListener('pointerdown', () => hide(), true)
+
+  card.addEventListener('pointerenter', () => {
+    clearTimeout(closeTimer)
+    inList = true
+    warm = true
+  })
+  card.addEventListener('pointerleave', (event) => {
+    const next = event.relatedTarget instanceof Node ? event.relatedTarget : null
+    if (next === null || !treeList.contains(next)) inList = false
+    clearTimeout(closeTimer)
+    closeTimer = setTimeout(hide, HoverCards.CLOSE_DELAY_MS)
+  })
+
+  /** DSH's `copyText`: the clipboard API, else a selected text area; `Copied` replaces the card's lines for a second. */
+  async function writeClipboard(text) {
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text)
+        return true
+      } catch {
+        return false
+      }
+    }
+    const area = document.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    document.body.append(area)
+    area.select()
+    try {
+      return document.execCommand('copy')
+    } catch {
+      return false
+    } finally {
+      area.remove()
+    }
+  }
+  async function copy() {
+    const text = card.dataset.copyText
+    if (text === undefined || copying || card.classList.contains('copied')) return
+    copying = true
+    const key = shownKey
+    const done = await writeClipboard(text)
+    copying = false
+    if (!done || key === null || shownKey !== key) return
+    card.style.minHeight = `${card.offsetHeight}px`
+    card.classList.add('copied')
+    const copied = element('span', 'hover-copied', 'Copied')
+    copied.setAttribute('aria-hidden', 'true')
+    card.replaceChildren(copied)
+    announcer.textContent = 'Copied'
+    copiedTimer = setTimeout(() => {
+      announcer.textContent = ''
+      card.classList.remove('copied')
+      if (shownKey === key) redraw()
+    }, HoverCards.COPIED_MS)
+  }
+  card.addEventListener('click', () => {
+    if (card.dataset.copyText === undefined) return
+    /** Selecting text in the card is not a request to copy the whole of it. */
+    const selection = window.getSelection()
+    if (selection !== null && !selection.isCollapsed) {
+      for (let index = 0; index < selection.rangeCount; index += 1) if (selection.getRangeAt(index).intersectsNode(card)) return
+    }
+    void copy()
+  })
+  card.addEventListener('keydown', (event) => {
+    if (card.dataset.copyText === undefined || (event.key !== 'Enter' && event.key !== ' ')) return
+    event.preventDefault()
+    void copy()
+  })
+
+  /** The card follows its row through a scroll or a resize, and goes when the row does. */
+  const follow = () => {
+    if (shownKey === null) return
+    const row = rowFor(shownKey)
+    if (row === null) hide()
+    else position(row)
+  }
+  window.addEventListener('scroll', follow, true)
+  window.addEventListener('resize', follow)
+
+  return { hide }
+})()
 
 /**
  * The reference's row movement, from its `AnimatedRows`: a **FLIP** measured before and after a redraw.

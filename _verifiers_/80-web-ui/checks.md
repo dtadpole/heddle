@@ -55,6 +55,11 @@ grounded_in:
   drawing sibling sections; and the Session Intent hero's workspace picker (C36): over a blank session a `Choose
   workspace` chip naming its workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu
   keys, and a pick that moves the new session and its draft so the first prompt runs in the picked workspace.
+- [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
+  real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
+  relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
+  card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
+  none for Ungrouped; the card closing when the pointer leaves the list.
 
 ## What it deliberately does not judge
 
