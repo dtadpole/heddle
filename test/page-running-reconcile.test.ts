@@ -36,7 +36,7 @@ function harness(): Page {
   const waiting: ((sessions: unknown[]) => void)[] = []
   return runInNewContext(
     `
-    let searchIndex = null;
+    let searchIndex = null, searchEpoch = 0;
     let current = 'X', composerKey = 'X';
     const runningSessions = new Set();
     // The page keeps one queue per session; X holds one, so a recovery has something to pump.
