@@ -21,7 +21,7 @@
 //! Before the first step and before every later one, DSH's archived-session gate is asked: a session that is
 //! archived, or a subagent descendant of one, runs no step. At the first step the prompt is queued, claimed and
 //! dropped and only `turn/failed` with `reason: {"kind": "blocked"}` is written; at a later step the turn ends
-//! with `assistant/completed` and that same record ([`ARCHIVED_BLOCKED`] in `ended`).
+//! with `assistant/completed` (`finishReason: "blocked"`, [`ARCHIVED_BLOCKED`] in `ended`) and that same record.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -462,6 +462,10 @@ async fn run_turn_body(
             runtime.session.claim_rejected(session, None, false)?;
             ended.push(ARCHIVED_BLOCKED.to_owned());
             blocked = true;
+            // The turn's finish reason is `blocked`, not the previous step's (`tool_calls`, as a rule): DSH's loop
+            // sets `turnEnds = { kind: 'blocked' }` at a rejected step whatever the earlier steps proposed
+            // (dsh-agent-loop lib/index.js:956-963), so the answer record and the result say why the turn ended.
+            "blocked".clone_into(&mut finish_reason);
             break;
         }
         // The step boundary: the previous round's tool results are on disk, so a steer that arrived during
@@ -3244,6 +3248,64 @@ pub(crate) mod tests {
             count_of(&sessions, &handle, "turn/completed"),
             0,
             "not as a completed turn"
+        );
+    }
+
+    // developer-five's review of cc4d7410: a step the gate rejects after the first used to leave the previous
+    // step's finish reason (`tool_calls`) in the result and the answer record. DSH's loop ends the turn
+    // `{ kind: 'blocked' }` at any rejected step (dsh-agent-loop lib/index.js:956-963).
+    #[tokio::test]
+    async fn a_step_the_gate_rejects_after_the_first_ends_the_turn_with_the_blocked_finish_reason()
+    {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("archived-finish");
+        let handle = sessions
+            .store()
+            .create(heddle_session::CreateOptions::default())
+            .unwrap();
+        let archiving = {
+            let sessions = Arc::clone(&sessions);
+            let handle = handle.clone();
+            tool_fn(
+                ToolSpec {
+                    name: "slow_tool".into(),
+                    description: "stands for a long bash call".into(),
+                    parameters: serde_json::json!({}),
+                },
+                move |_args, _ctx| {
+                    let sessions = Arc::clone(&sessions);
+                    let handle = handle.clone();
+                    Box::pin(async move {
+                        set_archived(&sessions, &handle.id, true);
+                        Ok(ToolResult::ok("tool finished"))
+                    })
+                },
+            )
+        };
+        let (runtime, _scripted) = real_runtime(
+            &sessions,
+            serde_json::json!([
+                { "toolCall": { "name": "slow_tool", "arguments": {} } },
+                { "text": "never asked" }
+            ]),
+            vec![archiving],
+        );
+        let mut options = RunTurnOptions::new(handle.clone(), "scripted", "run the slow tool");
+        options.max_rounds = RoundLimit::Rounds(4);
+        let result = run_turn(&runtime, options).await.unwrap();
+        assert_eq!(
+            result.finish_reason, "blocked",
+            "the result says blocked, not the first step's tool_calls"
+        );
+        let events = sessions.events(&handle).unwrap();
+        let completed: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "assistant/completed")
+            .collect();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(
+            completed[0].fields["finishReason"],
+            serde_json::json!("blocked"),
+            "and so does the turn's answer record"
         );
     }
 

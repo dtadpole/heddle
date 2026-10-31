@@ -216,8 +216,9 @@ export const ARCHIVED_BLOCKED = 'blocked: an archived session runs no model step
  * DSH's turn-end record for a rejected step, `{ kind: 'blocked' }` (dsh-agent-loop lib/index.js:960-962).
  *
  * It is written as heddle's non-completed turn end, `turn/failed`, which every reader of a turn's end already knows
- * (the time context, the goal tool, the schedule driver), and **not** as `turn/completed`: that event is the goal
- * driver's edge to start another round, and a blocked turn that wrote it would re-trigger a blocked round forever.
+ * (the time context, the goal tool, the schedule driver, and the goal driver, which ends the session's busy span on it),
+ * and **not** as `turn/completed`: that event is the goal driver's edge to start another round, and a blocked turn that
+ * wrote it would re-trigger a blocked round forever.
  */
 const BLOCKED_TURN_END = { type: 'turn/failed', reason: { kind: 'blocked' } } as const
 
@@ -331,6 +332,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       claimRejected(ctx.session.store, options.session, 'next-step')
       ended.push(ARCHIVED_BLOCKED)
       blocked = true
+      /**
+       * The turn's finish reason is `blocked`, not the previous step's (`tool_calls`, as a rule): DSH's loop sets
+       * `turnEnds = { kind: 'blocked' }` at a rejected step whatever the earlier steps proposed (dsh-agent-loop
+       * lib/index.js:956-963), so the answer record and the result say why the turn ended, as the first-step gate does.
+       */
+      finishReason = 'blocked'
       break
     }
     /**
