@@ -41,7 +41,7 @@ async function toolDouble() {
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       if (first) {
         frame({ role: 'assistant', content: 'looking ' })
-        await new Promise((resolve) => setTimeout(resolve, 600))
+        await new Promise((resolve) => setTimeout(resolve, 1200))
         frame({ tool_calls: [{ index: 0, id: 'call-list', type: 'function', function: { name: 'list_dir', arguments: JSON.stringify({ path: '.' }) } }] })
         frame({}, 'tool_calls')
       } else {
@@ -159,6 +159,13 @@ test('a steer sent during a step that calls a tool is written after the result, 
     assert.equal(steer.status, 200, `the steer was accepted while the turn ran\n${accepted}`)
     const steerId = JSON.parse(accepted).steerId
     assert.ok(typeof steerId === 'string' && steerId.length > 0, `the answer names the steer, so a page can follow it until it is claimed\n${accepted}`)
+    // While the step runs, the steer waits in the inbox, and the session view lists it: a reload or a second tab
+    // draws it as steering from there (developer-ten's review of #31).
+    const waiting = await (await request(server, `/api/sessions/${encodeURIComponent(session)}`)).json()
+    assert.ok(
+      (waiting.pendingSteers ?? []).some((entry) => entry.steerId === steerId && String(entry.text).includes('STEER:')),
+      `the session view lists the waiting steer\n${JSON.stringify(waiting.pendingSteers)}`,
+    )
     const text = await turn.done
     assert.doesNotMatch(text, /^event: error$/m, `the turn did not fail\n${text.slice(-1500)}`)
 
@@ -169,6 +176,17 @@ test('a steer sent during a step that calls a tool is written after the result, 
     assert.ok(result >= 0 && steered >= 0, `the tool result and the steer are both logged\n${types}`)
     assert.ok(steered > result, `the steer is written after the tool's result, not between the call and it\n${types}`)
     assert.equal(events[steered].message?.source?.steerId, steerId, 'and the claimed message names the steer it was')
+    const view = await (await request(server, `/api/sessions/${encodeURIComponent(session)}`)).json()
+    assert.deepEqual(view.pendingSteers ?? [], [], 'once claimed, no steer waits in the view')
+    assert.ok(
+      (view.turns ?? []).some((row) => row.kind === 'user' && row.steerId === steerId),
+      'and the claimed user row names the steer, so a page that missed the live claim can retire its row',
+    )
+    const late = await request(server, `/api/sessions/${encodeURIComponent(session)}/steer`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt: 'too late' }),
+    })
+    assert.equal(late.status, 409, 'after the turn, the steer gate is shut and the route refuses, so the page queues it')
 
     const next = double.requests.find((messages) => JSON.stringify(messages).includes('STEER:'))
     assert.ok(next, 'the steer reached the model')

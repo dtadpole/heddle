@@ -11,7 +11,7 @@ import { ApprovalService } from '../src/approvals/service.ts'
 import { ContextService } from '../src/context/service.ts'
 import { ModelService } from '../src/llm/service.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
-import { claimNextStep, foldInbox, INBOX_SPLICED, pendingInbox, queueSteer } from '../src/session/inbox.ts'
+import { claimNextStep, closeSteering, foldInbox, hasPendingStepOrClose, INBOX_SPLICED, openSteering, pendingInbox, queueSteer, steeringOpen } from '../src/session/inbox.ts'
 import { SessionService } from '../src/session/service.ts'
 import type { SessionEvent, SessionHandle } from '../src/session/store.ts'
 import { ToolRegistry } from '../src/tools/service.ts'
@@ -184,4 +184,32 @@ test('a claim records the removal first and writes each message in order, and cl
   assert.equal(events[0]?.outcome, undefined, 'a claim delivers, it does not cancel')
   assert.deepEqual(events.slice(1).map((event) => event.type), ['message', 'message'])
   assert.deepEqual(pendingInbox(sessions.store, session)['next-step'], [])
+})
+
+test('the steer gate opens with a turn and closes at its final "nothing pending" decision, not before (#31)', () => {
+  const ctx = new Context()
+  const sessions = new SessionService(ctx, { root: join(scratch, 'gate-sessions') })
+  const session = sessions.start({ cwd: scratch })
+  assert.equal(steeringOpen(sessions.store, session), false, 'no turn, no steering')
+  openSteering(sessions.store, session)
+  assert.equal(steeringOpen(sessions.store, session), true)
+  queueSteer(sessions.store, session, [{ type: 'text', text: 'one more thing' }], { kind: 'steer', steerId: 'steer-1' })
+  assert.equal(hasPendingStepOrClose(sessions.store, session), true, 'a waiting steer keeps the turn going')
+  assert.equal(steeringOpen(sessions.store, session), true, 'and the gate open')
+  claimNextStep(sessions.store, session, (content, source) => sessions.userContent(session, content, source))
+  assert.equal(hasPendingStepOrClose(sessions.store, session), false, 'nothing waits: the turn ends')
+  assert.equal(steeringOpen(sessions.store, session), false, 'and the gate shut in the same call, before any later steer')
+  openSteering(sessions.store, session)
+  closeSteering(sessions.store, session)
+  assert.equal(steeringOpen(sessions.store, session), false, 'a turn that ends any other way shuts it too')
+})
+
+test('a turn holds the gate open while it runs and leaves it shut when it ends (#31)', async () => {
+  let seen: boolean | undefined
+  const { ctx, sessions, session } = harness('gate-turn', [{ toolCall: { name: 'slow_tool', arguments: {} } }, { text: 'done' }], (handle) => {
+    seen = steeringOpen(sessions.store, handle)
+  })
+  await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'run the slow tool', maxRounds: 4 })
+  assert.equal(seen, true, 'open while the turn runs a tool')
+  assert.equal(steeringOpen(sessions.store, session), false, 'shut once the turn ended')
 })

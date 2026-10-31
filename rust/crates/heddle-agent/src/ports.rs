@@ -179,6 +179,19 @@ pub trait SessionPort: Send + Sync {
     fn has_pending_input(&self, _session: &SessionHandle) -> bool {
         false
     }
+
+    /// A turn began: the session accepts steers until it ends (#31's steer gate). A session with no inbox has
+    /// no gate, which is the default.
+    fn open_steering(&self, _session: &SessionHandle) {}
+
+    /// The loop's end-of-turn question: whether a message waits; when none does, the steer gate closes in the
+    /// same critical section, so no steer is accepted between this decision and the turn's end.
+    fn has_pending_input_or_close(&self, session: &SessionHandle) -> bool {
+        self.has_pending_input(session)
+    }
+
+    /// The turn ended, whichever way: a steer from now on waits for a turn of its own.
+    fn close_steering(&self, _session: &SessionHandle) {}
 }
 
 /// The context service, narrowed to the three questions a turn asks.

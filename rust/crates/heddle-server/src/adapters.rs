@@ -280,9 +280,21 @@ impl SessionService for StoreSessions {
         let count = STEERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let steer_id = format!("steer-{nanos:x}-{count}");
         let source = serde_json::json!({ "kind": "steer", "steerId": steer_id });
-        heddle_session::inbox::queue_steer(self.service.store(), &handle, parts, Some(source))
-            .map(|_| steer_id)
-            .map_err(|error| ServiceError::new(error.to_string()))
+        // Queued only while the running turn's steer gate is open, under the gate's own lock: the loop shuts it in
+        // the same critical section as its final "nothing pending" decision (#31).
+        match heddle_session::inbox::queue_steer_if_open(
+            self.service.store(),
+            &handle,
+            parts,
+            Some(source),
+        ) {
+            Ok(Some(_)) => Ok(steer_id),
+            Ok(None) => Err(ServiceError::with_code(
+                "the current turn no longer accepts steering",
+                "session/steer-unavailable",
+            )),
+            Err(error) => Err(ServiceError::new(error.to_string())),
+        }
     }
 
     fn folder(&self, id: &str) -> Option<PathBuf> {

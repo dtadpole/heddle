@@ -269,6 +269,25 @@ impl SessionPort for Sessions {
             }
         }
     }
+
+    fn open_steering(&self, session: &SessionHandle) {
+        heddle_session::inbox::open_steering(session);
+    }
+
+    fn has_pending_input_or_close(&self, session: &SessionHandle) -> bool {
+        match heddle_session::inbox::has_pending_step_or_close(self.service.store(), session) {
+            Ok(pending) => pending,
+            Err(error) => {
+                read_failed(session, "reading the inbox", error);
+                heddle_session::inbox::close_steering(session);
+                false
+            }
+        }
+    }
+
+    fn close_steering(&self, session: &SessionHandle) {
+        heddle_session::inbox::close_steering(session);
+    }
 }
 
 /// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,

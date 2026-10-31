@@ -170,6 +170,69 @@ pub fn has_pending_step(store: &SessionStore, handle: &SessionHandle) -> Result<
     Ok(!pending_inbox(store, handle)?.next_step.is_empty())
 }
 
+/// The steer gate (#31): the sessions whose running turn still accepts a steer.
+///
+/// A turn opens it when it begins and closes it in the same critical section as its final "nothing pending"
+/// decision ([`has_pending_step_or_close`]); [`queue_steer_if_open`] checks it and appends under the same lock.
+/// So no steer is queued after the loop stopped looking and before the turn ends. Measured window before
+/// (developer-ten's review): a steer accepted between the loop's last check and the server's running count
+/// dropping waited in the inbox until the person sent something else. In memory only, keyed by session id (a
+/// gate belongs to a live turn of this process). `steerGates` in `src/session/inbox.ts` is the twin.
+static STEER_GATES: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn steer_gates() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
+    STEER_GATES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A turn began on the session: steers are accepted until it ends.
+pub fn open_steering(handle: &SessionHandle) {
+    steer_gates().insert(handle.id.clone());
+}
+
+/// The turn ended, whichever way: a steer now waits for a turn of its own.
+pub fn close_steering(handle: &SessionHandle) {
+    steer_gates().remove(&handle.id);
+}
+
+/// Whether a steer sent now would still be claimed by the running turn.
+pub fn steering_open(handle: &SessionHandle) -> bool {
+    steer_gates().contains(&handle.id)
+}
+
+/// The loop's end-of-turn question: `true` when a message waits for the next step; otherwise the gate closes
+/// under the same lock a steer is queued under, and the answer is `false`.
+pub fn has_pending_step_or_close(
+    store: &SessionStore,
+    handle: &SessionHandle,
+) -> Result<bool, InboxError> {
+    let mut gates = steer_gates();
+    if has_pending_step(store, handle)? {
+        return Ok(true);
+    }
+    gates.remove(&handle.id);
+    Ok(false)
+}
+
+/// [`queue_steer`] while the session's turn still accepts a steer; `None` when the gate is shut, which the
+/// route answers as `session/steer-unavailable`.
+pub fn queue_steer_if_open(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    content: Vec<ContentPart>,
+    source: Option<Value>,
+) -> Result<Option<InboxMessage>, InboxError> {
+    let gates = steer_gates();
+    if !gates.contains(&handle.id) {
+        return Ok(None);
+    }
+    let queued = queue_steer(store, handle, content, source)?;
+    drop(gates);
+    Ok(Some(queued))
+}
+
 /// Steer: put a message at the end of the next-step list (DSH's `steer`, `send(message, "next-step", true)`).
 ///
 /// Nothing reaches the conversation here. The running loop writes the message at its next step boundary,
@@ -338,6 +401,62 @@ mod tests {
                 .to_string()
                 .starts_with("invalid persisted inbox splice at session seq 7"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn the_steer_gate_shuts_at_the_final_nothing_pending_decision_and_refuses_a_later_steer() {
+        // #31: the loop's last check and the gate's close are one critical section, so a steer is either claimed
+        // by the running turn or refused (409), never accepted and left waiting.
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap(), &heddle_config::Env::default());
+        let handle = store.create(CreateOptions::default()).expect("a session");
+        let text = |text: &str| {
+            vec![ContentPart::Text {
+                text: text.to_string(),
+            }]
+        };
+        assert!(!steering_open(&handle), "no turn, no steering");
+        assert!(
+            queue_steer_if_open(&store, &handle, text("early"), None)
+                .expect("reads")
+                .is_none(),
+            "a shut gate queues nothing"
+        );
+        open_steering(&handle);
+        let queued = queue_steer_if_open(
+            &store,
+            &handle,
+            text("one more thing"),
+            Some(serde_json::json!({ "kind": "steer", "steerId": "steer-1" })),
+        )
+        .expect("reads");
+        assert!(queued.is_some(), "an open gate queues the steer");
+        assert!(
+            has_pending_step_or_close(&store, &handle).expect("reads"),
+            "a waiting steer keeps the turn going"
+        );
+        assert!(steering_open(&handle), "and the gate open");
+        claim_next_step(&store, &handle, |_, _| Ok(())).expect("claims");
+        assert!(
+            !has_pending_step_or_close(&store, &handle).expect("reads"),
+            "nothing waits: the turn ends"
+        );
+        assert!(
+            !steering_open(&handle),
+            "and the gate shut in the same call"
+        );
+        assert!(
+            queue_steer_if_open(&store, &handle, text("too late"), None)
+                .expect("reads")
+                .is_none(),
+            "so a later steer is refused"
+        );
+        open_steering(&handle);
+        close_steering(&handle);
+        assert!(
+            !steering_open(&handle),
+            "a turn that ends any other way shuts it too"
         );
     }
 

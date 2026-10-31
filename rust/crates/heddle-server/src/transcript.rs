@@ -95,6 +95,10 @@ pub struct ChatTurn {
     /// An assistant turn's markdown rendered as a document; set by the session route, never by the fold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
+    /// A user row the loop wrote by claiming a steer names the steer's id (#31), so a page that missed the live
+    /// claim (a reload, a reconnect, a second tab) can retire its "Steering…" row from this view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steer_id: Option<String>,
 }
 
 impl ChatTurn {
@@ -113,6 +117,7 @@ impl ChatTurn {
             result: None,
             state: None,
             html: None,
+            steer_id: None,
         }
     }
 }
@@ -322,6 +327,14 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     if let Some(at) = event.get("at").and_then(Value::as_str) {
                         turn.time = Some(at.to_owned());
                     }
+                    turn.steer_id = message
+                        .get("source")
+                        .filter(|source| {
+                            source.get("kind").and_then(Value::as_str) == Some("steer")
+                        })
+                        .and_then(|source| source.get("steerId"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                     turns.push(turn);
                 }
                 "assistant" => turns.push(ChatTurn::new(TurnKind::Assistant, text)),
