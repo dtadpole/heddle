@@ -183,6 +183,24 @@ export async function run(command, args, options = {}) {
 export const EXIT_GRACE_MS = 1500
 
 /**
+ * Stop a harness a check started and wait until it has gone, within a bound.
+ *
+ * SIGTERM first, so the harness runs its own shutdown; SIGKILL if it is still there after `graceMs`. Measured on
+ * 31 Oct: checks that waited for `exit` after SIGTERM with no bound could only end at the lane's 300 s limit when a
+ * harness was slow to exit under load, which named no test. Resolves `'exited'`, `'killed'`, or `'stuck'` when even
+ * SIGKILL left no exit within a further second; a harness that had already exited resolves `'exited'` at once.
+ */
+export async function endChild(child, { graceMs = 5000 } = {}) {
+  if (child.exitCode !== null || child.signalCode !== null) return 'exited'
+  const exited = new Promise((resolve) => child.once('exit', () => resolve(true)))
+  const within = (ms) => Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(false), ms).unref())])
+  child.kill('SIGTERM')
+  if (await within(graceMs)) return 'exited'
+  child.kill('SIGKILL')
+  return (await within(1000)) ? 'killed' : 'stuck'
+}
+
+/**
  * The command that runs the harness under test, as `[file, argv]`.
  *
  * By default it is the TypeScript build, `node dist/cli.js`. `HEDDLE_BIN` names any other build of the same

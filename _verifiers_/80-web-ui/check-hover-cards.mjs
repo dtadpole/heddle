@@ -17,6 +17,11 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  * with the workspace's title, its folder (home abbreviated) and `Created y-m-d hh:mm`; a click on a card copies the title
  * or the full path; the Ungrouped bucket has no card; leaving the list closes the card.
  *
+ * And no row names an internal path (#109). DSH's rows carry no `title` (`SessionNodeItem`, lib/client.js:2273-2280;
+ * `ProjectRowItem`, :1965-1971). A row here is focusable, so its `title` is read aloud as well as shown: the session row's
+ * was its definition folder (`…/_sessions_/session-…`), else its working folder, with the home directory in it. Now it is
+ * the session's display title, and no row's title or description carries `_sessions_` or the home directory.
+ *
  * The pointer is real (`Input.dispatchMouseEvent`), because a card wired to the wrong event is the failure this exists for.
  * The scheduled task is the model's own, made by a scripted `schedule_create` call, as reminders are made in DSH.
  */
@@ -147,6 +152,30 @@ test("a session row and a workspace row open DSH's hover card after the dwell: t
     const workspaceRow = '#tree > li[data-kind="workspace"] > .row'
     const ungroupedRow = '#tree > li[data-kind="ungrouped"] > .row'
     await browser.waitFor(`document.querySelector(${JSON.stringify(sessionRow)}) !== null && document.querySelector(${JSON.stringify(ungroupedRow)}) !== null`, 15_000)
+
+    /**
+     * #109, read before the pointer arrives (the card takes the tooltip from a row it covers): what each tree item and row
+     * says beyond its text — `title`, `aria-label`, `aria-description`, and the text `aria-describedby` points at.
+     */
+    const userHome = String(process.env.HOME ?? '').replace(/\/+$/, '')
+    const spoken = JSON.parse(
+      await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tree li, #tree li > .row')].map((node) => ({
+        kind: node.closest('li').dataset.kind,
+        title: node.getAttribute('title'),
+        label: node.getAttribute('aria-label'),
+        description: node.getAttribute('aria-description'),
+        described: (node.getAttribute('aria-describedby') ?? '').split(/\\s+/).filter(Boolean).map((id) => document.getElementById(id)?.textContent ?? ''),
+      })))`),
+    )
+    const leaks = spoken.filter((entry) =>
+      [entry.title, entry.label, entry.description, ...entry.described].some((text) => typeof text === 'string' && (text.includes('_sessions_') || (userHome.length > 1 && text.includes(userHome)))),
+    )
+    assert.ok(spoken.some((entry) => entry.kind === 'session') && spoken.some((entry) => entry.kind === 'workspace'), `the tree drew a session row and a workspace row\nsaw: ${JSON.stringify(spoken)}`)
+    assert.deepEqual(leaks, [], `no row's title or description names a definition folder or the home directory (#109)\nsaw: ${JSON.stringify(spoken)}`)
+    const tip = JSON.parse(
+      await browser.evaluate(`(() => { const row = document.querySelector(${JSON.stringify(sessionRow)}); return JSON.stringify({ title: row.getAttribute('title'), label: row.querySelector(':scope > .label').textContent }) })()`),
+    )
+    assert.deepEqual(tip, { title: meta.title, label: meta.title }, `the session row's tooltip is its display title, the label it may clip (#109)\nsaw: ${JSON.stringify(tip)}`)
     const box = async (selector) =>
       JSON.parse(await browser.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(r.top + r.height / 2), top: r.top, right: r.right }) })()`))
     const move = (x, y) => browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' })

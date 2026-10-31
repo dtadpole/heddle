@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 
@@ -153,9 +154,10 @@ function usage() {
 
 function runFile(part, check, timeoutSeconds) {
   const at = Date.now()
+  const stopReport = join(tmpdir(), `lane-stop-${process.pid}-${at}.txt`)
   const run = spawnSync(process.execPath, [join(repoRoot, '_tools_', 'verify-runner', 'run.mjs'), join('_verifiers_', part, check), '--list'], {
     cwd: repoRoot,
-    env: { ...process.env, NO_COLOR: '1' },
+    env: { ...process.env, NO_COLOR: '1', HEDDLE_RUN_STOP_REPORT: stopReport },
     encoding: 'utf8',
     timeout: timeoutSeconds * 1000,
     /**
@@ -166,7 +168,12 @@ function runFile(part, check, timeoutSeconds) {
     killSignal: 'SIGTERM',
   })
   const result = run.error ? null : parseListOutput(run.stdout, run.status)
-  return { run, result, seconds: Math.round((Date.now() - at) / 100) / 10 }
+  let stopped = ''
+  if (existsSync(stopReport)) {
+    stopped = readFileSync(stopReport, 'utf8').trimEnd()
+    rmSync(stopReport, { force: true })
+  }
+  return { run, result, stopped, seconds: Math.round((Date.now() - at) / 100) / 10 }
 }
 
 function main() {
@@ -182,11 +189,13 @@ function main() {
       continue
     }
     for (const check of readdirSync(dir).filter((name) => /^check.*\.mjs$/.test(name)).sort()) {
-      const { run, result, seconds } = runFile(part, check, timeoutSeconds)
+      const { run, result, stopped, seconds } = runFile(part, check, timeoutSeconds)
       records.push({ part, check, result, seconds })
       if (!json) {
         const shown = result === null ? `BROKEN (${run.error ? run.error.code ?? 'error' : 'no verdict'})` : `verdict ${result.verdict}  pass ${result.pass}  fail ${result.fail}  skipped ${result.skipped}`
         process.stdout.write(`${part}/${check}`.padEnd(56) + `${shown}  ${seconds}s\n`)
+        // A stopped file's runner reports the TAP lines it had seen; show them under the BROKEN line.
+        if (result === null && stopped !== '') process.stdout.write(`${stopped}\n`)
       }
     }
   }
