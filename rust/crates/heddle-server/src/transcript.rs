@@ -152,6 +152,18 @@ fn trigger_of(source: Option<&Value>) -> Option<Value> {
         .cloned()
 }
 
+/// A user message's text blocks as the person reads them: a paragraph each, as the TypeScript build's `blocksText`.
+/// A settled subagent's notice is three blocks (DSH's `createSettlementMessage`); joined with nothing, the page read
+/// them as one run-on line (live-testing draft developer-five-10). A person's message is one block and reads as before.
+fn blocks_text(content: &[Value]) -> String {
+    content
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// `encodeURIComponent`, for the leaf of an upload's route: the unreserved marks it keeps are
 /// `A-Z a-z 0-9 - _ . ! ~ * ' ( )`, and everything else is its UTF-8 bytes as `%XX`.
 fn encode_component(raw: &str) -> String {
@@ -457,7 +469,7 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     section_start = Some(turns.len());
                     usage = UsageAccount { start: turns.len(), ..UsageAccount::default() };
                     let attachments = attachments_of(&content);
-                    let mut turn = ChatTurn::new(TurnKind::User, text);
+                    let mut turn = ChatTurn::new(TurnKind::User, blocks_text(&content));
                     if !attachments.is_empty() {
                         turn.attachments = Some(attachments);
                     }
@@ -781,6 +793,33 @@ mod tests {
         let wire = serde_json::to_value(&turns[1]).unwrap();
         assert_eq!(wire["trigger"]["round"], 2);
         assert!(serde_json::to_value(&turns[0]).unwrap().get("trigger").is_none(), "absent, not null");
+    }
+
+    #[test]
+    fn a_notices_text_blocks_read_as_paragraphs_and_a_persons_message_as_written() {
+        let source = json!({"kind": "subagent-settled", "form": "notice", "summary": "Background subagent s-1 finished."});
+        let events = vec![
+            json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "one line\nand a second"}]}}),
+            json!({"type": "message", "message": {"role": "user", "source": source, "content": [
+                {"type": "text", "text": "Background subagent s-1 finished. It cannot receive follow-up messages."},
+                {"type": "text", "text": "Its closing message:"},
+                {"type": "text", "text": "pong"}
+            ]}}),
+            json!({"type": "message", "message": {"role": "user", "content": [
+                {"type": "text", "text": "see the picture"},
+                {"type": "image", "mimeType": "image/png", "path": "/work/a.png"}
+            ]}}),
+            json!({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}}),
+        ];
+        let turns = transcript_turns(&events);
+        assert_eq!(turns[0].text, "one line\nand a second", "a person's message reads as written");
+        assert_eq!(
+            turns[1].text,
+            "Background subagent s-1 finished. It cannot receive follow-up messages.\n\nIts closing message:\n\npong",
+            "each block of a notice is its own paragraph"
+        );
+        assert_eq!(turns[2].text, "see the picture", "an attachment adds no text");
+        assert_eq!(turns[3].text, "ab", "an answer's text is joined as it streamed");
     }
 
     #[test]

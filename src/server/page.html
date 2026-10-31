@@ -9278,11 +9278,16 @@ function attachTypeLabel(name) {
   return extension.length > 0 && extension.length <= 5 ? extension.toUpperCase() : 'FILE'
 }
 
-/** The text a message shows; attachments are drawn as cards beside it, not typed into it. */
+/**
+ * The text a message shows: its text blocks, a paragraph each, as the transcript route's `blocksText` folds them.
+ * Attachments are drawn as cards beside it, not typed into it. A settled subagent's notice is three blocks, and joined
+ * with nothing it read as one run-on line (live-testing draft developer-five-10).
+ */
 function messageContentText(content) {
   return (content ?? [])
     .map((part) => (part.type === 'image' || part.type === 'file' ? '' : part.text ?? ''))
-    .join('')
+    .filter((text) => text !== '')
+    .join('\n\n')
 }
 
 /** Draw the pending cards; hidden entirely when nothing is waiting. */

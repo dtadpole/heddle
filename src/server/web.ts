@@ -3475,6 +3475,18 @@ export function highlightAsset(name: string, read: (relative: string) => string)
 }
 
 /**
+ * A user message's text blocks as the person reads them: a paragraph each.
+ *
+ * A harness notice is written as separate blocks — a settled subagent's summary, `Its closing message:`, and the
+ * child's text (DSH's `createSettlementMessage`) — and the chat adapters hand them to the model on separate lines.
+ * Joined with nothing, the page read them as one run-on line (live-testing draft developer-five-10). A person's
+ * message is one block, so it reads exactly as before; an attachment has no text and adds nothing.
+ */
+export function blocksText(content: readonly { readonly text?: string }[]): string {
+  return content.map((part) => part.text ?? '').filter((text) => text !== '').join('\n\n')
+}
+
+/**
  * Fold a session's recorded events into the display turns the page renders.
  *
  * Exported so the fold can be judged directly: it is pure, it is where the two subtle rules live (read the
@@ -3659,7 +3671,7 @@ export function transcriptTurns(
         const trigger = typeof source === 'object' && source !== null && typeof source.kind === 'string' && source.kind !== '' ? (source as ChatTurn['trigger']) : undefined
         turns.push({
           kind: 'user',
-          text,
+          text: blocksText(message.content ?? []),
           ...(attachments.length > 0 ? { attachments } : {}),
           ...(typeof event.at === 'string' ? { time: event.at } : {}),
           ...(trigger !== undefined ? { trigger } : {}),
