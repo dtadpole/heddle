@@ -151,8 +151,8 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
    * weight 500, and the chord `Alt+Meta+N`. Its collapsed rail carries the same action as its **second icon**, on the
    * 48-pixel pitch that begins with the control which opens the panel.
    */
-  assert.match(page, /<button id="new-session" type="button" title="New session \(⌥⌘N\)">/, 'the control exists, named with its chord')
-  assert.match(page, /<span id="new-session-label">New session<\/span>/, 'and says what it does')
+  assert.match(page, /<button id="new-session" type="button" title="New session \(⌥⌘N\)"[^>]*>/, 'the control exists, named with its chord')
+  assert.match(page, /<span id="new-session-label"[^>]*>New session<\/span>/, 'and says what it does')
   assert.match(page, /#new-session \{[\s\S]*?border-radius: var\(--radius-md\);/, 'rounded by the panel\'s own rule')
   assert.match(page, /#new-session \{[\s\S]*?font-size: \.875rem;[\s\S]*?font-weight: 500;/, 'at DSH\'s 14-pixel medium')
   assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')

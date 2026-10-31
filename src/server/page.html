@@ -2901,36 +2901,36 @@
     lands on after the brand, and the reason it belongs at the top is the same reason DSH puts it there: starting a
     conversation is what the panel is for.
   -->
-  <button id="new-session" type="button" title="New session (⌥⌘N)">
+  <button id="new-session" type="button" title="New session (⌥⌘N)" data-i18n-title="nav.newSessionTitle">
     <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
       <line x1="8" y1="3.5" x2="8" y2="12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       <line x1="3.5" y1="8" x2="12.5" y2="8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
     </svg>
-    <span id="new-session-label">New session</span>
+    <span id="new-session-label" data-i18n="nav.newSession">New session</span>
   </button>
   <!--
     DSH's sidebar panel list entry `schedules` (dsh-client-ui-schedule, order 10): a clock and "Automation tasks", which
     opens the cross-session task page in the main slot. Heddle has no panel list, so the entry is the one global row
     between the primary action and the workspaces — the place DSH's panel list occupies.
   -->
-  <button id="automation-tasks" type="button" aria-label="Automation tasks" title="Automation tasks">
+  <button id="automation-tasks" type="button" aria-label="Automation tasks" title="Automation tasks" data-i18n-aria-label="nav.automation" data-i18n-title="nav.automation">
     <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.6V8l2.4 1.5"/></svg>
-    <span id="automation-tasks-label">Automation tasks</span>
+    <span id="automation-tasks-label" data-i18n="nav.automation">Automation tasks</span>
   </button>
   <h1 id="workspaces-row">
-    <span id="workspaces-label">Workspaces</span>
+    <span id="workspaces-label" data-i18n="nav.workspaces">Workspaces</span>
     <!--
       The search control exists for the **rail**. Expanded, the field itself is right below and a button beside it would
       be a second way to do one thing; collapsed, the field is put away, so this is how a reader reaches it — the same
       job DSH's search icon does in its rail.
     -->
-    <button id="sidebar-search" type="button" aria-label="Search sessions" title="Search sessions (⌥⌘K)">
+    <button id="sidebar-search" type="button" aria-label="Search sessions" title="Search sessions (⌥⌘K)" data-i18n-aria-label="nav.search" data-i18n-title="nav.searchTitle">
       <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">
         <circle cx="7" cy="7" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/>
         <line x1="10.2" y1="10.2" x2="13.5" y2="13.5" stroke="currentColor" stroke-width="1.4"/>
       </svg>
     </button>
-    <button id="add-workspace" type="button" title="register a folder as a workspace root" aria-label="register a folder">+</button>
+    <button id="add-workspace" type="button" title="register a folder as a workspace root" aria-label="register a folder" data-i18n-title="nav.addWorkspaceTitle" data-i18n-aria-label="nav.addWorkspace">+</button>
     <span id="view-options"></span>
   </h1>
   <!--
@@ -2938,7 +2938,7 @@
     It filters **rows**: a session that does not match is put away while the query stands, and the branches
     around it stay where they are so the shape of the tree is still readable.
   -->
-  <input id="session-search" type="search" placeholder="Search sessions" aria-label="search session names" autocomplete="off">
+  <input id="session-search" type="search" placeholder="Search sessions" aria-label="search session names" data-i18n-placeholder="nav.search" data-i18n-aria-label="nav.searchNames" autocomplete="off">
   <p class="meta" id="search-note" hidden></p>
   <!--
     The **one scrollable region** of the panel, which is what the reference does and what this panel did not.
@@ -2950,9 +2950,9 @@
     `flex: none`, so only this region can ever be compressed.
   -->
   <div id="workspace-scroll">
-    <ul id="tree" role="tree" aria-label="workspace folders"></ul>
+    <ul id="tree" role="tree" aria-label="workspace folders" data-i18n-aria-label="nav.tree"></ul>
     <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
-    <div id="search-results" role="tree" aria-label="search results" hidden></div>
+    <div id="search-results" role="tree" aria-label="search results" data-i18n-aria-label="nav.searchResults" hidden></div>
     <p id="tree-note" class="meta" hidden></p>
   </div>
   <!--
@@ -2963,13 +2963,13 @@
     the reference's own `Alt+Meta+,`.
   -->
   <div id="panel-foot">
-    <button id="settings-open" type="button" aria-label="Settings" aria-haspopup="dialog" title="Settings (⌥⌘,)">
+    <button id="settings-open" type="button" aria-label="Settings" aria-haspopup="dialog" title="Settings (⌥⌘,)" data-i18n-aria-label="settings.title" data-i18n-title="nav.settingsTitle">
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
         <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/>
         <path d="M8 1.6v2M8 12.4v2M1.6 8h2M12.4 8h2M3.5 3.5l1.4 1.4M11.1 11.1l1.4 1.4M12.5 3.5l-1.4 1.4M4.9 11.1l-1.4 1.4"
               stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
       </svg>
-      <span id="settings-label">Settings</span>
+      <span id="settings-label" data-i18n="settings.title">Settings</span>
     </button>
   </div>
 </aside>
@@ -3472,6 +3472,18 @@ const MESSAGES = Object.freeze({
     'composer.commands': 'Add files or run commands',
     'composer.attachHint': 'Add a file or insert a workspace path',
     'composer.pending': 'Pending attachments',
+    'nav.newSession': 'New session',
+    'nav.newSessionTitle': 'New session (⌥⌘N)',
+    'nav.automation': 'Automation tasks',
+    'nav.workspaces': 'Workspaces',
+    'nav.search': 'Search sessions',
+    'nav.searchTitle': 'Search sessions (⌥⌘K)',
+    'nav.searchNames': 'search session names',
+    'nav.addWorkspace': 'register a folder',
+    'nav.addWorkspaceTitle': 'register a folder as a workspace root',
+    'nav.tree': 'workspace folders',
+    'nav.searchResults': 'search results',
+    'nav.settingsTitle': 'Settings (⌥⌘,)',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3497,6 +3509,18 @@ const MESSAGES = Object.freeze({
     'composer.commands': '添加文件或调用指令',
     'composer.attachHint': '添加文件或插入工作区路径',
     'composer.pending': '待发送附件',
+    'nav.newSession': '新建会话',
+    'nav.newSessionTitle': '新建会话 (⌥⌘N)',
+    'nav.automation': '自动化任务',
+    'nav.workspaces': '工作区',
+    'nav.search': '搜索会话',
+    'nav.searchTitle': '搜索会话 (⌥⌘K)',
+    'nav.searchNames': '搜索会话名称',
+    'nav.addWorkspace': '添加工作区',
+    'nav.addWorkspaceTitle': '将一个文件夹注册为工作区根目录',
+    'nav.tree': '工作区文件夹',
+    'nav.searchResults': '搜索结果',
+    'nav.settingsTitle': '设置 (⌥⌘,)',
   }),
 })
 
