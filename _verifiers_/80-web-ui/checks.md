@@ -50,6 +50,12 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-narrow-layout.mjs`](check-narrow-layout.mjs) — a narrow window at DSH parity: below 1024 pixels the
+  sidebar is the 56-pixel rail (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so at phone width (390 x 844, the
+  protocol's device metrics) the conversation keeps a readable width and the composer and its send button stay on
+  screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
+  breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
+  (live-testing draft developer-ten-9).
 - [`check-browser-tab.mjs`](check-browser-tab.mjs) — the right sidebar's Browser tab (#86), opt-in as DSH's Web
   profile ships it: a default server reports no `browser` on `/api/status` and shows no entry point; with
   `HEDDLE_WEB_BROWSER=1` the tab refuses `javascript:`, `file:`, `data:` and `blob:` input, credentials and the
