@@ -18,7 +18,7 @@ import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
-import { renderSourceOffThread } from './code.ts'
+import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
@@ -1034,7 +1034,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const reading = readFileText(wanted)
+      const path = canonicalPath(wanted)
+      if (rendererFor(path).renderer === 'image') {
+        let stats
+        try { stats = statSync(path) } catch { throw new Error(`${path} is not a file`) }
+        if (!stats.isFile()) throw new Error(`${path} is not a file`)
+        // Decide before the UTF-8 reader rejects PNG. No bytes or HTML in this metadata;
+        // /api/raw rechecks authentication and workspace ownership when the img loads.
+        respond(response, 200, 'application/json', `${JSON.stringify({
+          path, name: basename(path), bytes: stats.size, renderer: 'image',
+          image: { src: `/api/raw?path=${encodeURIComponent(path)}`, mediaType: 'image/png' },
+        })}\n`)
+        return
+      }
+      const reading = readFileText(path)
       /**
        * The reading and the **renderer's decision** travel together.
        *

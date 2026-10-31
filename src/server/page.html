@@ -2446,6 +2446,9 @@
    */
   #file-body { white-space: pre-wrap; font-family: var(--code-font); font-size: var(--code-size); line-height: var(--code-leading); overflow-wrap: anywhere; }
   #file-body[data-renderer='markdown'] { white-space: normal; font-family: inherit; font-size: .88rem; line-height: 1.5; }
+  #file-body[data-renderer='image'] { white-space: normal; font-family: inherit; }
+  #file-body[data-renderer='image'] img { display: block; max-width: 100%; height: auto; }
+  #file-body[data-renderer='image'] img[hidden] { display: none; }
   #file-body .line { display: block; }
   /**
    * The line numbers are a margin note, not part of the code.
@@ -11978,7 +11981,8 @@ async function showFile(node) {
       fileBody.textContent = body.error ?? `the server answered ${response.status}`
       return
     }
-    const bits = [humanBytes(body.bytes), body.lines + (body.lines === 1 ? ' line' : ' lines')]
+    const bits = [humanBytes(body.bytes)]
+    if (typeof body.lines === 'number') bits.push(body.lines + (body.lines === 1 ? ' line' : ' lines'))
     if (body.truncated) bits.push(`showing the first ${humanBytes(body.text.length)}`)
     fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}`
     /**
@@ -11994,6 +11998,37 @@ async function showFile(node) {
      * the document itself with its resources rewritten, and mixing them would mean one route deciding whether its
      * answer is data or a program.
      */
+    if (body.renderer === 'image') {
+      // Accept only the exact same-origin authorized raw address for this PNG.
+      const source = '/api/raw?path=' + encodeURIComponent(body.path)
+      if (body.image?.mediaType !== 'image/png' || body.image?.src !== source) {
+        throw new Error('invalid PNG preview source')
+      }
+      const status = document.createElement('p')
+      status.textContent = 'Loading image…'
+      status.setAttribute('role', 'status')
+      const image = document.createElement('img')
+      image.alt = 'Image preview: ' + (body.name ?? body.path)
+      image.referrerPolicy = 'no-referrer'
+      image.decoding = 'async'
+      image.draggable = false
+      image.hidden = true
+      image.onload = () => {
+        if (ticket !== fileFetches) return
+        status.hidden = true
+        image.hidden = false
+      }
+      image.onerror = () => {
+        if (ticket !== fileFetches) return
+        image.hidden = true
+        status.hidden = false
+        status.setAttribute('role', 'alert')
+        status.textContent = 'This image could not be displayed.'
+      }
+      fileBody.replaceChildren(status, image)
+      image.src = source
+      return
+    }
     if (body.renderer === 'html') {
       fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}  ·  preview`
       const htmlBody = await (await fetch('/api/html?path=' + encodeURIComponent(body.path))).json()
