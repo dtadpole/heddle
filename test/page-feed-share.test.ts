@@ -334,6 +334,22 @@ test('a tab that opens in front takes the stream with the leading tab\'s cursor,
   assert.deepEqual(Array.from(first.delivered), [1, 2], 'the old leader, now following, missed nothing')
 })
 
+test('a tab that opens in front takes the stream after 2 s when the tab holding the lock never answers', { timeout: 5000 }, async () => {
+  const world = { locks: new Locks(), bus: new Bus() }
+  /** A tab frozen while it holds the lock: it answers nothing. */
+  world.locks.forTab('frozen').request('heddle-events', () => new Promise(() => {})).catch(() => {})
+  await settle()
+  const fresh = tab('fresh', { ...world, visible: true })
+  await settle()
+  fresh.advance(1900)
+  await settle()
+  assert.equal(fresh.open().length, 0, 'it waits for the leading tab first')
+  fresh.advance(200)
+  await settle()
+  assert.equal(fresh.body.dataset.feed, 'leader', 'then takes the stream')
+  assert.equal(fresh.open().length, 1)
+})
+
 test('without locks, or where the browser refuses them, a tab keeps a stream of its own', { timeout: 5000 }, async () => {
   const bus = new Bus()
   const bare = tab('bare', { locks: null, bus, visible: true })
@@ -496,12 +512,15 @@ function runTurnHarness(answer: string) {
       sent.push(body);
       return ${answer};
     }
+    let streamOpen = true;
+    const opening = [];
+    const events = { whenOpen: () => (streamOpen ? Promise.resolve() : new Promise((resolve) => opening.push(resolve))) };
     ${block('turnVerdicts')};
     ${source('runTurn')}
-    ({ run: () => runTurn('hello', 'S', [], () => calls.push('accepted')), verdict: (data) => turnVerdicts.receive(data), idle: () => turnVerdicts.endIdle(new Map(), runningTick) })
+    ({ run: () => runTurn('hello', 'S', [], () => calls.push('accepted')), verdict: (data) => turnVerdicts.receive(data), idle: () => turnVerdicts.endIdle(new Map(), runningTick), close: () => { streamOpen = false }, open: () => { streamOpen = true; for (const resolve of opening.splice(0)) resolve() } })
     `,
     { sent, calls, performance: { now: () => 0 }, TextDecoder, chunks: CHUNKS },
-  ) as { run(): Promise<void>; verdict(data: unknown): void; idle(): void }
+  ) as { run(): Promise<void>; verdict(data: unknown): void; idle(): void; close(): void; open(): void }
   return { sent, calls, harness }
 }
 
@@ -561,4 +580,19 @@ test('a turn a sessions read ended as lost still runs its tail when its verdict 
   harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [{ tool: 'bash', message: 'late' }] })
   await settle()
   assert.ok(calls.includes('denied:bash: late'), `the late verdict ran the done tail: ${JSON.stringify(calls)}`)
+})
+
+test('a turn is not sent until the page follows the stream, so its first events reach the page', { timeout: 5000 }, async () => {
+  const { sent, harness } = runTurnHarness(
+    "{ ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session: 'S', turn: 't9' }) }",
+  )
+  harness.close()
+  const running = harness.run()
+  await settle()
+  assert.equal(sent.length, 0, 'nothing is posted while the stream is not open')
+  harness.open()
+  await settle()
+  assert.equal(sent.length, 1, 'and the turn goes once it is')
+  harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [] })
+  await running
 })

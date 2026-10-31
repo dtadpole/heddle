@@ -6468,10 +6468,13 @@ const events = (() => {
       // a closed channel has nobody left to tell
     }
   }
+  /** Callers waiting for the stream to open: a turn is sent only once its events will reach this page. */
+  const openWaiters = new Set()
   function setState(state) {
     document.body.dataset.connection = state
     banner.hidden = state !== 'connecting'
     if (leading) post({ kind: 'state', state, lastEventId })
+    if (state === 'open') for (const resolve of [...openWaiters]) resolve()
   }
   function heard() {
     clearTimeout(silenceTimer)
@@ -6649,6 +6652,14 @@ const events = (() => {
      * tab only after its answer to `hello` gave it a cursor (`relayed`).
      */
     frontOnJoin = document.visibilityState === 'visible'
+    /** A leader answers `hello` in milliseconds; one that has not in 2 s is frozen or gone, so the front tab takes over. */
+    if (frontOnJoin) {
+      setTimeout(() => {
+        if (!frontOnJoin) return
+        frontOnJoin = false
+        if (document.visibilityState === 'visible') seize()
+      }, 2000)
+    }
     stand()
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') seize()
@@ -6657,6 +6668,23 @@ const events = (() => {
   }
   if (!share()) solo()
   return {
+    /**
+     * Resolve once the stream is open, or after `timeoutMs`. A page that sends as soon as it loads would otherwise
+     * post its turn before its stream is subscribed, and the turn's first events (the person's own message) would
+     * reach the server's log but never this page (measured in check-composer once the stream waited for its lock).
+     */
+    whenOpen(timeoutMs) {
+      if (document.body.dataset.connection === 'open') return Promise.resolve()
+      return new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer)
+          openWaiters.delete(done)
+          resolve()
+        }
+        const timer = setTimeout(done, timeoutMs)
+        openWaiters.add(done)
+      })
+    },
     addEventListener(name, handler) {
       if (!handlers.has(name)) {
         handlers.set(name, [])
@@ -7988,6 +8016,8 @@ events.addEventListener('turn', (message) => {
 async function runTurn(text, key, attachments = [], onAccepted) {
   liveTurns += 1
   updateStatusBar()
+  /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
+  await events.whenOpen(3000)
   const startedAt = performance.now()
   const target = key === QUEUE_KEY_NONE ? null : key
   const response = await sendTurn({
