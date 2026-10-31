@@ -270,6 +270,25 @@ impl SessionPort for Sessions {
         }
     }
 
+    fn under_archived(&self, session: &SessionHandle) -> bool {
+        self.service.under_archived(&session.id)
+    }
+
+    fn claim_rejected(
+        &self,
+        session: &SessionHandle,
+        prompt: Option<(Vec<ContentPart>, Option<serde_json::Value>)>,
+        with_turn: bool,
+    ) -> Result<usize, PortError> {
+        if let Some((content, source)) = prompt {
+            heddle_session::inbox::queue_turn(self.service.store(), session, content, source)
+                .map_err(port_error)?;
+        }
+        heddle_session::inbox::claim_rejected(self.service.store(), session, with_turn)
+            .map(|claimed| claimed.len())
+            .map_err(port_error)
+    }
+
     fn recorded_preset(&self, session: &SessionHandle) -> Option<String> {
         self.service
             .meta(&session.id)

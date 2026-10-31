@@ -67,6 +67,8 @@ pub struct Context<'a> {
     pub views: Vec<(String, Arc<dyn SessionView>)>,
     /// Where `/vendor/purify.js` is looked for (the repository root and the working directory).
     pub asset_roots: Vec<PathBuf>,
+    /// Whether the serving invocation explicitly enabled Browser framing.
+    pub browser: bool,
     /// The cookie-signing secret's path, `<heddle home>/web-secret` as the boot's environment resolves
     /// it (`token::secret_path_for`). Pass it: `None` falls back to the server reading `HEDDLE_HOME` and
     /// `HOME` from the process itself.
@@ -101,6 +103,7 @@ pub fn options_for(args: &Args, context: &Context<'_>) -> ServerOptions {
         token: None,
         default_endpoint: args.endpoint.clone(),
         asset_roots: context.asset_roots.clone(),
+        browser: context.browser,
     }
 }
 
@@ -169,14 +172,29 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// A folder a test made under the system temp dir, removed when it is dropped.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// The temp folders of the test on this thread, dropped (and removed) when the test's thread ends, after a
+        /// panic too; see server.rs's `temp_secret`.
+        static TEMP_FOLDERS: std::cell::RefCell<Vec<TempFolder>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
     fn secret(label: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!(
-                "heddle-command-{label}-{}-{}",
-                std::process::id(),
-                crate::token::now_ms()
-            ))
-            .join("web-secret")
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-command-{label}-{}-{}",
+            std::process::id(),
+            crate::token::now_ms()
+        ));
+        TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
+        folder.join("web-secret")
     }
 
     fn context<'a>(harness: &'a Harness, label: &str) -> Context<'a> {
@@ -187,6 +205,7 @@ mod tests {
             routers: Vec::new(),
             views: Vec::new(),
             asset_roots: Vec::new(),
+            browser: false,
             secret_path: Some(secret(label)),
             notes: Vec::new(),
             shutdown: CancellationToken::new(),

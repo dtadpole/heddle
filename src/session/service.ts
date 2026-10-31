@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
-import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
+import { ensureSessionsFolder, existingSessionNames, unwritableIn, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 import { interruptedTurnClosers } from './repair.ts'
@@ -149,17 +149,32 @@ export class SessionService extends Service {
     } = {},
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
+    /**
+     * The branch is written **before** the store records anything (#106): a folder heddle cannot write is refused with
+     * `SessionUnwritableError` and leaves no session behind — measured, the old order recorded one, which then listed
+     * under a branch whose definition was never written.
+     */
+    try {
+      ensureSessionsFolder(canonical)
+    } catch (error) {
+      throw unwritableIn(canonical, error)
+    }
     const taken = existingSessionNames(canonical)
     const handle = this.openAt(canonical, { fresh: true, ...options })
     const meta = this.list().find((entry) => entry.id === handle.id)
-    const definition = writeSessionDefinition(handle, canonical, {
-      createdAt: meta?.created ?? new Date().toISOString(),
-      taken,
-      ...(options.title !== undefined ? { title: options.title } : {}),
-      ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-    })
+    let definition: SessionDefinition
+    try {
+      definition = writeSessionDefinition(handle, canonical, {
+        createdAt: meta?.created ?? new Date().toISOString(),
+        taken,
+        ...(options.title !== undefined ? { title: options.title } : {}),
+        ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
+      })
+    } catch (error) {
+      throw unwritableIn(canonical, error)
+    }
     return { handle, definition }
   }
 
@@ -172,9 +187,17 @@ export class SessionService extends Service {
    * The folder keeps the conventions' instance naming rule — a title with spaces and brackets is a label, not
    * an instance name — so the identity is generated as for any other session while the title carries the name.
    */
-  fork(id: SessionId): { readonly handle: SessionHandle; readonly definition: SessionDefinition } | null | { readonly error: 'unavailable' } {
+  fork(
+    id: SessionId,
+    options: { readonly atSeq?: number } = {},
+  ):
+    | { readonly handle: SessionHandle; readonly definition: SessionDefinition }
+    | null
+    | { readonly error: 'unavailable' }
+    | { readonly error: 'no-such-event'; readonly atSeq: number; readonly lastSeq?: number } {
     const source = this.store.list().find((one) => one.id === id)
     if (source === undefined) return null
+    if (options.atSeq !== undefined) return this.forkAt(id, source, options.atSeq)
     /**
      * A fork is cut at the last **completed** turn, as DSH's is: a session with none has nothing to fork from, and a child
      * carrying a half-finished turn would invite the model to continue work it never saw finish.
@@ -190,6 +213,39 @@ export class SessionService extends Service {
     /** The child records its parent, which is the provenance DSH's header keeps (`parentSession`). */
     const handle = this.store.fork(id, { parentSession: id })
     if (handle === null) return null
+    return this.nameFork(handle, source)
+  }
+
+  /**
+   * Fork at an explicit event: DSH's `session/fork` with `atSeq` (dsh-api-session-controller/lib/index.js:849-872).
+   *
+   * The cut is inclusive and must name an event the source has; DSH refuses any other with "event N does not exist in
+   * session ... (last seq: M)", and so does this. An explicit cut does not have to fall on a completed turn: DSH accepts
+   * any existing event seq. The chat's Branch action only offers the seq that ended a completed turn.
+   */
+  private forkAt(
+    id: SessionId,
+    source: SessionMeta,
+    atSeq: number,
+  ):
+    | { readonly handle: SessionHandle; readonly definition: SessionDefinition }
+    | null
+    | { readonly error: 'unavailable' }
+    | { readonly error: 'no-such-event'; readonly atSeq: number; readonly lastSeq?: number } {
+    const sourceHandle = this.store.open(id)
+    if (sourceHandle === null) return { error: 'unavailable' }
+    const events = this.store.read(sourceHandle)
+    if (!events.some((event) => event.seq === atSeq)) {
+      const last = events.at(-1)?.seq
+      return { error: 'no-such-event', atSeq, ...(last !== undefined ? { lastSeq: last } : {}) }
+    }
+    const handle = this.store.fork(id, { parentSession: id, atSeq })
+    if (handle === null) return null
+    return this.nameFork(handle, source)
+  }
+
+  /** Give the child its source's preset, its title from the source's (`forkTitle`), and its definition in the source's folder. */
+  private nameFork(handle: SessionHandle, source: SessionMeta): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     /** A fork continues its source, so it runs under the source's preset (inventory A96). */
     if (source.preset !== undefined) this.store.recordPreset(handle.id, source.preset)
     const created = this.store.list().find((one) => one.id === handle.id)
@@ -345,6 +401,14 @@ export class SessionService extends Service {
   /** Pin, unpin, archive or unarchive a session — the state behind a row's menu. */
   flags(id: SessionId, patch: { readonly pinned?: boolean; readonly archived?: boolean }): SessionMeta | null {
     return this.store.flags(id, patch)
+  }
+
+  /**
+   * Whether an archived session owns this one's steps: it is archived itself, or a session above it in its subagent
+   * lineage is. DSH's archived-session gate asks exactly this before every model step; the agent loop asks it here.
+   */
+  underArchived(id: SessionId): boolean {
+    return this.store.underArchived(id)
   }
 
   /**

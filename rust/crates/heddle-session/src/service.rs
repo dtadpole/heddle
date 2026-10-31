@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::clock::iso_now;
 use crate::definition::{
-    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+    CreatedDefinition, DefinitionOptions, ensure_sessions_folder, existing_session_names,
+    write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -83,6 +84,9 @@ pub enum ForkOutcome {
     NotFound,
     /// The source has no completed turn with an answer to inherit — a `409`.
     Unavailable,
+    /// An explicit `atSeq` names no event of the source — a `409` with DSH's sentence, which cites the
+    /// source's last seq (`None` for an empty log).
+    NoSuchEvent { at_seq: u64, last_seq: Option<u64> },
     /// The child session, named `<title> (n)`, with its definition in the source's folder.
     Forked(CreatedDefinition),
 }
@@ -270,6 +274,10 @@ impl SessionService {
         let canonical = canonical_path(Path::new(branch))
             .to_string_lossy()
             .into_owned();
+        // The branch is written **before** the store records anything (#106): a folder heddle cannot write
+        // is refused with `SessionError::Unwritable` and leaves no session behind — measured, the old order
+        // recorded one, which then listed under a branch whose definition was never written.
+        ensure_sessions_folder(&canonical).map_err(|error| error.unwritable_in(&canonical))?;
         let taken = existing_session_names(&canonical);
         let handle = self.open_at(
             &canonical,
@@ -299,30 +307,52 @@ impl SessionService {
                 reasoning_effort: options.reasoning_effort,
                 taken,
             },
-        )?;
+        )
+        .map_err(|error| error.unwritable_in(&canonical))?;
         Ok(CreatedDefinition { handle, definition })
     }
 
     /// Fork a session: a child that continues from its last completed turn, recording `parentSession`,
     /// titled `<title> (n)`, with its own definition in the source's folder.
     pub fn fork(&self, id: &str) -> Result<ForkOutcome, SessionError> {
+        self.fork_at(id, None)
+    }
+
+    /// [`SessionService::fork`] with DSH's `atSeq` (dsh-api-session-controller/lib/index.js:849-872):
+    /// `Some(seq)` cuts at that event, inclusive, and must name an event the source has; it need not fall
+    /// on a completed turn, as DSH accepts any existing seq. `None` is the last completed turn.
+    pub fn fork_at(&self, id: &str, at_seq: Option<u64>) -> Result<ForkOutcome, SessionError> {
         let Some(source) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(ForkOutcome::NotFound);
         };
         let Some(source_handle) = self.store.open(id) else {
             return Ok(ForkOutcome::Unavailable);
         };
-        // The question is "does the inherited projection contain an assistant message", not "does the
-        // log contain assistant chunks": a fork's own log holds copied messages and no chunks.
-        if !inherits_answer(self.store.read(&source_handle)?.as_slice())? {
-            return Ok(ForkOutcome::Unavailable);
+        let events = self.store.read(&source_handle)?;
+        match at_seq {
+            Some(cut) => {
+                if !events.iter().any(|event| event.seq == cut) {
+                    return Ok(ForkOutcome::NoSuchEvent {
+                        at_seq: cut,
+                        last_seq: events.last().map(|event| event.seq),
+                    });
+                }
+            }
+            // The question is "does the inherited projection contain an assistant message", not "does
+            // the log contain assistant chunks": a fork's own log holds copied messages and no chunks.
+            None => {
+                if !inherits_answer(events.as_slice())? {
+                    return Ok(ForkOutcome::Unavailable);
+                }
+            }
         }
-        let Some(handle) = self.store.fork(
+        let Some(handle) = self.store.fork_at(
             id,
             ForkAttribution {
                 parent_session: Some(id.to_string()),
                 ..Default::default()
             },
+            at_seq,
         )?
         else {
             return Ok(ForkOutcome::Unavailable);
@@ -424,9 +454,14 @@ impl SessionService {
         self.store.meta(id)
     }
 
-    /// Whether this store holds a session with that id.
+    /// Whether this store holds a session with that id: a metadata record, and a log that opens.
+    ///
+    /// A session whose log cannot be read opens as no session ([`SessionStore::open`]), so every route that asks this
+    /// first answers it as an unknown id. Measured before (#130): `POST /api/turn` into such a session passed this
+    /// check on its record alone and came back `400 no session '<id>' under <store root>`, naming the store on disk,
+    /// where web.ts answers `404 session/not-found`.
     pub fn exists(&self, id: &str) -> bool {
-        self.store.meta(id).is_some()
+        self.store.meta(id).is_some() && self.store.open(id).is_some()
     }
 
     /// Open an existing session by id, in whichever layout it was written in.
@@ -520,6 +555,12 @@ impl SessionService {
     /// Pin, unpin, archive or unarchive.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
         self.store.flags(id, patch)
+    }
+
+    /// Whether an archived session owns this one's steps: it is archived itself, or a session above it in its
+    /// subagent lineage is. DSH's archived-session gate asks exactly this before every model step.
+    pub fn under_archived(&self, id: &str) -> bool {
+        self.store.under_archived(id)
     }
 
     /// Record the agent preset a session runs under, only when it has none (inventory A96); see
@@ -987,6 +1028,51 @@ mod tests {
         assert_eq!(service.list().len(), 1);
     }
 
+    /// Issue #106: a branch heddle cannot write failed with the I/O error and the definition's absolute path,
+    /// after the store had already recorded the session. It is refused by code, in words, naming the folder by
+    /// its name, and before anything is recorded.
+    #[test]
+    fn create_at_in_a_branch_heddle_cannot_write_is_refused_by_code_without_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let mode = |bits: u32| {
+            std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(bits)).unwrap()
+        };
+        mode(0o000);
+        // File modes do not stop the superuser, so a run as root cannot judge this.
+        if std::fs::read_dir(folder.path()).is_ok() {
+            mode(0o755);
+            return;
+        }
+        let error = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap_err();
+        mode(0o755);
+        let name = folder.path().file_name().unwrap().to_string_lossy();
+        assert_eq!(error.code(), Some("session/unwritable"));
+        assert_eq!(
+            error.to_string(),
+            format!("cannot write to \"{name}\": permission denied")
+        );
+        assert!(
+            !error.to_string().contains(folder_path),
+            "no absolute path in the sentence"
+        );
+        assert!(
+            service.list().is_empty(),
+            "the store holds no session for the refused branch"
+        );
+        let created = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap();
+        assert!(
+            Path::new(&created.definition.file).exists(),
+            "once writable, the branch takes one"
+        );
+    }
+
     #[test]
     fn a_fork_needs_an_answer_and_then_copies_the_conversation() {
         let (_dir, service) = service();
@@ -1171,6 +1257,103 @@ mod tests {
         assert_eq!(recorded.preset(), Some("standard"));
         service.record_preset(&plain.id, "reader").unwrap();
         assert_eq!(preset_of(&plain.id).as_deref(), Some("standard"));
+    }
+
+    #[test]
+    fn a_fork_at_a_turn_end_holds_the_turns_up_to_it() {
+        // DSH's `session/fork` with `atSeq` (R-developer-eight-16): an inclusive cut at an existing event.
+        let (_dir, service) = service();
+        let folder = branch();
+        let source = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        service.rename(&source.id, "Long").unwrap();
+        let mut ends = Vec::new();
+        for prompt in ["turn one", "turn two", "turn three"] {
+            service.user(&source, prompt, None).unwrap();
+            service
+                .store()
+                .message(
+                    &source,
+                    Message {
+                        role: Role::Assistant,
+                        tool_call_id: None,
+                        content: vec![ContentPart::Text {
+                            text: format!("answer to {prompt}"),
+                        }],
+                        source: None,
+                    },
+                )
+                .unwrap();
+            let end = service
+                .store()
+                .append(&source, NewEvent::new("turn/completed"), Default::default())
+                .unwrap();
+            ends.push(end.seq);
+        }
+
+        let ForkOutcome::Forked(forked) = service.fork_at(&source.id, Some(ends[1])).unwrap()
+        else {
+            panic!("the cut at the second turn's end forks");
+        };
+        let carried: Vec<String> = service
+            .messages(&forked.handle)
+            .unwrap()
+            .iter()
+            .map(|message| text_of(&message.content))
+            .collect();
+        assert_eq!(
+            carried,
+            vec![
+                "turn one",
+                "answer to turn one",
+                "turn two",
+                "answer to turn two"
+            ],
+            "the child ends after turn two"
+        );
+        assert_eq!(
+            service
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == forked.handle.id)
+                .unwrap()
+                .title(),
+            Some("Long (1)")
+        );
+
+        let last = service
+            .store()
+            .read(&source)
+            .unwrap()
+            .last()
+            .map(|event| event.seq);
+        assert_eq!(
+            service.fork_at(&source.id, Some(9999)).unwrap(),
+            ForkOutcome::NoSuchEvent {
+                at_seq: 9999,
+                last_seq: last
+            },
+            "a seq past the log is refused with the last seq"
+        );
+        // An explicit seq need not fall on a completed turn: DSH accepts any existing event.
+        let untouched = service
+            .open_at(
+                folder.path().to_str().unwrap(),
+                OpenAtOptions {
+                    fresh: true,
+                    ..OpenAtOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            service.fork(&untouched.id).unwrap(),
+            ForkOutcome::Unavailable
+        );
+        assert!(matches!(
+            service.fork_at(&untouched.id, Some(0)).unwrap(),
+            ForkOutcome::Forked(_)
+        ));
     }
 
     #[test]
