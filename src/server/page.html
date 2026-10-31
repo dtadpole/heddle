@@ -3207,7 +3207,9 @@
     <ul id="tree" role="tree" aria-label="workspace folders"></ul>
     <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
     <div id="search-results" role="tree" aria-label="search results" hidden></div>
-    <p id="tree-note" class="meta" hidden></p>
+    <!-- The note carries what DSH says in a notice ("Choose a workspace first.", a refused fork, where a new conversation
+         starts), so it is a polite live region and a screen reader hears it change (developer-ten's N9). -->
+    <p id="tree-note" class="meta" aria-live="polite" hidden></p>
   </div>
   <!--
     The panel's **anchored bottom area**, which the reference has and this panel did not.
@@ -10994,6 +10996,7 @@ let chosenWorkspace = null
 /** Remember (or, when `path` is null, forget) the workspace a person just opened or added. */
 function chooseWorkspace(path) {
   chosenWorkspace = path === null ? null : { path, during: current }
+  paintNewConversationPlace()
 }
 
 /**
@@ -11785,6 +11788,7 @@ function markSelection() {
 function chooseSelected(path) {
   selectedPath = path
   markSelection()
+  paintNewConversationPlace()
 }
 
 /** Move the mark to the row whose session is the one now shown, when that row is drawn at all. */
@@ -12388,6 +12392,24 @@ function composerAimless() {
   if (!firstTreeSettled || workspaceRoutes === 'absent') return false
   if (current !== null || composerKey !== QUEUE_KEY_NONE || unavailableSession !== null) return false
   return newConversationTarget() === null
+}
+
+/** The note's words for where the next message starts a conversation while no session is open (#134). */
+const NEW_CONVERSATION_NOTE = 'a new conversation in '
+
+/**
+ * With no session open, repaint what names the new conversation's place once a person changed it: the hero chip and the
+ * composer's state (`paintConversationTarget`), and the note under the tree when it is the one that names the place
+ * (developer-ten's N4). Choosing a workspace row or a selected row moves the target (`newConversationTarget` reads both),
+ * and only a redraw of the tree repainted them, so the chip and the note could name A while the next message went to B.
+ * A note saying something else (an empty list, an error) is left as it is.
+ */
+function paintNewConversationPlace() {
+  if (current !== null || !firstTreeSettled) return
+  paintConversationTarget()
+  if (!treeNote.textContent.startsWith(NEW_CONVERSATION_NOTE)) return
+  const place = newConversationTarget()?.label ?? null
+  setNote(place === null ? '' : NEW_CONVERSATION_NOTE + place)
 }
 
 /**
@@ -16225,7 +16247,7 @@ async function renderTree() {
      * reload, which forgets the folder the prompt box was aimed at, still names that workspace (#134).
      */
     const place = current === null ? (newConversationTarget()?.label ?? null) : activeFolder === null ? null : WorkspaceTree.folderLabel(treeTops, activeFolder)
-    setNote(place === null ? '' : 'a new conversation in ' + place)
+    setNote(place === null ? '' : NEW_CONVERSATION_NOTE + place)
   }
 
   /**
