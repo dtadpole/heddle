@@ -327,6 +327,12 @@ fn page_routers(
             .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
             .map(|schedule| Arc::clone(&schedule.service)),
     ));
+    // The background-job routes: DSH's job controller (list, follow, kill); 503 when the profile has no jobs row.
+    routers.push(heddle_jobs::http::router(
+        boot.services
+            .get::<Arc<heddle_jobs::JobsPlugin>>("jobs")
+            .map(|jobs| jobs.registry.clone()),
+    ));
     routers
 }
 
@@ -828,6 +834,17 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         // The booted store's own records, as `tree` and `remove` read them.
         serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
     }
+
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.service
+            .insert_before(id, before)
+            .map_err(|error| match error {
+                heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
+                    heddle_server::services::workspace_not_found(&missing)
+                }
+                other => refusal(other),
+            })
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under
@@ -888,6 +905,15 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
             }));
         }
         schedule.start_delivery();
+    }
+    // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+    if let (Some(jobs), Some(hub)) = (
+        boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs"),
+        boot.services.get::<heddle_server::EventHub>("event-hub"),
+    ) {
+        jobs.on_change(move || {
+            hub.publish(heddle_server::SseFrame::new("jobs", &serde_json::json!({})));
+        });
     }
     notes
 }
@@ -1209,8 +1235,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            4,
-            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
+            5,
+            "files, trajectory, the composer, the reminder routes and the job routes (each 503 without its row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }

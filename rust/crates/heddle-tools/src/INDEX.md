@@ -16,7 +16,8 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`tool.rs`](tool.rs) | one tool and one command, their contexts, `ToolResult` and the stable codes |
 | [`registry.rs`](registry.rs) | `ToolRegistry`: registration, the allow list, and the gate order of every call |
 | [`gates.rs`](gates.rs) | the ports the registry gates through: approvals, sandbox, per-session mode, hooks |
-| [`builtin.rs`](builtin.rs) | `write_file`, `read_file`, `list_dir`, `bash` |
+| [`builtin.rs`](builtin.rs) | `write_file`, `read_file`, `list_dir`, `bash`; `launch_shell`, the confinement a foreground and a background command share |
+| [`background.rs`](background.rs) | the seam `bash`'s `run_in_background` reaches the jobs row through: `BashBackground`, attached per sandbox gate; with none attached `bash`'s schema and run are the foreground ones |
 | [`config.rs`](config.rs) | the `tools` configuration row |
 | [`protocol.rs`](protocol.rs) | the outside-component wire types ([`../PROTOCOL.md`](../PROTOCOL.md)) |
 | [`outside.rs`](outside.rs) | starting an outside component and forwarding its tools' calls |

@@ -318,13 +318,84 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     )
 }
 
+/// A command line confined for one call: the argv to spawn and the confinement it runs under (`None`: unconfined).
+#[derive(Debug, Clone)]
+pub struct ShellLaunch {
+    /// What to spawn: the wrapped argv, or `/bin/sh -c <command>`.
+    pub argv: Vec<std::ffi::OsString>,
+    /// The confinement, which the settled command is classified against.
+    pub confined: Option<crate::upstream::ConfinedArgv>,
+}
+
+/// Confine the exact argv, or refuse to run it.
+///
+/// `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox for a
+/// wrapped argv; if this host cannot confine, the call fails closed with the reason rather than running
+/// unconfined — that is the difference between a sandbox and a suggestion. `Err` is the refusal to answer, boxed
+/// because a `ToolResult` is large.
+///
+/// Shared by the foreground run and the jobs row's background run (`heddle-jobs`), so a background command is
+/// confined by exactly the path a foreground one is. `sandbox` is the gate rooted at the call's folder.
+pub fn launch_shell(
+    sandbox: &dyn SandboxGate,
+    command: &str,
+    context: &ToolRunContext,
+) -> Result<ShellLaunch, Box<ToolResult>> {
+    let mode = context.mode();
+    let confined = if mode == SandboxMode::DangerFullAccess {
+        None
+    } else {
+        match sandbox.confine(
+            &["/bin/sh".to_owned(), "-c".to_owned(), command.to_owned()],
+            mode,
+        ) {
+            Ok(confined) => Some(confined),
+            Err(unavailable) => {
+                let message = unavailable.to_string();
+                context.log(&format!("refused a '{mode}' shell: {message}"));
+                let data = serde_json::Map::from_iter([(
+                    "sandbox".to_owned(),
+                    json!({ "mode": mode, "denied": false, "unavailable": true }),
+                )]);
+                return Err(Box::new(
+                    ToolResult::refused(codes::SANDBOX_UNAVAILABLE, message).with_data(data),
+                ));
+            }
+        }
+    };
+    let argv: Vec<std::ffi::OsString> = confined.as_ref().map_or_else(
+        || {
+            vec![
+                std::ffi::OsString::from("/bin/sh"),
+                std::ffi::OsString::from("-c"),
+                std::ffi::OsString::from(command),
+            ]
+        },
+        |confined| confined.argv.clone(),
+    );
+    Ok(ShellLaunch { argv, confined })
+}
+
+const BASH_DESCRIPTION: &str = "Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.";
+
+/// `bash`, with its two schemas: the foreground one, and the same with `run_in_background` (after `timeoutMs`,
+/// before the escalation fields), which it advertises only while the jobs row has attached a runner to its sandbox
+/// ([`crate::background`]).
+struct BashTool {
+    sandbox: Arc<dyn SandboxGate>,
+    foreground: ToolSpec,
+    background: ToolSpec,
+    default_timeout_ms: u64,
+    output_limit: usize,
+}
+
 fn bash_tool(
     sandbox: Arc<dyn SandboxGate>,
     default_timeout_ms: u64,
     output_limit: usize,
     escalation: serde_json::Map<String, serde_json::Value>,
 ) -> Arc<dyn Tool> {
-    let parameters = {
+    let parameters = |background: bool| {
         let mut properties = serde_json::Map::from_iter([
             (
                 "command".to_owned(),
@@ -335,7 +406,13 @@ fn bash_tool(
                 json!({ "type": "number", "description": format!("Wall time before the command is killed; default {default_timeout_ms}.") }),
             ),
         ]);
-        properties.extend(escalation);
+        if background {
+            properties.insert(
+                "run_in_background".to_owned(),
+                json!({ "type": "boolean", "description": crate::background::RUN_IN_BACKGROUND_DESCRIPTION }),
+            );
+        }
+        properties.extend(escalation.clone());
         json!({
             "type": "object",
             "properties": properties,
@@ -343,73 +420,72 @@ fn bash_tool(
             "additionalProperties": false,
         })
     };
-    let run = Arc::clone(&sandbox);
-    tool_fn(
-        spec(
-            "bash",
-            "Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.",
-            parameters,
-        ),
-        move |args,
-              context: ToolRunContext|
-              -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
-            let sandbox = rooted(&run, &context);
-            Box::pin(async move {
-                let command = string_arg(&args, "command");
-                if command.is_empty() {
-                    return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
-                }
-                let mode = context.mode();
-                let confined = if mode == SandboxMode::DangerFullAccess {
-                    None
-                } else {
-                    match sandbox.confine(
-                        &["/bin/sh".to_owned(), "-c".to_owned(), command.clone()],
-                        mode,
-                    ) {
-                        Ok(confined) => Some(confined),
-                        Err(unavailable) => {
-                            let message = unavailable.to_string();
-                            context.log(&format!("refused a '{mode}' shell: {message}"));
-                            let data = serde_json::Map::from_iter([(
-                                "sandbox".to_owned(),
-                                json!({ "mode": mode, "denied": false, "unavailable": true }),
-                            )]);
-                            return Ok(ToolResult::refused(codes::SANDBOX_UNAVAILABLE, message)
-                                .with_data(data));
-                        }
-                    }
+    Arc::new(BashTool {
+        foreground: spec("bash", BASH_DESCRIPTION, parameters(false)),
+        background: spec("bash", BASH_DESCRIPTION, parameters(true)),
+        sandbox,
+        default_timeout_ms,
+        output_limit,
+    })
+}
+
+impl Tool for BashTool {
+    /// Read per call rather than fixed: `run_in_background` is in the schema only while a runner is attached (DSH
+    /// shows the parameter only when a job registry is loaded). With none attached, this is the foreground schema
+    /// exactly.
+    fn spec(&self) -> &ToolSpec {
+        if crate::background::background_for(&self.sandbox).is_some() {
+            &self.background
+        } else {
+            &self.foreground
+        }
+    }
+
+    fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> crate::tool::ToolFuture<'a> {
+        let sandbox = rooted(&self.sandbox, &context);
+        let attached = crate::background::background_for(&self.sandbox);
+        let default_timeout_ms = self.default_timeout_ms;
+        let output_limit = self.output_limit;
+        Box::pin(async move {
+            let command = string_arg(&args, "command");
+            if command.is_empty() {
+                return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
+            }
+            // A background call is the jobs row's (DSH's refusal text when no job registry is loaded, adapted).
+            if args.get("run_in_background") == Some(&serde_json::Value::Bool(true)) {
+                return match attached {
+                    None => Ok(ToolResult::refused(
+                        crate::background::JOB_UNAVAILABLE,
+                        crate::background::NO_JOBS_ROW_MESSAGE,
+                    )),
+                    Some(background) => background.start(args, context, sandbox).await,
                 };
-                let argv: Vec<std::ffi::OsString> = confined.as_ref().map_or_else(
-                    || {
-                        vec![
-                            std::ffi::OsString::from("/bin/sh"),
-                            std::ffi::OsString::from("-c"),
-                            std::ffi::OsString::from(command),
-                        ]
-                    },
-                    |confined| confined.argv.clone(),
-                );
-                // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
-                let limit = args
-                    .get("timeoutMs")
-                    .and_then(serde_json::Value::as_f64)
-                    .filter(|milliseconds| *milliseconds > 0.0)
-                    .map(|milliseconds| milliseconds.round() as u64)
-                    .unwrap_or(default_timeout_ms);
-                run_command(
-                    sandbox.as_ref(),
-                    &argv,
-                    mode,
-                    confined.as_ref(),
-                    limit,
-                    output_limit,
-                    &context,
-                )
-                .await
-            })
-        },
-    )
+            }
+            let mode = context.mode();
+            let ShellLaunch { argv, confined } =
+                match launch_shell(sandbox.as_ref(), &command, &context) {
+                    Ok(launch) => launch,
+                    Err(refusal) => return Ok(*refusal),
+                };
+            // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
+            let limit = args
+                .get("timeoutMs")
+                .and_then(serde_json::Value::as_f64)
+                .filter(|milliseconds| *milliseconds > 0.0)
+                .map(|milliseconds| milliseconds.round() as u64)
+                .unwrap_or(default_timeout_ms);
+            run_command(
+                sandbox.as_ref(),
+                &argv,
+                mode,
+                confined.as_ref(),
+                limit,
+                output_limit,
+                &context,
+            )
+            .await
+        })
+    }
 }
 
 /// Spawn one argv, enforce its wall time and the call's Stop, and classify what it did.
@@ -940,5 +1016,221 @@ mod tests {
                 .contains("Required")
         );
         assert!(escalation_fields(&FakeSandbox::new(root.path())).is_empty());
+    }
+
+    /// A runner that answers with the folder it was handed, so a test sees the call reached it rooted.
+    struct EchoRunner;
+
+    impl crate::background::BashBackground for EchoRunner {
+        fn start(
+            &self,
+            args: ToolArgs,
+            context: ToolRunContext,
+            sandbox: Arc<dyn SandboxGate>,
+        ) -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
+            let root = sandbox.workspace_root().display().to_string();
+            let cwd = context.cwd.display().to_string();
+            let command = string_arg(&args, "command");
+            Box::pin(async move { Ok(ToolResult::ok(format!("{command} in {cwd} under {root}"))) })
+        }
+    }
+
+    fn property_names(tool: &Arc<dyn Tool>) -> Vec<String> {
+        tool.spec().parameters["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn bash_advertises_run_in_background_only_while_a_runner_is_attached() {
+        let root = tempdir();
+        let gate = sandbox(root.path());
+        let bash = tool("bash", Arc::clone(&gate));
+        let before = bash.spec().clone();
+        assert_eq!(property_names(&bash), ["command", "timeoutMs"]);
+        let detach = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        assert_eq!(
+            property_names(&bash),
+            ["command", "timeoutMs", "run_in_background"]
+        );
+        assert_eq!(
+            bash.spec().parameters["properties"]["run_in_background"],
+            json!({ "type": "boolean", "description": "Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies." })
+        );
+        // Another sandbox's bash is untouched: the seam is keyed by the gate a tool was built over.
+        let other = tool("bash", sandbox(root.path()));
+        assert_eq!(property_names(&other), ["command", "timeoutMs"]);
+        detach.detach();
+        assert_eq!(
+            *bash.spec(),
+            before,
+            "detached, the schema is the foreground one again"
+        );
+        detach.detach();
+    }
+
+    #[test]
+    fn the_background_property_sits_between_timeout_and_the_escalation_fields() {
+        let root = tempdir();
+        let mut wide = FakeSandbox::new(root.path());
+        wide.targets = vec![SandboxMode::DangerFullAccess];
+        let gate: Arc<dyn SandboxGate> = Arc::new(wide);
+        let bash = tool("bash", Arc::clone(&gate));
+        let detach = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        assert_eq!(
+            property_names(&bash),
+            [
+                "command",
+                "timeoutMs",
+                "run_in_background",
+                "sandbox_permissions",
+                "justification"
+            ]
+        );
+        detach.detach();
+        assert_eq!(
+            property_names(&bash),
+            [
+                "command",
+                "timeoutMs",
+                "sandbox_permissions",
+                "justification"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_background_call_with_no_runner_is_refused_and_a_foreground_call_still_runs() {
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let refused = bash
+            .run(
+                args(json!({ "command": "echo hi", "run_in_background": true })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.error,
+            Some(crate::ToolError {
+                code: "JOB_UNAVAILABLE".into(),
+                message: "background jobs unavailable: load the jobs row (src/plugins/jobs.ts)"
+                    .into(),
+            })
+        );
+        let foreground = bash
+            .run(
+                args(json!({ "command": "echo hi", "run_in_background": false })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreground.output, "hi\n");
+        assert!(foreground.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_background_call_reaches_the_runner_with_the_sandbox_rooted_at_the_calls_folder() {
+        let root = tempdir();
+        let folder = root.path().join("project");
+        std::fs::create_dir_all(&folder).unwrap();
+        let gate: Arc<dyn SandboxGate> = Arc::new(Rerooting(root.path()));
+        let bash = tool("bash", Arc::clone(&gate));
+        let detach = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        let started = bash
+            .run(
+                args(json!({ "command": "sleep 1", "run_in_background": true })),
+                context_in(folder.clone(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            started.output,
+            format!("sleep 1 in {} under {}", folder.display(), folder.display())
+        );
+        let empty = bash
+            .run(
+                args(json!({ "command": "", "run_in_background": true })),
+                context_in(folder, SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.error.unwrap().code, codes::BAD_ARGS);
+        detach.detach();
+    }
+
+    /// A sandbox that can be re-rooted, as the real gate can.
+    struct Rerooting(PathBuf);
+
+    impl SandboxGate for Rerooting {
+        fn workspace_root(&self) -> &Path {
+            &self.0
+        }
+        fn rooted_at(&self, root: &Path) -> Option<Arc<dyn SandboxGate>> {
+            Some(Arc::new(Rerooting(root.to_path_buf())))
+        }
+        fn default_mode(&self) -> SandboxMode {
+            SandboxMode::DangerFullAccess
+        }
+        fn escalation_targets(&self) -> Vec<SandboxMode> {
+            Vec::new()
+        }
+        fn policy(&self, _: SandboxMode) -> serde_json::Value {
+            json!({})
+        }
+        fn policy_statement(&self, _: SandboxMode) -> String {
+            String::new()
+        }
+        fn assert_writable(&self, path: &str, _: SandboxMode) -> Result<PathBuf, SandboxDenial> {
+            Ok(self.0.join(path))
+        }
+        fn assert_readable(&self, path: &str, _: SandboxMode) -> Result<PathBuf, SandboxDenial> {
+            Ok(self.0.join(path))
+        }
+        fn confine(
+            &self,
+            _: &[String],
+            mode: SandboxMode,
+        ) -> Result<ConfinedArgv, SandboxUnavailable> {
+            Err(SandboxUnavailable { mode, detail: None })
+        }
+        fn classify_outcome(&self, _: i32, _: &str, _: Option<&ConfinedArgv>) -> SandboxOutcome {
+            SandboxOutcome::Exited
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_shell_wraps_a_confined_mode_and_refuses_when_nothing_can_confine() {
+        let root = tempdir();
+        let open = launch_shell(
+            &FakeSandbox::new(root.path()),
+            "true",
+            &context(SandboxMode::DangerFullAccess),
+        )
+        .unwrap();
+        assert_eq!(
+            open.argv
+                .iter()
+                .map(|part| part.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["/bin/sh", "-c", "true"]
+        );
+        assert!(open.confined.is_none());
+        let confined = launch_shell(
+            &FakeSandbox::new(root.path()),
+            "true",
+            &context(SandboxMode::WorkspaceWrite),
+        )
+        .unwrap();
+        assert!(confined.confined.is_some());
+        let mut unconfinable = FakeSandbox::new(root.path());
+        unconfinable.unavailable = Some("no backend on this host".into());
+        let refused =
+            launch_shell(&unconfinable, "true", &context(SandboxMode::WorkspaceWrite)).unwrap_err();
+        assert_eq!(refused.error.unwrap().code, codes::SANDBOX_UNAVAILABLE);
+        assert_eq!(refused.data.unwrap()["sandbox"]["unavailable"], true);
     }
 }
