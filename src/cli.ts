@@ -14,8 +14,9 @@ import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
+import { declaredModuleNames } from './config/plugin-inventory.ts'
 import { resetProfileFromTemplate } from './config/profile-template.ts'
-import { ConfigError, heddleHome } from './config/schema.ts'
+import { ConfigError, heddleHome, profilesDir } from './config/schema.ts'
 
 /**
  * `FiberState` is a `const enum`, so it has no runtime object to read names from.
@@ -441,10 +442,14 @@ function describeTree(node: TreeNode): string[] {
  * prints exactly what it did.
  */
 async function bootFromArgs(args: Args, options: { readonly machineOutput?: boolean } = {}) {
+  return boot({ ...bootOptions(args), ...(options.machineOutput === true ? { logLevel: 0 } : {}) })
+}
+
+/** The layers and overrides a command line boots, which the settings surface must judge writes against. */
+function bootOptions(args: Args) {
   const layers = baseLayer(args)
-  return boot({
+  return {
     configDir: process.cwd(),
-    ...(options.machineOutput === true ? { logLevel: 0 } : {}),
     ...(args.profile !== undefined ? { profile: args.profile } : {}),
     ...(layers.base !== undefined ? { base: layers.base } : {}),
     patches: [...layers.patches],
@@ -469,7 +474,7 @@ async function bootFromArgs(args: Args, options: { readonly machineOutput?: bool
           ],
         }
       : {}),
-  })
+  }
 }
 
 function hasProfile(args: Args): boolean {
@@ -512,13 +517,17 @@ async function runWeb(args: Args): Promise<void> {
       return
     }
 
+    const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
+      settings: settingsServiceFor(bootOptions(args)),
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
       // The endpoint the flag named becomes the server's default, so a turn posted without one
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
+      // The plugin inventory reports each row's module name as the layer wrote it, not as `boot` resolved it.
+      pluginModuleNames: declaredModuleNames(app),
     })
     /**
      * A restarted harness picks up the goals it finds still active.
@@ -934,6 +943,42 @@ async function runCommand(command: string, target: string | undefined, json: boo
   }
 }
 
+/**
+ * The profile a run boots when it names none (issue #74).
+ *
+ * A run that boots — `web`, a command, or a `--turn` — and names no profile, no `--config` and no `--patch`, from a
+ * folder with no project tree (`cordis.yml`), used to boot **nothing**: on a fresh home the page loaded with no
+ * session, model or workspace service, and the first message failed with an internal TypeError. DSH auto-initializes
+ * its shipped profiles from their templates on first use; heddle does the same for `default`: such a run boots
+ * `$HEDDLE_HOME/profiles/default`, created from the shipped template the first time, and says so on stderr. A profile a
+ * person already keeps under that name is booted as it is. `profiles` lists what exists and creates nothing. Answers
+ * false when the template could not be written (the reason is on stderr and the exit code is 1).
+ */
+function useDefaultProfile(args: Args): boolean {
+  if (args.profile !== undefined || args.config !== undefined || args.patch.length > 0) return true
+  /**
+   * `--from-default-profile` replaces a profile, so it must name one: the check below refuses it without `--profile`.
+   * Choosing `default` here first would turn that refusal into a reset of the default profile (developer-two's review).
+   */
+  if (args.fromDefaultProfile !== undefined) return true
+  if (args.command === undefined && args.turn === undefined) return true
+  if (args.command === 'profiles') return true
+  if (existsSync(resolve(process.cwd(), 'cordis.yml'))) return true
+  const dir = join(profilesDir(), 'default')
+  if (!existsSync(dir)) {
+    try {
+      resetProfileFromTemplate('default', 'default', { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return false
+    }
+    process.stderr.write(`heddle: created profile 'default' from the shipped template at ${dir}\n`)
+  }
+  args.profile = 'default'
+  return true
+}
+
 function hasProfileArgs(args: Args): boolean {
   return hasProfile(args)
 }
@@ -964,6 +1009,8 @@ async function main(): Promise<void> {
     process.stdout.write(USAGE)
     return
   }
+
+  if (!useDefaultProfile(args)) return
 
   /**
    * DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of a
@@ -1066,6 +1113,9 @@ async function main(): Promise<void> {
      *
      * `--resume` still addresses a session by id from anywhere, because a person who has an id is
      * asking about that session rather than about this folder.
+     *
+     * A new session is born untitled, as the turn route's is (#68): its first message writes the fallback name and
+     * the session layer asks the model for the title (`session/title.ts`).
      */
     const folder = canonicalPath(process.cwd())
     const handle =
@@ -1075,7 +1125,6 @@ async function main(): Promise<void> {
             fresh: args.fresh,
             endpoint,
             ...(args.model !== undefined ? { model: args.model } : {}),
-            title: args.turn.slice(0, 60),
           })
 
     /**

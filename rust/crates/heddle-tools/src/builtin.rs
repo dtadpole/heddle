@@ -128,8 +128,11 @@ pub fn escalation_fields(sandbox: &dyn SandboxGate) -> serde_json::Map<String, s
     ])
 }
 
-/// Cut a command's combined output at [`BASH_OUTPUT_LIMIT`] characters, marking the cut with
-/// `"\n… truncated"`.
+/// The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB).
+pub const BASH_SPILL_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// What the model is shown of a command's combined output at [`BASH_OUTPUT_LIMIT`] characters: see
+/// [`truncate_output_at`].
 ///
 /// The TypeScript build counts UTF-16 code units; this counts `char`s, so a cut never splits a character.
 /// The two agree on every ASCII output, which is what the verifiers produce.
@@ -137,14 +140,69 @@ pub fn truncate_output(combined: &str) -> String {
     truncate_output_at(combined, BASH_OUTPUT_LIMIT)
 }
 
-/// [`truncate_output`] at `limit` characters, the row's `bashOutputLimit`.
+/// All of `combined` within `limit` characters (the row's `bashOutputLimit`), otherwise its **end** and the path of a
+/// file holding the whole of it: `[output truncated; full output: <path>]`, or `(unavailable)` when no file could be
+/// written.
+///
+/// Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long
+/// command's closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream
+/// and names its spill file (`dsh-tool-bash` streamText). Stated differences: the combined stdout and stderr are cut,
+/// by characters, where DSH cuts each stream at 64,000 bytes.
 pub fn truncate_output_at(combined: &str, limit: usize) -> String {
-    if combined.chars().count() <= limit {
+    truncate_output_spilling(combined, limit, BASH_SPILL_MAX_BYTES)
+}
+
+/// [`truncate_output_at`] with the full-output file capped at `spill_max_bytes`.
+pub fn truncate_output_spilling(combined: &str, limit: usize, spill_max_bytes: usize) -> String {
+    let total = combined.chars().count();
+    if total <= limit {
         return combined.to_owned();
     }
-    let mut cut: String = combined.chars().take(limit).collect();
-    cut.push_str("\n… truncated");
-    cut
+    let start = combined
+        .char_indices()
+        .nth(total - limit)
+        .map_or(combined.len(), |(index, _)| index);
+    let path =
+        spill_output(combined, spill_max_bytes).unwrap_or_else(|| "(unavailable)".to_owned());
+    format!(
+        "{}\n[output truncated; full output: {path}]",
+        &combined[start..]
+    )
+}
+
+/// Write a command's whole output to a private temporary file and return its path, or `None`.
+///
+/// Only a complete copy is ever named: an output over `spill_max_bytes` gets no file, and a write that fails removes
+/// what it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the
+/// marker never points at a partial file (developer-five's review of #83). A completed file stays in the temporary
+/// directory, as DSH's do.
+fn spill_output(full: &str, spill_max_bytes: usize) -> Option<String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    if full.len() > spill_max_bytes {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let name = format!(
+        "heddle-bash-output-{}-{nanos:x}-{}.txt",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&path).ok()?;
+    if file.write_all(full.as_bytes()).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(path.display().to_string())
 }
 
 /// The argument a tool requires as a string; empty when absent, which is what makes the refusal sentence.
@@ -404,6 +462,78 @@ fn list_dir_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     )
 }
 
+/// A command line confined for one call: the argv to spawn and the confinement it runs under (`None`: unconfined).
+#[derive(Debug, Clone)]
+pub struct ShellLaunch {
+    /// What to spawn: the wrapped argv, or `/bin/sh -c <command>`.
+    pub argv: Vec<std::ffi::OsString>,
+    /// The confinement, which the settled command is classified against.
+    pub confined: Option<crate::upstream::ConfinedArgv>,
+}
+
+/// Confine the exact argv, or refuse to run it.
+///
+/// `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox for a
+/// wrapped argv; if this host cannot confine, the call fails closed with the reason rather than running
+/// unconfined — that is the difference between a sandbox and a suggestion. `Err` is the refusal to answer, boxed
+/// because a `ToolResult` is large.
+///
+/// Shared by the foreground run and the jobs row's background run (`heddle-jobs`), so a background command is
+/// confined by exactly the path a foreground one is. `sandbox` is the gate rooted at the call's folder.
+pub fn launch_shell(
+    sandbox: &dyn SandboxGate,
+    command: &str,
+    context: &ToolRunContext,
+) -> Result<ShellLaunch, Box<ToolResult>> {
+    let mode = context.mode();
+    let confined = if mode == SandboxMode::DangerFullAccess {
+        None
+    } else {
+        match sandbox.confine(
+            &["/bin/sh".to_owned(), "-c".to_owned(), command.to_owned()],
+            mode,
+        ) {
+            Ok(confined) => Some(confined),
+            Err(unavailable) => {
+                let message = unavailable.to_string();
+                context.log(&format!("refused a '{mode}' shell: {message}"));
+                let data = serde_json::Map::from_iter([(
+                    "sandbox".to_owned(),
+                    json!({ "mode": mode, "denied": false, "unavailable": true }),
+                )]);
+                return Err(Box::new(
+                    ToolResult::refused(codes::SANDBOX_UNAVAILABLE, message).with_data(data),
+                ));
+            }
+        }
+    };
+    let argv: Vec<std::ffi::OsString> = confined.as_ref().map_or_else(
+        || {
+            vec![
+                std::ffi::OsString::from("/bin/sh"),
+                std::ffi::OsString::from("-c"),
+                std::ffi::OsString::from(command),
+            ]
+        },
+        |confined| confined.argv.clone(),
+    );
+    Ok(ShellLaunch { argv, confined })
+}
+
+const BASH_DESCRIPTION: &str = "Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.";
+
+/// `bash`, with its two schemas: the foreground one, and the same with `run_in_background` (after `timeoutMs`,
+/// before the escalation fields), which it advertises only while the jobs row has attached a runner to its sandbox
+/// ([`crate::background`]).
+struct BashTool {
+    sandbox: Arc<dyn SandboxGate>,
+    foreground: ToolSpec,
+    background: ToolSpec,
+    default_timeout_ms: u64,
+    max_timeout_ms: u64,
+    output_limit: usize,
+}
+
 fn bash_tool(
     sandbox: Arc<dyn SandboxGate>,
     default_timeout_ms: u64,
@@ -411,7 +541,7 @@ fn bash_tool(
     output_limit: usize,
     escalation: serde_json::Map<String, serde_json::Value>,
 ) -> Arc<dyn Tool> {
-    let parameters = {
+    let parameters = |background: bool| {
         let mut properties = serde_json::Map::from_iter([
             (
                 "command".to_owned(),
@@ -422,7 +552,13 @@ fn bash_tool(
                 json!({ "type": "number", "description": format!("Wall time before the command is killed, in milliseconds; default {default_timeout_ms}, at most {max_timeout_ms}.") }),
             ),
         ]);
-        properties.extend(escalation);
+        if background {
+            properties.insert(
+                "run_in_background".to_owned(),
+                json!({ "type": "boolean", "description": crate::background::RUN_IN_BACKGROUND_DESCRIPTION }),
+            );
+        }
+        properties.extend(escalation.clone());
         json!({
             "type": "object",
             "properties": properties,
@@ -430,72 +566,117 @@ fn bash_tool(
             "additionalProperties": false,
         })
     };
-    let run = Arc::clone(&sandbox);
-    tool_fn(
-        spec(
-            "bash",
-            "Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.",
-            parameters,
-        ),
-        move |args,
-              context: ToolRunContext|
-              -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
-            let sandbox = rooted(&run, &context);
-            Box::pin(async move {
-                let command = string_arg(&args, "command");
-                if command.is_empty() {
-                    return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
-                }
-                let limit =
-                    match bash_wall_time(args.get("timeoutMs"), default_timeout_ms, max_timeout_ms)
-                    {
-                        Ok(milliseconds) => milliseconds,
-                        Err(message) => return Ok(ToolResult::refused(codes::BAD_ARGS, message)),
-                    };
-                let mode = context.mode();
-                let confined = if mode == SandboxMode::DangerFullAccess {
-                    None
-                } else {
-                    match sandbox.confine(
-                        &["/bin/sh".to_owned(), "-c".to_owned(), command.clone()],
-                        mode,
-                    ) {
-                        Ok(confined) => Some(confined),
-                        Err(unavailable) => {
-                            let message = unavailable.to_string();
-                            context.log(&format!("refused a '{mode}' shell: {message}"));
-                            let data = serde_json::Map::from_iter([(
-                                "sandbox".to_owned(),
-                                json!({ "mode": mode, "denied": false, "unavailable": true }),
-                            )]);
-                            return Ok(ToolResult::refused(codes::SANDBOX_UNAVAILABLE, message)
-                                .with_data(data));
-                        }
-                    }
+    Arc::new(BashTool {
+        foreground: spec("bash", BASH_DESCRIPTION, parameters(false)),
+        background: spec("bash", BASH_DESCRIPTION, parameters(true)),
+        sandbox,
+        default_timeout_ms,
+        max_timeout_ms,
+        output_limit,
+    })
+}
+
+impl Tool for BashTool {
+    /// Read per call rather than fixed: `run_in_background` is in the schema only while a runner is attached (DSH
+    /// shows the parameter only when a job registry is loaded). With none attached, this is the foreground schema
+    /// exactly.
+    fn spec(&self) -> &ToolSpec {
+        if crate::background::background_for(&self.sandbox).is_some() {
+            &self.background
+        } else {
+            &self.foreground
+        }
+    }
+
+    fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> crate::tool::ToolFuture<'a> {
+        let sandbox = rooted(&self.sandbox, &context);
+        let attached = crate::background::background_for(&self.sandbox);
+        let default_timeout_ms = self.default_timeout_ms;
+        let max_timeout_ms = self.max_timeout_ms;
+        let output_limit = self.output_limit;
+        Box::pin(async move {
+            let command = string_arg(&args, "command");
+            if command.is_empty() {
+                return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
+            }
+            let limit =
+                match bash_wall_time(args.get("timeoutMs"), default_timeout_ms, max_timeout_ms) {
+                    Ok(milliseconds) => milliseconds,
+                    Err(message) => return Ok(ToolResult::refused(codes::BAD_ARGS, message)),
                 };
-                let argv: Vec<std::ffi::OsString> = confined.as_ref().map_or_else(
-                    || {
-                        vec![
-                            std::ffi::OsString::from("/bin/sh"),
-                            std::ffi::OsString::from("-c"),
-                            std::ffi::OsString::from(command),
-                        ]
-                    },
-                    |confined| confined.argv.clone(),
-                );
-                run_command(
-                    sandbox.as_ref(),
-                    &argv,
-                    mode,
-                    confined.as_ref(),
-                    limit,
-                    output_limit,
-                    &context,
-                )
-                .await
-            })
-        },
-    )
+            // A background call is the jobs row's (DSH's refusal text when no job registry is loaded, adapted).
+            if args.get("run_in_background") == Some(&serde_json::Value::Bool(true)) {
+                return match attached {
+                    None => Ok(ToolResult::refused(
+                        crate::background::JOB_UNAVAILABLE,
+                        crate::background::NO_JOBS_ROW_MESSAGE,
+                    )),
+                    Some(background) => background.start(args, context, sandbox).await,
+                };
+            }
+            let mode = context.mode();
+            let launch = match launch_shell(sandbox.as_ref(), &command, &context) {
+                Ok(launch) => launch,
+                Err(refusal) => return Ok(*refusal),
+            };
+            // With the jobs row attached and promoting, the call runs as a job (DSH's `promoteOnTimeout`): a command
+            // that outlives its wall time keeps running in the background instead of being killed. A registration
+            // the row refuses (a session at its job cap) falls through to the foreground run and its wall-time kill.
+            if let Some(background) = attached.filter(|background| background.promotes()) {
+                let render_sandbox = Arc::clone(&sandbox);
+                let render_confined = launch.confined.clone();
+                let run = crate::background::ForegroundRun {
+                    args: args.clone(),
+                    context: context.clone(),
+                    sandbox: Arc::clone(&sandbox),
+                    launch: launch.clone(),
+                    limit_ms: limit,
+                    render: Box::new(move |end: ShellEnd| {
+                        shell_result(
+                            render_sandbox.as_ref(),
+                            &end,
+                            mode,
+                            render_confined.as_ref(),
+                            output_limit,
+                        )
+                    }),
+                };
+                if let Some(answered) = background.run_foreground(run).await {
+                    return answered;
+                }
+            }
+            let ShellLaunch { argv, confined } = launch;
+            run_command(
+                sandbox.as_ref(),
+                &argv,
+                mode,
+                confined.as_ref(),
+                limit,
+                output_limit,
+                &context,
+            )
+            .await
+        })
+    }
+}
+
+/// Ends a command's process group when its call is dropped before it settles, as when the runtime shuts down
+/// under a running turn: live-testing issue #6 found a restart leaving the command running orphaned, because only
+/// a Stop or the wall time reached the group. A call that settled, or killed the group itself, disarms it.
+struct GroupGuard(Option<u32>);
+
+impl GroupGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(leader) = self.0.take() {
+            let _ = heddle_sandbox::kill_process_group(leader);
+        }
+    }
 }
 
 /// Spawn one argv, enforce its wall time and the call's Stop, and classify what it did.
@@ -517,6 +698,10 @@ async fn run_command(
         .args(&argv[1..])
         .current_dir(&context.cwd)
         .env("NO_COLOR", "1")
+        // No input to give, so stdin is /dev/null and a reader gets end-of-file at once, as DSH's shell leaves it
+        // closed (#97). Left unset, `spawn` inherited the server's own stdin: EOF when a daemon started it with
+        // /dev/null, but an open pipe or a terminal otherwise, where `read` waits for the wall time.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -527,13 +712,7 @@ async fn run_command(
     process.process_group(0);
     let child = process.spawn()?;
     let leader = child.id();
-
-    let facts = || match confined {
-        None => sandbox_facts(mode, false),
-        Some(confined) => {
-            json!({ "mode": mode, "enforcement": confined.enforcement, "denied": false })
-        }
-    };
+    let mut guard = GroupGuard(leader);
 
     let limit = Duration::from_millis(limit_ms);
     let cancel = context.cancel.clone();
@@ -556,7 +735,7 @@ async fn run_command(
         }
     };
 
-    match output {
+    let end = match output {
         None => {
             // The child was killed for its wall time or by the caller's Stop: dropping it killed the shell
             // (`kill_on_drop`), and the group signal stops whatever the shell had started, which outlives the
@@ -564,61 +743,107 @@ async fn run_command(
             if let Some(Err(error)) = leader.map(heddle_sandbox::kill_process_group) {
                 tracing::warn!(%error, ?leader, "the command's process group could not be stopped");
             }
+            guard.disarm();
             let stopped = context.is_cancelled();
-            let message = if stopped {
-                "the command was stopped before it finished".to_owned()
-            } else {
-                format!("the command exceeded {limit_ms}ms and was killed")
-            };
-            let code = if stopped {
-                codes::INTERRUPTED
-            } else {
-                codes::TIMEOUT
-            };
-            let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
-            Ok(ToolResult::refused(code, message).with_data(data))
-        }
-        Some(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let trimmed = truncate_output_at(&format!("{stdout}{stderr}"), output_limit);
-            let code = output.status.code().unwrap_or(1);
-            let outcome = match confined {
-                None => SandboxOutcome::Exited,
-                Some(confined) => sandbox.classify_outcome(code, &stderr, Some(confined)),
-            };
-            let kept = || ToolResult::ok(trimmed.clone());
-            match outcome {
-                SandboxOutcome::RunnerFailure { detail } => Ok(kept()
-                    .with_error(
-                        codes::SANDBOX_UNAVAILABLE,
-                        // The sandbox crate's sentence, which 75's shell-confinement checks match.
-                        heddle_sandbox::runner_failure_message(mode, &detail),
-                    )
-                    .with_data(serde_json::Map::from_iter([(
-                        "sandbox".to_owned(),
-                        json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": false, "runnerFailed": true }),
-                    )]))),
-                SandboxOutcome::Denied => Ok(kept()
-                    .with_error(
-                        codes::SANDBOX,
-                        heddle_sandbox::shell_denial_message(mode),
-                    )
-                    .with_data(serde_json::Map::from_iter([(
-                        "sandbox".to_owned(),
-                        json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": true }),
-                    )]))),
-                SandboxOutcome::Exited if code != 0 => Ok(kept()
-                    .with_error(codes::EXIT, format!("the command exited {code}"))
-                    .with_data(serde_json::Map::from_iter([("sandbox".to_owned(), facts())]))),
-                SandboxOutcome::Exited => Ok(ToolResult::ok(trimmed).with_data(
-                    serde_json::Map::from_iter([
-                        ("exitCode".to_owned(), json!(code)),
-                        ("sandbox".to_owned(), facts()),
-                    ]),
-                )),
+            ShellEnd {
+                stopped,
+                timed_out: !stopped,
+                limit_ms,
+                ..ShellEnd::default()
             }
         }
+        Some(output) => {
+            guard.disarm();
+            ShellEnd {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                code: output.status.code(),
+                stopped: false,
+                timed_out: false,
+                limit_ms,
+            }
+        }
+    };
+    Ok(shell_result(sandbox, &end, mode, confined, output_limit))
+}
+
+/// What a foreground command reported when it ended, before it becomes `bash`'s answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellEnd {
+    pub stdout: String,
+    pub stderr: String,
+    /// The exit code; `None` when a signal ended it (classified and reported as 1).
+    pub code: Option<i32>,
+    /// The call's Stop ended it.
+    pub stopped: bool,
+    /// Its wall time ended it.
+    pub timed_out: bool,
+    pub limit_ms: u64,
+}
+
+/// `bash`'s answer for a command that ended: the stop or the wall time, else the combined output cut to
+/// `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
+/// sandbox facts. Shared by the foreground run and the jobs row's promoting run (`heddle-jobs`), so a call answers
+/// the same however it was run.
+pub fn shell_result(
+    sandbox: &dyn SandboxGate,
+    end: &ShellEnd,
+    mode: SandboxMode,
+    confined: Option<&crate::upstream::ConfinedArgv>,
+    output_limit: usize,
+) -> ToolResult {
+    let facts = || match confined {
+        None => sandbox_facts(mode, false),
+        Some(confined) => {
+            json!({ "mode": mode, "enforcement": confined.enforcement, "denied": false })
+        }
+    };
+    if end.stopped || end.timed_out {
+        let (code, message) = if end.stopped {
+            (
+                codes::INTERRUPTED,
+                "the command was stopped before it finished".to_owned(),
+            )
+        } else {
+            (
+                codes::TIMEOUT,
+                format!("the command exceeded {}ms and was killed", end.limit_ms),
+            )
+        };
+        let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
+        return ToolResult::refused(code, message).with_data(data);
+    }
+    let trimmed = truncate_output_at(&format!("{}{}", end.stdout, end.stderr), output_limit);
+    let code = end.code.unwrap_or(1);
+    let outcome = match confined {
+        None => SandboxOutcome::Exited,
+        Some(confined) => sandbox.classify_outcome(code, &end.stderr, Some(confined)),
+    };
+    let kept = || ToolResult::ok(trimmed.clone());
+    match outcome {
+        SandboxOutcome::RunnerFailure { detail } => kept()
+            .with_error(
+                codes::SANDBOX_UNAVAILABLE,
+                // The sandbox crate's sentence, which 75's shell-confinement checks match.
+                heddle_sandbox::runner_failure_message(mode, &detail),
+            )
+            .with_data(serde_json::Map::from_iter([(
+                "sandbox".to_owned(),
+                json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": false, "runnerFailed": true }),
+            )])),
+        SandboxOutcome::Denied => kept()
+            .with_error(codes::SANDBOX, heddle_sandbox::shell_denial_message(mode))
+            .with_data(serde_json::Map::from_iter([(
+                "sandbox".to_owned(),
+                json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": true }),
+            )])),
+        SandboxOutcome::Exited if code != 0 => kept()
+            .with_error(codes::EXIT, format!("the command exited {code}"))
+            .with_data(serde_json::Map::from_iter([("sandbox".to_owned(), facts())])),
+        SandboxOutcome::Exited => ToolResult::ok(trimmed).with_data(serde_json::Map::from_iter([
+            ("exitCode".to_owned(), json!(code)),
+            ("sandbox".to_owned(), facts()),
+        ])),
     }
 }
 
@@ -909,6 +1134,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_shell_read_gets_end_of_file_at_once() {
+        // Live-testing issue #97: stdin is /dev/null, not the server's own stdin, so `read` cannot wait for input.
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let started = std::time::Instant::now();
+        let result = bash
+            .run(
+                args(json!({
+                    "command": "if read -r line; then printf input; else printf eof; fi",
+                    "timeoutMs": 2000
+                })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.output, "eof");
+        assert!(started.elapsed() < std::time::Duration::from_millis(1500));
+    }
+
+    #[tokio::test]
     async fn a_missing_file_is_fs_not_found_and_names_the_file() {
         // Live-testing issue #4: the raw OS error named no file.
         let root = tempdir();
@@ -1092,6 +1338,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_call_dropped_mid_run_still_ends_the_command_group() {
+        // Issue #6: a restart drops the running turn's future; the command and what it started must not outlive it.
+        let root = tempdir();
+        let pid_file = root.path().join("child.pid");
+        let bash = tool("bash", sandbox(root.path()));
+        let command = format!("sleep 41 & echo $! > '{}'; wait", pid_file.display());
+        let call_args = args(json!({ "command": command }));
+        let call_context = context_in(root.path(), SandboxMode::DangerFullAccess);
+        let running = tokio::spawn(async move { bash.run(call_args, call_context).await });
+        let started = std::time::Instant::now();
+        let child: i32 = loop {
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command wrote its child pid"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let alive = |pid: i32| {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        assert!(alive(child), "the background command runs");
+        running.abort();
+        let _ = running.await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive(child) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(child), "dropping the call ended the command's group");
+    }
+
+    #[tokio::test]
     async fn a_stopped_command_is_killed_and_reports_interrupted() {
         let root = tempdir();
         let token = crate::CancellationToken::new();
@@ -1178,25 +1464,54 @@ mod tests {
         );
     }
 
+    /// The kept tail and the spill path of a cut output: issue #83's head probe, filler and tail probe.
+    fn cut_parts(cut: &str) -> (&str, std::path::PathBuf) {
+        let (kept, marker) = cut
+            .rsplit_once("\n[output truncated; full output: ")
+            .expect("the cut is marked with the spill path");
+        let path = marker.strip_suffix(']').expect("the marker closes");
+        (kept, std::path::PathBuf::from(path))
+    }
+
     #[test]
-    fn a_long_output_is_cut_at_the_limit_and_marked() {
+    fn a_long_output_keeps_its_end_and_names_a_file_with_all_of_it() {
+        // Issue #83: the head was kept and the tail, often the summary, was lost with nothing to recover it.
         let inside = "a".repeat(BASH_OUTPUT_LIMIT);
         assert_eq!(truncate_output(&inside), inside, "no cut at the limit");
-        let outside = "a".repeat(BASH_OUTPUT_LIMIT + 10);
+        let outside = format!("HEAD-PROBE{}TAIL-PROBE", "x".repeat(BASH_OUTPUT_LIMIT));
         let cut = truncate_output(&outside);
+        let (kept, path) = cut_parts(&cut);
+        assert_eq!(kept.chars().count(), BASH_OUTPUT_LIMIT);
+        assert!(kept.ends_with("TAIL-PROBE") && !kept.contains("HEAD-PROBE"));
         assert_eq!(
-            cut.chars().count(),
-            BASH_OUTPUT_LIMIT + "\n… truncated".chars().count()
+            std::fs::read_to_string(&path).expect("the spill file"),
+            outside
         );
-        assert!(cut.ends_with("\n… truncated"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_output_beyond_the_spill_cap_names_no_file() {
+        // developer-five's review of #83: DSH discards a spill past its cap, so no marker names a partial copy.
+        assert_eq!(
+            truncate_output_spilling(&"x".repeat(100), 10, 50),
+            format!(
+                "{}\n[output truncated; full output: (unavailable)]",
+                "x".repeat(10)
+            )
+        );
     }
 
     #[test]
     fn a_configured_output_limit_cuts_there() {
+        let cut = truncate_output_at(&format!("{}é-end", "a".repeat(500)), 50);
+        let (kept, path) = cut_parts(&cut);
         assert_eq!(
-            truncate_output_at(&"a".repeat(500), 50),
-            format!("{}\n… truncated", "a".repeat(50))
+            kept,
+            format!("{}é-end", "a".repeat(45)),
+            "the last 50 characters, whole"
         );
+        let _ = std::fs::remove_file(path);
         assert_eq!(
             truncate_output_at(&"b".repeat(500), 500),
             "b".repeat(500),
@@ -1225,5 +1540,221 @@ mod tests {
                 .contains("Required")
         );
         assert!(escalation_fields(&FakeSandbox::new(root.path())).is_empty());
+    }
+
+    /// A runner that answers with the folder it was handed, so a test sees the call reached it rooted.
+    struct EchoRunner;
+
+    impl crate::background::BashBackground for EchoRunner {
+        fn start(
+            &self,
+            args: ToolArgs,
+            context: ToolRunContext,
+            sandbox: Arc<dyn SandboxGate>,
+        ) -> BoxFuture<'static, Result<ToolResult, ToolFailure>> {
+            let root = sandbox.workspace_root().display().to_string();
+            let cwd = context.cwd.display().to_string();
+            let command = string_arg(&args, "command");
+            Box::pin(async move { Ok(ToolResult::ok(format!("{command} in {cwd} under {root}"))) })
+        }
+    }
+
+    fn property_names(tool: &Arc<dyn Tool>) -> Vec<String> {
+        tool.spec().parameters["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn bash_advertises_run_in_background_only_while_a_runner_is_attached() {
+        let root = tempdir();
+        let gate = sandbox(root.path());
+        let bash = tool("bash", Arc::clone(&gate));
+        let before = bash.spec().clone();
+        assert_eq!(property_names(&bash), ["command", "timeoutMs"]);
+        let detach = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        assert_eq!(
+            property_names(&bash),
+            ["command", "timeoutMs", "run_in_background"]
+        );
+        assert_eq!(
+            bash.spec().parameters["properties"]["run_in_background"],
+            json!({ "type": "boolean", "description": "Run in the background and return a job id immediately (collect with job_output, stop with job_kill). No timeout applies." })
+        );
+        // Another sandbox's bash is untouched: the seam is keyed by the gate a tool was built over.
+        let other = tool("bash", sandbox(root.path()));
+        assert_eq!(property_names(&other), ["command", "timeoutMs"]);
+        detach.detach();
+        assert_eq!(
+            *bash.spec(),
+            before,
+            "detached, the schema is the foreground one again"
+        );
+        detach.detach();
+    }
+
+    #[test]
+    fn the_background_property_sits_between_timeout_and_the_escalation_fields() {
+        let root = tempdir();
+        let mut wide = FakeSandbox::new(root.path());
+        wide.targets = vec![SandboxMode::DangerFullAccess];
+        let gate: Arc<dyn SandboxGate> = Arc::new(wide);
+        let bash = tool("bash", Arc::clone(&gate));
+        let detach = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        assert_eq!(
+            property_names(&bash),
+            [
+                "command",
+                "timeoutMs",
+                "run_in_background",
+                "sandbox_permissions",
+                "justification"
+            ]
+        );
+        detach.detach();
+        assert_eq!(
+            property_names(&bash),
+            [
+                "command",
+                "timeoutMs",
+                "sandbox_permissions",
+                "justification"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_background_call_with_no_runner_is_refused_and_a_foreground_call_still_runs() {
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let refused = bash
+            .run(
+                args(json!({ "command": "echo hi", "run_in_background": true })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.error,
+            Some(crate::ToolError {
+                code: "JOB_UNAVAILABLE".into(),
+                message: "background jobs unavailable: load the jobs row (src/plugins/jobs.ts)"
+                    .into(),
+            })
+        );
+        let foreground = bash
+            .run(
+                args(json!({ "command": "echo hi", "run_in_background": false })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(foreground.output, "hi\n");
+        assert!(foreground.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_background_call_reaches_the_runner_with_the_sandbox_rooted_at_the_calls_folder() {
+        let root = tempdir();
+        let folder = root.path().join("project");
+        std::fs::create_dir_all(&folder).unwrap();
+        let gate: Arc<dyn SandboxGate> = Arc::new(Rerooting(root.path()));
+        let bash = tool("bash", Arc::clone(&gate));
+        let detach = crate::background::attach_bash_background(&gate, Arc::new(EchoRunner));
+        let started = bash
+            .run(
+                args(json!({ "command": "sleep 1", "run_in_background": true })),
+                context_in(folder.clone(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            started.output,
+            format!("sleep 1 in {} under {}", folder.display(), folder.display())
+        );
+        let empty = bash
+            .run(
+                args(json!({ "command": "", "run_in_background": true })),
+                context_in(folder, SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.error.unwrap().code, codes::BAD_ARGS);
+        detach.detach();
+    }
+
+    /// A sandbox that can be re-rooted, as the real gate can.
+    struct Rerooting(PathBuf);
+
+    impl SandboxGate for Rerooting {
+        fn workspace_root(&self) -> &Path {
+            &self.0
+        }
+        fn rooted_at(&self, root: &Path) -> Option<Arc<dyn SandboxGate>> {
+            Some(Arc::new(Rerooting(root.to_path_buf())))
+        }
+        fn default_mode(&self) -> SandboxMode {
+            SandboxMode::DangerFullAccess
+        }
+        fn escalation_targets(&self) -> Vec<SandboxMode> {
+            Vec::new()
+        }
+        fn policy(&self, _: SandboxMode) -> serde_json::Value {
+            json!({})
+        }
+        fn policy_statement(&self, _: SandboxMode) -> String {
+            String::new()
+        }
+        fn assert_writable(&self, path: &str, _: SandboxMode) -> Result<PathBuf, SandboxDenial> {
+            Ok(self.0.join(path))
+        }
+        fn assert_readable(&self, path: &str, _: SandboxMode) -> Result<PathBuf, SandboxDenial> {
+            Ok(self.0.join(path))
+        }
+        fn confine(
+            &self,
+            _: &[String],
+            mode: SandboxMode,
+        ) -> Result<ConfinedArgv, SandboxUnavailable> {
+            Err(SandboxUnavailable { mode, detail: None })
+        }
+        fn classify_outcome(&self, _: i32, _: &str, _: Option<&ConfinedArgv>) -> SandboxOutcome {
+            SandboxOutcome::Exited
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_shell_wraps_a_confined_mode_and_refuses_when_nothing_can_confine() {
+        let root = tempdir();
+        let open = launch_shell(
+            &FakeSandbox::new(root.path()),
+            "true",
+            &context(SandboxMode::DangerFullAccess),
+        )
+        .unwrap();
+        assert_eq!(
+            open.argv
+                .iter()
+                .map(|part| part.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["/bin/sh", "-c", "true"]
+        );
+        assert!(open.confined.is_none());
+        let confined = launch_shell(
+            &FakeSandbox::new(root.path()),
+            "true",
+            &context(SandboxMode::WorkspaceWrite),
+        )
+        .unwrap();
+        assert!(confined.confined.is_some());
+        let mut unconfinable = FakeSandbox::new(root.path());
+        unconfinable.unavailable = Some("no backend on this host".into());
+        let refused =
+            launch_shell(&unconfinable, "true", &context(SandboxMode::WorkspaceWrite)).unwrap_err();
+        assert_eq!(refused.error.unwrap().code, codes::SANDBOX_UNAVAILABLE);
+        assert_eq!(refused.data.unwrap()["sandbox"]["unavailable"], true);
     }
 }

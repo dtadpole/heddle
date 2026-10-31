@@ -19,8 +19,9 @@ import type { SessionEvent, SessionHandle } from './store.ts'
  * existed (R-developer-two-5): a steer sent during `bash sleep 30` was written at seq 6, between the call
  * (seq 4-5) and its result (seq 7), and a stop then left nothing pending.
  *
- * heddle's page keeps its own next-turn queue, so only `next-step` is written here. The fold still reads both
- * lists, so a later queue on the server can use the same event.
+ * heddle's page keeps its own next-turn queue, so a steer is the only input that waits here between turns. `next-turn`
+ * is written by one path: a turn into an archived session queues its prompt and its rejected step claims it at once
+ * (`queueTurn`, `claimRejected`), so the log records the dropped input the way DSH's does.
  */
 
 /** The event every inbox change is recorded as. DSH's name. */
@@ -169,6 +170,48 @@ export function queueSteer(store: InboxStore, handle: SessionHandle, content: re
   const list = pendingInbox(store, handle)['next-step']
   store.append(handle, { type: INBOX_SPLICED, target: 'next-step', start: list.length, inserted: [message] })
   return message
+}
+
+/**
+ * Queue a prompt as the next turn's input (DSH's `followup`, `inbox.append('next-turn', message)`).
+ *
+ * heddle writes a prompt straight into the conversation when its turn starts, so this list is used only where DSH's
+ * order has to be kept: a turn into an archived session queues its prompt here, and the rejected step claims and
+ * drops it (`claimRejected`), which is how DSH records input it discarded.
+ */
+export function queueTurn(store: InboxStore, handle: SessionHandle, content: readonly ContentPart[], source?: unknown): InboxMessage {
+  const message: InboxMessage = {
+    id: `inbox-${randomUUID()}`,
+    role: 'user',
+    content: [...content],
+    ...(source !== undefined ? { source } : {}),
+  }
+  const list = pendingInbox(store, handle)['next-turn']
+  store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start: list.length, inserted: [message] })
+  return message
+}
+
+/**
+ * Claim what a step proposes and write **none** of it: the claim of a step the archived-session gate rejected.
+ *
+ * DSH's `claim(target)` takes the whole next-step list and, at a turn's first step (`'next-turn'`), the first queued
+ * prompt; each is one splice with no `outcome`, because a claim delivers to the step. The gate then rejects the step,
+ * so the claimed messages are never written: "the pre-step rejection that produced it discarded the claimed messages"
+ * (dsh-agent lib/index.js:53-62). Answers what was claimed, which is none when nothing waited.
+ */
+export function claimRejected(store: InboxStore, handle: SessionHandle, target: InboxTarget): readonly InboxMessage[] {
+  const inbox = pendingInbox(store, handle)
+  const claimed: InboxMessage[] = []
+  if (inbox['next-step'].length > 0) {
+    store.append(handle, { type: INBOX_SPLICED, target: 'next-step', start: 0, removedCount: inbox['next-step'].length, inserted: [] })
+    claimed.push(...inbox['next-step'])
+  }
+  const queued = inbox['next-turn'][0]
+  if (target === 'next-turn' && queued !== undefined) {
+    store.append(handle, { type: INBOX_SPLICED, target: 'next-turn', start: 0, removedCount: 1, inserted: [] })
+    claimed.push(queued)
+  }
+  return claimed
 }
 
 /**

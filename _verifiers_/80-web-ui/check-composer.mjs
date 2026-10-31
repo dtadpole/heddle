@@ -1874,3 +1874,63 @@ test('Stop preserves pending messages until a new send drains them ahead of new 
     assert.ok(asked[2].includes('NEXT'), 'new text follows retained work')
   } finally { browser.close(); await server.close() }
 })
+
+test('a message the server took is not put back or resent when the connection drops before its turn ends', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue #48 (2026-10-30): when the network dropped at the end of a turn, the answer had arrived in full, but the
+   * page said "the message could not be sent: Failed to fetch" and put the answered prompt back in the composer, so
+   * Enter sent it again as a duplicate turn. DSH restores a draft only for a failed submission. The drop is made
+   * deterministic in the page: the turn's response stream errors as a lost connection does, right after the answer's
+   * text has been read, while the model double still holds the stream open.
+   */
+  const server = await startServer('dropped-end', { holdOpenMs: 4000 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the panel is up')
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.fetch = async (input, init) => {
+        const response = await real(input, init)
+        if (!String(input).includes('/api/turn') || response.body === null) return response
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let seen = ''
+        let drop = false
+        const body = new ReadableStream({
+          async pull(controller) {
+            if (drop) { controller.error(new TypeError('Failed to fetch')); return }
+            const { value, done } = await reader.read()
+            if (done) { controller.close(); return }
+            controller.enqueue(value)
+            seen += decoder.decode(value, { stream: true })
+            if (seen.includes('the answer')) drop = true
+          },
+        })
+        return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers })
+      }
+    })()`)
+    await type(browser, 'only once')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("the answer")', 15_000), 'the answer arrived')
+    assert.ok(
+      await browser.waitFor(`[...document.querySelectorAll('#log .turn.denied')].length > 0`, 10_000),
+      'and the dropped connection is reported',
+    )
+    const state = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        field: document.querySelector('textarea').value,
+        notes: [...document.querySelectorAll('#log .turn.denied')].map((note) => note.textContent),
+      })`),
+    )
+    assert.equal(state.field, '', `the delivered message is not put back in the composer (${JSON.stringify(state)})`)
+    assert.ok(!state.notes.some((note) => /could not be sent/.test(note)), `nor reported as unsent (${JSON.stringify(state.notes)})`)
+    assert.ok(state.notes.some((note) => /delivered/.test(note)), 'the note says the message was delivered')
+    assert.equal(server.double.requests.length, 1, 'and nothing was sent twice')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

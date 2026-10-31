@@ -48,6 +48,7 @@
 //! `INDEX.md`.
 
 pub mod command;
+mod component_schemas;
 mod compose;
 mod endpoints;
 mod env;
@@ -55,8 +56,11 @@ mod error;
 mod home;
 mod layer;
 mod local;
+mod locale;
 mod model_row;
 pub mod paths;
+mod plugin_inventory;
+mod presets;
 mod profile;
 mod references;
 mod retry;
@@ -66,21 +70,35 @@ mod template;
 mod validate;
 mod value;
 
+pub use component_schemas::{
+    context_schema, goal_schema, jobs_schema, schedule_schema, subagent_tool_schema, team_schema,
+};
 pub use compose::{ComponentName, ComposedRow, EntryRow, Provenance, compose, origin_of};
 pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,
     PAGE_ENDPOINT_FIELDS, ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths,
     default_endpoints, describe_endpoint, describe_endpoints, describe_page_endpoint,
-    environment_override, materialize_key, merge_endpoint, read_key_file, resolve_endpoints,
-    selection_problem,
+    environment_override, is_shipped_fixture, materialize_key, merge_endpoint, read_key_file,
+    resolve_endpoints, selection_problem, unscripted_fixture_message,
 };
 pub use env::Env;
 pub use error::ConfigError;
 pub use home::{expand_home, heddle_home, profiles_dir};
 pub use layer::{INLINE_FILE, Layer, NamedLayer, anchor_dir, read_layer};
 pub use local::{LocalConfig, LocalConfigLocation, local_config_candidates, read_local_config};
+pub use locale::{
+    FALLBACK_LOCALE, LocalePreference, SUPPORTED_LOCALES, accepted_languages, document_language,
+    locale_label, locale_preference, locale_schema, negotiate_locale,
+};
 pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
 pub use paths::{canonical_path, depth_of, is_under};
+pub use plugin_inventory::{
+    PluginFiberPhase, PluginInventoryEntry, PluginInventorySnapshot, plugin_inventory,
+};
+pub use presets::{
+    PresetDefinition, PresetResolution, PresetRoster, missing_preset_message, preset_roster,
+    standard_preset,
+};
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,
     list_profiles, profile_argument, resolve_profile,
@@ -93,10 +111,10 @@ pub use retry::{
 };
 pub use schema::{Additional, Schema, SchemaProblem, SchemaType, TypeSet};
 pub use settings::{
-    PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsError, SettingsNamespace,
-    SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService, SettingsTarget,
-    SettingsView, SettingsWrite, commit_settings_write, describe_settings, handle_settings_request,
-    is_secret_key, plan_settings_write, settings_target,
+    PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsApplier, SettingsError,
+    SettingsNamespace, SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService,
+    SettingsTarget, SettingsView, SettingsWrite, commit_settings_write, describe_settings,
+    handle_settings_request, is_secret_key, plan_settings_write, settings_target,
 };
 pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{

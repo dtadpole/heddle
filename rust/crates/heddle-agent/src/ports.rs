@@ -192,6 +192,42 @@ pub trait SessionPort: Send + Sync {
 
     /// The turn ended, whichever way: a steer from now on waits for a turn of its own.
     fn close_steering(&self, _session: &SessionHandle) {}
+
+    /// DSH's archived-session gate: whether the session, or a session above it in its subagent lineage, is
+    /// archived, so its next step must be rejected (dsh-api-session-controller lib/index.js:2508-2541). Asked of
+    /// the records at every step. A session store with no archive runs every step, which is the default.
+    fn under_archived(&self, _session: &SessionHandle) -> bool {
+        false
+    }
+
+    /// Record the claim of a step the gate rejected, writing none of it (`heddle_session::inbox::claim_rejected`):
+    /// first queue `prompt` as the next turn's input when there is one (DSH's `followup`), then claim the next-step
+    /// list and, with `with_turn`, the first queued prompt. Answers how many messages were claimed and dropped.
+    fn claim_rejected(
+        &self,
+        _session: &SessionHandle,
+        _prompt: Option<(Vec<ContentPart>, Option<serde_json::Value>)>,
+        _with_turn: bool,
+    ) -> Result<usize, PortError> {
+        Ok(0)
+    }
+
+    /// The agent preset the session recorded (`SessionMeta.preset`, inventory A96), or `None` for a session that
+    /// recorded none. The default knows no record, for a session that does not keep one.
+    fn recorded_preset(&self, _session: &SessionHandle) -> Option<String> {
+        None
+    }
+
+    /// Record `preset` as the session's agent preset **only when it has none** (`SessionStore::record_preset`), and
+    /// answer the preset the session now records. A session keeps its preset, so this never replaces one. The default
+    /// records nothing and answers `None`, and the loop then runs the preset it asked to record.
+    fn record_preset(
+        &self,
+        _session: &SessionHandle,
+        _preset: &str,
+    ) -> Result<Option<String>, PortError> {
+        Ok(None)
+    }
 }
 
 /// The context service, narrowed to the three questions a turn asks.

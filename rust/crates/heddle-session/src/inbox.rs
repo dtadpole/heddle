@@ -14,8 +14,9 @@
 //! existed (R-developer-two-5): a steer sent during `bash sleep 30` was written between the call and its
 //! result, and a stop then left nothing pending.
 //!
-//! heddle's page keeps its own next-turn queue, so only `next-step` is written here. The fold still reads
-//! both lists, so a later queue on the server can use the same event.
+//! heddle's page keeps its own next-turn queue, so a steer is the only input that waits here between turns.
+//! `next-turn` is written by one path: a turn into an archived session queues its prompt and its rejected step
+//! claims it at once ([`queue_turn`], [`claim_rejected`]), so the log records the dropped input the way DSH's does.
 
 use std::collections::HashSet;
 
@@ -32,7 +33,7 @@ pub const INBOX_SPLICED: &str = "agent/inbox/spliced";
 /// The list a steer goes to: input for the next step of the running turn.
 pub const NEXT_STEP: &str = "next-step";
 
-/// The list of prompts that each start a turn. heddle writes none yet; the fold reads it.
+/// The list of prompts that each start a turn; written only by a turn into an archived session.
 pub const NEXT_TURN: &str = "next-turn";
 
 /// One pending message. It is written as an ordinary user message when it is claimed.
@@ -264,6 +265,79 @@ pub fn queue_steer(
         AppendOptions::default(),
     )?;
     Ok(message)
+}
+
+/// Queue a prompt as the next turn's input (DSH's `followup`, `inbox.append("next-turn", message)`).
+///
+/// heddle writes a prompt straight into the conversation when its turn starts, so this list is used only where
+/// DSH's order has to be kept: a turn into an archived session queues its prompt here, and the rejected step
+/// claims and drops it ([`claim_rejected`]), which is how DSH records input it discarded. `queueTurn` in the
+/// TypeScript build.
+pub fn queue_turn(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    content: Vec<ContentPart>,
+    source: Option<Value>,
+) -> Result<InboxMessage, InboxError> {
+    let message = InboxMessage {
+        id: format!("inbox-{}", uuid::Uuid::new_v4()),
+        role: "user".to_string(),
+        content,
+        source,
+    };
+    let start = pending_inbox(store, handle)?.next_turn.len();
+    let inserted =
+        serde_json::to_value(std::slice::from_ref(&message)).expect("a message is serializable");
+    store.append(
+        handle,
+        NewEvent::new(INBOX_SPLICED)
+            .field("target", NEXT_TURN)
+            .field("start", start as u64)
+            .field("inserted", inserted),
+        AppendOptions::default(),
+    )?;
+    Ok(message)
+}
+
+/// Claim what a step proposes and write **none** of it: the claim of a step the archived-session gate rejected.
+///
+/// DSH's `claim(target)` takes the whole next-step list and, at a turn's first step (`with_turn`), the first
+/// queued prompt; each is one splice with no `outcome`, because a claim delivers to the step. The gate then
+/// rejects the step, so the claimed messages are never written: "the pre-step rejection that produced it
+/// discarded the claimed messages" (dsh-agent lib/index.js:53-62). Answers what was claimed. `claimRejected` in
+/// the TypeScript build.
+pub fn claim_rejected(
+    store: &SessionStore,
+    handle: &SessionHandle,
+    with_turn: bool,
+) -> Result<Vec<InboxMessage>, InboxError> {
+    let inbox = pending_inbox(store, handle)?;
+    let mut claimed = Vec::new();
+    if !inbox.next_step.is_empty() {
+        store.append(
+            handle,
+            NewEvent::new(INBOX_SPLICED)
+                .field("target", NEXT_STEP)
+                .field("start", 0u64)
+                .field("removedCount", inbox.next_step.len() as u64)
+                .field("inserted", Value::Array(Vec::new())),
+            AppendOptions::default(),
+        )?;
+        claimed.extend(inbox.next_step);
+    }
+    if with_turn && let Some(queued) = inbox.next_turn.into_iter().next() {
+        store.append(
+            handle,
+            NewEvent::new(INBOX_SPLICED)
+                .field("target", NEXT_TURN)
+                .field("start", 0u64)
+                .field("removedCount", 1u64)
+                .field("inserted", Value::Array(Vec::new())),
+            AppendOptions::default(),
+        )?;
+        claimed.push(queued);
+    }
+    Ok(claimed)
 }
 
 /// Claim the whole next-step list at a step boundary and write each message into the conversation.
@@ -541,6 +615,116 @@ mod tests {
         assert!(
             !has_pending_step(&store, &handle).expect("readable"),
             "nothing is left pending"
+        );
+    }
+
+    #[test]
+    fn a_rejected_claim_records_dshs_splices_and_writes_no_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap(), &heddle_config::Env::default());
+        let handle = store.create(CreateOptions::default()).expect("a session");
+        let text = |text: &str| {
+            vec![ContentPart::Text {
+                text: text.to_string(),
+            }]
+        };
+        let base = store.count(&handle).expect("a count");
+        assert!(
+            claim_rejected(&store, &handle, true)
+                .expect("a claim")
+                .is_empty(),
+            "an empty inbox claims nothing and writes nothing"
+        );
+        assert_eq!(store.count(&handle).expect("a count"), base);
+
+        queue_steer(&store, &handle, text("steer"), None).expect("queued");
+        let queued = queue_turn(
+            &store,
+            &handle,
+            text("prompt"),
+            Some(json!({"kind": "subagent"})),
+        )
+        .expect("queued");
+        assert_eq!(pending_inbox(&store, &handle).unwrap().next_turn, [queued]);
+        let claimed = claim_rejected(&store, &handle, true).expect("a claim");
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|message| crate::text_of(&message.content))
+                .collect::<Vec<_>>(),
+            ["steer", "prompt"],
+            "the next-step list first, then the queued turn, as DSH's claim orders them"
+        );
+        let events = store.read(&handle).expect("readable");
+        let events: Vec<&SessionEvent> = events
+            .iter()
+            .skip(base as usize)
+            .map(|event| event.as_ref())
+            .collect();
+        let kinds: Vec<(&str, Option<&Value>, Option<&Value>)> = events
+            .iter()
+            .map(|event| {
+                (
+                    event.kind.as_str(),
+                    event.fields.get("target"),
+                    event.fields.get("removedCount"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (INBOX_SPLICED, Some(&json!("next-step")), None),
+                (INBOX_SPLICED, Some(&json!("next-turn")), None),
+                (INBOX_SPLICED, Some(&json!("next-step")), Some(&json!(1))),
+                (INBOX_SPLICED, Some(&json!("next-turn")), Some(&json!(1))),
+            ],
+            "no message is written"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event.fields.get("outcome").is_none())
+        );
+        let inbox = pending_inbox(&store, &handle).unwrap();
+        assert!(inbox.next_step.is_empty() && inbox.next_turn.is_empty());
+    }
+
+    #[test]
+    fn the_archived_lineage_follows_subagent_parents_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path().to_str().unwrap(), &heddle_config::Env::default());
+        let parent = store.create(CreateOptions::default()).expect("a session");
+        let child = store
+            .create(CreateOptions {
+                parent_session: Some(parent.id.clone()),
+                origin: Some(crate::SessionOrigin::Subagent),
+                delegation_depth: Some(1),
+                ..CreateOptions::default()
+            })
+            .expect("a child");
+        let fork = store
+            .create(CreateOptions {
+                parent_session: Some(parent.id.clone()),
+                ..CreateOptions::default()
+            })
+            .expect("a fork");
+        assert!(!store.under_archived(&parent.id) && !store.under_archived(&child.id));
+        store
+            .flags(
+                &parent.id,
+                crate::FlagPatch {
+                    pinned: None,
+                    archived: Some(true),
+                },
+            )
+            .unwrap();
+        assert!(store.under_archived(&parent.id), "an archived session");
+        assert!(store.under_archived(&child.id), "its subagent child");
+        assert!(!store.under_archived(&fork.id), "not its fork");
+        assert!(
+            !store.under_archived("session-unknown"),
+            "nor an unknown id"
         );
     }
 }

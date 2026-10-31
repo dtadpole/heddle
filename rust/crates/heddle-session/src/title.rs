@@ -9,7 +9,10 @@
 //! - **When**: on the session's first eligible human message (a `user` message with no `source` and visible text) in a
 //!   session with no title and no parent (`onUserMessage`, dsh-session-title lib/index.js:380-404); the call starts
 //!   once the turn's own `model/request` is on record, on that request's endpoint and model (`onRequestHeader`,
-//!   :406-416).
+//!   :406-416). DSH titles nothing when a session is created, so every path that opens a session for a turn — a
+//!   blank row, the turn route, the CLI's `--turn` — opens it untitled (#68: the turn route and the CLI used to name
+//!   it with the prompt cut to 60 characters, which read as a person's name, so no call ever started). A title given
+//!   at creation (`session new --title`, a definition) is a person's.
 //! - **What it sends**: the first-prompt system prompt and the one message framed as JSON (first-prompt
 //!   lib/index.js:44-56), within [`MAX_INPUT_BYTES`], [`MAX_OUTPUT_TOKENS`] and [`TIMEOUT`], tagged
 //!   [`SESSION_TITLE_PURPOSE`] (`dsh-session-title-llm` lib/index.js:160-220).

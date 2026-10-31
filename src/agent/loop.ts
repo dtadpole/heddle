@@ -1,3 +1,5 @@
+import { missingPresetMessage, presetAllows, presetToolSpecs } from '../config/presets.ts'
+import type { PresetDefinition, PresetResolution } from '../config/presets.ts'
 import { mergeTokenUsage } from '../llm/usage.ts'
 import type { TokenUsage } from '../llm/usage.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -7,7 +9,7 @@ import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
-import { claimNextStep, closeSteering, hasPendingStepOrClose, openSteering } from '../session/inbox.ts'
+import { claimNextStep, claimRejected, closeSteering, hasPendingStepOrClose, openSteering, queueTurn } from '../session/inbox.ts'
 import { recordTimeContext } from '../schedule/time-context.ts'
 
 /**
@@ -208,9 +210,21 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
       : options.signal === undefined
         ? live.signal
         : AbortSignal.any([options.signal, live.signal])
+  /**
+   * The session's agent preset (inventory A96), resolved once the turn holds its session and **before** the turn's
+   * own recording begins: a refused preset writes nothing, so it is thrown past `recordUnfinished`, which would
+   * otherwise close a turn that never started.
+   */
+  let preset: PresetDefinition | undefined
+  try {
+    preset = sessionPreset(ctx, options.session)
+  } catch (error) {
+    live?.settle()
+    throw error
+  }
   const progress: TurnProgress = { text: '', reasoning: '', rounds: 0, denials: 0, completed: false }
   try {
-    return await runTurnBody(ctx, options, signal, progress)
+    return await runTurnBody(ctx, options, signal, progress, preset)
   } catch (error) {
     recordUnfinished(ctx, options.session, error, signal, progress)
     throw error
@@ -220,6 +234,55 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
     closeSteering(ctx.session.store, options.session)
     live?.settle()
   }
+}
+
+/** Why a turn the archived-session gate rejected ended, in the loop's words (`TurnResult.ended`). */
+export const ARCHIVED_BLOCKED = 'blocked: an archived session runs no model step until it is unarchived'
+
+/**
+ * DSH's turn-end record for a rejected step, `{ kind: 'blocked' }` (dsh-agent-loop lib/index.js:960-962).
+ *
+ * It is written as heddle's non-completed turn end, `turn/failed`, which every reader of a turn's end already knows
+ * (the time context, the goal tool, the schedule driver, and the goal driver, which ends the session's busy span on it),
+ * and **not** as `turn/completed`: that event is the goal driver's edge to start another round, and a blocked turn that
+ * wrote it would re-trigger a blocked round forever.
+ */
+const BLOCKED_TURN_END = { type: 'turn/failed', reason: { kind: 'blocked' } } as const
+
+/**
+ * DSH's archived-session gate: whether this session's next step must be rejected.
+ *
+ * `ArchivedSessionGate` (dsh-api-session-controller lib/index.js:2508-2541) answers `agent/pre-step` with `reject` while
+ * the agent's session, or a session above it in its subagent lineage, is archived. Asked of the records at every step,
+ * so an archive written by another process, or a parent archived while its child runs, stops the next step too. A
+ * profile whose session service has no such question runs every step, as before.
+ */
+function archivedGate(ctx: Context, session: SessionHandle): boolean {
+  return ctx.session.underArchived?.(session.id) === true
+}
+
+/** The `presets` service as the loop reads it: optional, so a profile without the row runs every tool. */
+interface PresetRegistry {
+  defaultId(): string
+  resolve(id: string | undefined): PresetResolution
+}
+
+/**
+ * The agent preset a turn's session runs under (inventory A96), or undefined when the profile declares none.
+ *
+ * DSH's rules: a session keeps the preset it recorded, so a later change of the default does not move it; a session
+ * that recorded none (one from before presets, or created by a path that named none) records the current default now
+ * and keeps it from then on; and a recorded preset that is no longer declared is **rejected** rather than replaced, so
+ * the turn is refused with a sentence naming it before anything is written to the log.
+ */
+function sessionPreset(ctx: Context, session: SessionHandle): PresetDefinition | undefined {
+  const presets = ctx.get('presets') as PresetRegistry | undefined
+  if (presets === undefined) return undefined
+  let recorded = ctx.session.store.list().find((meta) => meta.id === session.id)?.preset
+  if (recorded === undefined) recorded = ctx.session.store.recordPreset(session.id, presets.defaultId())?.preset ?? presets.defaultId()
+  const resolution = presets.resolve(recorded)
+  if ('missing' in resolution) throw new Error(missingPresetMessage(resolution))
+  return resolution.preset
 }
 
 /**
@@ -282,8 +345,34 @@ async function runTurnBody(
   options: RunTurnOptions,
   signal: AbortSignal | undefined,
   progress: TurnProgress,
+  preset: PresetDefinition | undefined,
 ): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
+  /**
+   * A turn into an archived session is **accepted and blocked**, as DSH's is: the prompt is queued (DSH's `followup`), the
+   * turn's first step claims it with any pending steer, the gate rejects the step before a model request is made, and
+   * the turn ends `blocked`. The claimed input is dropped, never written as a message, so the session's turns, its
+   * conversation and its answer stay as they were; the splices keep a record of what was dropped. This covers every
+   * caller: the page's turn route, the command line's `--resume --turn`, a subagent's settlement notice, a goal round, a
+   * reminder and a teammate's mail all start their turns here.
+   */
+  if (archivedGate(ctx, options.session)) {
+    if (options.answerPending !== true) {
+      queueTurn(ctx.session.store, options.session, [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])], options.source)
+    }
+    claimRejected(ctx.session.store, options.session, 'next-turn')
+    ctx.session.store.append(options.session, BLOCKED_TURN_END)
+    return {
+      text: '',
+      reasoning: '',
+      toolCalls: [],
+      denials: [],
+      finishReason: 'blocked',
+      events: ctx.session.store.count(options.session) - started,
+      rounds: 0,
+      ended: [ARCHIVED_BLOCKED],
+    }
+  }
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
   const maximumTokens = options.maxOutputTokens
@@ -296,6 +385,12 @@ async function runTurnBody(
   const cwd = ctx.sandbox.rootFor(folder)
   // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
   const instructionCwd = folder ?? ctx.sandbox.workspaceRoot
+  /**
+   * The session's preset narrows what this turn offers: its tools, and the persona its system prompt is written from
+   * when the caller names none. `runTurn` resolved it before anything was written, so a refused preset leaves no
+   * dangling message and no closed-but-empty turn.
+   */
+  const system = options.system ?? preset?.persona
 
   /**
    * Write what waits in the session's inbox into the conversation (src/session/inbox.ts).
@@ -320,7 +415,7 @@ async function runTurnBody(
     )
   }
 
-  const tools = specsOf(ctx.tools)
+  const tools = preset === undefined ? specsOf(ctx.tools) : presetToolSpecs(preset, specsOf(ctx.tools))
   const denials: { tool: string; code: string; message: string }[] = []
   const toolCallRecords: { name: string; arguments: string; result: ToolResult }[] = []
   let text = ''
@@ -331,6 +426,8 @@ async function runTurnBody(
   let rounds = 0
   let lastContext: { estimatedTokens: number; thresholdTokens: number; pruned: number; compacted: boolean } | undefined
   const ended: string[] = []
+  /** Whether the archived-session gate rejected a later step of this turn. */
+  let blocked = false
   /** Read at the moment asked: TypeScript narrows a checked field to `false` for the rest of the scope, and an
    *  abort arrives asynchronously while a tool is running. */
   const stoppedByCaller = (): boolean => signal !== undefined && signal.aborted
@@ -343,6 +440,23 @@ async function runTurnBody(
      */
     if (stoppedByCaller()) {
       ended.push('stopped by the caller')
+      break
+    }
+    /**
+     * The archived-session gate at a later step: a session archived while its turn ran (by another process, or a parent
+     * archived under a running child) runs no further step. The step's claim of pending steers is recorded and dropped,
+     * as DSH's rejected claim is, and the turn ends `blocked` below.
+     */
+    if (round > 0 && archivedGate(ctx, options.session)) {
+      claimRejected(ctx.session.store, options.session, 'next-step')
+      ended.push(ARCHIVED_BLOCKED)
+      blocked = true
+      /**
+       * The turn's finish reason is `blocked`, not the previous step's (`tool_calls`, as a rule): DSH's loop sets
+       * `turnEnds = { kind: 'blocked' }` at a rejected step whatever the earlier steps proposed (dsh-agent-loop
+       * lib/index.js:956-963), so the answer record and the result say why the turn ended, as the first-step gate does.
+       */
+      finishReason = 'blocked'
       break
     }
     /**
@@ -390,7 +504,7 @@ async function runTurnBody(
       endpoint: options.endpoint,
       ...(options.model !== undefined ? { model: options.model } : {}),
       tools,
-      ...(options.system !== undefined ? { system: options.system } : {}),
+      ...(system !== undefined ? { system } : {}),
     })
 
     /**
@@ -424,6 +538,12 @@ async function runTurnBody(
       const reason = isHookRefusal(error) ? (error as Error).message : `a hook failed at agent/pre-step — ${(error as Error).message}`
       throw new Error(reason)
     }
+    /**
+     * The session's preset is applied again to what the hook answered (developer-five's review of A96): a listener may
+     * add a registered tool, and one outside the preset would otherwise reach the model's tool list even though a call
+     * to it is refused. A profile without presets is unchanged.
+     */
+    if (preset !== undefined) prepared = { ...prepared, tools: presetToolSpecs(preset, prepared.tools) }
 
     const calls: { id: string; name: string; arguments: string }[] = []
     let roundText = ''
@@ -517,6 +637,12 @@ async function runTurnBody(
          * sending the same too-long request again would fail identically, which is why the loop
          * re-derives the request before trying.
          */
+        /**
+         * A stopped request is a cancellation, not a request failure (#99): it is not offered to the recovery
+         * listener, which would otherwise log a `compaction/recovery` decision for a call that never failed. The
+         * Rust turn checks its stop first the same way, and DSH's loop treats an abort as its own end.
+         */
+        if (signal?.aborted === true) throw error
         const failure = modelFailure(error)
         if (failure === undefined || attempt >= maxOverflowRetries) throw error
         const action = await ctx.waterfall(
@@ -544,7 +670,7 @@ async function runTurnBody(
         const retried = ctx.context.assemble(options.session, {
           cwd: instructionCwd,
           tools,
-          ...(options.system !== undefined ? { system: options.system } : {}),
+          ...(system !== undefined ? { system } : {}),
           endpoint: options.endpoint,
           ...(options.model !== undefined ? { model: options.model } : {}),
         })
@@ -610,6 +736,17 @@ async function runTurnBody(
       if (stoppedByCaller()) {
         return { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
       }
+      /**
+       * A tool outside the session's preset does not exist for this agent, so the call gets the registry's own answer
+       * for an unknown tool, naming the tools the preset does offer. The model is never shown such a tool; this is
+       * the answer to one it names anyway.
+       */
+      if (preset !== undefined && !presetAllows(preset, call.name)) {
+        return {
+          output: '',
+          error: { code: 'UNKNOWN_TOOL', message: `no tool named '${call.name}'; known: ${tools.map((tool) => tool.name).join(', ') || '(none)'}` },
+        }
+      }
       try {
         return await ctx.tools.call(call.name, args, {
           cwd,
@@ -637,16 +774,7 @@ async function runTurnBody(
       ctx.session.store.message(options.session, {
         role: 'tool',
         toolCallId: call.id,
-        content: [
-          {
-            type: 'text',
-            text: result.error
-              ? `error (${result.error.code}): ${result.error.message}`
-              : result.output.length > 0
-                ? result.output
-                : '(the tool produced no output)',
-          },
-        ],
+        content: [{ type: 'text', text: toolMessageText(result) }],
       })
     }
     const limit = Math.max(1, ctx.tools.maxParallelToolCalls ?? 1)
@@ -680,7 +808,8 @@ async function runTurnBody(
     ...(ended.length > 0 ? { ended } : {}),
   })
   progress.completed = true
-  ctx.session.store.append(options.session, { type: 'turn/completed', rounds })
+  /** A turn whose later step the gate rejected ends with DSH's `blocked` record, not as a completed turn. */
+  ctx.session.store.append(options.session, blocked ? BLOCKED_TURN_END : { type: 'turn/completed', rounds })
 
   return {
     text,
@@ -787,4 +916,22 @@ async function runPool<T, R>(items: readonly T[], limit: number, run: (item: T) 
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
   return results
+}
+
+/**
+ * The text a tool result is recorded and replayed to the model as.
+ *
+ * A failed result keeps what it printed (live-testing issue #82): a bash call that exited 7 used to reach the model as
+ * the bare `error (EXIT): the command exited 7`, its stdout and stderr dropped, so the model ran a second command to
+ * see them. DSH's bash `renderResult` keeps the body and adds an `[exit code: N]` marker. Here the error line stays first,
+ * because the page reads the first line as the failed row's summary and a leading `error` as the failure, and the
+ * output follows it.
+ */
+export function toolMessageText(result: ToolResult): string {
+  const output = result.output ?? ''
+  if (result.error) {
+    const line = `error (${result.error.code}): ${result.error.message}`
+    return output.length > 0 ? `${line}\n${output}` : line
+  }
+  return output.length > 0 ? output : '(the tool produced no output)'
 }

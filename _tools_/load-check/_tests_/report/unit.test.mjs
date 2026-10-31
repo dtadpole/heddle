@@ -42,7 +42,7 @@ const base = {
     { index: 2, state: 'free' },
   ],
   processes: [],
-  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, memWarnPct: 30, memStopPct: 25, slots: 3 },
+  thresholds: { diskStopGb: 16, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, memWarnPct: 30, memStopPct: 25, slots: 3 },
 }
 
 test('the machine sources are parsed from the commands a Mac answers with', () => {
@@ -131,8 +131,12 @@ test('the assessment warns and stops at the working model\'s lines', () => {
 
   const diskWarn = assess({ ...base, disk: { ...base.disk, availKb: 25 * 1024 * 1024 } })
   assert.equal(diskWarn.diskVerdict, WARN)
-  const diskStop = assess({ ...base, disk: { ...base.disk, availKb: 19 * 1024 * 1024 } })
+  // D-067: 16 to 20 GiB is the coordinator's sweep band, a warn; only under 16 GiB does nothing new start
+  const sweepBand = assess({ ...base, disk: { ...base.disk, availKb: 19 * 1024 * 1024 } })
+  assert.equal(sweepBand.diskVerdict, WARN)
+  const diskStop = assess({ ...base, disk: { ...base.disk, availKb: 15.9 * 1024 * 1024 } })
   assert.equal(diskStop.diskVerdict, STOP)
+  assert.match(format({ at: 'now', ...base, disk: { ...base.disk, availKb: 15.9 * 1024 * 1024 }, assessment: diskStop }), /\(warn < 26 GB, stop < 16 GB: D-067\)/)
 
   // The system load average is context now: the desktop's Spotlight or Chrome must not
   // make the team's verdict warn. The team's own cpu share decides.
@@ -223,7 +227,7 @@ test('thresholds come from the environment when they are set', () => {
   assert.equal(t.diskWarnGb, 40)
   assert.equal(t.memStopPct, 20)
   assert.equal(t.slots, 5)
-  assert.equal(t.diskStopGb, 20, 'an unset threshold keeps its default')
+  assert.equal(t.diskStopGb, 16, 'an unset threshold keeps its default, the D-067 line')
 })
 
 test('the command exits 0 on a healthy machine and 1 on a stale slot', (t) => {

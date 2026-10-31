@@ -23,7 +23,7 @@ export const WARN = 1
 export const STOP = 2
 
 export const THRESHOLDS = {
-  diskStopGb: 20, // D-064 and the working model: nothing new starts below 20 GiB free
+  diskStopGb: 16, // D-067: nothing new starts below 16 GiB free; between 16 and 20 the coordinator sweeps each pass
   diskWarnGb: 26, // working model: remove release artifacts below 26 GB free
   loadWarnPerCore: 1.5,
   loadStopPerCore: 2.0,
@@ -312,7 +312,7 @@ export function format({ at, disk, load, ncpu, swap, slots, processes, threshold
   lines.push(`load-check ${at} (${ncpu} cores)`)
   lines.push(
     `disk     ${a.diskFreeGb.toFixed(1)} GB free of ${gib(disk.totalKb).toFixed(0)} GB on ${disk.mount} ${mark(a.diskVerdict)}` +
-      ` (warn < ${thresholds.diskWarnGb} GB, stop < ${thresholds.diskStopGb} GB: D-064)`,
+      ` (warn < ${thresholds.diskWarnGb} GB, stop < ${thresholds.diskStopGb} GB: D-067)`,
   )
   lines.push(
     `load     ${load.map((n) => n.toFixed(2)).join(' ')} = ${a.systemLoadPerCore.toFixed(2)}/core [context]` +
