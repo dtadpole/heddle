@@ -15,7 +15,7 @@ import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
 import { resetProfileFromTemplate } from './config/profile-template.ts'
-import { ConfigError, heddleHome } from './config/schema.ts'
+import { ConfigError, heddleHome, profilesDir } from './config/schema.ts'
 
 /**
  * `FiberState` is a `const enum`, so it has no runtime object to read names from.
@@ -934,6 +934,37 @@ async function runCommand(command: string, target: string | undefined, json: boo
   }
 }
 
+/**
+ * The profile a run boots when it names none (issue #74).
+ *
+ * A run that boots — `web`, a command, or a `--turn` — and names no profile, no `--config` and no `--patch`, from a
+ * folder with no project tree (`cordis.yml`), used to boot **nothing**: on a fresh home the page loaded with no
+ * session, model or workspace service, and the first message failed with an internal TypeError. DSH auto-initializes
+ * its shipped profiles from their templates on first use; heddle does the same for `default`: such a run boots
+ * `$HEDDLE_HOME/profiles/default`, created from the shipped template the first time, and says so on stderr. A profile a
+ * person already keeps under that name is booted as it is. `profiles` lists what exists and creates nothing. Answers
+ * false when the template could not be written (the reason is on stderr and the exit code is 1).
+ */
+function useDefaultProfile(args: Args): boolean {
+  if (args.profile !== undefined || args.config !== undefined || args.patch.length > 0) return true
+  if (args.command === undefined && args.turn === undefined) return true
+  if (args.command === 'profiles') return true
+  if (existsSync(resolve(process.cwd(), 'cordis.yml'))) return true
+  const dir = join(profilesDir(), 'default')
+  if (!existsSync(dir)) {
+    try {
+      resetProfileFromTemplate('default', 'default', { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return false
+    }
+    process.stderr.write(`heddle: created profile 'default' from the shipped template at ${dir}\n`)
+  }
+  args.profile = 'default'
+  return true
+}
+
 function hasProfileArgs(args: Args): boolean {
   return hasProfile(args)
 }
@@ -964,6 +995,8 @@ async function main(): Promise<void> {
     process.stdout.write(USAGE)
     return
   }
+
+  if (!useDefaultProfile(args)) return
 
   /**
    * DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of a
