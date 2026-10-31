@@ -1628,18 +1628,17 @@ async fn purify(State(state): State<AppState>) -> Response {
     // The browser loads this as a script, so it is served as JavaScript rather than through the
     // inline/download file answer: an `attachment` content-disposition here would leave the preview
     // page without a sanitiser.
-    let Some(path) = preview::purify_path(&state.options().asset_roots) else {
-        return respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n");
-    };
-    match std::fs::read(&path) {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/javascript; charset=utf-8")
-            .header("cache-control", "no-store")
-            .body(Body::from(bytes))
-            .expect("a response builder with static headers"),
-        Err(_) => respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n"),
-    }
+    // An installed package wins, so a checkout serves the version the TypeScript build serves; without one the binary
+    // serves its own copy (live issue #39), so a Rust deployment does not depend on a Node install.
+    let bytes = preview::purify_path(&state.options().asset_roots)
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(|| preview::EMBEDDED_PURIFY.as_bytes().to_vec());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/javascript; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Body::from(bytes))
+        .expect("a response builder with static headers")
 }
 
 // ---------------------------------------------------------------------------------------------------------

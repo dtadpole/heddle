@@ -261,6 +261,15 @@ fn attribute_at(html: &str, start: usize) -> Option<(String, char, usize)> {
 /// Where `/vendor/purify.js` is read from, first existing wins: each root in `roots` joined with
 /// [`PURIFY_RELATIVE_PATH`]. The binary passes the repository it was built from and the working
 /// directory; a build without the package answers `404 the sanitiser is not installed`.
+/// DOMPurify as the binary carries it: the same file as the installed `dompurify` package the TypeScript build serves
+/// (3.4.16, pinned by package-lock.json), with its licence header, embedded as `page.html` is.
+///
+/// Live issue #39 (developer-two-8, 2026-10-29): `/vendor/purify.js` was looked for only under `node_modules` beside
+/// the binary's repository or working directory. The Rust preview's checkout had no `node_modules`, so the route
+/// answered 404 and every HTML document was shown as its source; a deployment had to copy the file in. A binary now
+/// serves this copy when no installed one is found; a unit test keeps it equal to the installed package.
+pub const EMBEDDED_PURIFY: &str = include_str!("../assets/purify.min.js");
+
 pub fn purify_path(roots: &[PathBuf]) -> Option<PathBuf> {
     roots
         .iter()
@@ -416,5 +425,25 @@ mod tests {
         );
         assert_eq!(purify_path(&[root.join("missing")]), None);
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_embedded_sanitiser_is_dompurify_and_equals_the_installed_package() {
+        assert!(
+            EMBEDDED_PURIFY.starts_with("/*! @license DOMPurify "),
+            "the embedded file is DOMPurify with its licence header"
+        );
+        // Where the repository has the package installed (every checkout that builds the TypeScript side), the copy
+        // the binary carries must be the very file the TypeScript build serves.
+        let installed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join(PURIFY_RELATIVE_PATH);
+        if let Ok(text) = std::fs::read_to_string(&installed) {
+            assert!(
+                text == EMBEDDED_PURIFY,
+                "rust/crates/heddle-server/assets/purify.min.js differs from {}: copy the installed file over it",
+                installed.display()
+            );
+        }
     }
 }
