@@ -49,8 +49,19 @@
     --shadow-low: 0 1px 1px -1px #0003;
     --shadow-menu: 0 2px 8px -2px #0003;
     /** DSH's own stack (`-apple-system` first, with PingFang SC for Chinese), read from its body. */
-    --font: -apple-system, system-ui, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --font-default: -apple-system, system-ui, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    --font: var(--heddle-font-family-text, var(--font-default)), var(--font-default);
     --mono: "SF Mono", "Optimistic Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    /**
+     * The person's typography (issue #81, DSH's dsh-client-ui-theme), served on `<html>` from the `ui-theme` row and
+     * changed live from Settings. The text size moves the conversation's base text, headings, user bubble and draft by
+     * the same increment from DSH's 14px; the code size moves code blocks from its 11px default. A font list, when one
+     * is set, goes ahead of the built-in stack, so a font missing on this machine falls back to the default.
+     */
+    --heddle-content-font-size: 14px;
+    --heddle-code-font-size: 11px;
+    --heddle-content-font-delta: calc(var(--heddle-content-font-size) - 14px);
+    --heddle-code-font-delta: calc(var(--heddle-code-font-size) - 11px);
     --code-bg: #232127;
     --line: var(--border);
   }
@@ -131,7 +142,8 @@
      * Measured here: Menlo and PingFang SC are installed; SF Mono, JetBrains Mono and Fira Code are not, so they are
      * named for the machines that have them and the rest of the stack carries this one.
      */
-    --code-font: "Optimistic Mono", "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", Courier, ui-monospace, "PingFang SC", "Microsoft YaHei", monospace;
+    --code-font-default: "Optimistic Mono", "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, "Liberation Mono", Courier, ui-monospace, "PingFang SC", "Microsoft YaHei", monospace;
+    --code-font: var(--heddle-font-family-code, var(--code-font-default)), var(--code-font-default);
     /**
      * The size of a code line, from DSH's theme as well: 12px text on a 19px line.
      *
@@ -337,6 +349,20 @@
   #settings-server dd { margin: 0; overflow-wrap: anywhere; }
   /** A setting a person changes: its label on the left, its control on the right, as DSH's General rows are laid out. */
   .settings-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .35rem 0; font-size: .875rem; }
+  .settings-row .settings-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .settings-row .settings-row-text .meta { font-size: .78rem; }
+  .settings-stepper { display: inline-flex; align-items: center; gap: .35rem; flex: none; }
+  .settings-stepper button {
+    width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--surface); color: var(--text); font: inherit; cursor: pointer;
+  }
+  .settings-stepper button:disabled { opacity: .4; cursor: default; }
+  .settings-stepper output { min-width: 3.2rem; text-align: center; font-variant-numeric: tabular-nums; }
+  .settings-row input[type="text"] {
+    width: 14rem; height: 32px; padding: 0 .6rem; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--surface); color: var(--text); font: inherit;
+  }
+  #settings-more-fonts { padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-size: .85rem; cursor: pointer; }
   .settings-row select {
     height: 32px;
     padding: 0 .6rem;
@@ -652,7 +678,7 @@
     max-width: 100%; width: fit-content; padding: 10px 16px;
     border: 0; border-radius: 20px;
     background: var(--chat-bubble); color: var(--chat-text);
-    font-size: 14px; line-height: 22px; white-space: pre-wrap;
+    font-size: calc(14px + var(--heddle-content-font-delta)); line-height: calc(22px + var(--heddle-content-font-delta)); white-space: pre-wrap;
   }
   .turn.user .actions { height: 28px; align-items: center; gap: 8px; margin: 0; }
   /**
@@ -746,7 +772,10 @@
   .turn.user .action[data-copied='true'] { opacity: 1; }
   /** The answer: no border, no bubble, roomier leading — DSH's `AssistantMarkdown` root (14px on 24px). */
   /** The answer follows the chat's leading variable (the reference's 22.75), not a local 24. */
-  .turn.assistant { margin-top: 6px; font-size: 14px; line-height: var(--chat-leading); color: var(--chat-text); }
+  .turn.assistant { margin-top: 6px; font-size: calc(14px + var(--heddle-content-font-delta)); line-height: calc(var(--chat-leading) + var(--heddle-content-font-delta)); color: var(--chat-text); }
+  .turn.assistant.markdown h1 { font-size: calc(1.35rem + var(--heddle-content-font-delta)); }
+  .turn.assistant.markdown h2 { font-size: calc(1.15rem + var(--heddle-content-font-delta)); }
+  .turn.assistant.markdown h3 { font-size: calc(1rem + var(--heddle-content-font-delta)); }
   /**
    * The document's own rhythm and its code blocks, from DSH's markdown renderer: a paragraph is
    * `margin: 16px 0`, and a block of code is its own surface rather than a quoted aside.
@@ -760,9 +789,9 @@
   .turn.assistant.markdown ul, .turn.assistant.markdown ol { margin: 0 0 12px; padding-left: 1.4em; line-height: 1.5; }
   .turn.assistant.markdown li { margin-top: 4px; }
   .turn.assistant.markdown li:first-child { margin-top: 0; }
-  .turn.assistant.markdown td, .turn.assistant.markdown th { font-size: 14px; line-height: 20px; }
+  .turn.assistant.markdown td, .turn.assistant.markdown th { font-size: calc(14px + var(--heddle-content-font-delta)); line-height: calc(20px + var(--heddle-content-font-delta)); }
   .turn.assistant.markdown pre { margin: 16px 0; padding: 10px 12px; background: var(--chat-code); border-radius: 8px; overflow-x: auto; }
-  .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: 12.5px; line-height: 19px; background: none; padding: 0; }
+  .turn.assistant.markdown pre code { font-family: var(--code-font); font-size: calc(12.5px + var(--heddle-code-font-delta)); line-height: calc(19px + var(--heddle-code-font-delta)); background: none; padding: 0; }
   .turn.assistant[data-state='running']::after { content: '▍'; margin-left: .1rem; opacity: .45; }
   /**
    * **The live state is a shimmer on the words, never a band across the row.**
@@ -1636,7 +1665,7 @@
      * the reference's 21 belongs to the reference's own composer, not here.
      */
     /** the reference's composer measures 14px on a 21px line; a concurrent edit keeps reverting this line. */
-    font: 14px/21px var(--font);
+    font: calc(14px + var(--heddle-content-font-delta)) / calc(21px + var(--heddle-content-font-delta)) var(--font);
     padding: 4px 8px 8px 14px;
     min-height: 36px; max-height: 336px; resize: none; overflow-y: auto;
   }
@@ -3321,6 +3350,34 @@
         <select id="settings-language"></select>
       </div>
       <p id="settings-language-note" class="meta" hidden></p>
+      <div class="settings-row" data-font-size="fontSize">
+        <span class="settings-row-text"><span data-i18n="theme.fontSize.text.title">Font size</span><span class="meta" data-i18n="theme.fontSize.text.description">Only affects conversation content</span></span>
+        <span class="settings-stepper">
+          <button type="button" data-step="-1" data-i18n-aria-label="theme.fontSize.text.decrease" aria-label="Decrease font size">−</button>
+          <output></output>
+          <button type="button" data-step="1" data-i18n-aria-label="theme.fontSize.text.increase" aria-label="Increase font size">+</button>
+        </span>
+      </div>
+      <button type="button" id="settings-more-fonts" aria-expanded="false" aria-controls="settings-fonts" data-i18n="theme.fontSize.more">More font settings</button>
+      <div id="settings-fonts" hidden>
+        <div class="settings-row" data-font-size="codeFontSize">
+          <span class="settings-row-text"><span data-i18n="theme.fontSize.code.title">Code font size</span><span class="meta" data-i18n="theme.fontSize.code.description">Used for code blocks, inline code, and tool output</span></span>
+          <span class="settings-stepper">
+            <button type="button" data-step="-1" data-i18n-aria-label="theme.fontSize.code.decrease" aria-label="Decrease code font size">−</button>
+            <output></output>
+            <button type="button" data-step="1" data-i18n-aria-label="theme.fontSize.code.increase" aria-label="Increase code font size">+</button>
+          </span>
+        </div>
+        <div class="settings-row" data-font-family="textFontFamily">
+          <label class="settings-row-text" for="settings-text-font"><span data-i18n="theme.fontFamily.text.title">Text font</span><span class="meta" data-i18n="theme.fontFamily.text.description">Used for the interface and conversation text. Separate fonts with commas; leave empty for the default</span></label>
+          <input type="text" id="settings-text-font" spellcheck="false" autocomplete="off" data-i18n-placeholder="theme.fontFamily.placeholder" placeholder="Default">
+        </div>
+        <div class="settings-row" data-font-family="codeFontFamily">
+          <label class="settings-row-text" for="settings-code-font"><span data-i18n="theme.fontFamily.code.title">Code font</span><span class="meta" data-i18n="theme.fontFamily.code.description">Used for code blocks, inline code, and tool output. Separate fonts with commas; leave empty for the default</span></label>
+          <input type="text" id="settings-code-font" spellcheck="false" autocomplete="off" data-i18n-placeholder="theme.fontFamily.placeholder" placeholder="Default">
+        </div>
+      </div>
+      <p id="settings-theme-note" class="meta" hidden></p>
     </section>
     <section>
       <h3 data-i18n="settings.server">Server</h3>
@@ -3458,6 +3515,22 @@ const MESSAGES = Object.freeze({
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
+    'theme.fontSize.text.title': 'Font size',
+    'theme.fontSize.text.description': 'Only affects conversation content',
+    'theme.fontSize.text.increase': 'Increase font size',
+    'theme.fontSize.text.decrease': 'Decrease font size',
+    'theme.fontSize.code.title': 'Code font size',
+    'theme.fontSize.code.description': 'Used for code blocks, inline code, and tool output',
+    'theme.fontSize.code.increase': 'Increase code font size',
+    'theme.fontSize.code.decrease': 'Decrease code font size',
+    'theme.fontSize.unit': 'px',
+    'theme.fontSize.more': 'More font settings',
+    'theme.fontFamily.text.title': 'Text font',
+    'theme.fontFamily.text.description': 'Used for the interface and conversation text. Separate fonts with commas; leave empty for the default',
+    'theme.fontFamily.code.title': 'Code font',
+    'theme.fontFamily.code.description': 'Used for code blocks, inline code, and tool output. Separate fonts with commas; leave empty for the default',
+    'theme.fontFamily.placeholder': 'Default',
+    'theme.notSaved': 'Not saved ({reason}); this page keeps it until it is reloaded.',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3469,6 +3542,22 @@ const MESSAGES = Object.freeze({
     'settings.models': '模型',
     'settings.workspaces': '工作区',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
+    'theme.fontSize.text.title': '字号大小',
+    'theme.fontSize.text.description': '仅影响会话内容的字号',
+    'theme.fontSize.text.increase': '增大字号',
+    'theme.fontSize.text.decrease': '减小字号',
+    'theme.fontSize.code.title': '代码字号',
+    'theme.fontSize.code.description': '用于代码块、行内代码与工具输出',
+    'theme.fontSize.code.increase': '增大代码字号',
+    'theme.fontSize.code.decrease': '减小代码字号',
+    'theme.fontSize.unit': 'px',
+    'theme.fontSize.more': '更多字体设置',
+    'theme.fontFamily.text.title': '正文字体',
+    'theme.fontFamily.text.description': '用于界面与会话正文。多个字体用逗号分隔，留空使用默认字体',
+    'theme.fontFamily.code.title': '代码字体',
+    'theme.fontFamily.code.description': '用于代码块、行内代码与工具输出。多个字体用逗号分隔，留空使用默认字体',
+    'theme.fontFamily.placeholder': '默认',
+    'theme.notSaved': '未保存（{reason}）；本页在重新加载前保持此设置。',
   }),
 })
 
@@ -11184,6 +11273,8 @@ function settingsWorkspaceOrder(records) {
 
 async function showSettings() {
   fillLanguageRow()
+  fillThemeRows()
+  if (!settingsDialog.open) collapseMoreFonts()
   await fillSettings()
   if (!settingsDialog.open) settingsDialog.showModal()
 }
@@ -11202,6 +11293,142 @@ function fillLanguageRow() {
   )
   select.value = activeLocale
 }
+
+/**
+ * Typography (issue #81), DSH's dsh-client-ui-theme rows in General: the text font-size stepper (10-22px, default 14),
+ * and behind More font settings the code font-size stepper (10-16px, default 11) and the text and code font lists.
+ *
+ * The server serves the stored values as custom properties on `<html>`, so the page starts from them; a change is
+ * applied at once by setting the same property, then written to the `ui-theme` row through the settings API. Writes go
+ * one after another and only the latest change may report a failure, as the Language row's do. A font list is
+ * normalized as DSH normalizes it (names quoted, unsafe characters dropped) before it is applied or stored; an empty
+ * field is the built-in stack. heddle has no terminal, so its two rows are not offered; the row keeps their values.
+ */
+const FONT_SIZE_ROWS = Object.freeze({
+  fontSize: Object.freeze({ variable: '--heddle-content-font-size', min: 10, max: 22, fallback: 14 }),
+  codeFontSize: Object.freeze({ variable: '--heddle-code-font-size', min: 10, max: 16, fallback: 11 }),
+})
+const FONT_FAMILY_ROWS = Object.freeze({
+  textFontFamily: '--heddle-font-family-text',
+  codeFontFamily: '--heddle-font-family-code',
+})
+const GENERIC_FONT_FAMILIES = new Set([
+  'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy', 'system-ui', 'ui-serif', 'ui-sans-serif', 'ui-monospace',
+  'ui-rounded', 'emoji', 'math', 'fangsong', '-apple-system', 'blinkmacsystemfont',
+])
+
+/** DSH's `normalizeFontFamily`, the twin of `src/config/theme.ts`'s. */
+function normalizeFontFamily(value) {
+  return value
+    .split(',')
+    .map((name) => name.replace(/["'\\<>\u0000-\u001f\u007f]/gu, '').replace(/\s+/gu, ' ').trim())
+    .filter((name) => name !== '')
+    .map((name) => (GENERIC_FONT_FAMILIES.has(name.toLowerCase()) ? name : `"${name}"`))
+    .join(', ')
+}
+
+function currentFontSize(field) {
+  const row = FONT_SIZE_ROWS[field]
+  const value = Number.parseInt(document.documentElement.style.getPropertyValue(row.variable), 10)
+  return Number.isInteger(value) && value >= row.min && value <= row.max ? value : row.fallback
+}
+
+let themeWrites = Promise.resolve()
+let themeGeneration = 0
+
+/** Write `update` to the `ui-theme` row; resolves to the reason it failed, or `null` (also for a superseded change). */
+async function writeTheme(update) {
+  const generation = ++themeGeneration
+  const write = themeWrites.then(async () => {
+    try {
+      const response = await fetch('/api/settings/ui-theme', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ update }),
+      })
+      if (response.ok) return null
+      const body = await response.json().catch(() => null)
+      return body !== null && typeof body.error === 'string' ? body.error : `the server answered ${response.status}`
+    } catch (error) {
+      return (error && error.message) || String(error)
+    }
+  })
+  themeWrites = write.then(() => undefined)
+  const failure = await write
+  return generation === themeGeneration ? failure : null
+}
+
+async function saveTheme(update) {
+  const note = document.getElementById('settings-theme-note')
+  note.hidden = true
+  const failure = await writeTheme(update)
+  if (failure !== null) {
+    note.textContent = t('theme.notSaved', { reason: failure })
+    note.hidden = false
+  }
+}
+
+/** Each stepper shows its size and stops at its bounds; each font field shows its list without the added quotes. */
+function fillThemeRows() {
+  for (const row of document.querySelectorAll('#settings-dialog [data-font-size]')) {
+    const field = row.dataset.fontSize
+    const spec = FONT_SIZE_ROWS[field]
+    const size = currentFontSize(field)
+    row.querySelector('output').textContent = `${size} ${t('theme.fontSize.unit')}`
+    row.querySelector('[data-step="-1"]').disabled = size <= spec.min
+    row.querySelector('[data-step="1"]').disabled = size >= spec.max
+  }
+  for (const row of document.querySelectorAll('#settings-dialog [data-font-family]')) {
+    const list = document.documentElement.style.getPropertyValue(FONT_FAMILY_ROWS[row.dataset.fontFamily]).trim()
+    const input = row.querySelector('input')
+    if (document.activeElement !== input) input.value = list.replace(/"/g, '')
+  }
+}
+
+/** More font settings opens closed every time Settings opens, as DSH's region does. */
+function collapseMoreFonts() {
+  document.getElementById('settings-fonts').hidden = true
+  document.getElementById('settings-more-fonts').setAttribute('aria-expanded', 'false')
+}
+
+for (const row of document.querySelectorAll('#settings-dialog [data-font-size]')) {
+  for (const button of row.querySelectorAll('[data-step]')) {
+    button.addEventListener('click', () => {
+      const field = row.dataset.fontSize
+      const spec = FONT_SIZE_ROWS[field]
+      const size = Math.min(spec.max, Math.max(spec.min, currentFontSize(field) + Number(button.dataset.step)))
+      document.documentElement.style.setProperty(spec.variable, `${size}px`)
+      fillThemeRows()
+      void saveTheme({ [field]: size })
+    })
+  }
+}
+for (const row of document.querySelectorAll('#settings-dialog [data-font-family]')) {
+  const input = row.querySelector('input')
+  const commit = () => {
+    const field = row.dataset.fontFamily
+    const variable = FONT_FAMILY_ROWS[field]
+    const list = normalizeFontFamily(input.value)
+    if (list === document.documentElement.style.getPropertyValue(variable).trim()) return
+    if (list === '') document.documentElement.style.removeProperty(variable)
+    else document.documentElement.style.setProperty(variable, list)
+    input.value = list.replace(/"/g, '')
+    void saveTheme({ [field]: list })
+  }
+  input.addEventListener('blur', commit)
+  input.addEventListener('keydown', (keyEvent) => {
+    if (keyEvent.key === 'Enter') {
+      keyEvent.preventDefault()
+      commit()
+    }
+  })
+}
+document.getElementById('settings-more-fonts').addEventListener('click', () => {
+  const region = document.getElementById('settings-fonts')
+  region.hidden = !region.hidden
+  document.getElementById('settings-more-fonts').setAttribute('aria-expanded', String(!region.hidden))
+})
+window.addEventListener('heddle:locale', fillThemeRows)
 
 document.getElementById('settings-language').addEventListener('change', async (changeEvent) => {
   const note = document.getElementById('settings-language-note')
