@@ -26,10 +26,16 @@ import { heddleCommand, isolatedHome, removeDir, repoRoot, scriptedConfig } from
  *    and no second round starts.
  * 2. **Failure.** A provider that fails every call fails round 1, and no further round starts on its own. The goal
  *    stays active but disarmed until a person resumes it.
+ * 3. **Output limit.** A round whose answer is cut at the output limit ends the chain the same way ("the driver also
+ *    stops on its own when a turn ends on max tokens"). The chain never waits for an edge between rounds, so this is
+ *    the case a trigger-side guard alone cannot stop.
  */
 
 /** One slow round: a tool call that runs long enough to be stopped in, then an answer. */
 const SLOW_ROUND = [{ toolCall: { name: 'bash', arguments: { command: 'sleep 6' } } }, { text: 'round done' }]
+
+/** Every answer is cut at the output limit (the canonical finish reason the provider adapters produce). */
+const CUT_SHORT = [{ text: 'a partial answer', finishReason: 'max_output_tokens' }]
 
 /** Every call fails, and is not one a retry would fix. */
 const FAILING = [{ error: { code: 'SCRIPT', status: 400, message: 'the provider refused the request' } }]
@@ -203,6 +209,43 @@ test('a failed goal round does not retry on its own: one round, and the goal wai
     const goal = (await api(url, cookie, `/api/goal?session=${session}`)).body.goal
     assert.equal(goal.phase, 'active', 'a failure is not a block: the goal keeps its phase')
     assert.equal(goal.activation, 'disarmed', 'and waits for a person to resume it')
+  } catch (error) {
+    error.message += `\n--- server output (tail) ---\n${server.logs().slice(-1500)}`
+    throw error
+  } finally {
+    await server.close()
+    removeDir(home)
+  }
+})
+
+test('a goal round cut at the output limit ends the chain: one round, and the goal waits disarmed', { timeout: 90_000 }, async () => {
+  const home = isolatedHome('goal-cut')
+  const work = join(home, 'work')
+  mkdirSync(work, { recursive: true })
+  const { config, script } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
+  const server = startServer(home, work, config)
+  try {
+    const url = await server.url
+    const cookie = await cookieFor(url)
+    const session = await openSession(url, cookie, work)
+    writeFileSync(script, JSON.stringify({ steps: CUT_SHORT }))
+
+    const created = await api(url, cookie, '/api/goal', {
+      method: 'POST',
+      body: JSON.stringify({ session, action: 'create', objective: 'keep going', max_goal_rounds: 4 }),
+    })
+    assert.equal(created.status, 200, created.text)
+
+    await waitFor(async () => (goalRounds(await events(url, cookie, session)).length >= 1 ? true : undefined), 20_000, 'round 1 to start')
+    await sleep(5_000)
+    const log = await events(url, cookie, session)
+    const rounds = goalRounds(log)
+    assert.deepEqual(rounds.map((source) => source.round), [1], `a round cut at the output limit starts no other round\nsaw rounds ${JSON.stringify(rounds)}`)
+    const cut = log.filter((event) => event.type === 'assistant/completed').at(-1)
+    assert.equal(cut?.finishReason, 'max_output_tokens', `the round was cut at the output limit\nsaw: ${JSON.stringify(cut)}`)
+    const goal = (await api(url, cookie, `/api/goal?session=${session}`)).body.goal
+    assert.equal(goal.phase, 'active')
+    assert.equal(goal.activation, 'disarmed')
   } catch (error) {
     error.message += `\n--- server output (tail) ---\n${server.logs().slice(-1500)}`
     throw error
