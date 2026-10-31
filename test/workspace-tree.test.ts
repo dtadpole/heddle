@@ -33,6 +33,8 @@ interface Tree {
   flatten: (groups: Group[]) => Group[]
   containsSession: (group: Group, id: string | null, deep?: boolean) => boolean
   shownCount: (sessions: unknown[], watermark: number, options?: Record<string, unknown>) => number
+  raisedWatermark: (stored: number | undefined, sessions: unknown[], options?: Record<string, unknown>) => number
+  parentsRunning: (sessions: unknown[], running?: Set<string>) => Set<string>
   watermarkRows: (sessions: { id: string }[], watermark: number) => { rows: { id: string }[]; hidden: number; conversations: number }
   nextWatermark: (total: number, shown: number) => number
   overflow: (total: number, shown: number, baseline?: number) => 'more' | 'less' | null
@@ -223,6 +225,68 @@ test('Show more counts conversations: the open New session is drawn on top of fi
   assert.equal(tree.overflow(12, 12, 12), null, 'nor do rows the open conversation already raised into view')
   const raised = tree.shownCount(talked, tree.INITIAL, { current: 's-2' })
   assert.equal(raised, 11, 'an open conversation further down still raises the watermark to itself')
+})
+
+/**
+ * DSH's `requiredWatermark` (dsh-client-ui-workspace lib/client.js:2820-2833): the watermark rises to the last conversation
+ * within the first fifty that is running, has a running child, **awaits the person** (`pendingInteraction`, one of the
+ * three kinds `visiblePendingKind` keeps, `:1048-1055`), **carries an unread completion** (`completed`, `:1068`), or is
+ * open. #62: the page raised it for running and open rows only, so a waiting or unread row could sit below the fold.
+ */
+test('Show more: a row awaiting a person, an unread completion or a running child raises the watermark to it, within fifty', () => {
+  const rows = Array.from({ length: 60 }, (_, index) => session(`s-${index}`, index % 60))
+  assert.equal(tree.shownCount(rows, 5, { pending: new Map([['s-7', 'approval']]) }), 8, 'a row waiting for approval is kept in view')
+  assert.equal(tree.shownCount(rows, 5, { pending: new Map([['s-9', 'plan-review']]) }), 10, 'so is one whose plan awaits review')
+  assert.equal(tree.shownCount(rows, 5, { pending: new Map([['s-11', 'question']]) }), 12, 'and one waiting for an answer')
+  assert.equal(tree.shownCount(rows, 5, { pending: new Map([['s-11', 'toString']]) }), 5, 'an unknown kind is no interaction')
+  assert.equal(tree.shownCount(rows, 5, { unread: new Set(['s-20']) }), 21, 'an unread completion is kept in view')
+  assert.equal(tree.shownCount(rows, 5, { runningChildren: new Set(['s-14']) }), 15, 'and a session whose subagent is running')
+  assert.equal(
+    tree.shownCount(rows, 5, { pending: new Map([['s-7', 'approval']]), unread: new Set(['s-25']), current: 's-3' }),
+    26,
+    'the last of them sets the count',
+  )
+  assert.equal(tree.shownCount(rows, 5, { unread: new Set(['s-49']) }), 50, 'the fiftieth conversation is within reach')
+  assert.equal(tree.shownCount(rows, 5, { pending: new Map([['s-52', 'approval']]), unread: new Set(['s-55']) }), 5, 'a later one is not')
+  const blank = session('s-blank', 59, { turns: 0 })
+  assert.equal(
+    tree.shownCount([blank, ...rows.slice(0, 10)], 5, { unread: new Set(['s-6']), current: 's-blank' }),
+    7,
+    'the open New session takes no place in the count',
+  )
+})
+
+/** DSH's `runningChildCount` (`lib/client.js:1056-1058`): a subagent child's run counts for its parent's row, a fork's does not. */
+test('a session whose subagent is running is one with a running child; a fork names its source but is no child', () => {
+  const metas = [
+    session('s-parent', 1),
+    session('s-child', 2, { origin: 'subagent', parentSession: 's-parent', running: true }),
+    session('s-fork', 3, { parentSession: 's-source', running: true }),
+    session('s-idle-child', 4, { origin: 'subagent', parentSession: 's-quiet' }),
+    session('s-live-child', 5, { origin: 'subagent', parentSession: 's-third' }),
+  ]
+  assert.deepEqual([...tree.parentsRunning(metas, new Set(['s-live-child']))].sort(), ['s-parent', 's-third'])
+  assert.deepEqual([...tree.parentsRunning(metas)], ['s-parent'], 'the list\'s own running flag counts without the stream')
+})
+
+/**
+ * DSH keeps the raise (`raiseWatermarks` and the stored marks, `lib/client.js:2834-2842`, `:3088`, `:3095-3096`; README:
+ * "a row count that never falls on its own, so the rows stay visible after a run or notification ends"). Only Show less and
+ * folding the workspace lower it, and the page does both by forgetting the stored mark.
+ */
+test('a raised watermark never falls on its own: the row stays in view after its question is answered and read', () => {
+  const rows = Array.from({ length: 12 }, (_, index) => session(`s-${index}`, 40 - index))
+  let mark = tree.raisedWatermark(undefined, rows, {})
+  assert.equal(mark, 5, 'nothing to raise: the first five')
+  mark = tree.raisedWatermark(mark, rows, { pending: new Map([['s-8', 'approval']]) })
+  assert.equal(mark, 9, 'a question at the ninth row raises it to nine')
+  mark = tree.raisedWatermark(mark, rows, { unread: new Set(['s-8']) })
+  assert.equal(mark, 9, 'the turn ends off screen: still nine')
+  mark = tree.raisedWatermark(mark, rows, {})
+  assert.equal(mark, 9, 'read and quiet: still nine')
+  assert.equal(tree.shownCount(rows, mark, {}), 9, 'so the row stays drawn')
+  assert.equal(tree.raisedWatermark(10, rows, { unread: new Set(['s-3']) }), 10, 'a Show more past the requirement is kept')
+  assert.equal(tree.raisedWatermark(undefined, rows, { unread: new Set(['s-3']) }), 5, 'a row already in view raises nothing')
 })
 
 test('a group knows whether it, or a group under it, holds the open session', () => {

@@ -8978,6 +8978,8 @@ function paintRowStatus(row, status) {
 }
 
 function paintRunningMarks() {
+  /** A status change can raise a group's watermark first, so a row it brings into view is drawn before it is painted. */
+  raiseOpenGroups()
   for (const entry of rowIndex.values()) {
     const { node, li } = entry
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
@@ -10422,9 +10424,11 @@ Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSes
  *   before the parent's own sessions); `workspace` keeps every group a sibling section (DSH's `WorkSpace`).
  * - **Rows**: subagent-origin sessions are hidden (DSH hides `origin: 'subagent'`); the archive filter is DSH's three
  *   states; the order is pinned first (newest pin first), then last updated, newest first, then id.
- * - **Show more**: an open group shows 5 conversations, raised to cover the last running or open one within the first 50,
- *   plus the open New session placeholder, which takes none of the places; the control reads `Show {n} more sessions`
- *   and each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
+ * - **Show more**: an open group shows 5 conversations, raised to cover the last one within the first 50 that is running,
+ *   has a running subagent, awaits the person, carries an unread completion or is open, plus the open New session
+ *   placeholder, which takes none of the places; a raise is kept until `Show less` or a fold; the control reads
+ *   `Show {n} more sessions` and each click adds 5. The number lives with the page, never in storage, as DSH's
+ *   watermark does.
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -10601,22 +10605,60 @@ const WorkspaceTree = (() => {
 
   /**
    * How many of a group's **conversations** are drawn: the watermark (5 until `Show more`), raised to cover the last
-   * running or open conversation among the first 50, never more than there are. A New session placeholder is not one of
-   * them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
+   * conversation among the first 50 that needs to be seen, never more than there are. A New session placeholder is not
+   * one of them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
    * `dsh-client-ui-workspace` `lib/client.js:2803-2833`), so the open blank never takes one of the five places (#54).
+   *
+   * What raises it is DSH's `requiredWatermark` (`:2830`), clause for clause: a conversation that is **running**
+   * (`options.running`, or the list's own `running`), has a **running child** (`options.runningChildren`, the parents
+   * `parentsRunning` names), **awaits the person** (`options.pending`, id → kind, counting the three kinds
+   * `visiblePendingKind` keeps, `:1048-1055`), carries an **unread completion** (`options.unread`, DSH's `completed`,
+   * `:1068`), or is **open** (`options.current`). The waiting and unread clauses are #62.
    */
   function shownCount(sessions, watermark, options = {}) {
     const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
     const running = options.running instanceof Set ? options.running : new Set()
+    const runningChildren = options.runningChildren instanceof Set ? options.runningChildren : new Set()
+    const pending = options.pending instanceof Map ? options.pending : new Map()
+    const unread = options.unread instanceof Set ? options.unread : new Set()
     const current = options.current ?? null
+    const awaits = (id) => Object.hasOwn(PENDING, String(pending.get(id)))
     let total = 0
     let required = 0
     for (const meta of sessions) {
       if (placeholder(meta)) continue
       total += 1
-      if (total <= REACH && (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current))) required = total
+      if (total > REACH) continue
+      const id = meta.id
+      if (running.has(id) || meta.running === true || runningChildren.has(id) || awaits(id) || unread.has(id) || (current !== null && id === current)) required = total
     }
     return Math.min(total, Math.max(mark, required))
+  }
+
+  /**
+   * The watermark a group keeps after it is drawn: the stored one raised to what its rows now require, and never lowered —
+   * DSH's `raiseWatermarks` over its baselines (`lib/client.js:2834-2842`, `:3088`, `:3095-3096`). The watermark is a
+   * row count that does not fall on its own, so a row stays in view after its run, its question or its reminder ends
+   * (README: "the rows stay visible after a run or notification ends"); only `Show less` and folding the workspace lower
+   * it, which the page does by forgetting the stored mark. `stored` undefined is a group with none yet.
+   */
+  function raisedWatermark(stored, sessions, options = {}) {
+    const mark = Number.isFinite(stored) ? Math.max(0, stored) : INITIAL
+    return Math.max(mark, shownCount(sessions, INITIAL, options))
+  }
+
+  /**
+   * The sessions with a running **subagent** child, from `/api/sessions` (each child names its `parentSession`): DSH's
+   * `runningChildCount` over the parent's subagent catalog (`lib/client.js:1056-1058`). A fork also names its source as
+   * `parentSession`, but it is a conversation of its own, not a child, so only `origin: 'subagent'` counts.
+   */
+  function parentsRunning(sessions, running = new Set()) {
+    const parents = new Set()
+    for (const meta of Array.isArray(sessions) ? sessions : []) {
+      if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent' || typeof meta.parentSession !== 'string') continue
+      if (running.has(meta.id) || meta.running === true) parents.add(meta.parentSession)
+    }
+    return parents
   }
 
   /**
@@ -10682,7 +10724,7 @@ const WorkspaceTree = (() => {
     return change.wasRunning === true ? true : unread === true
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, watermarkRows, nextWatermark, overflow, overflowLabel, rowStatus, completionUnread }
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, raisedWatermark, parentsRunning, watermarkRows, nextWatermark, overflow, overflowLabel, rowStatus, completionUnread }
 })()
 /* workspace-tree:end */
 
@@ -10697,6 +10739,8 @@ function placeholderDrawn(id) {
  */
 let treeGroups = []
 const watermarks = new Map()
+/** The subagent sessions `/api/sessions` last listed (not rows themselves): their runs raise their parents' rows. */
+let childSessions = []
 const definitionOf = new Map()
 /** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
 let listedSessions = new Set()
@@ -10798,10 +10842,13 @@ function paintSessionRows(list, group, depth) {
   const anchor = groupRows.length > 0 ? groupRows[groupRows.length - 1].nextSibling : list.firstChild
   /**
    * DSH's arithmetic (`lib/client.js:3156-3158`): the open New session placeholder is drawn on top of the watermark's
-   * conversations rather than in one of their places, and the control names how many it hides (#54).
+   * conversations rather than in one of their places, and the control names how many it hides (#54). The raise is kept
+   * (`:3095-3096`), so a row a question or a finished turn brought into view stays there once it is answered and read.
    */
-  const raise = { running: runningSessions, current }
-  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, raise)
+  const raise = watermarkFacts()
+  const kept = WorkspaceTree.raisedWatermark(watermarks.get(group.key), group.sessions, raise)
+  if (kept !== (watermarks.get(group.key) ?? WorkspaceTree.INITIAL)) watermarks.set(group.key, kept)
+  const shown = WorkspaceTree.shownCount(group.sessions, kept, raise)
   const baseline = WorkspaceTree.shownCount(group.sessions, WorkspaceTree.INITIAL, raise)
   const drawn = WorkspaceTree.watermarkRows(group.sessions, shown)
   const total = drawn.conversations
@@ -10847,6 +10894,41 @@ function paintSessionRows(list, group, depth) {
 /** Forget the watermarks of a group and everything under it — DSH resets them when a workspace folds. */
 function resetWatermarks(group) {
   for (const each of WorkspaceTree.flatten([group])) watermarks.delete(each.key)
+}
+
+/**
+ * What raises a watermark right now, in `WorkspaceTree.shownCount`'s terms: the running sessions, the parents of a running
+ * subagent, the sessions awaiting a person, the unread completions, and the open session (DSH's `requiredWatermark`).
+ */
+function watermarkFacts() {
+  return {
+    running: runningSessions,
+    runningChildren: WorkspaceTree.parentsRunning(childSessions, runningSessions),
+    pending: pendingInteractions,
+    unread: unreadSessions,
+    current,
+  }
+}
+
+/**
+ * Redraw the session rows of every open group whose rows now need a higher watermark than it keeps — a question, a run
+ * or an unread completion below the fold. DSH re-derives its baselines on every status change (`lib/client.js:3088-3096`),
+ * so such a row comes into view at once; the page's stream handlers only repaint the marks of rows already drawn, so
+ * they call this from `paintRunningMarks`. A group already high enough is left alone, which is also what ends the
+ * recursion through `paintSessionRows`.
+ */
+function raiseOpenGroups() {
+  const facts = watermarkFacts()
+  for (const { node, li } of [...rowIndex.values()]) {
+    const group = node.group
+    if (group === undefined || !li.isConnected || li.dataset.open !== 'true') continue
+    const list = li.querySelector(':scope > ul[role="group"]')
+    if (list === null) continue
+    const stored = watermarks.get(group.key) ?? WorkspaceTree.INITIAL
+    if (WorkspaceTree.raisedWatermark(stored, group.sessions, facts) <= stored) continue
+    paintSessionRows(list, group, Number(li.style.getPropertyValue('--tree-depth') || '0') + 1)
+    markSelection()
+  }
 }
 
 function nodeRow(node, depth = 0) {
@@ -11529,6 +11611,7 @@ async function renderTree() {
   }
   rowIndex.clear()
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
+  childSessions = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta?.origin === 'subagent')
   treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode, current })
   /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
   treeTops = WorkspaceTree.flatten(treeGroups)

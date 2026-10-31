@@ -330,3 +330,136 @@ test('a session awaiting approval says Approval on its row, and a turn that ends
     await server.close()
   }
 })
+
+/**
+ * Wait out the tree redraw that a turn's end or a session switch schedules (`scheduleTreeRefresh`, 400 ms later): mark the
+ * drawn row, then wait until it is replaced or gone. A redraw that already ran leaves the mark where it is, so the wait
+ * gives up after five seconds and the caller judges the rows as they stand.
+ */
+async function afterRedraw(browser, rowExpression) {
+  await browser.evaluate(`(() => { const row = ${rowExpression}; if (row !== null) row.dataset.beforeRedraw = 'true'; return true })()`)
+  try {
+    await browser.waitFor(`(() => { const row = ${rowExpression}; return row === null || row.dataset.beforeRedraw !== 'true' })()`, 5_000)
+  } catch {
+    // no redraw after the mark: the one the change scheduled had already run
+  }
+}
+
+test('a session below the fold waits for approval in view, and stays in view after its turn ends off screen (#62)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH raises a workspace's Show more watermark to the last session within the first fifty that is running, has a
+   * running child, awaits the person or carries an unread completion, or is open (`requiredWatermark`,
+   * dsh-client-ui-workspace `lib/client.js:2820-2833`), and keeps the raise (`:3095-3096`; README: "the rows stay visible
+   * after a run or notification ends"). Before #62 the page raised it for running and open rows only and kept nothing:
+   * a session at the seventh row was drawn while its turn ran, and fell back behind `Show 2 more sessions` the moment
+   * the turn ended off screen, done dot and all.
+   *
+   * Six pinned sessions lead the group (pins first, `sessionOrder`), so the busy session is the seventh row however
+   * recently it ran.
+   */
+  const server = await startServer('fold', escalationSteps)
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const added = await request(server, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    assert.equal(added.status, 200, 'the work folder is a workspace')
+    const title = (await added.json()).record?.title
+    const made = async (name) => {
+      const response = await request(server, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: server.work, title: name }) })
+      assert.equal(response.status, 200, `created ${name}`)
+      return (await response.json()).session
+    }
+    const busy = await made('busy session')
+    const pinned = []
+    for (let index = 1; index <= 6; index += 1) {
+      const id = await made(`pinned session ${index}`)
+      const pin = await request(server, `/api/sessions/${encodeURIComponent(id)}/flags`, { method: 'POST', body: JSON.stringify({ pinned: true }) })
+      assert.equal(pin.status, 200, `pinned session ${index} is pinned`)
+      pinned.push(id)
+      // Distinct pin times, so newest-pin-first has one answer.
+      await new Promise((done) => setTimeout(done, 15))
+    }
+    const group = `document.querySelector('#tree > li[data-kind="workspace"] > ul[role="group"]')`
+    const row = (id) => `document.querySelector('#tree li[data-row-key="session:${id}"] > .row')`
+    const rows = async () =>
+      JSON.parse(
+        await browser.evaluate(`(() => {
+          const list = ${group}
+          if (list === null) return JSON.stringify({ ids: [], control: null })
+          return JSON.stringify({
+            ids: [...list.querySelectorAll(':scope > li[data-kind="session"]')].map((li) => li.dataset.sessionId),
+            control: list.querySelector(':scope > li[data-kind="more"] .label')?.textContent ?? null,
+          })
+        })()`),
+      )
+    const status = async (id) =>
+      JSON.parse(
+        await browser.evaluate(`(() => {
+          const row = ${row(id)}
+          const dot = row === null ? null : row.querySelector(':scope > .status-dot')
+          return JSON.stringify({ state: dot === null ? null : dot.dataset.state, time: row === null ? null : row.querySelector('.age')?.textContent ?? null })
+        })()`),
+      )
+    const open = async (id, name) => {
+      await browser.evaluate(`${row(id)}.click()`)
+      assert.ok(await browser.waitFor(`document.getElementById('session-title').textContent.includes(${JSON.stringify(name)})`, 10_000), `${name} opens`)
+    }
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    assert.ok(await browser.waitFor(`${row(pinned[5])} !== null`, 15_000), 'the group is drawn')
+    await open(pinned[5], 'pinned session 6')
+    const before = await rows()
+    assert.deepEqual(before.ids, [...pinned].reverse().slice(0, 5), `five rows, the pins newest first\nsaw: ${JSON.stringify(before)}`)
+    assert.notEqual(before.control, null, 'the busy session starts below the fold, behind the control')
+
+    /** The busy session's turn starts from outside the page and asks for approval while another session is open. */
+    const turn = request(server, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'write outside the workspace', session: busy }) }).then((response) =>
+      response.text(),
+    )
+    let asked
+    for (let attempt = 0; attempt < 100 && asked === undefined; attempt += 1) {
+      const pending = await request(server, '/api/approvals').then((response) => response.json())
+      asked = pending.requests.find((entry) => entry.session === busy)
+      if (asked === undefined) await new Promise((done) => setTimeout(done, 200))
+    }
+    assert.ok(asked !== undefined, 'the busy session asks for approval')
+    assert.ok(await browser.waitFor(`${row(busy)}?.querySelector(':scope > .status-dot[data-state="warning"]') != null`, 15_000), 'its row comes into view, waiting')
+    const waiting = await rows()
+    assert.equal(waiting.ids.indexOf(busy), 6, `as the seventh row, without Show more\nsaw: ${JSON.stringify(waiting)}`)
+    assert.equal((await status(busy)).time, 'Approval')
+
+    /** Answered from outside the page: the turn ends while the busy session is still off screen. */
+    const answer = await request(server, `/api/approvals/${encodeURIComponent(asked.id)}`, { method: 'POST', body: JSON.stringify({ outcome: 'allowed-once' }) })
+    assert.equal(answer.status, 200, 'the answer lands')
+    await turn
+    assert.ok(
+      await browser.waitFor(`(() => { const row = ${row(busy)}; return row === null || row.querySelector(':scope > .status-dot[data-state="done"]') !== null })()`, 20_000),
+      'the page sees the turn end',
+    )
+    await afterRedraw(browser, row(busy))
+    const finished = await rows()
+    assert.equal(finished.ids.indexOf(busy), 6, `the unread row stays in view after the redraw its end scheduled\nsaw: ${JSON.stringify(finished)}`)
+    assert.equal(finished.control, null, 'with nothing behind a control')
+    assert.equal((await status(busy)).state, 'done', 'and keeps its done dot')
+
+    /** Read it, open a New session, then leave it: the redraw that drops the placeholder still keeps the busy row. */
+    await open(busy, 'busy session')
+    assert.ok(await browser.waitFor(`${row(busy)}?.querySelector(':scope > .status-dot') === null`, 10_000), 'opening it reads it')
+    await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row button[aria-label="New session in ${title}"]').click()`)
+    const known = JSON.stringify([busy, ...pinned])
+    const selected = `${group}?.querySelector(':scope > li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId`
+    assert.ok(await browser.waitFor(`(() => { const id = ${selected}; return id !== undefined && !${known}.includes(id) })()`, 15_000), 'New session opens a placeholder in the workspace')
+    const blank = await browser.evaluate(selected)
+    await open(pinned[5], 'pinned session 6')
+    assert.ok(await browser.waitFor(`${row(blank)} === null`, 10_000), 'leaving the placeholder redraws the tree without it')
+    const kept = await rows()
+    assert.equal(kept.ids.indexOf(busy), 6, `the watermark does not fall on its own: the busy row is still the seventh\nsaw: ${JSON.stringify(kept)}`)
+    assert.equal(kept.ids.length, 7, 'and the placeholder is gone')
+    assert.equal(kept.control, 'Show less', 'Show less is what folds it back, as DSH\'s control does')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
