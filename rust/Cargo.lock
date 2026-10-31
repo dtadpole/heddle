@@ -638,12 +638,14 @@ dependencies = [
  "axum",
  "futures",
  "heddle-agent",
+ "heddle-commands",
  "heddle-config",
  "heddle-context",
  "heddle-events",
  "heddle-goal",
  "heddle-jobs",
  "heddle-llm",
+ "heddle-plan",
  "heddle-sandbox",
  "heddle-schedule",
  "heddle-server",
@@ -678,6 +680,25 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "heddle-commands"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "futures",
+ "heddle-config",
+ "heddle-context",
+ "heddle-goal",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-session",
+ "heddle-web-files",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]
@@ -771,6 +792,22 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "heddle-plan"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "futures",
+ "heddle-commands",
+ "heddle-config",
+ "heddle-llm",
+ "heddle-session",
+ "heddle-tools",
+ "serde_json",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

@@ -2727,6 +2727,195 @@ test("the Web API's tree lists only what a workspace root holds, and refuses a p
   }
 })
 
+test('first use creates or reuses default-workspace under the heddle home, once, the way DSH initializes its default', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's workspace/initializeDefault (dsh-workspace, dsh-api-workspace-controller): an empty install — no workspace,
+   * no session — gets a workspace over a folder named default-workspace, created when missing and reused when present;
+   * a repeated call answers the same workspace; deleting it turns first use off for good, and the folder stays; any
+   * install that is not empty gets nothing, which is not an error. No session is started. DSH's folder is under
+   * Documents/deepseek-harness; heddle's is under its own home, so HOME is a fixture here and its Documents must stay
+   * absent.
+   */
+  const fresh = harness('first-use')
+  const busy = harness('first-use-busy')
+  const userHome = fixtureDir('first-use-user')
+  const chosen = fixtureDir('first-use-chosen')
+  const live = []
+  try {
+    const serve = async (h) => {
+      const server = await startServer(
+        ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+        { ...h.env, HOME: userHome },
+      )
+      live.push(server)
+      const origin = new URL(server.url).origin
+      const handshake = await fetch(server.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      return async (path, init = {}) => {
+        const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+        const text = await response.text()
+        let body
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+        return { status: response.status, body }
+      }
+    }
+    const call = await serve(fresh)
+    const folder = join(fresh.home, 'default-workspace')
+    const first = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(first.status, 200, `an empty install asks for its default workspace (${JSON.stringify(first.body)})`)
+    assert.ok(first.body.workspace !== null && typeof first.body.workspace === 'object', `and gets one (${JSON.stringify(first.body)})`)
+    assert.ok(existsSync(folder), 'its folder is made under the heddle home')
+    assert.equal(first.body.workspace.path, realpathSync(folder), 'and the workspace is that folder')
+    assert.equal(first.body.workspace.title, 'default-workspace', "titled after the folder, as DSH stores it")
+    assert.equal(first.body.workspace.origin, 'added', 'a workspace the tree draws')
+    assert.equal(existsSync(join(userHome, 'Documents')), false, "nothing is made in the user's Documents")
+    const listed = (await call('/api/workspaces')).body.workspaces ?? []
+    assert.deepEqual(listed.map((view) => view.id), [first.body.workspace.id], 'it is the one workspace')
+    assert.deepEqual((await call('/api/sessions')).body, [], 'and no session was started')
+
+    const again = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(again.body.workspace?.id, first.body.workspace.id, 'a repeated call reuses it')
+    assert.equal(((await call('/api/workspaces')).body.workspaces ?? []).length, 1, 'rather than making a second')
+
+    const deleted = await call(`/api/workspaces/${encodeURIComponent(first.body.workspace.id)}`, { method: 'DELETE' })
+    assert.equal(deleted.status, 200, 'the default workspace can be deleted')
+    const after = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(after.status, 200)
+    assert.equal(after.body.workspace, null, 'and once deleted it is not given back')
+    assert.deepEqual((await call('/api/workspaces')).body.workspaces ?? [], [], 'the list stays empty')
+    assert.ok(existsSync(folder), 'while its folder stays')
+
+    const other = await serve(busy)
+    assert.equal((await other('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: chosen }) })).status, 200)
+    const notFirst = await other('/api/workspaces/default', { method: 'POST' })
+    assert.equal(notFirst.status, 200, 'an install that is not empty is not refused')
+    assert.equal(notFirst.body.workspace, null, 'it gets no default workspace')
+    assert.equal(existsSync(join(busy.home, 'default-workspace')), false, 'and no folder')
+  } finally {
+    for (const server of live) server.kill()
+    for (const h of [fresh, busy]) {
+      removeDir(h.home)
+      removeDir(h.work)
+    }
+    removeDir(userHome)
+    removeDir(chosen)
+  }
+})
+
+test('a folder heddle cannot read is refused with a code, never listed as empty, and New session where heddle cannot write says why without the path (#106)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /** `chmod 000` does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * Issue #106. DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:483-489
+   * and :564-581): a failed level shows one line per code and the transport's own message otherwise, and its file
+   * backend's listing of a folder it may not read fails with "cannot list "<path>": permission denied"
+   * (dsh-fs-local lib/index.js:269) instead of answering no entries. Both builds answered `200` with `children: []`, which
+   * the page drew as "nothing inside". DSH has no code for that failure, so heddle answers its own in DSH's family,
+   * `workspace-file/unreadable`, `400` as heddle's folder picker answers `directory-picker/unreadable`, naming the folder
+   * relative to its workspace (the root by its title).
+   *
+   * New session writes a definition into the branch, so a branch heddle cannot write fails there. TS answered a raw
+   * `500 internal error: EACCES … mkdir '<home>/…'` and Rust a path; both now answer `400` with `session/unwritable` and
+   * a sentence naming the folder by its name, never its absolute path, and record no session for the refused branch.
+   * The modes are restored in `finally`, before the fixture is removed.
+   */
+  const h = harness('unreadable')
+  const root = fixtureDir('unreadable-root')
+  const locked = join(root, 'locked')
+  const { chmodSync } = await import('node:fs')
+  let live
+  try {
+    entry(join(locked, 'held.txt'), 'a file the server cannot list\n')
+    mkdirSync(join(root, 'empty'), { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const title = added.body.record?.title
+    assert.equal(typeof title, 'string', `the registration answers the root's title (${JSON.stringify(added.body)})`)
+    const canonicalRoot = realpathSync(root)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const empty = await treeOf(join(root, 'empty'))
+    assert.equal(empty.status, 200, `an empty folder still lists (${JSON.stringify(empty.body)})`)
+    assert.deepEqual(empty.body.children, [], 'as asked and empty')
+
+    chmodSync(locked, 0o000)
+    const sub = await treeOf(locked)
+    assert.equal(sub.status, 400, `an unreadable folder is refused, not listed as empty (${sub.status} ${JSON.stringify(sub.body)})`)
+    assert.deepEqual(
+      sub.body,
+      { error: 'cannot list "locked": permission denied', code: 'workspace-file/unreadable' },
+      'with a code and a sentence naming the folder relative to its workspace',
+    )
+    const cliTree = await runCli(adminArgs(h, ['tree', locked, '--json']), { env: h.env, cwd: root })
+    assert.notEqual(cliTree.code, 0, `the CLI refuses it too\n${cliTree.stdout}${cliTree.stderr}`)
+    assert.match(cliTree.stderr, /heddle: cannot list "locked": permission denied/, 'with the same sentence')
+
+    const parent = await treeOf(root)
+    assert.equal(parent.status, 200, `the readable root still lists (${JSON.stringify(parent.body)})`)
+    assert.ok(childOf(parent.body, 'locked'), 'and still names the unreadable folder in it')
+
+    chmodSync(root, 0o000)
+    const whole = await treeOf(root)
+    assert.equal(whole.status, 400, `an unreadable workspace root is refused, not listed as empty (${whole.status} ${JSON.stringify(whole.body)})`)
+    assert.deepEqual(whole.body, { error: `cannot list "${title}": permission denied`, code: 'workspace-file/unreadable' }, 'naming the root by its title')
+    const roots = await call('/api/tree')
+    assert.equal(roots.status, 200, 'the roots still list beside it')
+    const listedRoot = [...(roots.body.children ?? []), ...(roots.body.adHoc ?? [])].find((node) => node.path === canonicalRoot)
+    assert.ok(listedRoot, `the unreadable root is still one of them\n${JSON.stringify(roots.body)}`)
+    assert.equal(listedRoot.children, null, 'with its children not listed (null), never an empty list')
+
+    const created = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root }) })
+    assert.equal(created.status, 400, `New session in a folder heddle cannot write is a refusal, not an internal error (${created.status} ${JSON.stringify(created.body)})`)
+    assert.deepEqual(
+      created.body,
+      { error: `cannot write to "${root.split(sep).pop()}": permission denied`, code: 'session/unwritable' },
+      'with a code and a sentence that names the folder without its path',
+    )
+    for (const leak of [root, canonicalRoot, process.env.HOME].filter((text) => typeof text === 'string' && text.length > 1)) {
+      assert.ok(!JSON.stringify(created.body).includes(leak), `the answer carries no absolute path (${leak})`)
+    }
+    const listed = await call('/api/sessions')
+    const strays = (Array.isArray(listed.body) ? listed.body : []).filter((meta) => meta.cwd === canonicalRoot || meta.cwd === root)
+    assert.deepEqual(strays, [], 'and the refused branch holds no session record')
+  } finally {
+    live?.kill()
+    for (const dir of [root, locked]) {
+      try {
+        chmodSync(dir, 0o755)
+      } catch {
+        // already gone, or never made
+      }
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -2869,6 +3058,149 @@ test('a new session is filed under its workspace, and an old one keeps the shape
   } finally {
     removeDir(h.home)
     removeDir(h.work)
+  }
+})
+
+/**
+ * A server of the blank-session checks below: a scratch home, the work folder registered as a workspace, and a caller that
+ * holds the cookie the launch URL mints.
+ */
+async function blankSessionServer(h) {
+  const live = await startServer(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+    { ...h.env, HOME: h.home },
+  )
+  const origin = new URL(live.url).origin
+  const handshake = await fetch(live.url, { redirect: 'manual' })
+  const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+  const call = async (path, init = {}) => {
+    const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    const text = await response.text()
+    let body
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = text
+    }
+    return { status: response.status, body }
+  }
+  const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body) })
+  const added = await post('/api/workspaces', { path: h.work })
+  assert.equal(added.status, 200, `the folder is a workspace (${JSON.stringify(added.body)})`)
+  return { live, call, post, branch: realpathSync(h.work) }
+}
+
+test('a New session request never lands in an empty session another client made, even one it names', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's sidebar New session and its chord mint a fresh Session on every press (startSession with no options, then
+   * connectBlank with no reuse: dsh-client-ui-workspace lib/client.js:1403-1406 and 1520); the older blank is only hidden
+   * (sessionVisible, :964-966). On a shared server an empty session in the list can be another client's: the coordinator's
+   * request of 2026-10-29 reports a turn landing in one. So the session route makes a new session for every request, and a
+   * request that names a listed empty session (what an earlier page sent) is not handed that session.
+   */
+  const h = harness('blank-two-clients-api')
+  let server
+  try {
+    server = await blankSessionServer(h)
+    const { post, call, branch } = server
+    const first = await post('/api/sessions', { branch })
+    assert.equal(first.status, 200, `client A's New session starts a session (${JSON.stringify(first.body)})`)
+    const plain = await post('/api/sessions', { branch })
+    assert.equal(plain.status, 200, `client B's New session answers (${JSON.stringify(plain.body)})`)
+    assert.notEqual(plain.body.session, first.body.session, 'and is a session of its own')
+    const naming = await post('/api/sessions', { branch, session: first.body.session })
+    assert.equal(naming.status, 200, `a New session naming A's empty session still answers (${JSON.stringify(naming.body)})`)
+    assert.notEqual(naming.body.session, first.body.session, "and is not handed A's session")
+    assert.notEqual(naming.body.definition, first.body.definition, 'nor its definition')
+    const listed = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    assert.equal(new Set(listed.map((meta) => meta.id)).size, 3, `three requests, three sessions\nsaw: ${JSON.stringify(listed.map((meta) => meta.id))}`)
+    assert.equal(listed.find((meta) => meta.id === first.body.session)?.turns ?? 0, 0, "and A's session is as A left it")
+  } finally {
+    server?.live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('two clients pressing New session in the same folder get two different sessions, and each sees only its own blank', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The coordinator's case (2026-10-29): on a shared server the page's New session reopened an empty session another client
+   * had made, and a turn landed in it. DSH mints a fresh Session on every press of New session or its chord
+   * (dsh-client-ui-workspace lib/client.js:1403-1406, 1520) and shows a blank row only while it is the open session
+   * (sessionVisible, :959-966). Two browsers are two clients: each presses the page's own New session control.
+   */
+  const h = harness('blank-two-clients')
+  const elsewhere = fixtureDir('blank-two-clients-elsewhere')
+  let server
+  let clientA
+  let clientB
+  try {
+    server = await blankSessionServer(h)
+    const { live, call, branch } = server
+    /** One press of the panel's New session; resolves with the selected session before and after, and the session rows. */
+    const press = `(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const selected = () => document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null
+      for (let attempt = 0; attempt < 60 && document.querySelector('#tree li[data-kind="workspace"]') === null; attempt += 1) await wait(150)
+      await wait(300)
+      const before = selected()
+      document.getElementById('new-session').click()
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await wait(150)
+        const now = selected()
+        if (now !== null && now !== before) break
+      }
+      await wait(700)
+      return JSON.stringify({ before, after: selected(), rows: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId), note: document.getElementById('tree-note')?.textContent ?? '' })
+    })()`
+    const rows = `JSON.stringify([...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId))`
+
+    clientA = await openBrowser()
+    await clientA.goto(live.url)
+    await clientA.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const a = JSON.parse(await clientA.evaluate(press, 20_000))
+    assert.ok(typeof a.after === 'string' && a.after !== a.before, `client A's New session opens a session\nsaw: ${JSON.stringify(a)}`)
+
+    clientB = await openBrowser()
+    await clientB.goto(live.url)
+    await clientB.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const b = JSON.parse(await clientB.evaluate(press, 20_000))
+    assert.ok(typeof b.after === 'string', `client B's New session opens a session\nsaw: ${JSON.stringify(b)}`)
+    assert.notEqual(b.after, a.after, `client B's New session is not client A's session\nA: ${JSON.stringify(a)}\nB: ${JSON.stringify(b)}`)
+    const again = JSON.parse(await clientB.evaluate(press, 20_000))
+    assert.ok(typeof again.after === 'string' && again.after !== b.after && again.after !== a.after, `a second press makes another, as DSH's does\nsaw: ${JSON.stringify(again)}`)
+
+    const listed = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    const ids = new Set(listed.map((meta) => meta.id))
+    assert.ok([a.after, b.after, again.after].every((id) => ids.has(id)), `the server holds all three sessions\nsaw: ${JSON.stringify([...ids])}`)
+    assert.equal(listed.find((meta) => meta.id === a.after)?.turns ?? 0, 0, "and client A's is still empty, waiting for A")
+
+    /**
+     * Each client's rows: only its own open blank, never the other's nor an older one of its own. A turn elsewhere makes both
+     * pages redraw their trees from the server, so the rows below are drawn from the same list.
+     */
+    const turn = await server.post('/api/turn', { prompt: 'a turn somewhere else, so both trees redraw', folder: elsewhere })
+    assert.equal(turn.status, 200, `a turn elsewhere runs (${String(JSON.stringify(turn.body)).slice(0, 300)})`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const rowsA = JSON.parse(await clientA.evaluate(rows))
+    const rowsB = JSON.parse(await clientB.evaluate(rows))
+    assert.ok(rowsA.includes(a.after), `client A still sees its own blank\nsaw: ${JSON.stringify(rowsA)}`)
+    assert.ok(!rowsA.includes(b.after) && !rowsA.includes(again.after), `and none of client B's\nsaw: ${JSON.stringify(rowsA)}`)
+    assert.deepEqual(
+      rowsB.filter((id) => [a.after, b.after, again.after].includes(id)),
+      [again.after],
+      `client B sees its open blank only: not A's, not its own older one\nsaw: ${JSON.stringify(rowsB)}`,
+    )
+  } finally {
+    await clientA?.close()
+    await clientB?.close()
+    server?.live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(elsewhere)
   }
 })
 
@@ -4707,16 +5039,23 @@ test('content search finds a phrase inside an answer, ranked and quoted the way 
 })
 
 test('View options groups the sessions the two ways DSH offers: the tree, or one list', async (context) => {
-  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-grouping')
   let live
   let browser
   try {
     await conventionsFixture(h)
+    /**
+     * Two conversations, each with a turn. Empty ones would not do: DSH draws a blank session as a row only while it is
+     * the open one (sessionVisible, dsh-client-ui-workspace lib/client.js:959-966), in the tree and in the list alike, and
+     * this page follows it, so two blanks would be one row whichever grouping is chosen. What is judged here is the grouping.
+     */
     for (const name of ['one', 'two']) {
       const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', name), '--json']), { env: h.env, cwd: h.work })
       assert.equal(made.code, 0, made.stderr)
+      const turn = await runCli(adminArgs(h, ['--turn', `a conversation in ${name}`]), { env: h.env, cwd: join(h.work, '_tools_', name) })
+      assert.equal(turn.code, 0, turn.stderr)
     }
     live = await startServer(
       ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
