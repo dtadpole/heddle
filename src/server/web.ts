@@ -2574,8 +2574,8 @@ function subscribeSessionEvent(ctx: Context, forward: (payload: { session: strin
   }
 }
 
-/** `/api/sessions/<session>/terminals[/<terminal>[/stream|/input|/resize]]`. */
-const TERMINAL_ROUTE = /^\/api\/sessions\/(session-[0-9a-f-]{36})\/terminals(?:\/(terminal-[0-9a-f-]{36})(?:\/(stream|input|resize))?)?$/i
+/** `/api/sessions/<session>/terminals[/<terminal>[/stream|/input|/resize]]`; the ids are judged in the handler. */
+const TERMINAL_ROUTE = /^\/api\/sessions\/([^/]+)\/terminals(?:\/([^/]+)(?:\/(stream|input|resize))?)?$/
 
 /**
  * The terminal routes (#85, slice 1), with developer-ten's conditions for the server half:
@@ -2590,7 +2590,9 @@ const TERMINAL_ROUTE = /^\/api\/sessions\/(session-[0-9a-f-]{36})\/terminals(?:\
  * - A terminal id is looked up only inside its own session, so another session's path answers `404`.
  */
 async function handleTerminalRoute(ctx: Context, request: IncomingMessage, response: ServerResponse, url: URL, state: RequestState): Promise<void> {
-  const [, session = '', terminal, action] = TERMINAL_ROUTE.exec(url.pathname) ?? []
+  const [, rawSession = '', rawTerminal, action] = TERMINAL_ROUTE.exec(url.pathname) ?? []
+  const session = decodeURIComponent(rawSession)
+  const terminal = rawTerminal === undefined ? undefined : decodeURIComponent(rawTerminal)
   const method = request.method ?? 'GET'
   const json = (status: number, body: unknown): void => respond(response, status, 'application/json', `${JSON.stringify(body)}\n`)
   const route =
@@ -2602,11 +2604,16 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
           ? method === 'GET' ? 'stream' : undefined
           : method === 'POST' ? action : undefined
   if (route === undefined) {
-    json(405, { error: `${method} is not allowed on ${url.pathname}` })
+    // The answer every unrouted request gets here (and the Rust router's method fallback).
+    respond(response, 404, 'text/plain', 'not found\n')
     return
   }
   if (method !== 'GET' && !/^application\/json\s*(;|$)/i.test(String(request.headers['content-type'] ?? ''))) {
     json(415, { error: 'a terminal request must be sent as application/json' })
+    return
+  }
+  if (!/^session-[0-9a-f-]{36}$/i.test(session)) {
+    json(400, { error: 'not a session id' })
     return
   }
   const meta = ctx.session.list().find((entry) => entry.id === session)
@@ -2637,8 +2644,10 @@ async function handleTerminalRoute(ctx: Context, request: IncomingMessage, respo
     streamTerminal(request, response, registry, session, terminal ?? '')
     return
   }
-  const body = await readJson(request, response)
-  if (body === null) return
+  const parsed = await readJson(request, response)
+  if (parsed === null && response.headersSent) return
+  // JSON that is not an object (`null`, an array, a number) reads as `{}`, as the Rust body reader does.
+  const body: Record<string, unknown> = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
   if (route === 'create') {
     const cols = body.cols === undefined ? 80 : body.cols
     const rows = body.rows === undefined ? 24 : body.rows
