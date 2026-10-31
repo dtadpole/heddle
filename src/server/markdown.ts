@@ -560,13 +560,20 @@ export class MarkdownWorker {
   render(source: string, options: RenderOptions = {}): Promise<string> {
     const text = String(source ?? '')
     if (this.unavailable) return Promise.resolve(renderMarkdown(text, options))
-    const key = createHash('sha256').update(JSON.stringify(options)).update('\u0000').update(text).digest('hex')
-    const known = this.recent.get(key)
+    /** Options JSON cannot write (a BigInt, a cycle) only cost the document its place in the cache, never a throw. */
+    let key: string | undefined
+    try {
+      key = createHash('sha256').update(JSON.stringify(options)).update('\u0000').update(text).digest('hex')
+    } catch {
+      key = undefined
+    }
+    const known = key === undefined ? undefined : this.recent.get(key)
     if (known !== undefined) return known
     const answer = new Promise<string>((settle) => {
       this.queue.push({ job: { id: this.nextId++, source: text, options: { ...options } }, settle })
       this.pump()
     })
+    if (key === undefined) return answer
     this.recent.set(key, answer)
     if (this.recent.size > RECENT_DOCUMENTS) this.recent.delete(this.recent.keys().next().value as string)
     return answer
@@ -602,7 +609,19 @@ export class MarkdownWorker {
     this.worker.ref()
     const timer = setTimeout(() => this.expire(), this.budgetMs)
     this.current = { ...next, timer }
-    this.worker.postMessage(next.job)
+    try {
+      this.worker.postMessage(next.job)
+    } catch {
+      /**
+       * A job the worker cannot be sent — a DataCloneError, for an option that does not survive structured clone — is
+       * answered as its text and the queue goes on. Thrown from here it escaped as an uncaught exception from the
+       * worker's message listener, or as a rejection from render's executor, and render promises neither.
+       */
+      clearTimeout(timer)
+      this.current = undefined
+      next.settle(markdownFallback(next.job.source))
+      this.pump()
+    }
   }
 
   private start(): void {

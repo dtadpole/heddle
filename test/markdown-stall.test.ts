@@ -138,3 +138,24 @@ test('off the thread, a document renders exactly as on it: an answer, and a prev
   assert.deepEqual(preview, renderSource('/tmp/docs/README.md', text), 'a previewed document')
   assert.match(String(preview.html), /https:\/\/example\.com\/a\.png/, 'whose remote image is kept as written')
 })
+
+test('a document the worker cannot be sent is answered as its text, so render never rejects or throws', async () => {
+  /**
+   * developer-ten's review of 65c2104b: render() promises never to reject, but worker.postMessage throws a
+   * DataCloneError for a job that does not survive structured clone, and that throw came out of the worker's message
+   * listener (an uncaught exception) or out of the promise's executor (a rejection). An option that is a function is
+   * the plainest such job.
+   */
+  const renderer = new markdown.MarkdownWorker({ budgetMs: 3_000 })
+  try {
+    const options = { base: '/tmp/docs', notCloneable: () => 'x' } as unknown as { readonly base: string }
+    const outcome = await Promise.race([
+      renderer.render('**bold** <b>', options).then((html) => ({ html }), (error: unknown) => ({ rejected: String(error) })),
+      new Promise<{ timedOut: true }>((resolve) => setTimeout(() => resolve({ timedOut: true }), 5_000)),
+    ])
+    assert.deepEqual(outcome, { html: markdown.markdownFallback('**bold** <b>') }, 'the document comes back as its text')
+    assert.equal(await renderer.render('**bold**'), '<p><strong>bold</strong></p>\n', 'and the next document renders as usual')
+  } finally {
+    await renderer.close()
+  }
+})
