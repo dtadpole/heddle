@@ -298,12 +298,21 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
     )
     assert.equal(server.double.requests.length, 4, 'each message was one turn')
 
-    /** The arrow button is the same gesture as Enter, which is DSH's rule for its primary action. */
+    /**
+     * The arrow button is the same gesture as Enter, which is DSH's rule for its primary action.
+     *
+     * The count is read before the click and then waited for. The person's message is drawn once the server has logged
+     * it, which can come before the model is asked. Reading the count once, right after the message appeared, failed
+     * whenever the model request was a moment later (seen on the Rust build with #128's detached turns), and reading
+     * it after the click could already include the new request.
+     */
+    const before = server.double.requests.length
     await type(browser, 'by button')
     await browser.evaluate('document.getElementById("send").click()')
-    const before = server.double.requests.length
     await browser.waitFor('document.getElementById("log").innerText.includes("by button")', 15_000)
-    assert.equal(server.double.requests.length, before + 1, 'and that was one more turn')
+    assert.ok(await until(() => server.double.requests.length >= before + 1, 15_000), 'and that was one more turn')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(server.double.requests.length, before + 1, 'and only one')
   } finally {
     browser.close()
     await server.close()
