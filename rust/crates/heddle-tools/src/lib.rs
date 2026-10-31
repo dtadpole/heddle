@@ -12,6 +12,7 @@
 //! | [`registry`] | [`ToolRegistry`]: registration, the allow list, and the gate order of every call |
 //! | [`gates`] | the ports the registry gates through — approvals, sandbox, per-session mode, hooks |
 //! | [`builtin`] | `write_file`, `read_file`, `list_dir`, `bash` |
+//! | [`background`] | the seam `bash`'s `run_in_background` reaches the jobs row (`heddle-jobs`) through |
 //! | [`config`] | the `tools` configuration row |
 //! | [`protocol`] | the outside-component wire: line-delimited JSON-RPC 2.0 on stdio |
 //! | [`outside`] | starting an outside component and forwarding its tools' calls |
@@ -19,10 +20,11 @@
 //! | [`adapters`] | the gate ports over the real `heddle-sandbox` and `heddle-session` services |
 //! | [`command`] | the `tools` and `commands` commands, in the owning crate (D-043) |
 //!
-//! Background jobs are named in this crate's description but have no TypeScript source and no verifier
-//! yet; they are not part of this API until the oracle has them.
+//! Background jobs themselves live in `heddle-jobs`; this crate carries only the seam `bash` hands a background
+//! call to ([`background`]), which is unattached unless the jobs row is loaded.
 
 pub mod adapters;
+pub mod background;
 pub mod builtin;
 pub mod command;
 pub mod config;
@@ -34,7 +36,11 @@ pub mod tool;
 pub mod upstream;
 pub mod validate;
 
-pub use builtin::{BuiltinOptions, builtin_tools, escalation_fields};
+pub use background::{
+    BashBackground, BashBackgroundDetach, RUN_IN_BACKGROUND_DESCRIPTION, attach_bash_background,
+    background_for,
+};
+pub use builtin::{BuiltinOptions, ShellLaunch, builtin_tools, escalation_fields, launch_shell};
 pub use config::ToolsConfig;
 pub use gates::{
     ApprovalGate, DefaultModes, EscalationError, EscalationRequest, ModeResolver, NoToolHooks,
