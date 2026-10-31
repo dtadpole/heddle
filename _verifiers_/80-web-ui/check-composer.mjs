@@ -1370,7 +1370,9 @@ test('a pending image is delivered to a vision route as image content', async (c
     assert.match(String(image.image_url.url), /^data:image\/png;base64,/, 'as a data URL of the declared media type')
     assert.equal(Buffer.from(String(image.image_url.url).split(',')[1] ?? '', 'base64').length, bytes.length, 'with the whole stored file')
     assert.ok(user.content.some((part) => part.type === 'text' && part.text === 'describe this image'), 'beside the prompt text')
-    assert.ok(!JSON.stringify(sent).includes(server.home), 'and the stored path is not what the provider was told')
+    // The stored file sits under <home>/uploads. The whole home is not the test: an empty install now works in
+    // <home>/default-workspace, so the request's cwd and runtime context name the home on purpose.
+    assert.ok(!JSON.stringify(sent).includes(join(server.home, 'uploads')), 'and the stored path is not what the provider was told')
 
     const rows = await browser.evaluate(`(async () => (await (await fetch('/api/sessions')).json()).map((row) => row.id).slice(0, 1))()`)
     assert.equal(rows.length, 1, 'the turn created a session')
@@ -1805,8 +1807,14 @@ test('switching to idle Y keeps X queued messages moving and Y offers Send', asy
     const headers = { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' }
     const post = (path, body) => fetch(new URL(path, server.url), { method: 'POST', headers, body: JSON.stringify(body) }).then((response) => response.json())
     await post('/api/workspaces', { path: server.work })
-    const x = (await post('/api/sessions', { branch: server.work })).session
-    const y = (await post('/api/sessions', { branch: server.work })).session
+    /**
+     * Both sessions are titled when they are made. A session with no turn and no title is a New session placeholder, and
+     * among those only the open one is a tree row (DSH `sessionVisible`, dsh-client-ui-workspace lib/client.js:959-966;
+     * heddle's `WorkspaceTree.placeholder` / `hiddenBlank`), so two untitled blanks would leave Y without a row to click
+     * once X is open. A titled session is one a person named, and is a row however many turns it has.
+     */
+    const x = (await post('/api/sessions', { branch: server.work, title: 'session X' })).session
+    const y = (await post('/api/sessions', { branch: server.work, title: 'session Y' })).session
     assert.ok(typeof x === 'string' && typeof y === 'string')
     await browser.goto(server.url)
     const row = (id) => `document.querySelector('#tree li[data-kind=session][data-session-id=${JSON.stringify(id)}] > .row')`
