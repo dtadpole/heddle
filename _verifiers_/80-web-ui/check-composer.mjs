@@ -1942,3 +1942,55 @@ test('a message the server took is not put back or resent when the connection dr
     await server.close()
   }
 })
+
+/**
+ * DSH's per-Turn token usage (C71): a completed turn shows its own usage row, closed to its total and opening to the
+ * buckets the provider reported, beside the session dock. The row is the durable fold's, so it is the same live and
+ * after a reload; a turn whose provider reported nothing has no row at all rather than a zero.
+ */
+test('a completed turn shows its own token-usage row, which opens to the reported buckets', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('turn-usage', {
+    usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 800 } },
+    holdOpenMs: 50,
+  })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await type(browser, 'report the cost')
+    await press(browser, { key: 'Enter' })
+    const row = () =>
+      browser.evaluate(`(() => {
+        const answers = [...document.querySelectorAll('#log .turn.assistant')]
+        const row = answers.length === 0 ? null : answers[answers.length - 1].querySelector('.turn-usage')
+        if (row === null) return JSON.stringify(null)
+        return JSON.stringify({
+          summary: row.querySelector('summary').textContent,
+          open: row.open,
+          buckets: [...row.querySelectorAll('[data-bucket]')].map((node) => [node.dataset.bucket, node.textContent]),
+          visible: row.querySelector('.turn-usage-figures').getBoundingClientRect().height > 0,
+          rows: document.querySelectorAll('#log .turn-usage').length,
+        })
+      })()`).then(JSON.parse)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant .turn-usage") !== null', 20_000), 'the completed turn has its own usage row')
+    const live = await row()
+    assert.equal(live.summary, 'Tokens · 1,050', 'closed, it reads the turn\u2019s total')
+    assert.equal(live.open, false)
+    assert.equal(live.rows, 1, 'one row for one turn')
+    assert.deepEqual(live.buckets, [['inputTokens', 'Input 200'], ['cacheReadTokens', 'Cache read 800'], ['outputTokens', 'Output 50']], 'the reported buckets, and no invented cache write')
+    await browser.evaluate('document.querySelector("#log .turn-usage summary").click()')
+    assert.equal((await row()).visible, true, 'it opens to its figures')
+
+    // A reload reopens the session the page remembers, and draws the turn from the transcript.
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant .turn-usage") !== null', 15_000), 'a reload draws the same row')
+    const reloaded = await row()
+    assert.deepEqual([reloaded.summary, reloaded.buckets], [live.summary, live.buckets])
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})

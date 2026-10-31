@@ -29,6 +29,8 @@ heddle-plan = { path = "../heddle-plan" }
 heddle-goal.workspace = true
 # The jobs row (`src/plugins/jobs.ts`): background jobs, their tools, background bash and the page's routes.
 heddle-jobs.workspace = true
+
+heddle-questions.workspace = true
 heddle-sandbox.workspace = true
 heddle-schedule.workspace = true
 heddle-server.workspace = true
