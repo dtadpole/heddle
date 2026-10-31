@@ -129,7 +129,7 @@ pub fn fold_code_point(cp: u32) -> u32 {
     }
     let (start, count, step, kind, value) = FOLDS[index - 1];
     let offset = cp - start;
-    if offset % step != 0 || offset / step >= count {
+    if !offset.is_multiple_of(step) || offset / step >= count {
         return cp;
     }
     let folded = if kind == 0 {
