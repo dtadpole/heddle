@@ -459,8 +459,9 @@ async function runTurnBody(
           ctx.session.store.assistantChunk(options.session, chunk)
           if (chunk.type === 'text-delta') {
             roundText += chunk.text
-            // The round's partial answer counts too, should the stream fail or be stopped before the round ends.
-            progress.text = text + roundText
+            // The round's partial answer is the turn's answer so far (the last non-empty round, as above), should the
+            // stream fail or be stopped before the round ends; a round with no text yet leaves the previous answer.
+            progress.text = roundText
           }
           else if (chunk.type === 'reasoning-delta') {
             reasoning += chunk.text

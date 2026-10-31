@@ -141,11 +141,49 @@ test('a stream that breaks after some text keeps that text in the record', async
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
   const { ctx, session, ends } = harness(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`)
   try {
-    await runTurn(ctx, { session, endpoint: 'double', prompt: 'go', maxRounds: 1 }).catch(() => undefined)
+    await assert.rejects(runTurn(ctx, { session, endpoint: 'double', prompt: 'go', maxRounds: 1 }), 'the broken stream fails the turn')
     const { completed, closed } = ends()
     assert.equal(completed.length, 1, 'one completion record')
     assert.equal(completed[0]?.text, 'partial ', 'with the text that streamed before the break')
+    assert.equal(completed[0]?.finishReason, 'error')
+    assert.match(String((completed[0]?.ended as string[] | undefined)?.[0]), /^failed: /, 'naming the failure')
     assert.equal(closed.length, 1)
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve())
+      server.closeAllConnections()
+    })
+  }
+})
+
+test('a second round cut after some text records that text as the answer, as the last non-empty round', async () => {
+  let requests = 0
+  const server = createServer((request, response: ServerResponse) => {
+    request.resume()
+    request.on('end', () => {
+      requests += 1
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      const send = (delta: unknown, finish: string | null) => response.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\n`)
+      if (requests === 1) {
+        send({ role: 'assistant', content: 'looking ' }, null)
+        send({ tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'nope', arguments: '{}' } }] }, null)
+        send({}, 'tool_calls')
+        response.end('data: [DONE]\n\n')
+        return
+      }
+      send({ role: 'assistant', content: 'the answer is' }, null)
+      setTimeout(() => response.destroy(), 100)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { ctx, session, ends } = harness(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`)
+  try {
+    await assert.rejects(runTurn(ctx, { session, endpoint: 'double', prompt: 'go', maxRounds: 3 }))
+    const { completed } = ends()
+    assert.equal(completed.length, 1)
+    assert.equal(completed[0]?.text, 'the answer is', 'the cut round replaces the first round’s remark')
+    assert.equal(completed[0]?.rounds, 2)
+    assert.equal(completed[0]?.finishReason, 'error')
   } finally {
     await new Promise<void>((resolve) => {
       server.close(() => resolve())

@@ -560,9 +560,10 @@ async fn run_turn_body(
                         match &chunk {
                             Chunk::TextDelta { text: delta } => {
                                 round_text.push_str(delta);
-                                // The round's partial answer counts too, should the stream fail before the
-                                // round ends.
-                                progress.text = format!("{text}{round_text}");
+                                // The round's partial answer is the turn's answer so far (the last non-empty
+                                // round), should the stream fail before the round ends; a round with no text
+                                // yet leaves the previous answer.
+                                progress.text.clone_from(&round_text);
                             }
                             Chunk::ReasoningDelta { text: delta } => {
                                 reasoning.push_str(delta);
@@ -2304,14 +2305,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_stopped_after_text_keeps_that_text_in_its_completion() {
+    async fn a_stream_cut_by_a_stop_after_text_keeps_that_text_in_the_unfinished_record() {
+        // developer-five's third review: the stop must cut a stream that has already streamed text, so the turn
+        // reaches record_unfinished (a stream that ends normally after a stop is the ordinary completion).
         let session = RecordingSession::new();
-        let model = ScriptedModel::new(vec![Step::Chunks(vec![
-            Chunk::TextDelta {
+        let model = ScriptedModel::new(vec![Step::ChunksThenFail(
+            vec![Chunk::TextDelta {
                 text: "partial ".into(),
+            }],
+            ModelError {
+                code: None,
+                message: "the stream was cancelled".into(),
             },
-            done("stop"),
-        ])]);
+        )]);
         let token = CancellationToken::new();
         let stop = token.clone();
         let model = model.with_stream_hook(Arc::new(move || stop.cancel()));
@@ -2323,19 +2329,59 @@ pub(crate) mod tests {
         );
         let mut options = RunTurnOptions::new(session_handle(), "scripted", "go");
         options.cancel = Some(token);
-        // A stop ends the turn either way; what matters is the record.
-        let _ = run_turn(&runtime, options).await;
+        run_turn(&runtime, options).await.unwrap_err();
         let completed = session
             .event(events::ASSISTANT_COMPLETED)
             .expect("the stopped turn is ended in the log");
         assert_eq!(completed.fields["text"], "partial ");
-        assert!(
-            completed.fields["ended"]
-                .to_string()
-                .contains("stopped by the caller"),
-            "{}",
-            completed.fields["ended"]
+        assert_eq!(completed.fields["finishReason"], "aborted");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["stopped by the caller"])
         );
+    }
+
+    #[tokio::test]
+    async fn a_second_round_cut_after_text_records_that_text_as_the_answer() {
+        // The record follows the last-non-empty-round rule (#9): the cut round's partial text replaces the first
+        // round's remark; a cut round with no text would keep it (a_turn_that_fails_after_a_round_...).
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "looking ".into(),
+                },
+                call_chunk("c1", "nope", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::ChunksThenFail(
+                vec![Chunk::TextDelta {
+                    text: "the answer is".into(),
+                }],
+                ModelError {
+                    code: None,
+                    message: "the stream broke".into(),
+                },
+            ),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(completed.fields["text"], "the answer is");
+        assert_eq!(completed.fields["rounds"], 2);
+        assert_eq!(completed.fields["finishReason"], "error");
     }
 
     #[tokio::test]
