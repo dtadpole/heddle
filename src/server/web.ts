@@ -324,7 +324,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
-        void stopRunningTurns().then(() => closeNow(resolvePromise))
+        void stopRunningTurns().finally(() => closeNow(resolvePromise))
       }),
   }
 

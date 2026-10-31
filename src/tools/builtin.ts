@@ -4,7 +4,7 @@ import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { dirname, join, relative } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
-import { killProcessGroup } from '../sandbox/process-group.ts'
+import { killProcessGroup, trackGroup, untrackGroup } from '../sandbox/process-group.ts'
 import type { SandboxService } from '../sandbox/service.ts'
 import type { ToolDefinition, ToolResult } from './service.ts'
 
@@ -49,23 +49,6 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
 
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
-
-/**
- * The process groups of commands still running, ended when the process exits so a restart cannot leave them behind
- * (live-testing issue #6: the server's own shutdown stops its turns first; this is the backstop for any other exit).
- */
-const liveGroups = new Set<number>()
-let exitHookArmed = false
-
-function trackGroup(leader: number | undefined): void {
-  if (leader === undefined) return
-  liveGroups.add(leader)
-  if (exitHookArmed) return
-  exitHookArmed = true
-  process.once('exit', () => {
-    for (const group of liveGroups) killProcessGroup(group)
-  })
-}
 
 /** The default for `bashMaxTimeoutMs`: the most wall time a call may ask for, DSH's `maxTimeoutMs` (ten minutes). */
 export const BASH_MAX_TIMEOUT_MS = 600_000
@@ -265,12 +248,12 @@ export function builtinTools(
           { once: true },
         )
         child.on('error', (error) => {
-          if (child.pid !== undefined) liveGroups.delete(child.pid)
+          untrackGroup(child.pid)
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
         })
         child.on('close', (code) => {
-          if (child.pid !== undefined) liveGroups.delete(child.pid)
+          untrackGroup(child.pid)
           clearTimeout(timer)
           const combined = stdout + stderr
           const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined

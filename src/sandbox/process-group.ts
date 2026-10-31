@@ -32,3 +32,27 @@ export function killProcessGroup(leader: number | undefined): boolean {
     return (error as NodeJS.ErrnoException).code === 'ESRCH'
   }
 }
+
+/**
+ * The process groups of commands still running, ended when the process exits so a restart cannot leave them behind
+ * (live-testing issue #6). The server's own shutdown stops its turns first; this is the backstop for any other exit,
+ * shared by every launcher that starts a detached group (the bash tool, and the jobs producers).
+ */
+const liveGroups = new Set<number>()
+let exitHookArmed = false
+
+/** Register a running command's group leader with the exit backstop. */
+export function trackGroup(leader: number | undefined): void {
+  if (leader === undefined) return
+  liveGroups.add(leader)
+  if (exitHookArmed) return
+  exitHookArmed = true
+  process.once('exit', () => {
+    for (const group of liveGroups) killProcessGroup(group)
+  })
+}
+
+/** Forget a group whose command has ended, so the backstop never signals a pid that may be reused. */
+export function untrackGroup(leader: number | undefined): void {
+  if (leader !== undefined) liveGroups.delete(leader)
+}
