@@ -27,6 +27,27 @@ export const ROUND_LIMIT_CODE = 'round-limit'
 /** The block code used when a round cannot be started at all. */
 export const QUEUE_FAILED_CODE = 'queue-failed'
 
+/**
+ * The block DSH writes when a goal round is rejected before entering its step (dsh-goal-round-driver
+ * lib/index.js:326-333): its code and its sentence, DSH's own.
+ */
+export const PROMPT_REJECTED_CODE = 'prompt-rejected'
+export const PROMPT_REJECTED_MESSAGE = 'Goal round was rejected before entering its step.'
+
+/**
+ * Whether an event ends its turn with DSH's `blocked`: the archived-session gate's `turn/failed`
+ * `{ reason: { kind: 'blocked' } }`, the one turn end heddle writes for a rejected step. Any other `turn/failed` (a
+ * teammate's turn that failed, whose `reason` is its error) is a failure, DSH's `agent/error`.
+ */
+export function isBlockedTurnEnd(event: { readonly type: string; readonly [key: string]: unknown }): boolean {
+  return event.type === 'turn/failed' && (event.reason as { kind?: unknown } | undefined)?.kind === 'blocked'
+}
+
+/** Whether a round's own events end its turn with DSH's `blocked`. */
+function endedBlocked(events: readonly { readonly type: string; readonly [key: string]: unknown }[]): boolean {
+  return events.some(isBlockedTurnEnd)
+}
+
 /** What should happen next for one goal. */
 export type RoundDecision =
   | { readonly kind: 'round'; readonly round: number; readonly prompt: string }
@@ -112,7 +133,7 @@ export interface GoalDriverDeps {
 export interface DriverOutcome {
   /** Rounds that were admitted and answered. */
   readonly rounds: number
-  /** Why the chain ended: `idle`, `no-goal`, `disarmed`, `phase-complete`, `round-limit`, `goal-moved`, … */
+  /** Why the chain ended: `idle`, `no-goal`, `disarmed`, `phase-complete`, `round-limit`, `prompt-rejected`, `goal-moved`, … */
   readonly stopped: string
   /** Present when the chain ended by blocking the goal. */
   readonly blocked?: GoalBlockReason
@@ -297,6 +318,8 @@ export class GoalDriver extends Service {
       }
 
       const before = view!.roundsStarted
+      /** Where this round's own events start, so a round that was not admitted can be read back. */
+      const mark = this.goals.sessionEvents(handle).length
       let failure: unknown
       let failed = false
       lane.roundRunning = true
@@ -357,7 +380,31 @@ export class GoalDriver extends Service {
        * admitted goal message for it. If the count did not move, the next decision would pick the same
        * round again — an infinite loop — so the chain stops and says so.
        */
-      if (after.roundsStarted <= before) return { rounds: rounds + 1, stopped: 'round-not-admitted' }
+      if (after.roundsStarted <= before) {
+        /**
+         * DSH's `prompt-rejected`: a round whose step was rejected before it entered — here, the archived-session gate
+         * refusing the round's first step, whose turn ends `blocked` — **blocks** the goal it served, when that goal is
+         * still the same revision, active and armed (dsh-goal-round-driver lib/index.js:326-333). The goal is then not
+         * run again by itself, and after an unarchive a person's resume starts it, as it does in DSH; left active and
+         * armed, the resume was refused as "already active and armed".
+         */
+        if (
+          endedBlocked(this.goals.sessionEvents(handle).slice(mark)) &&
+          after.id === view!.id &&
+          after.revision === view!.revision &&
+          after.phase === 'active' &&
+          after.activation === 'armed'
+        ) {
+          const reason: GoalBlockReason = { code: PROMPT_REJECTED_CODE, message: PROMPT_REJECTED_MESSAGE }
+          try {
+            this.goals.block(handle, { id: after.id, revision: after.revision }, reason)
+          } catch (error) {
+            return { rounds, stopped: PROMPT_REJECTED_CODE, blocked: reason, error: messageOf(error) }
+          }
+          return { rounds, stopped: PROMPT_REJECTED_CODE, blocked: reason }
+        }
+        return { rounds: rounds + 1, stopped: 'round-not-admitted' }
+      }
       rounds += 1
       /**
        * If the goal moved while the round ran — edited, paused, completed by the model itself — the chain
