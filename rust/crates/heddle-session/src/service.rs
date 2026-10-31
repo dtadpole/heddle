@@ -253,6 +253,12 @@ impl SessionService {
         let canonical = canonical_path(Path::new(branch))
             .to_string_lossy()
             .into_owned();
+        // A folder that is gone is refused ([`SessionError::MissingFolder`]) before the store creates anything
+        // (#56). This differs from DSH on purpose: its session create makes the project directory
+        // (`mkdir(cwd, { recursive: true })`, dsh-api-session-controller lib/index.js:511-516). heddle writes the
+        // session's committed definition (`_sessions_/<name>/`) into the folder, so a recreated folder is a decoy
+        // at the old path of a folder a person moved, and Add workspace already refuses a missing folder.
+        require_folder(&canonical)?;
         let taken = existing_session_names(&canonical);
         let handle = self.open_at(
             &canonical,
@@ -962,6 +968,42 @@ mod tests {
             format!("This workspace's folder no longer exists: {canonical}")
         );
         assert!(folder.is_file());
+    }
+
+    /// #56, the heddle-specific half: New session at a folder that was deleted recreated it with a
+    /// `_sessions_` drawer. Refused here on purpose (DSH's create makes the directory): the store keeps no
+    /// session and nothing comes back on disk; a file where the folder was is refused the same way.
+    #[test]
+    fn a_new_session_at_a_folder_that_is_gone_is_refused_and_nothing_is_written() {
+        let (_dir, service) = service();
+        let parent = branch();
+        let folder = parent.path().join("w");
+        std::fs::create_dir(&folder).unwrap();
+        let canonical = canonical_path(&folder).to_str().unwrap().to_string();
+        service
+            .create_at(&canonical, CreateAtOptions::default())
+            .unwrap();
+        let before = service.list().len();
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        let error = service
+            .create_at(&canonical, CreateAtOptions::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("This workspace's folder no longer exists: {canonical}")
+        );
+        assert!(!folder.exists(), "the deleted folder is not recreated");
+        assert_eq!(service.list().len(), before, "and no session is left");
+
+        std::fs::write(&folder, "not a folder any more\n").unwrap();
+        let error = service
+            .create_at(&canonical, CreateAtOptions::default())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("This workspace's folder no longer exists: {canonical}")
+        );
     }
 
     #[test]

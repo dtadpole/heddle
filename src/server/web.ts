@@ -1671,9 +1671,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${wanted} is not under any workspace root` })}\n`)
       return
     }
-    const { handle, definition } = ctx.session.createAt(wanted, {
-      ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
-    })
+    let created
+    try {
+      created = ctx.session.createAt(wanted, {
+        ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+      })
+    } catch (error) {
+      if (!isMissingFolder(error)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
+      return
+    }
+    const { handle, definition } = created
     respond(
       response,
       200,

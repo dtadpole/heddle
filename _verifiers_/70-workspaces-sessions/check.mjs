@@ -2002,6 +2002,36 @@ test('a fork or a turn in a session whose folder was deleted fails naming the fo
   }
 })
 
+test('New session in a workspace whose folder was deleted is refused naming the folder, and the folder is not recreated', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * #56, the heddle-specific half, measured on both builds before the change: `POST /api/sessions { branch }` (the page's
+   * New session) answered 200 for a deleted folder and recreated it with `_sessions_/<name>/{session.json,INDEX.md}`.
+   * This differs from DSH **on purpose**: DSH's session create makes the project directory (dsh-api-session-controller
+   * lib/index.js:511-516), but heddle writes the session's committed definition into the folder, so a recreated folder is
+   * a decoy at the old path of a folder a person moved, and Add workspace already refuses a folder that does not exist —
+   * with the same status and shape this refusal uses, `400 { error }`.
+   */
+  let fixture
+  try {
+    fixture = await goneFolderFixture('gone-folder-create')
+    const { folder, call, post, reason } = fixture
+    const before = (await call('/api/sessions')).body.length
+    const refused = await post('/api/sessions', { branch: folder })
+    assert.equal(refused.status, 400, `New session is refused (${JSON.stringify(refused.body)})`)
+    assert.equal(refused.body.error, reason, 'naming the folder')
+    assert.equal(existsSync(folder), false, 'and the folder is not recreated')
+    assert.equal((await call('/api/sessions')).body.length, before, 'and no session is left in the store')
+  } finally {
+    fixture?.live.kill()
+    if (fixture !== undefined) {
+      removeDir(fixture.h.home)
+      removeDir(fixture.h.work)
+      removeDir(fixture.top)
+    }
+  }
+})
+
 test('a workspace moved before another keeps its place across a restart, as DSH workspace/insertBefore does', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**

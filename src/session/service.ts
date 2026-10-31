@@ -137,6 +137,14 @@ export class SessionService extends Service {
     options: { readonly title?: string; readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } = {},
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
+    /**
+     * A folder that is gone is refused (`MissingFolderError`), before the store creates anything (#56). This differs from
+     * DSH on purpose: its session create makes the project directory (`mkdir(cwd, { recursive: true })`,
+     * dsh-api-session-controller lib/index.js:511-516). heddle writes the session's committed definition
+     * (`_sessions_/<name>/`) into the folder, so a recreated folder is a decoy at the old path of a folder a person moved,
+     * and Add workspace already refuses a folder that does not exist.
+     */
+    requireFolder(canonical)
     const taken = existingSessionNames(canonical)
     const handle = this.openAt(canonical, { fresh: true, ...options })
     const meta = this.list().find((entry) => entry.id === handle.id)
