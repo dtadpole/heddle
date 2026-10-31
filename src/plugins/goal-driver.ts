@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
-import { GoalDriver } from '../goal/driver.ts'
+import { GoalDriver, turnEndOf, type TurnEndEvidence } from '../goal/driver.ts'
 
 /** Name this plugin is registered and logged under. */
 export const name = 'goal-driver'
@@ -57,6 +57,8 @@ export function apply(ctx: Context): void {
    * `agent.status === 'idle'` in `readyToDrive`.
    */
   const inTurn = new Set<string>()
+  /** Each session's last `assistant/completed`, read at its `turn/completed` to tell how the turn ended. */
+  const lastCompleted = new Map<string, TurnEndEvidence>()
   const requestFor = (session: string): void => {
     const handle = ctx.session.store.open(session)
     if (handle === null) return
@@ -65,8 +67,20 @@ export function apply(ctx: Context): void {
     })
   }
   ctx.on('session/event', ({ session, event }) => {
+    if (event.type === 'assistant/completed') {
+      lastCompleted.set(session, event as TurnEndEvidence)
+      return
+    }
     if (event.type === 'turn/completed') {
       inTurn.delete(session)
+      /**
+       * How the turn ended decides what may follow it (#93, DSH's turn/end listener): a stopped goal round pauses its
+       * goal, and any other stopped, failed or length-cut turn disarms continuation, so no round starts after it.
+       */
+      const end = turnEndOf(lastCompleted.get(session), event as TurnEndEvidence)
+      lastCompleted.delete(session)
+      const handle = ctx.session.store.open(session)
+      if (handle !== null) driver.turnEnded(handle, end)
       requestFor(session)
       return
     }

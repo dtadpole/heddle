@@ -59,6 +59,12 @@ grounded_in:
   four keystrokes, the session found only inside its answer joining the hits with its snippet, "No matching
   sessions" only once the host has answered, and a content hit opening like any hit; a failed host request leaving
   the name matches with no warning of their own, and the same query asking the host again (#58).
+- [`check-narrow-layout.mjs`](check-narrow-layout.mjs) — a narrow window at DSH parity: below 1024 pixels the
+  sidebar is the 56-pixel rail (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so at phone width (390 x 844, the
+  protocol's device metrics) the conversation keeps a readable width and the composer and its send button stay on
+  screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
+  breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
+  (live-testing draft developer-ten-9).
 
 ## What it deliberately does not judge
 

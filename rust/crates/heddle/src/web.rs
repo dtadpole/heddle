@@ -51,6 +51,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
     }
+    // The agent presets (inventory A96): `GET /api/presets`, and the preset a session the page creates runs under.
+    harness.presets = boot
+        .services
+        .get::<Arc<heddle_config::PresetRoster>>("presets");
     if let Some(service) = boot
         .services
         .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
@@ -124,6 +128,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
         .get::<Arc<heddle_team::service::TeamService>>("team")
     {
         harness.team = Some(Arc::new(Team { service }));
+    }
+    // The live-turn registry: a Stop also reaches the turns the rows start themselves (#93).
+    if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
+        harness.interrupter = Some(Arc::new(LiveTurns { turns }));
     }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
@@ -828,6 +836,17 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         // The booted store's own records, as `tree` and `remove` read them.
         serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
     }
+
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.service
+            .insert_before(id, before)
+            .map_err(|error| match error {
+                heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
+                    heddle_server::services::workspace_not_found(&missing)
+                }
+                other => refusal(other),
+            })
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under
@@ -1028,6 +1047,17 @@ impl heddle_server::services::GoalService for Goals {
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
+}
+
+/// The agent runtime's live-turn registry as the server's interrupter: what `turns.abort` is in web.ts's stop route.
+struct LiveTurns {
+    turns: heddle_agent::TurnRegistry,
+}
+
+impl heddle_server::services::TurnInterrupter for LiveTurns {
+    fn interrupt(&self, session: &str) -> bool {
+        self.turns.abort(session, Some("stopped by the user"))
+    }
 }
 
 impl heddle_server::services::TodoService for Todos {

@@ -76,6 +76,7 @@ import {
   expectedSeatLabel,
   fixtureOnly,
   healthSessionExpired,
+  ownSessionPlaced,
   modelLabel,
   REAL_MODEL,
   realModelChoice,
@@ -633,11 +634,15 @@ function judgeMarker(load) {
  * never reads the deployment's store.
  */
 /**
- * The deployment's own health session, through its API from inside the page (same origin, the page's
+ * A target's own health session, through its API from inside the page (same origin, the page's
  * cookie): the health folder is registered as a workspace (idempotent), then the day's recorded id is
  * kept when the server still lists it, or a new session is created at the folder - its id comes from
  * the reply, so it is the monitor's by construction. The model is recorded on it the way the page's
- * selection does. Returns `{ ok, id, created, title, branch }` or `{ ok: false, reason }`.
+ * selection does. Used by 8082 (scope 'deployment', option b) and by the 3097 preview (scope 'preview',
+ * hd-coordinator 2026-10-31); each server keeps its own store and the state file keeps one id per
+ * scope. A created id is recorded at once; before any turn the server's own list must show it in the
+ * health folder (`ownSessionPlaced`), and only then is the previous day's own id archived.
+ * Returns `{ ok, id, created, title, branch }` or `{ ok: false, reason }`.
  */
 async function ownHealthSession(pageId, scope, choice) {
   try {
@@ -689,25 +694,51 @@ async function ownHealthSession(pageId, scope, choice) {
         }
         const model = await post('/api/sessions/' + encodeURIComponent(id) + '/model', ${JSON.stringify(selection)})
         if (model.status !== 200) return { ok: false, id, created, reason: 'the model could not be recorded on the health session (' + said(model) + ')' }
-        const previous = ${JSON.stringify(previous)}
-        let archived = null
-        if (created && previous !== null && previous !== id) {
-          const flagged = await post('/api/sessions/' + encodeURIComponent(previous) + '/flags', { archived: true })
-          archived = flagged.status === 200 ? 'archived' : 'not archived (' + said(flagged) + ')'
-        }
-        return { ok: true, id, created, archived }
+        let listed = null
+        try {
+          const after = await (await fetch('/api/sessions')).json()
+          listed = Array.isArray(after) ? after.map((item) => ({ id: item.id, cwd: typeof item.cwd === 'string' ? item.cwd : null })) : null
+        } catch {}
+        return { ok: true, id, created, listed }
       })`,
     },
     25_000,
   ))?.value ?? null
-  if (got?.created === true && typeof got.id === 'string') {
+  if (got === null) return { ok: false, reason: 'the page could not reach the session API' }
+  /**
+   * A created id is recorded at once, even when a later step fails: the next pass then re-checks that
+   * same session instead of creating another one every 20 minutes. A recorded session that is not in
+   * the health folder is never written into (`ownSessionPlaced` refuses it again each pass).
+   */
+  if (got.created === true && typeof got.id === 'string') {
     try {
+      // Re-read just before writing: the other scope may have recorded its own id meanwhile.
+      let fresh = {}
+      try {
+        fresh = JSON.parse(readFileSync(HEALTH_STATE, 'utf8'))
+      } catch {}
       mkdirSync(dirname(HEALTH_STATE), { recursive: true })
-      writeFileSync(HEALTH_STATE, `${JSON.stringify({ ...state, [scope]: { date: today, id: got.id } }, null, 2)}\n`)
+      writeFileSync(HEALTH_STATE, `${JSON.stringify({ ...fresh, [scope]: { date: today, id: got.id } }, null, 2)}\n`)
     } catch {}
   }
-  if (got === null) return { ok: false, reason: 'the page could not reach the session API' }
-  return { ...got, title, branch }
+  if (got.ok !== true) return { ...got, title, branch }
+  const placed = ownSessionPlaced({ listed: got.listed, id: got.id, workspace: branch })
+  if (placed.ok !== true) return { ok: false, id: got.id, created: got.created, reason: placed.reason, title, branch }
+  let archived = null
+  if (got.created === true && previous !== null && previous !== got.id) {
+    archived = (await callTool(
+      'evaluate_script',
+      {
+        pageId,
+        function: `(async () => {
+          const response = await fetch('/api/sessions/' + encodeURIComponent(${JSON.stringify(previous)}) + '/flags', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ archived: true }) })
+          return response.status === 200 ? 'archived' : 'not archived (' + response.status + ')'
+        })`,
+      },
+      15_000,
+    ))?.value ?? 'not archived (no answer)'
+  }
+  return { ok: true, id: got.id, created: got.created, archived, title, branch }
 }
 
 /**
@@ -777,7 +808,7 @@ async function openOwnRow(pageId, id, branch) {
   return { ok: false, reason: "the health session's row could not be opened in the tree" }
 }
 
-async function judgeTurn(pageId, beforeSession, { deploymentTrace = true, ownSession = false } = {}) {
+async function judgeTurn(pageId, beforeSession, { deploymentTrace = true, ownSession = false, ownScope = 'deployment' } = {}) {
   if (!SEND_TURN) return { verdict: 'unjudged', detail: '--no-turn' }
   if (pageId === undefined) return { verdict: 'unjudged', detail: 'the page is not open, so a turn cannot be sent' }
   try {
@@ -810,11 +841,12 @@ async function judgeTurn(pageId, beforeSession, { deploymentTrace = true, ownSes
       return { mode, selection: choice, session: { reused: false, via: 'none', title: null }, verdict: 'fail', detail: `no real turn was sent: ${choice.reason}` }
     }
     /**
-     * The deployment's real turn goes only into a session the monitor created itself through the API, in
-     * its own health workspace (option b). Nothing is looked up by title there, so no session someone
-     * else made - like the empty one 8082's New session opened on 2026-10-29 - can be chosen.
+     * A real turn with `ownSession` goes only into a session the monitor created itself through the API,
+     * in its own health workspace (option b: 8082 since 2026-10-29, the 3097 preview since 2026-10-31).
+     * Nothing is looked up by title there, so no session someone else made - like the empty one 8082's
+     * New session opened on 2026-10-29 - can be chosen, and the server's list must show it in that folder.
      */
-    const own = ownSession && mode === 'real' ? await ownHealthSession(pageId, 'deployment', choice) : null
+    const own = ownSession && mode === 'real' ? await ownHealthSession(pageId, ownScope, choice) : null
     if (own !== null && own.ok !== true) {
       return { mode, selection: choice, session: { reused: false, via: 'api', title: null }, verdict: 'unjudged', detail: `no turn was sent: ${own.reason}` }
     }
@@ -1191,7 +1223,12 @@ async function previewTurn(launch, gate) {
   try {
     pageId = (await callTool('new_page', { url: launch }, 45_000))?.pageId
     if (!(await waitFor(pageId, '#log', 25_000))) return { verdict: 'fail', detail: "the preview's page never drew its log" }
-    const turn = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
+    /**
+     * The preview's real turn goes into the monitor's own session in its own 3097 workspace, made
+     * through the API (hd-coordinator, 2026-10-31) - never the page's New session, which takes the open
+     * session's workspace and put the health session in two testers' workspaces on 2026-10-30/31.
+     */
+    const turn = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false, ownSession: true, ownScope: 'preview' })
     const judged = judgedPreviewTurn(turn)
     /**
      * The two-message conversation: once the fix is served, a follow-up goes into the same session on
@@ -1202,7 +1239,7 @@ async function previewTurn(launch, gate) {
       // One real turn per target per pass (D-052): the follow-up would be a second paid call.
       conversation = { verdict: 'not-sent', detail: 'one real turn per pass (D-052), so no follow-up is sent' }
     } else if (gate?.open === true && judged.verdict === 'pass') {
-      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false })
+      const followUp = await judgeTurn(pageId, (await factsOf(pageId)) ?? null, { deploymentTrace: false, ownSession: true, ownScope: 'preview' })
       const second = judgedPreviewTurn(followUp)
       const sameSession = followUp.session?.title !== null && followUp.session?.title === turn.session?.title && followUp.landing?.landed === 'own'
       conversation = { ...conversationVerdict({ gate, first: judged, second, sameSession }), followUp: { landing: followUp.landing ?? null, answerHead: followUp.answerHead ?? null } }
@@ -1278,7 +1315,7 @@ async function judgePreview() {
   const turn = !SEND_TURN
     ? { verdict: 'unjudged', detail: '--no-turn' }
     : !PREVIEW_TURN
-      ? { verdict: 'unjudged', detail: 'the preview turn is paused (--no-preview-turn) until its session store is separated from the deployment' }
+      ? { verdict: 'unjudged', detail: 'the preview turn is paused (--no-preview-turn)' }
       : shared !== 0
         ? { verdict: 'unjudged', detail: `the preview's sessions are not separate from the deployment's (${shared ?? 'unreadable'} shared), so no turn was sent` }
         : // The turn reads the preview's own catalogue: a fixture turn, or one real turn (D-052).

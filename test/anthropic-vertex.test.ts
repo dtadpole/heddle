@@ -73,7 +73,7 @@ test('a request names the model per call when the caller asks for another one', 
 
 test('the system prompt, the tool call and the tool result are translated the way Anthropic reads them', () => {
   const call = anthropicCall(endpoint, request)
-  assert.equal(call.body.system, 'be brief', 'a system message becomes the top-level system field')
+  assert.deepEqual(call.body.system, [{ type: 'text', text: 'be brief', cache_control: { type: 'ephemeral' } }], 'a system message becomes the top-level system field, marked for caching (#70)')
 
   const messages = call.body.messages as { role: string; content: { type: string; [key: string]: unknown }[] }[]
   assert.deepEqual(
@@ -87,8 +87,8 @@ test('the system prompt, the tool call and the tool result are translated the wa
   ], 'a recorded tool call becomes a tool_use block with parsed input')
   assert.deepEqual(
     messages[2]?.content,
-    [{ type: 'tool_result', tool_use_id: 'call-1', content: 'AGENTS.md' }],
-    'and its answer becomes a tool_result block naming the call',
+    [{ type: 'tool_result', tool_use_id: 'call-1', content: 'AGENTS.md', cache_control: { type: 'ephemeral' } }],
+    'and its answer becomes a tool_result block naming the call, the conversation breakpoint (#70)',
   )
   /**
    * Reasoning is **dropped**, and that is not an optimisation.
@@ -106,8 +106,8 @@ test('tools are declared in the shape the route expects', () => {
     tools: [{ name: 'bash', description: 'run a command', parameters: { type: 'object', properties: {} } }],
   })
   assert.deepEqual(call.body.tools, [
-    { name: 'bash', description: 'run a command', input_schema: { type: 'object', properties: {} } },
-  ], 'a tool is name/description/input_schema')
+    { name: 'bash', description: 'run a command', input_schema: { type: 'object', properties: {} }, cache_control: { type: 'ephemeral' } },
+  ], 'a tool is name/description/input_schema, the last one marked for caching (#70)')
 })
 
 test('a missing project or region is refused by name rather than sent as a broken URL', () => {

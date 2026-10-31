@@ -244,7 +244,7 @@ export function renderSource(path: string, text: string): Rendered {
    * broken marker.
    */
   if (decision.renderer === 'markdown') {
-    return { renderer: 'markdown', html: `<div class="markdown">${renderMarkdown(text, { base: dirname(path) })}</div>` }
+    return { renderer: 'markdown', html: `<div class="markdown">${renderMarkdown(text, { base: dirname(path), remoteImages: true })}</div>` }
   }
   if (decision.renderer === 'code' && decision.language !== undefined) {
     return { renderer: 'code', language: decision.language, html: renderCode(text, decision.language) }

@@ -77,6 +77,10 @@ pub fn run(invocation: &Invocation, out: &mut output::Output<'_>) -> Exit {
         out.out(&usage::usage(usage::SERVED));
         return Exit::Success;
     }
+    let mut args = args;
+    if let Err(exit) = use_default_profile(&mut args, invocation, out) {
+        return exit;
+    }
     if let Some(template) = &args.from_default_profile {
         // DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of
         // a shipped template, then the command boots it as usual. A profile named by a directory is not one this can
@@ -88,8 +92,7 @@ pub fn run(invocation: &Invocation, out: &mut output::Output<'_>) -> Exit {
         else {
             return out.fail("--from-default-profile needs --profile <name>, a profile under $HEDDLE_HOME/profiles");
         };
-        let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let checkout = checkout.canonicalize().unwrap_or(checkout);
+        let checkout = shipped_checkout();
         if let Err(error) =
             heddle_config::reset_profile_from_template(name, template, &checkout, &invocation.env)
         {
@@ -100,4 +103,59 @@ pub fn run(invocation: &Invocation, out: &mut output::Output<'_>) -> Exit {
         ));
     }
     commands::dispatch(&args, invocation, out)
+}
+
+/// The checkout this binary was built from, whose tree is the shipped `default` template.
+fn shipped_checkout() -> std::path::PathBuf {
+    let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    checkout.canonicalize().unwrap_or(checkout)
+}
+
+/// The profile a run boots when it names none (issue #74), as `useDefaultProfile` in `src/cli.ts`.
+///
+/// A run that boots (`web`, a command, or a `--turn`) and names no profile, no `--config` and no `--patch`, from a
+/// folder with no project tree (`cordis.yml`), used to boot nothing: on a fresh home the page had no session, model or
+/// workspace service, and `--session-root` failed outright (its patch named a row no layer inserted). DSH
+/// auto-initializes its shipped profiles from their templates on first use; such a run boots
+/// `$HEDDLE_HOME/profiles/default`, created from the shipped template the first time, and says so on stderr. A profile
+/// a person already keeps under that name is booted as it is. `profiles` lists what exists and creates nothing.
+fn use_default_profile(
+    args: &mut cli::Args,
+    invocation: &Invocation,
+    out: &mut output::Output<'_>,
+) -> Result<(), Exit> {
+    if args.profile.is_some() || args.config.is_some() || !args.patch.is_empty() {
+        return Ok(());
+    }
+    // `--from-default-profile` replaces a profile, so it must name one: the check after this refuses it without
+    // `--profile`. Choosing `default` here first would turn that refusal into a reset of the default profile.
+    if args.from_default_profile.is_some() {
+        return Ok(());
+    }
+    if args.command.is_none() && args.turn.is_none() {
+        return Ok(());
+    }
+    if args.command == Some(cli::CommandWord::Profiles) {
+        return Ok(());
+    }
+    if invocation.cwd.join("cordis.yml").exists() {
+        return Ok(());
+    }
+    let dir = heddle_config::profiles_dir(&invocation.env).join("default");
+    if !dir.exists() {
+        if let Err(error) = heddle_config::reset_profile_from_template(
+            "default",
+            "default",
+            &shipped_checkout(),
+            &invocation.env,
+        ) {
+            return Err(out.fail(&error.problems().join("; ")));
+        }
+        out.err(&format!(
+            "heddle: created profile 'default' from the shipped template at {}\n",
+            dir.display()
+        ));
+    }
+    args.profile = Some("default".to_owned());
+    Ok(())
 }

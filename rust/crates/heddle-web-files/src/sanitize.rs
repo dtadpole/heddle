@@ -83,6 +83,115 @@ pub struct UrlSite<'a> {
     pub attribute: &'a str,
 }
 
+/// The character for each named reference whose character is ASCII (HTML's table), plus the no-break space: the
+/// TypeScript sanitizer's `ASCII_NAMED`. A URL's scheme and the characters a browser strips from it are ASCII, so a
+/// name left undecoded stands for a character beyond ASCII, which can neither spell a scheme nor end one.
+fn ascii_named(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Tab" => "\t",
+        "NewLine" => "\n",
+        "excl" => "!",
+        "quot" | "QUOT" => "\"",
+        "num" => "#",
+        "dollar" => "$",
+        "percnt" => "%",
+        "amp" | "AMP" => "&",
+        "apos" => "'",
+        "lpar" => "(",
+        "rpar" => ")",
+        "ast" | "midast" => "*",
+        "plus" => "+",
+        "comma" => ",",
+        "period" => ".",
+        "sol" => "/",
+        "colon" => ":",
+        "semi" => ";",
+        "lt" | "LT" => "<",
+        "equals" => "=",
+        "gt" | "GT" => ">",
+        "quest" => "?",
+        "commat" => "@",
+        "lsqb" | "lbrack" => "[",
+        "bsol" => "\\",
+        "rsqb" | "rbrack" => "]",
+        "Hat" => "^",
+        "lowbar" | "UnderBar" => "_",
+        "grave" | "DiacriticalGrave" => "`",
+        "lcub" | "lbrace" => "{",
+        "verbar" | "vert" | "VerticalLine" => "|",
+        "rcub" | "rbrace" => "}",
+        "nbsp" | "NonBreakingSpace" => "\u{a0}",
+        _ => return None,
+    })
+}
+
+/// An attribute value as a browser reads it: numeric references (`&#106;`, `&#x6A`, with or without the `;`) and
+/// the named references in [`ascii_named`], decoded in one pass, as HTML decodes them; the same decisions as the
+/// TypeScript `decodeCharacterReferences`.
+///
+/// The URL policy used to be handed the value **as written**, so `<a href="&#x6A;avascript:alert(1)">` looked like
+/// a relative path to it and reached the page unchanged, where the browser decoded it into `javascript:alert(1)`.
+/// `java&#x09;script:`, `javascript&colon;` and `&#x64;ata:` went the same way (live issue developer-two-6).
+pub fn decode_character_references(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0usize;
+    while index < value.len() {
+        if bytes[index] != b'&' {
+            let next = value[index..]
+                .find('&')
+                .map_or(value.len(), |at| index + at);
+            out.push_str(&value[index..next]);
+            index = next;
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'#') {
+            let hex = matches!(bytes.get(index + 2), Some(b'x' | b'X'));
+            let start = index + if hex { 3 } else { 2 };
+            let mut end = start;
+            while end < bytes.len()
+                && if hex {
+                    bytes[end].is_ascii_hexdigit()
+                } else {
+                    bytes[end].is_ascii_digit()
+                }
+            {
+                end += 1;
+            }
+            if end > start {
+                let code = u32::from_str_radix(&value[start..end], if hex { 16 } else { 10 }).ok();
+                let character = code
+                    .filter(|code| *code != 0)
+                    .and_then(char::from_u32)
+                    .unwrap_or('\u{fffd}');
+                out.push(character);
+                index = if bytes.get(end) == Some(&b';') {
+                    end + 1
+                } else {
+                    end
+                };
+                continue;
+            }
+        } else if bytes.get(index + 1).is_some_and(u8::is_ascii_alphabetic) {
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_alphanumeric() {
+                end += 1;
+            }
+            if bytes.get(end) == Some(&b';')
+                && let Some(character) = ascii_named(&value[start..end])
+            {
+                out.push_str(character);
+                index = end + 1;
+                continue;
+            }
+        }
+        out.push('&');
+        index += 1;
+    }
+    out
+}
+
 /// A URL policy: the value to write, or `None` to drop the attribute.
 pub type UrlPolicy<'p> = &'p dyn Fn(&str, UrlSite<'_>) -> Option<String>;
 
@@ -186,10 +295,14 @@ pub fn sanitize_html(html: &str, options: SanitizeOptions<'_>) -> String {
                 continue;
             }
             if URL_ATTRIBUTES.contains(&attribute.name.as_str()) {
+                // The URL is judged **decoded**, as the browser will read it. When the decision keeps it as it
+                // is, the value is written back as it was given, references and all: the browser decodes it into
+                // exactly what was judged. When the decision rewrote it, the new value is escaped whole.
+                let decoded = decode_character_references(&attribute.value);
                 let decided = match options.url {
-                    None => Some(attribute.value),
+                    None => Some(decoded.clone()),
                     Some(policy) => policy(
-                        &attribute.value,
+                        &decoded,
                         UrlSite {
                             tag: &name,
                             attribute: &attribute.name,
@@ -197,11 +310,12 @@ pub fn sanitize_html(html: &str, options: SanitizeOptions<'_>) -> String {
                     ),
                 };
                 let Some(decided) = decided else { continue };
-                attributes.push(format!(
-                    "{}=\"{}\"",
-                    attribute.name,
-                    decided.replace('"', "&quot;")
-                ));
+                let written = if decided == decoded {
+                    attribute.value.replace('"', "&quot;")
+                } else {
+                    decided.replace('&', "&amp;").replace('"', "&quot;")
+                };
+                attributes.push(format!("{}=\"{written}\"", attribute.name));
                 continue;
             }
             if attribute.value.is_empty() {

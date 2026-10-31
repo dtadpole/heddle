@@ -47,7 +47,7 @@ pub mod tool;
 pub use driver::{
     DriverOutcome, DriverRun, DriverTrigger, GoalDriver, GoalRoundSource, NO_RUNTIME_SENTENCE,
     QUEUE_FAILED_CODE, ROUND_LIMIT_CODE, ResumeReport, RoundDecision, RoundRunner, SessionEdge,
-    classify_session_event, decide_goal_round, render_goal_round_prompt,
+    TurnEnd, classify_session_event, decide_goal_round, render_goal_round_prompt, turn_end_of,
 };
 pub use log::{Clock, LogError, SessionLog, SystemClock, iso_timestamp};
 pub use service::{
