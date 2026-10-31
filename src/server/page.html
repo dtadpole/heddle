@@ -2713,6 +2713,8 @@
   .tr-tick[data-lane='model'] { background: color-mix(in oklab, #8b5cf6 55%, transparent); }
   .tr-tick[data-lane='tools'] { background: color-mix(in oklab, #b7791f 65%, transparent); }
   .tr-tick[data-running='true'] { opacity: .55; }
+  /** An answer's bar splits at its TTFT, as DSH's does: the wait for the first token lighter, the decoding darker. */
+  .tr-tick[data-split='true'] { background: linear-gradient(to right, color-mix(in oklab, #8b5cf6 25%, transparent) 0 var(--ttft), color-mix(in oklab, #8b5cf6 75%, transparent) var(--ttft) 100%); }
   .tr-tick:hover, .tr-tick[aria-current='true'] { outline: 1px solid var(--text-3); }
   .tr-focus {
     position: absolute;
@@ -6379,6 +6381,53 @@ function timelineTickText(span, totalMs, startsAtMs) {
 }
 /* timeline-tip:end */
 
+/* overview-bars:begin */
+/**
+ * The overview's bars, as DSH's overview draws them: one per timed record, in its lane (S151, R-developer-eleven-21).
+ * A turn's records in one lane are drawn one by one when they are few and each is at least a pixel wide; otherwise they
+ * merge into one bar for that turn and lane, so a long session stays a few hundred nodes, not thousands. A bar carries
+ * the TTFT split only when the record does (the projections give it only when 0 <= ttftMs <= durationMs). Pure, and
+ * fenced so test/page-overview-bars.test.ts judges it.
+ */
+function overviewBars(records, trackPx) {
+  const width = trackPx > 0 ? trackPx : 1000
+  const groups = new Map()
+  for (const record of records) {
+    const key = record.turn + '|' + record.lane
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(record)
+  }
+  const bars = []
+  for (const group of groups.values()) {
+    const drawable = group.length <= 12 && group.every((record) => (record.end - record.start) * width >= 1)
+    if (drawable) {
+      for (const record of group) bars.push({ ...record, kinds: [record.kind], merged: 1 })
+      continue
+    }
+    const first = group[0]
+    bars.push({
+      turn: first.turn,
+      lane: first.lane,
+      kinds: [...new Set(group.map((record) => record.kind))],
+      start: Math.min(...group.map((record) => record.start)),
+      end: Math.max(...group.map((record) => record.end)),
+      running: group.some((record) => record.running),
+      merged: group.length,
+    })
+  }
+  return bars
+}
+
+/** A bar's words: the tick's label and clock, then the TTFT split when it has one, or how many records it merges. */
+function timelineRecordText(bar, totalMs, startsAtMs) {
+  const text = timelineTickText(bar, totalMs, startsAtMs)
+  const label = bar.merged > 1 ? text.label + ' · ' + bar.merged + ' records' : text.label
+  const ms = (value) => (value < 1000 ? Math.round(value) + ' ms' : (value / 1000).toFixed(value < 10_000 ? 2 : 1) + ' s')
+  const split = bar.ttftMs !== undefined && bar.decodingMs !== undefined ? ' · TTFT ' + ms(bar.ttftMs) + ' · decoding ' + ms(bar.decodingMs) : ''
+  return { label, when: text.when + split }
+}
+/* overview-bars:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   timeline.replaceChildren()
@@ -6387,6 +6436,16 @@ function renderTimeline(timeline_, data = {}) {
   const total = timeline_?.durationMs ?? 0
   const startsAtMs = Date.parse(timeline_?.startsAt ?? '')
   const lanes = ['input', 'model', 'tools']
+  const records = timeline_?.records ?? []
+  /**
+   * DSH draws per-record bars in both modes: with actual durations each bar sits on its recorded time; in the default
+   * equal mode each record takes one equal slot along the axis, in record order. An answer without records (an older
+   * server) keeps one tick per turn.
+   */
+  const placed = trajectory.durationActual
+    ? records
+    : records.map((record, index) => ({ ...record, start: index / records.length, end: (index + 0.9) / records.length }))
+  const bars = records.length > 0 ? overviewBars(placed, timeline.clientWidth) : null
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
   const focusBox = document.createElement('div')
@@ -6402,6 +6461,37 @@ function renderTimeline(timeline_, data = {}) {
     label.textContent = lane
     const track = document.createElement('div')
     track.className = 'tr-lane-track'
+    /**
+     * With per-record data, the lane draws DSH's per-record bars; an answer from a server without records keeps one tick
+     * per turn. Bars are buttons like ticks, so Tab reaches them and Enter picks their turn; their listeners are the
+     * strip's own, below.
+     */
+    if (bars !== null) {
+      for (const bar of bars) {
+        if (bar.lane !== lane) continue
+        const element = document.createElement('button')
+        element.type = 'button'
+        element.className = 'tr-tick tr-bar'
+        element.dataset.lane = lane
+        element.dataset.turn = String(bar.turn)
+        element.dataset.kind = bar.kinds.join(' ')
+        element.style.left = (bar.start * 100).toFixed(3) + '%'
+        element.style.width = (Math.max(bar.end - bar.start, 0.004) * 100).toFixed(3) + '%'
+        if (bar.running) element.dataset.running = 'true'
+        if (bar.ttftMs !== undefined && bar.decodingMs !== undefined && bar.ttftMs + bar.decodingMs > 0) {
+          element.dataset.split = 'true'
+          element.style.setProperty('--ttft', ((bar.ttftMs / (bar.ttftMs + bar.decodingMs)) * 100).toFixed(1) + '%')
+        }
+        const text = timelineRecordText(bar, total, startsAtMs)
+        element.dataset.tipLabel = text.label
+        element.dataset.tipWhen = text.when
+        element.setAttribute('aria-label', text.label + ' · ' + text.when)
+        track.append(element)
+      }
+      laneBox.append(label, track)
+      wrapper.append(laneBox)
+      continue
+    }
     spans.forEach((span, index) => {
       const kinds = span.kinds ?? []
       if (!(span.lanes ?? []).includes(lane)) return
@@ -6422,11 +6512,7 @@ function renderTimeline(timeline_, data = {}) {
       tick.dataset.tipLabel = text.label
       tick.dataset.tipWhen = text.when
       tick.setAttribute('aria-label', text.label + ' · ' + text.when)
-      tick.addEventListener('click', (clickEvent) => {
-        clickEvent.stopPropagation()
-        const anchor = turnAnchors.get(span.turn)
-        if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-      })
+      tick.dataset.turn = String(span.turn)
       track.append(tick)
     })
     laneBox.append(label, track)
@@ -6444,21 +6530,38 @@ function renderTimeline(timeline_, data = {}) {
     tipTimer = null
     tip.hidden = true
   }
-  for (const tick of wrapper.querySelectorAll('.tr-tick')) {
-    tick.addEventListener('pointerenter', () => {
-      hideTip()
-      tipTimer = setTimeout(() => {
-        tipTimer = null
-        tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
-        const strip = timeline.getBoundingClientRect()
-        const at = tick.getBoundingClientRect()
-        tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
-        tip.hidden = false
-      }, 500)
-    })
-    tick.addEventListener('pointerleave', hideTip)
-    tick.addEventListener('pointerdown', hideTip)
-  }
+  /**
+   * One set of listeners for the whole strip (developer-ten's condition 1): a bar or tick picks its turn, and 500 ms of
+   * hovering one shows its tip. Delegated, so a session of hundreds of bars adds no listener per bar.
+   */
+  const tickOf = (target) => target?.closest?.('.tr-tick') ?? null
+  wrapper.addEventListener('click', (clickEvent) => {
+    const tick = tickOf(clickEvent.target)
+    if (tick === null) return
+    clickEvent.stopPropagation()
+    const anchor = turnAnchors.get(Number(tick.dataset.turn))
+    if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+  /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
+  wrapper.addEventListener('pointerenter', (pointerEvent) => {
+    const tick = pointerEvent.target?.classList?.contains('tr-tick') ? pointerEvent.target : null
+    if (tick === null) return
+    hideTip()
+    tipTimer = setTimeout(() => {
+      tipTimer = null
+      tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+      const strip = timeline.getBoundingClientRect()
+      const at = tick.getBoundingClientRect()
+      tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
+      tip.hidden = false
+    }, 500)
+  }, true)
+  wrapper.addEventListener('pointerleave', (pointerEvent) => {
+    if (pointerEvent.target?.classList?.contains('tr-tick')) hideTip()
+  }, true)
+  wrapper.addEventListener('pointerdown', (pointerEvent) => {
+    if (tickOf(pointerEvent.target) !== null) hideTip()
+  })
   /** Drag across the strip to focus a time window; rows outside it dim, as DSH does. */
   let dragging = false
   let startX = 0
