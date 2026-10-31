@@ -182,11 +182,6 @@ pub fn resolve_endpoint(requested: Option<&str>, models: &ModelService) -> Resul
     heddle_llm::command::turn_endpoint(requested, &models.names(), models.nominated().as_deref())
 }
 
-/// The prompt's first sixty characters, the title a new session is given.
-fn title_of(prompt: &str) -> String {
-    prompt.chars().take(60).collect()
-}
-
 async fn turn(
     args: &Args,
     context: &Context<'_>,
@@ -220,7 +215,9 @@ async fn turn(
 
     let endpoint = resolve_endpoint(args.endpoint.as_deref(), context.models)?;
 
-    // A turn asks this folder's session; `--resume` addresses one by id from anywhere.
+    // A turn asks this folder's session; `--resume` addresses one by id from anywhere. A new session is born
+    // untitled, as the turn route's is (#68): its first message writes the fallback name and the session layer asks
+    // the model for the title (heddle_session::title).
     let folder = context.cwd.to_string_lossy().into_owned();
     let handle = match &args.resume {
         Some(resume) => context.sessions.start(StartOptions {
@@ -233,7 +230,6 @@ async fn turn(
                 fresh: args.fresh,
                 endpoint: Some(endpoint.clone()),
                 model: args.model.clone(),
-                title: Some(title_of(prompt)),
                 ..OpenAtOptions::default()
             },
         ),
@@ -821,10 +817,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_new_sessions_title_is_the_prompts_first_sixty_characters() {
-        assert_eq!(title_of("short"), "short");
-        assert_eq!(title_of(&"é".repeat(70)).chars().count(), 60);
+    /// A title model that answers at once, as the scripted endpoint's `session-title` step would, or fails.
+    struct AnsweringTitles(Result<&'static str, &'static str>);
+
+    impl heddle_session::TitleModel for AnsweringTitles {
+        fn generate(&self, request: heddle_llm::GenerateRequest, done: heddle_session::TitleDone) {
+            assert_eq!(
+                request.purpose.as_deref(),
+                Some(heddle_session::SESSION_TITLE_PURPOSE)
+            );
+            done(match self.0 {
+                Ok(text) => Ok(heddle_session::TitleAnswer {
+                    text: text.to_owned(),
+                    finish_reason: "stop".to_owned(),
+                    tool_calls: 0,
+                }),
+                Err(message) => Err(message.to_owned()),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_session_is_titled_from_its_first_prompt_as_a_blank_one_is() {
+        // #68: DSH writes no title when a session is created; dsh-session-title writes the fallback from the first
+        // eligible human message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session
+        // with no title yet (:387). `--turn` opened its session titled with the prompt's first sixty characters, so the
+        // coordinator saw a named session and asked nothing.
+        const PROMPT: &str = "Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.";
+        let titled = harness("title", json!([{ "text": "an answer" }]), &[]);
+        titled.sessions.attach_titles(Arc::new(AnsweringTitles(Ok(
+            "**Northern revenue year on year**",
+        ))));
+        let (code, out, err) = titled
+            .run(&Args {
+                fresh: true,
+                ..turn(PROMPT)
+            })
+            .await;
+        assert_eq!(code, 0, "{out}{err}");
+        let meta = &titled.sessions.list()[0];
+        assert_eq!(
+            meta.title(),
+            Some("Northern revenue year on year"),
+            "the generated title replaced the fallback"
+        );
+
+        let failed = harness("title-failed", json!([{ "text": "an answer" }]), &[]);
+        failed
+            .sessions
+            .attach_titles(Arc::new(AnsweringTitles(Err("the title model is down"))));
+        let (code, _, _) = failed
+            .run(&Args {
+                fresh: true,
+                ..turn(PROMPT)
+            })
+            .await;
+        assert_eq!(code, 0);
+        let title = failed.sessions.list()[0].title().map(str::to_owned);
+        assert_eq!(
+            title.as_deref(),
+            Some(heddle_session::title_from(PROMPT).as_str()),
+            "a failed call leaves the fallback the first message wrote, cut at a word"
+        );
+        assert_ne!(
+            title,
+            Some(PROMPT.chars().take(60).collect::<String>()),
+            "not the prompt cut mid-word at sixty characters"
+        );
     }
 
     /// A writer whose bytes the test can read after the view wrote them.

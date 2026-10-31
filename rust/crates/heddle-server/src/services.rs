@@ -105,7 +105,8 @@ pub struct StartSession {
     pub resume: Option<String>,
     /// Start a fresh session here (the server's working directory).
     pub cwd: Option<PathBuf>,
-    /// The first 60 characters of the prompt.
+    /// A name for a session this request creates. The turn route gives none (#68): a new session is born untitled,
+    /// and its first message writes the fallback name the session layer's title coordinator replaces.
     pub title: Option<String>,
     /// What a session created by this request is born with.
     pub selection: SessionSelection,
