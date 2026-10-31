@@ -448,6 +448,9 @@ fn with_live_rows(
         .services
         .get::<Arc<heddle_config::ModelRowSource>>("model-row")
         .map(|source| (rows_of(crate::builtins::Builtin::Model), source));
+    // The row's default selection (A104) is the model service's own, read once at start; a live write carries it
+    // there too, as the TypeScript build's re-created model plugin does.
+    let model_service = boot.services.get::<Arc<heddle_llm::ModelService>>("model");
     let locale = boot
         .services
         .get::<Arc<heddle_config::LiveLocale>>("locale")
@@ -466,7 +469,17 @@ fn with_live_rows(
             if let Some((ids, source)) = &model
                 && ids.iter().any(|id| id == ns)
             {
-                return source.set_row_config(config);
+                source.set_row_config(config)?;
+                if let Some(service) = &model_service {
+                    let text = |key: &str| {
+                        config
+                            .get(key)
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned)
+                    };
+                    service.set_defaults(text("defaultModel"), text("defaultEffort"));
+                }
+                return Ok(());
             }
             if let Some((ids, live)) = &locale
                 && ids.iter().any(|id| id == ns)
@@ -1720,6 +1733,15 @@ mod tests {
             env.clone(),
         ));
         boot.services.provide("model-row", Arc::clone(&source));
+        let composed = source.compose().unwrap();
+        let models = Arc::new(
+            heddle_llm::ModelService::from_configuration(
+                composed.endpoints,
+                composed.nominated.as_deref(),
+            )
+            .unwrap(),
+        );
+        boot.services.provide("model", Arc::clone(&models));
         let locale = Arc::new(heddle_config::LiveLocale::default());
         boot.services.provide("locale", Arc::clone(&locale));
         let catalog = crate::builtins::BuiltinCatalog::new(env.clone(), root.clone());
@@ -1738,12 +1760,23 @@ mod tests {
         assert_eq!(applies("model").as_deref(), Some("live"));
         assert_eq!(applies("tools").as_deref(), Some("restart"));
         assert_eq!(source.compose().unwrap().nominated.as_deref(), Some("one"));
+        assert_eq!(
+            models.default_selection().model,
+            None,
+            "no default model is configured yet"
+        );
         let mut fields = serde_json::Map::new();
         fields.insert("default".to_owned(), serde_json::json!("two"));
+        fields.insert("defaultModel".to_owned(), serde_json::json!("m"));
         let entry = service
             .write("model", &heddle_config::SettingsWrite::Update(fields), None)
             .unwrap();
         assert_eq!(entry.apply_error, None);
+        assert_eq!(
+            models.default_selection().model.as_deref(),
+            Some("m"),
+            "the written default model is the next new session's, with no restart (A104)"
+        );
         let changed = source
             .changed()
             .expect("the write reached the source")
