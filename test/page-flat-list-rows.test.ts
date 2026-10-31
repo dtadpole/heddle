@@ -84,6 +84,8 @@ async function draw(sessions: object[]): Promise<Drawn> {
     const loadSearchIndex = async () => ({ sessions: SESSIONS, roots: [] })
     const kindIcon = () => new Element('svg')
     const workspaceOf = () => null
+    /** Main's In one list names a row's nearest registered workspace through workspaceNamer(index) (#57); no names here. */
+    const workspaceNamer = () => workspaceOf
     const relativeAge = () => '1d'
     const showSession = async (id) => { opened.push(id); return true }
     const notifyArchivedNotOpenable = () => { notified += 1 }
