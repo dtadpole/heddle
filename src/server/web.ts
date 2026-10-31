@@ -29,6 +29,7 @@ import { readFileText, tree } from '../session/tree.ts'
 import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
@@ -1518,8 +1519,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Retitle a conversation — the `Rename…` item in a session's or an instance's menu.
    *
    * The session's own log is append-only and stays that way: this rewrites the meta record, which is
-   * what a listing and a tree row read. The title is a label rather than a fact about the run, and the
-   * empty string clears it.
+   * what a listing and a tree row read. The title is a label rather than a fact about the run; the store
+   * cleans it as DSH does, and a title with nothing visible left is refused (`400 session/title-invalid`).
    *
    * `folder` is the session's **definition** folder when the caller knows it, and it is why one rename
    * reaches both halves: the store holds the label this UI reads, while the definition is the record a
@@ -1535,6 +1536,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     if (body === null) return
     if (typeof body.title !== 'string') {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a title is required' })}\n`)
+      return
+    }
+    /**
+     * A title with nothing visible left once cleaned is **refused**, as DSH's rename refuses it (`dsh-session-title`
+     * `rename`, lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838, `session/title-invalid`). The store
+     * cleans what it accepts (`src/session/title-text.ts`). Measured before: three spaces cleared the title with a 200.
+     * An unknown session is still a `404` first, as DSH resolves the session before it judges the title.
+     */
+    if (normalizeSessionTitle(body.title).length === 0) {
+      if (!ctx.session.list().some((meta) => meta.id === id)) {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+        return
+      }
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: TITLE_INVALID.message, code: TITLE_INVALID.code })}\n`)
       return
     }
     const folder = typeof body.folder === 'string' && body.folder.length > 0 ? canonicalPath(body.folder) : undefined
