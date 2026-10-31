@@ -636,3 +636,40 @@ test('a record carries the TTFT split only when its TTFT lies within its duratio
   assert.deepEqual(split, [[undefined, undefined], [100, 300], [undefined, undefined]], 'a TTFT past its duration, or none, is one plain bar')
 })
 
+
+/** The shared Between turns fixture: the same events the Rust crate's `between_turns.rs` reads, and the rows both builds place. */
+const betweenEvents = (): LedgerEvent[] =>
+  readFileSync(new URL('between-turns.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+
+test('a record between turns sits where it happened, in its own section, the same as the Rust projection (shared fixture)', () => {
+  /**
+   * DSH: "A standalone compaction request appears chronologically in its own `Between turns` section." Both builds listed
+   * every loose record after the last turn, with no section head, so a /compact between turns 1 and 2 read as if it had
+   * run after turn 2.
+   */
+  const expected = JSON.parse(readFileSync(new URL('between-turns.expected.json', timelineFixture), 'utf8'))
+  const placed = projectRows(projectLedger(betweenEvents())).map((row) => ({
+    turn: row.turn,
+    ...(row.step !== undefined ? { step: row.step } : {}),
+    loose: row.loose,
+    turnStart: row.turnStart,
+    stepStart: row.stepStart,
+    label: row.record.label,
+    ...(row.record.afterTurn !== undefined ? { afterTurn: row.record.afterTurn } : {}),
+  }))
+  assert.deepEqual(placed, expected)
+})
+
+test('only a loose record names the turn it follows, and a hand-built one without it follows the last turn', () => {
+  const ledger = projectLedger(betweenEvents())
+  assert.ok(
+    ledger.turns.flatMap((turn) => turn.steps.flatMap((step) => step.records)).every((record) => record.afterTurn === undefined),
+    'a record inside a turn needs no placement',
+  )
+  const rows = projectRows({ ...ledger, loose: [...ledger.loose, { kind: 'system', label: 'note', text: 'kept' }] })
+  const last = rows.at(-1)
+  assert.deepEqual([last?.loose, last?.turnStart, last?.record.label], [true, false, 'note'], 'it joins the section after the last turn, not dropped')
+})
