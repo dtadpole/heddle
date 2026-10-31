@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
-import { dirname, join, relative } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
 import { killProcessGroup } from '../sandbox/process-group.ts'
@@ -45,6 +45,16 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
         'Required with sandbox_permissions: one sentence for the user explaining why this exact operation needs the wider access. Use the language of the user’s current request.',
     },
   }
+}
+
+/**
+ * DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and normalised
+ * unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model can tell which
+ * of several reads failed (live-testing issue #4: the Rust build named no file at all).
+ */
+export function displayPath(cwd: string, path: string): string {
+  const raw = isAbsolute(path) ? path : `${cwd}${sep}${path}`
+  return /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(raw) ? raw : resolve(cwd, path)
 }
 
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
@@ -125,6 +135,18 @@ export function builtinTools(
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
+      /**
+       * A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
+       * `resolveRegularReadTarget`): `FS_NOT_FOUND` and `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …`, not the
+       * platform's raw error (live-testing issue #4).
+       */
+      const shown = displayPath(context.cwd, path)
+      const info = await stat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+        throw error
+      })
+      if (info === undefined) return { output: '', error: { code: 'FS_NOT_FOUND', message: `cannot read "${shown}": not found` } }
+      if (!info.isFile()) return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot read "${shown}": not a regular file` } }
       // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
       const text = await readFileText(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
