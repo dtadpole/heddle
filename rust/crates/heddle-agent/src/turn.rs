@@ -281,6 +281,16 @@ pub fn begin_turn(runtime: &AgentRuntime, options: RunTurnOptions) -> Result<Beg
         .turns
         .as_ref()
         .map(|turns| turns.begin(&options.session.id, options.cancel.as_ref()));
+    begin_registered(runtime, options, live)
+}
+
+/// [`begin_turn`] with the registration already made: at once by `begin_turn`, or after the session's queue by
+/// [`run_turn`].
+fn begin_registered(
+    runtime: &AgentRuntime,
+    options: RunTurnOptions,
+    live: Option<crate::turns::LiveTurn>,
+) -> Result<BegunTurn, TurnError> {
     let cancel = match (&live, &options.cancel) {
         (Some(live), _) => Some(live.token().clone()),
         (None, Some(caller)) => Some(caller.clone()),
@@ -329,7 +339,18 @@ pub async fn run_turn(
     runtime: &AgentRuntime,
     options: RunTurnOptions,
 ) -> Result<TurnResult, TurnError> {
-    begin_turn(runtime, options)?.run().await
+    // One turn at a time per session (#28): a turn sent to a busy session waits for the running one, as DSH's
+    // follow-up does. `begin_turn` keeps registering at once, for a caller that needs the prompt durable before
+    // it polls anything and starts turns only on idle sessions.
+    let live = match runtime.turns.as_ref() {
+        Some(turns) => Some(
+            turns
+                .begin_queued(&options.session.id, options.cancel.as_ref())
+                .await,
+        ),
+        None => None,
+    };
+    begin_registered(runtime, options, live)?.run().await
 }
 
 /// One turn's body, after [`begin_turn`] wrote the prompt.
