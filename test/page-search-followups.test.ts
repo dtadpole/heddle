@@ -17,6 +17,7 @@ import { test } from 'node:test'
  * - N4: a one-column list that could not read the sessions still ends its redraw: the held keyboard place is let go.
  * - N5: the archive notice's "filter archived sessions" redraws a standing search under the filter it switched to.
  * - #151: a redraw of the hits keeps each hit's element (DSH's keyed list), so a press that straddles it still lands.
+ * - M1: a read the refresh overtook shares the read in flight for the newer list instead of starting another.
  */
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
@@ -581,6 +582,46 @@ test('N5: "filter archived sessions" in the archive notice redraws a standing se
   await filter.listeners.get('click')!()
   assert.equal(page.mode(), 'show', 'the filter now shows archived sessions')
   assert.deepEqual(log, ['remember show', 'renderTree show', 'applySearch show'], 'the tree is redrawn, then the search, both under the new filter')
+})
+
+test('M1: a read the refresh overtook shares the read in flight for the newer list, and no third set of requests starts', async () => {
+  const network = heldNetwork()
+  const noted: Meta[][] = []
+  const { run } = searchPage(network.fetch, noted)
+  const asked = (url: string) => network.waiting().filter((waiting) => waiting === url).length
+
+  /** L1 reads the index; a refresh makes it stale; L2, the next keystroke, reads the newer list. */
+  const first = run.loadSearchIndex()
+  await tick()
+  const refresh = run.refreshSessions()
+  await tick()
+  network.release('/api/sessions', answer(null, 500), true)
+  await refresh
+  const second = run.loadSearchIndex()
+  await tick()
+  assert.equal(asked('/api/tree'), 2, 'two reads are out: L1, from before the refresh, and L2')
+
+  /** L1 lands, stale, while L2 is still out: it waits for L2 rather than asking a third time. */
+  answerRead(network, before)
+  await tick()
+  assert.equal(asked('/api/tree'), 1, `L1 asked nothing more; only L2 is still out\nwaiting: ${JSON.stringify(network.waiting())}`)
+  answerRead(network, after)
+  const [late, fresh] = await Promise.all([first, second])
+  assert.equal(archivedIn(fresh), true, 'L2 answers the newer list')
+  assert.equal(late, fresh, 'and L1 answers the same index, not one of its own')
+  assert.deepEqual(network.waiting(), [], 'nothing is left waiting')
+
+  /** Two keystrokes in one refresh share one read too. */
+  const refreshAgain = run.refreshSessions()
+  await tick()
+  network.release('/api/sessions', answer(null, 500), true)
+  await refreshAgain
+  const third = run.loadSearchIndex()
+  const fourth = run.loadSearchIndex()
+  await tick()
+  assert.equal(asked('/api/tree'), 1, 'one read for both')
+  answerRead(network, after)
+  assert.equal(await third, await fourth)
 })
 
 /**

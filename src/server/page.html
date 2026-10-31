@@ -17267,29 +17267,50 @@ function treeIndex() {
   return sessions.length === 0 ? null : { sessions, roots: heldIndex?.roots ?? [], workspaces }
 }
 
+/**
+ * The index read in flight and the refresh it belongs to, `{ epoch, promise }`, or `null`. Every caller of one refresh
+ * shares it (M1): two keystrokes before the first read lands, and a read the refresh overtook, which used to start a
+ * third set of requests while the newer read was still out.
+ */
+let searchIndexRead = null
+
 async function loadSearchIndex() {
   if (searchIndex !== null) return searchIndex
+  if (searchIndexRead !== null && searchIndexRead.epoch === searchEpoch) return searchIndexRead.promise
   const epoch = searchEpoch
   /** A body, `null` for an answer that is not 2xx, `undefined` for a request that got no answer. */
   const read = (url) => fetch(url).then((response) => (response.ok ? response.json() : null)).catch(() => undefined)
-  const [sessions, treeBody, workspaceBody] = await Promise.all([read('/api/sessions'), read('/api/tree'), read('/api/workspaces')])
-  /** A refresh came while this read was out: it keeps nothing, and answers the newer index, read again if none landed. */
-  if (epoch !== searchEpoch) return searchIndex ?? loadSearchIndex()
-  if (!Array.isArray(sessions) || treeBody === undefined || workspaceBody === undefined) return treeIndex() ?? heldIndex
-  searchIndex = {
+  const reading = (async () => {
+    const [sessions, treeBody, workspaceBody] = await Promise.all([read('/api/sessions'), read('/api/tree'), read('/api/workspaces')])
     /**
-     * Only the sessions the sidebar lists: the search and the one-column list both read this, and DSH hides a subagent's
-     * child from both, as from the tree (`SessionRules.sidebarSessions`). Phase A measured the two listing a delegated
-     * child the tree hides (R-developer-eight-1, -26).
+     * A refresh came while this read was out: it keeps nothing, and answers the newer index — or shares the newer read
+     * still in flight (M1), else reads again.
      */
-    sessions: SessionRules.sidebarSessions(sessions),
-    roots: (treeBody?.children ?? []).map((node) => ({ path: node.path, title: node.label })),
-    workspaces: Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : [],
+    if (epoch !== searchEpoch) return searchIndex ?? loadSearchIndex()
+    if (!Array.isArray(sessions) || treeBody === undefined || workspaceBody === undefined) return treeIndex() ?? heldIndex
+    searchIndex = {
+      /**
+       * Only the sessions the sidebar lists: the search and the one-column list both read this, and DSH hides a subagent's
+       * child from both, as from the tree (`SessionRules.sidebarSessions`). Phase A measured the two listing a delegated
+       * child the tree hides (R-developer-eight-1, -26).
+       */
+      sessions: SessionRules.sidebarSessions(sessions),
+      roots: (treeBody?.children ?? []).map((node) => ({ path: node.path, title: node.label })),
+      workspaces: Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : [],
+    }
+    heldIndex = searchIndex
+    /** Every listed session, a subagent's child included: the header follows the open session's title whatever it is. */
+    noteSessions(sessions)
+    return searchIndex
+  })()
+  const entry = { epoch, promise: reading }
+  searchIndexRead = entry
+  try {
+    return await reading
+  } finally {
+    /** A landed read is the index now, and a failed one is not kept (#58): the next search asks again. */
+    if (searchIndexRead === entry) searchIndexRead = null
   }
-  heldIndex = searchIndex
-  /** Every listed session, a subagent's child included: the header follows the open session's title whatever it is. */
-  noteSessions(sessions)
-  return searchIndex
 }
 
 /**
