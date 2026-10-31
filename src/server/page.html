@@ -2400,6 +2400,10 @@
   }
   #timeline:empty { display: none; }
   .tr-lanes { position: relative; }
+  /** An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration. */
+  #timeline-tip { position: absolute; top: calc(100% + .25rem); z-index: 5; display: flex; flex-direction: column; gap: .1rem; max-width: 220px; padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
+  #timeline-tip[hidden] { display: none; }
+  #timeline-tip span { font-family: var(--mono); opacity: .75; }
   .tr-lane { position: relative; height: 15px; }
   .tr-lane-label {
     position: absolute;
@@ -5085,12 +5089,35 @@ function timingSection(record, turn, step) {
   ])
 }
 
+/* timeline-tip:begin */
+/**
+ * What an overview tick says when hovered: its turn and kinds, then the clock it started at and how long it lasted
+ * (DSH's overview shows a span's exact clock and duration after a 500 ms hover). A running span shows only its start,
+ * because DSH's overview invents no elapsed time for work in flight. Positions are fractions of the timeline's domain,
+ * which starts at `startsAtMs` and lasts `totalMs`. Pure, and fenced so test/page-timeline-tip.test.ts judges it.
+ */
+function timelineTickText(span, totalMs, startsAtMs) {
+  const label = 'turn ' + span.turn + ' · ' + ((span.kinds ?? []).join(', ') || 'records')
+  const lasted = Math.max(0, (span.end - span.start) * totalMs)
+  const duration = lasted < 1000 ? Math.round(lasted) + ' ms' : lasted < 60_000 ? (lasted / 1000).toFixed(lasted < 10_000 ? 2 : 1) + ' s' : Math.floor(lasted / 60_000) + 'm ' + Math.round((lasted % 60_000) / 1000) + 's'
+  let clock = null
+  if (Number.isFinite(startsAtMs)) {
+    const at = new Date(startsAtMs + span.start * totalMs)
+    const two = (value) => String(value).padStart(2, '0')
+    clock = two(at.getHours()) + ':' + two(at.getMinutes()) + ':' + two(at.getSeconds()) + '.' + String(at.getMilliseconds()).padStart(3, '0')
+  }
+  const when = span.running ? [clock ?? 'start unknown', 'running'] : [clock, duration].filter((part) => part !== null)
+  return { label, when: when.join(' · ') }
+}
+/* timeline-tip:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   timeline.replaceChildren()
   const spans = timeline_?.spans ?? []
   if (spans.length === 0) return
   const total = timeline_?.durationMs ?? 0
+  const startsAtMs = Date.parse(timeline_?.startsAt ?? '')
   const lanes = ['input', 'model', 'tools']
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
@@ -5119,8 +5146,14 @@ function renderTimeline(timeline_, data = {}) {
       tick.style.left = (left * 100).toFixed(3) + '%'
       tick.style.width = (width * 100).toFixed(3) + '%'
       if (span.running) tick.dataset.running = 'true'
-      tick.title = 'turn ' + span.turn + ' · ' + (kinds.join(', ') || 'records')
-      tick.setAttribute('aria-label', tick.title)
+      /**
+       * The details wait for a 500 ms hover, as DSH's do, in the strip's own tip rather than a native title (which the
+       * browser shows on its own delay, with no clock); the same words are the tick's accessible name.
+       */
+      const text = timelineTickText(span, total, startsAtMs)
+      tick.dataset.tipLabel = text.label
+      tick.dataset.tipWhen = text.when
+      tick.setAttribute('aria-label', text.label + ' · ' + text.when)
       tick.addEventListener('click', (clickEvent) => {
         clickEvent.stopPropagation()
         const anchor = turnAnchors.get(span.turn)
@@ -5132,6 +5165,32 @@ function renderTimeline(timeline_, data = {}) {
     wrapper.append(laneBox)
   }
   timeline.append(wrapper)
+  /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
+  const tip = document.createElement('div')
+  tip.id = 'timeline-tip'
+  tip.hidden = true
+  timeline.append(tip)
+  let tipTimer = null
+  const hideTip = () => {
+    if (tipTimer !== null) clearTimeout(tipTimer)
+    tipTimer = null
+    tip.hidden = true
+  }
+  for (const tick of wrapper.querySelectorAll('.tr-tick')) {
+    tick.addEventListener('pointerenter', () => {
+      hideTip()
+      tipTimer = setTimeout(() => {
+        tipTimer = null
+        tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+        const strip = timeline.getBoundingClientRect()
+        const at = tick.getBoundingClientRect()
+        tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
+        tip.hidden = false
+      }, 500)
+    })
+    tick.addEventListener('pointerleave', hideTip)
+    tick.addEventListener('pointerdown', hideTip)
+  }
   /** Drag across the strip to focus a time window; rows outside it dim, as DSH does. */
   let dragging = false
   let startX = 0
