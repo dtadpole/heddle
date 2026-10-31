@@ -14,6 +14,7 @@ import type { CommandService } from '../commands/service.ts'
 import { handlePlanRequest } from '../plan/http.ts'
 import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
+import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
@@ -39,6 +40,7 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
+import { activitySessions, sessionActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
@@ -755,6 +757,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
+    return
+  }
+
+  /** highlight.js for the page's code blocks: see {@link highlightAsset}. */
+  if (url.pathname.startsWith('/vendor/highlight/') && request.method === 'GET') {
+    const answer = highlightAsset(url.pathname.slice('/vendor/highlight/'.length), (relative) =>
+      readFileSync(new URL(`../../node_modules/highlight.js/${relative}`, import.meta.url), 'utf8'),
+    )
+    if (answer === null) {
+      respond(response, 404, 'text/plain', 'that highlighter module is not served\n')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+    response.end(answer)
     return
   }
 
@@ -1616,9 +1632,31 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id)
+    /**
+     * An optional `atSeq` body field is DSH's inclusive cut (dsh-api-session-controller/lib/index.js:849-872): the chat's
+     * Branch action sends the seq that ended its turn. DSH refuses a value that is not a non-negative safe integer as a
+     * bad request, and a seq the source does not have as fork-unavailable, with the same two sentences used here.
+     */
+    const body = await readJson(request, response)
+    if (body === null) return
+    const atSeq = body.atSeq
+    if (atSeq !== undefined && !(typeof atSeq === 'number' && Number.isSafeInteger(atSeq) && atSeq >= 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
+      return
+    }
+    const forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    if ('error' in forked && forked.error === 'no-such-event') {
+      const last = forked.lastSeq === undefined ? 'none' : String(forked.lastSeq)
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: `event ${forked.atSeq} does not exist in session "${id}" (last seq: ${last})`, code: 'unavailable' })}\n`,
+      )
       return
     }
     if ('error' in forked) {
@@ -1664,9 +1702,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Archiving a session with a turn in flight is refused unless the caller says to stop it, which is DSH's
+     * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
      * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     *
+     * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
+     * `details.activity`): the turn in progress and the running subagent descendants, which the page's stop-and-archive
+     * dialog lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn,
+     * a teammate's, a notice's), because a session the page did not start can still be working.
      */
     /**
      * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
@@ -1676,9 +1719,12 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     const jobs = ctx.get('jobs') as JobRegistry | undefined
     const stopJobs = archived === true && body.stop === true
     if (archived === true) {
-      const running = state.running.get(id) ?? 0
+      const turns = ctx.get('turns') as TurnRegistry | undefined
+      const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
+      /** The session's own turn and its running subagents (stack-2's archive), then its live jobs (main's jobs view). */
+      const activity = sessionActivity(id, ctx.session.list(), isRunning)
       const liveJobs = sessionJobActivity(jobs, id)
-      if (running > 0 || liveJobs.length > 0) {
+      if (activity.length > 0 || liveJobs.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
@@ -1686,17 +1732,22 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
             'application/json',
             `${JSON.stringify({
               error:
-                running > 0
+                activity.length > 0
                   ? `session ${id} is running; pass stop: true to stop it and archive`
                   : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
               code: 'active',
-              running,
+              running: state.running.get(id) ?? 0,
+              /** DSH's list, every family: `dsh-jobs` prepends its `{ kind: 'job', items }` ahead of the rest (lib/index.js:19-31). */
+              activity: [...(liveJobs.length > 0 ? [{ kind: 'job', items: liveJobs }] : []), ...activity],
               ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
             })}\n`,
           )
           return
         }
-        if (running > 0) abortSession(state.controllers, id)
+        for (const sessionId of activitySessions(id, activity)) {
+          abortSession(state.controllers, sessionId)
+          turns?.abort(sessionId, 'session archived')
+        }
       }
     }
     let meta
@@ -2137,6 +2188,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            */
           turns,
           /**
+           * How far this transcript reaches: the last recorded event's `seq`, or 0 for an empty session.
+           *
+           * A page opening a session clears its transcript and reads this answer, while the event stream keeps
+           * delivering. Events that arrive during the read are also in the answer when they were recorded before it
+           * was built, so drawn both ways they read twice (live-testing draft developer-eleven-1). The page keeps them
+           * aside and draws only those past this `seq`.
+           */
+          seq: events.length > 0 ? events[events.length - 1]?.seq ?? 0 : 0,
+          /**
            * The composer's bottom statistics, from the same events as everything else in this answer.
            * The reference prints turns, steps, a token total with its cache-hit share, and a context share;
            * every one of those is a fact of this record, so they travel with it rather than being re-derived
@@ -2221,6 +2281,79 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     push(state, 'approval-settled', { type: 'approval/settled', id, outcome })
     respond(response, 200, 'application/json', `${JSON.stringify({ answered: true })}\n`)
+    return
+  }
+
+  /**
+   * The model's questions to a person (`ask_user_question`), and their answers - DSH's user-questions seam.
+   *
+   * `GET /api/questions?session=<id>` lists the session's answerable requests (`all=1` adds settled ones);
+   * `POST /api/questions/<id>` answers one batch; `POST /api/questions/<id>/hold` is Take time. Requests live in the
+   * session log, so a reload or a restart reads them back. A late answer - no turn waiting, because a timed wait ran
+   * out or the process that asked is gone - comes back as `message`, the user message DSH sends, for the caller to
+   * deliver as a turn (or queue behind a running one).
+   */
+  if (url.pathname === '/api/questions' || url.pathname.startsWith('/api/questions/')) {
+    const service = ctx.get('questions') as import('../questions/service.ts').QuestionService | undefined
+    if (service === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the questions plugin' })}\n`)
+      return
+    }
+    const sessionOf = (id: unknown) => {
+      if (typeof id !== 'string' || !/^session-[0-9a-f-]{36}$/i.test(id)) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a session id is required' })}\n`)
+        return null
+      }
+      const handle = ctx.session.store.open(id)
+      if (handle === null) respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return handle
+    }
+    const refuse = (error: unknown) => {
+      const code = (error as { code?: unknown }).code
+      const status = code === 'NOT_FOUND' ? 404 : code === 'SETTLED' ? 409 : code === 'INVALID_ANSWERS' ? 400 : 500
+      if (status === 500) throw error
+      respond(response, status, 'application/json', `${JSON.stringify({ error: (error as Error).message, code })}\n`)
+    }
+    if (url.pathname === '/api/questions' && request.method === 'GET') {
+      const handle = sessionOf(url.searchParams.get('session'))
+      if (handle === null) return
+      const all = url.searchParams.get('all') === '1'
+      respond(response, 200, 'application/json', `${JSON.stringify({ session: handle.id, requests: service.list(handle, all ? {} : { open: true }) }, null, 2)}\n`)
+      return
+    }
+    const match = /^\/api\/questions\/(question-[0-9a-f-]{36})(\/hold)?$/i.exec(url.pathname)
+    if (match === null || request.method !== 'POST') {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a question route' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    const handle = sessionOf(body.session)
+    if (handle === null) return
+    const id = match[1] as string
+    try {
+      if (match[2] !== undefined) {
+        respond(response, 200, 'application/json', `${JSON.stringify({ request: service.hold(handle, id) }, null, 2)}\n`)
+        return
+      }
+      const outcome = service.answer(handle, id, body.answers)
+      if (!outcome.late) {
+        respond(response, 200, 'application/json', `${JSON.stringify({ answered: true, late: false, request: outcome.view }, null, 2)}\n`)
+        return
+      }
+      /**
+       * The caller delivers a late answer, as a turn or queued behind the running one. The server does not steer it in:
+       * a turn on its last step ends without another model call, so a steered answer was measured to go unanswered.
+       */
+      respond(
+        response,
+        200,
+        'application/json',
+        `${JSON.stringify({ answered: true, late: true, delivered: 'none', message: outcome.message, request: outcome.view }, null, 2)}\n`,
+      )
+    } catch (error) {
+      refuse(error)
+    }
     return
   }
 
@@ -3359,6 +3492,51 @@ export function attachmentsOf(
 }
 
 /**
+ * The grammars the page's code-block highlighter registers: exactly the set and the order `highlight.ts` registers on
+ * the server, so a fence the TypeScript server classified is classified the same in the page, on either build.
+ */
+export const HIGHLIGHT_GRAMMARS = [
+  'bash', 'c', 'cpp', 'css', 'diff', 'go', 'ini', 'java', 'javascript', 'json', 'markdown', 'php', 'plaintext', 'python',
+  'ruby', 'rust', 'sql', 'typescript', 'xml', 'yaml',
+] as const
+
+/**
+ * One module of highlight.js for the browser, or `null` for anything else: `core.js`, and `languages/<name>.js` for a
+ * grammar in {@link HIGHLIGHT_GRAMMARS}.
+ *
+ * DSH highlights a chat code block in the browser; heddle's two servers each highlight on their own (highlight.js here,
+ * a grammar engine in the Rust port) and were measured classifying the same tokens differently (C60). The page now
+ * re-highlights an answer's code blocks itself with the one highlight.js both servers serve from `node_modules`, so a
+ * block is coloured the same whichever server drew it. The package's ES grammars are standalone modules; its core is
+ * CommonJS with no `require`, so it is served wrapped as an ES module. Only listed names are served, so the route cannot
+ * name another file.
+ */
+export function highlightAsset(name: string, read: (relative: string) => string): string | null {
+  try {
+    if (name === 'core.js') {
+      return `const module = { exports: {} };\nconst exports = module.exports;\n${read('lib/core.js')}\nexport default module.exports;\n`
+    }
+    const match = /^languages\/([a-z]+)\.js$/.exec(name)
+    if (match === null || !(HIGHLIGHT_GRAMMARS as readonly string[]).includes(match[1] as string)) return null
+    return read(`es/languages/${match[1]}.js`)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A user message's text blocks as the person reads them: a paragraph each.
+ *
+ * A harness notice is written as separate blocks — a settled subagent's summary, `Its closing message:`, and the
+ * child's text (DSH's `createSettlementMessage`) — and the chat adapters hand them to the model on separate lines.
+ * Joined with nothing, the page read them as one run-on line (live-testing draft developer-five-10). A person's
+ * message is one block, so it reads exactly as before; an attachment has no text and adds nothing.
+ */
+export function blocksText(content: readonly { readonly text?: string }[]): string {
+  return content.map((part) => part.text ?? '').filter((text) => text !== '').join('\n\n')
+}
+
+/**
  * Fold a session's recorded events into the display turns the page renders.
  *
  * Exported so the fold can be judged directly: it is pure, it is where the two subtle rules live (read the
@@ -3444,6 +3622,16 @@ export function transcriptTurns(
     openReasoning = -1
   }
   /**
+   * The exchange's token usage, DSH's per-Turn usage row: every model round (`model/request`) since the message that
+   * opened the exchange, and the rounds that reported usage. The sum is attached to the answer at `turn/completed`
+   * only when **every** round reported, because DSH hides the row rather than show a partial total.
+   */
+  let usageRounds = 0
+  let usageReports = 0
+  let usageReported = false
+  let usageSum: TokenUsage | undefined
+  let usageStart = -1
+  /**
    * A blank-line-only delta between two tokens is a **stream artifact**, not prose.
    *
    * Measured 2026-10-18 in the owner's transcript: a build of the server streamed content as `'检测'`, `'\n\n\n'`,
@@ -3515,18 +3703,28 @@ export function transcriptTurns(
             role?: string
             content?: readonly { type?: string; text?: string; name?: string; path?: string; mimeType?: string; bytes?: number }[]
             toolCallId?: string
+            source?: unknown
           }
         | undefined
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
         sectionStart = turns.length
+        usageRounds = 0
+        usageReports = 0
+        usageReported = false
+        usageSum = undefined
+        usageStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
+        /** A message the harness wrote names its trigger in `source`; a person's message has none. */
+        const source = message.source as { kind?: unknown } | undefined
+        const trigger = typeof source === 'object' && source !== null && typeof source.kind === 'string' && source.kind !== '' ? (source as ChatTurn['trigger']) : undefined
         turns.push({
           kind: 'user',
-          text,
+          text: blocksText(message.content ?? []),
           ...(attachments.length > 0 ? { attachments } : {}),
           ...(typeof event.at === 'string' ? { time: event.at } : {}),
+          ...(trigger !== undefined ? { trigger } : {}),
         })
       }
       else if (message.role === 'assistant') turns.push({ kind: 'assistant', text })
@@ -3552,6 +3750,25 @@ export function transcriptTurns(
       }
       continue
     }
+    if (event.type === 'model/request') {
+      usageRounds += 1
+      usageReported = false
+    }
+    if (event.type === 'turn/completed') {
+      /** The exchange's usage belongs to its last answer, and only a complete account is shown. */
+      if (usageRounds > 0 && usageReports === usageRounds && usageSum !== undefined) {
+        let lastAnswer = -1
+        for (let index = turns.length - 1; index > usageStart; index -= 1) {
+          if (turns[index]?.kind === 'user') break
+          if (turns[index]?.kind === 'assistant') { lastAnswer = index; break }
+        }
+        const answer = turns[lastAnswer]
+        if (lastAnswer >= 0 && answer !== undefined) turns[lastAnswer] = { ...answer, usage: usageSum }
+      }
+      usageRounds = 0
+      usageReports = 0
+      usageSum = undefined
+    }
     if (event.type !== 'assistant/chunk') {
       /**
        * A stopped turn records its reason on the completion. It is attached to the answer it stopped — or, when
@@ -3563,6 +3780,18 @@ export function transcriptTurns(
           const last = turns[turns.length - 1]
           if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended }
           else turns.push({ kind: 'assistant', text: typeof event.text === 'string' ? event.text : '', ended })
+        }
+      }
+      /**
+       * A completed turn can be branched from its closing answer — DSH's turn footer offers "Branch into a new
+       * conversation" there and forks with `atSeq` set to the turn's end (dsh-client-ui-chat/lib/client.js:6963-7001,
+       * 11094-11115, 13266-13285). DSH refuses the branch when the turn's last row is not an answer with text (a call
+       * after the answer, or no text at all), so only that case carries the seq.
+       */
+      if (event.type === 'turn/completed' && typeof event.seq === 'number') {
+        const last = turns[turns.length - 1]
+        if (last !== undefined && last.kind === 'assistant' && last.text.trim().length > 0) {
+          turns[turns.length - 1] = { ...last, forkSeq: event.seq }
         }
       }
       /**
@@ -3579,8 +3808,14 @@ export function transcriptTurns(
       closeRuns()
       continue
     }
-    const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string } | undefined
+    const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string; usage?: TokenUsage } | undefined
     if (chunk === undefined) continue
+    if (chunk.usage !== undefined) {
+      /** One report per round, however many frames of that round carried usage. */
+      if (!usageReported) usageReports += 1
+      usageReported = true
+      usageSum = mergeTokenUsage(usageSum, chunk.usage)
+    }
     if (chunk.type === 'text-delta' && chunk.text !== undefined) {
       openAssistant = append('assistant', chunk.text, openAssistant)
       openReasoning = -1
@@ -3665,11 +3900,22 @@ export interface ChatTurn {
    */
   readonly ended?: readonly string[]
   /**
+   * The exchange's token usage, summed over its model rounds - DSH's per-Turn usage row, carried by the exchange's
+   * last answer. Present only when every round reported usage; a bucket no round reported is absent.
+   */
+  readonly usage?: TokenUsage
+  /**
    * Files attached to this message, in the order they were chosen — the gallery and file chips DSH draws on
    * a person's row. The metadata is what the server measured when it recorded the message, so the page never
    * re-derives a size or a media type from a path.
    */
   readonly attachments?: readonly TurnAttachment[]
+  /**
+   * A user message the harness wrote rather than a person: a goal round's `source` (`{ kind: 'goal', goalId,
+   * revision, round }`) or another trigger's. DSH draws a non-human turn trigger as an independent, bordered notice
+   * on a neutral background, so the page needs to tell it apart from a person's bubble.
+   */
+  readonly trigger?: { readonly kind: string; readonly [key: string]: unknown }
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */
@@ -3682,6 +3928,11 @@ export interface ChatTurn {
   readonly result?: string
   /** DSH's phases, simplified: a call is running until its result says otherwise; a command is done or failed. */
   readonly state?: 'running' | 'ok' | 'error' | 'done'
+  /**
+   * On the answer that closes a completed turn: the seq of that turn's `turn/completed`, which the page's Branch action
+   * sends as the fork's `atSeq` — DSH's turn footer forks at the turn's end seq.
+   */
+  readonly forkSeq?: number
   /** A slash command's run id, which pairs its `command/run` and `command/done` (src/commands/). */
   readonly commandId?: string
   /** What followed the command's name, when the log kept it. */

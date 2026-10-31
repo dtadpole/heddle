@@ -73,6 +73,23 @@ export async function openBrowser(options = {}) {
       await page.navigate({ url, timeoutMs })
       return this
     },
+    /**
+     * Open the Web UI at `url` with the session `sessionId` as the one it opens, the way a person comes back to a
+     * session they had open: the page's saved selection (`heddle.sessions.current`, `{ sessionId }`, DSH's
+     * `dsh.sessions.current`) is written first, so the page's startup restores it.
+     *
+     * The page opens nothing on its own beyond that: with nothing saved, a load starts a fresh session (#17, DSH's
+     * `restoreSelection`), so a check that seeds a session and wants it on screen names it here rather than relying
+     * on it being the newest. The entry is written from `/healthz`, a document of the same origin that runs none of
+     * the page's script, so no load before it starts a session of its own; then the page loads once.
+     */
+    async gotoSession(url, sessionId, timeoutMs = 20_000) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) throw new Error(`gotoSession needs a session id, not ${JSON.stringify(sessionId)}`)
+      await page.navigate({ url: new URL('/healthz', url).href, timeoutMs })
+      await page.evaluate(`localStorage.setItem('heddle.sessions.current', ${JSON.stringify(JSON.stringify({ sessionId }))})`, { timeoutMs })
+      await page.navigate({ url, timeoutMs })
+      return this
+    },
     /** Evaluate an expression and return its value. */
     evaluate: (expression, timeoutMs = 10_000) => page.evaluate(expression, { timeoutMs }),
     /** Wait for an expression to become truthy; resolve true or throw on timeout. */

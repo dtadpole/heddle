@@ -86,7 +86,7 @@ test('the model writes a todo list and the dock shows it live, updates it and hi
     const opened = await server.api('/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
     const session = opened.body.session?.id ?? opened.body.id
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.getElementById("todo-panel") !== null', 20_000)
     assert.equal(await browser.evaluate('document.getElementById("todo-panel").hidden'), true, 'no list, no dock')
 
@@ -177,7 +177,7 @@ test('the todo panel sits above the goal dock when both exist', async (context) 
     await server.api('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
     const opened = await server.api('/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
     const session = opened.body.session?.id ?? opened.body.id
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.getElementById("todo-panel") !== null', 20_000)
     const turn = await fetch(new URL('/api/turn', server.url), {
       method: 'POST',

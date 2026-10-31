@@ -1,7 +1,7 @@
 ---
 title: The heddle-plan crate
 created: 2026-10-29T13:40:00Z
-modified: 2026-10-29T13:40:00Z
+modified: 2026-10-31T14:24:07Z
 version: 0.1.0
 description: The Rust port crate for plan mode — the mode fold, the notice, DSH's plan-mode policy section, /plan, exit_plan_mode and GET /api/sessions/{id}/plan — its public API, what it needs from other crates, how the binary mounts it, and where it differs from the TypeScript build.
 grounded_in:
@@ -78,8 +78,9 @@ when the row is loaded.
 - A path whose id segment holds a `/` never reaches the route (axum matches one segment), so the server answers its
   `404` where `http.ts` answers `400`; an id that does not percent-decode is `400` where `decodeURIComponent` throws.
 - The review channel is provided to the service (`provide_review_channel`, e.g. with `questions_review_channel`)
-  rather than looked up as the `questions` service; it is still read per call. The binary has no question service
-  yet, so none is provided and the tool answers DSH's sentence, as the TypeScript build does without `questions`.
+  rather than looked up as the `questions` service; it is still read per call. The binary's `plan` and `questions`
+  rows hand it over, whichever starts second; without a `questions` row none is provided and the tool answers DSH's
+  sentence, as the TypeScript build does without `questions`.
 
 ## Read next
 
