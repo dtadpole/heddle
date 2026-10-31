@@ -53,6 +53,11 @@ pub fn marked_page(html: &str) -> String {
     marked
 }
 
+/// The page with its `<html lang>` set to `lang` (issue #80); the marker stays the file's own.
+pub fn with_language(page: &str, lang: &str) -> String {
+    page.replacen("<html lang=\"en\">", &format!("<html lang=\"{lang}\">"), 1)
+}
+
 /// The page as served: [`marked_page`] of [`PAGE_SOURCE`], computed once per process.
 pub fn page() -> &'static str {
     static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -193,6 +198,20 @@ mod tests {
                 stale: true
             }
         );
+    }
+
+    /// DSH parity C13 (R-developer-eight-17): `In one list` takes the workspace tree's order, the newest pin first and
+    /// then the last write, through `WorkspaceTree.flatList`, as DSH fronts a new pin in the group and in the flat list
+    /// alike (`dsh-client-ui-workspace` `pinSessionOrder`). The page is embedded, so this asserts the binary serves that
+    /// rule and no longer the creation-time sort that put the earlier of two pins first.
+    #[test]
+    fn the_served_flat_list_orders_sessions_by_the_trees_rule() {
+        let served = page();
+        assert!(served.contains("function flatList(sessions, options = {}) {"));
+        assert!(served.contains(
+            "const visible = WorkspaceTree.flatList(index.sessions, { archived: archiveMode })"
+        ));
+        assert!(!served.contains("String(right.created).localeCompare(String(left.created))"));
     }
 
     #[test]

@@ -1,10 +1,17 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
+import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
+import { StringDecoder } from 'node:string_decoder'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+
+import { symbols } from '@deepseek-ai/cordis'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
+import { killProcessGroup } from '../sandbox/process-group.ts'
 import type { SandboxService } from '../sandbox/service.ts'
-import type { ToolDefinition, ToolResult } from './service.ts'
+import type { ToolDefinition, ToolResult, ToolRunContext } from './service.ts'
 
 /**
  * The tools this harness ships.
@@ -45,9 +52,321 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
   }
 }
 
+/** The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB). */
+export const BASH_SPILL_MAX_BYTES = 64 * 1024 * 1024
+
+/**
+ * What the model is shown of a command's output: all of it within `limit` characters, otherwise its **end** and the
+ * path of a file holding the whole of it.
+ *
+ * Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long command's
+ * closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream and names the
+ * spill file, `[output truncated; full output: <path>]` (`dsh-tool-bash` streamText; `(unavailable)` when no file could
+ * be written). Stated differences: heddle cuts the combined stdout and stderr, by characters (`bashOutputLimit`),
+ * where DSH cuts each stream at 64,000 bytes.
+ */
+export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH_SPILL_MAX_BYTES, io: SpillIo = NODE_SPILL_IO): string {
+  if (combined.length <= limit) return combined
+  let tail = combined.slice(combined.length - limit)
+  // Never start on the second half of a surrogate pair.
+  const first = tail.charCodeAt(0)
+  if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1)
+  return `${tail}\n[output truncated; full output: ${spillOutput(combined, spillMaxBytes, io) ?? '(unavailable)'}]`
+}
+
+/** The file operations a spill makes. A test replaces them to model a failed write or a failed cleanup. */
+export interface SpillIo {
+  /** Create the file exclusively (`wx`, mode 0600) and answer its descriptor; throws when it cannot. */
+  readonly open: (path: string) => number
+  readonly write: (fd: number, bytes: Buffer) => void
+  readonly close: (fd: number) => void
+  readonly unlink: (path: string) => void
+}
+
+const NODE_SPILL_IO: SpillIo = {
+  open: (path) => openSync(path, 'wx', 0o600),
+  write: (fd, bytes) => {
+    let offset = 0
+    while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset)
+  },
+  close: (fd) => closeSync(fd),
+  unlink: (path) => rmSync(path, { force: true }),
+}
+
+/**
+ * Write a command's whole output to a private temporary file and return its path, or none.
+ *
+ * Only a complete copy is ever named: an output over `spillMaxBytes` gets no file, and a write that fails removes what
+ * it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the marker never
+ * points at a partial file (developer-five's review of #83). A completed file stays in the temporary directory, as DSH's do.
+ */
+function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string | undefined {
+  /**
+   * The spill is optional, so nothing in it may fail the command: every step, the name included, is contained,
+   * and any failure answers "no file". Ownership is tracked rather than guessed. A file is removed only after this
+   * call's exclusive open succeeded, so an open that fails (an existing name, a missing or unwritable directory)
+   * removes nothing. A cleanup that fails is ignored, as the Rust twin ignores `remove_file`'s error
+   * (developer-five's review of #83).
+   */
+  try {
+    const bytes = Buffer.from(full, 'utf8')
+    if (bytes.length > spillMaxBytes) return undefined
+    const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
+    let fd: number
+    try {
+      fd = io.open(path)
+    } catch {
+      return undefined
+    }
+    let closed = false
+    try {
+      io.write(fd, bytes)
+      closed = true
+      io.close(fd)
+      return path
+    } catch {
+      if (!closed) {
+        try {
+          io.close(fd)
+        } catch {
+          // Best effort: a close that fails here is not retried, and the answer is still (unavailable).
+        }
+      }
+      try {
+        io.unlink(path)
+      } catch {
+        // Best effort: a cleanup failure must not replace the command's result.
+      }
+      return undefined
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and normalised
+ * unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model can tell which
+ * of several reads failed (live-testing issue #4: the Rust build named no file at all).
+ */
+export function displayPath(cwd: string, path: string): string {
+  const raw = isAbsolute(path) ? path : `${cwd}${sep}${path}`
+  return /(?:^|[\\/])\.\.(?:[\\/]|$)/u.test(raw) ? raw : resolve(cwd, path)
+}
+
+/** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
+export const BASH_OUTPUT_LIMIT = 20_000
+
+/** The environment every `bash` command runs with, foreground or background. */
+export function shellEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, NO_COLOR: '1' }
+}
+
+/** A command line confined for one call: the argv to spawn and the confinement it runs under (`null`: unconfined). */
+export interface ShellLaunch {
+  readonly argv: readonly string[]
+  readonly confined: ConfinedArgv | null
+}
+
+/**
+ * Confine the exact argv, or refuse to run it.
+ *
+ * `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox
+ * service for a wrapped argv; if this host cannot confine, the call fails closed with the reason rather than
+ * running unconfined — that is the difference between a sandbox and a suggestion.
+ *
+ * Shared by the foreground run below and the jobs row's background run (`src/jobs/bash.ts`), so a background
+ * command is confined by exactly the path a foreground one is.
+ */
+export function launchShell(sandbox: SandboxService, command: string, context: ToolRunContext): ShellLaunch | { readonly refusal: ToolResult } {
+  const mode = context.mode
+  let confined: ConfinedArgv | null = null
+  try {
+    if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode, context.cwd)
+  } catch (error) {
+    if (error instanceof SandboxUnavailableError) {
+      context.log(`refused a '${mode}' shell: ${error.message}`)
+      return {
+        refusal: {
+          output: '',
+          error: { code: 'SANDBOX_UNAVAILABLE', message: error.message },
+          data: { sandbox: { mode, denied: false, unavailable: true } },
+        },
+      }
+    }
+    throw error
+  }
+  return { argv: confined?.argv ?? ['/bin/sh', '-c', command], confined }
+}
+
+/**
+ * The background half of `bash`: what the jobs row (`src/plugins/jobs.ts`) attaches.
+ *
+ * While one is attached to the sandbox a `bash` tool was built over, the tool's schema carries `run_in_background`
+ * and a call that sets it is handed to `start`; with none attached, the schema is exactly the foreground one. The
+ * seam is keyed by the sandbox service because that is the one object both rows already share, which keeps the tools
+ * row unchanged and the dependency optional.
+ */
+export interface BashBackground {
+  /** The schema property bash advertises while attached (DSH's `run_in_background`). */
+  readonly property: { readonly type: 'boolean'; readonly description: string }
+  /** Start the command as a background job and answer the tool result. */
+  readonly start: (args: Record<string, unknown>, context: ToolRunContext) => Promise<ToolResult>
+  /**
+   * Run a foreground call as a job, DSH's `promoteOnTimeout` (`dsh-tool-bash`: with a registry, every call registers
+   * its process as a job at its start). It answers `render`'s result when the command ends within `limitMs`, and the
+   * promoted answer when the command outlives it and keeps running as a job. `undefined` means the job could not be
+   * registered, and the call runs here in the foreground, with the wall-time kill, as DSH falls back. Absent when the
+   * row does not promote.
+   */
+  readonly runForeground?: (run: ForegroundRun) => Promise<ToolResult | undefined>
+}
+
+/** One foreground call handed to {@link BashBackground.runForeground}. */
+export interface ForegroundRun {
+  readonly args: Record<string, unknown>
+  readonly context: ToolRunContext
+  /** The confined argv, from {@link launchShell}: the job runs exactly what the foreground would have. */
+  readonly launch: ShellLaunch
+  /** The call's wall time, already validated and capped ({@link bashWallTime}). */
+  readonly limitMs: number
+  /** `bash`'s own answer for a command that ended ({@link shellResult}, bound to this call). */
+  readonly render: (end: ShellEnd) => ToolResult
+}
+
+/** What a foreground command reported when it ended, before it becomes `bash`'s answer. */
+export interface ShellEnd {
+  readonly stdout: string
+  readonly stderr: string
+  /** The exit code; `null` when a signal ended it. */
+  readonly code: number | null
+  /** The call's Stop ended it. */
+  readonly stopped: boolean
+  /** Its wall time ended it. */
+  readonly timedOut: boolean
+  readonly limitMs: number
+}
+
+/**
+ * `bash`'s answer for a command that ended: the combined output cut to `outputLimit`, then the stop, the wall time,
+ * the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the sandbox facts. Shared by
+ * the foreground run and the jobs row's promoting run, so a call answers the same however it was run.
+ */
+export function shellResult(end: ShellEnd, launch: ShellLaunch, mode: ToolRunContext['mode'], outputLimit: number): ToolResult {
+  const { stdout, stderr, code } = end
+  const { confined } = launch
+  const combined = stdout + stderr
+  const trimmed = tailOutput(combined, outputLimit)
+  /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
+  const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
+  /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
+  if (end.stopped) {
+    return {
+      output: trimmed,
+      error: { code: 'INTERRUPTED', message: 'the command was stopped before it finished' },
+      data: { sandbox: { ...sandboxFacts, denied: false } },
+    }
+  }
+  if (end.timedOut) {
+    return {
+      output: trimmed,
+      error: { code: 'TIMEOUT', message: `the command exceeded ${end.limitMs}ms and was killed` },
+      data: { sandbox: { ...sandboxFacts, denied: false } },
+    }
+  }
+  const outcome = confined === null ? ({ kind: 'exited' } as const) : classifyOutcome({ exitCode: code ?? 1, stderr, confined })
+  /**
+   * A runner failure means the command **never ran**, so it is reported as a sandbox problem and outranks
+   * any denial sentence in the output. An ordinary denial says which mode refused the effect.
+   */
+  if (outcome.kind === 'runner-failure') {
+    return {
+      output: trimmed,
+      error: {
+        code: 'SANDBOX_UNAVAILABLE',
+        message: `the sandbox runner failed under '${mode}' mode — the command did not run: ${outcome.detail}`,
+      },
+      data: { sandbox: { ...sandboxFacts, denied: false, runnerFailed: true } },
+    }
+  }
+  if (outcome.kind === 'denied') {
+    return {
+      output: trimmed,
+      error: { code: 'SANDBOX', message: `[sandbox: file access denied under ${mode} mode]` },
+      data: { sandbox: { ...sandboxFacts, denied: true } },
+    }
+  }
+  if (code !== 0) {
+    return {
+      output: trimmed,
+      error: { code: 'EXIT', message: `the command exited ${code}` },
+      data: { sandbox: { ...sandboxFacts, denied: false } },
+    }
+  }
+  return { output: trimmed, data: { exitCode: code, sandbox: { ...sandboxFacts, denied: false } } }
+}
+
+const backgrounds = new WeakMap<object, BashBackground>()
+
+/**
+ * The service behind a context's handle. Cordis hands each plugin its own proxy of a service, so the tools row's
+ * `ctx.sandbox` and the jobs row's are different objects over one service; the seam is keyed by that service.
+ */
+function serviceOf(sandbox: SandboxService): object {
+  const original = (sandbox as unknown as Record<symbol, unknown>)[symbols.original]
+  return typeof original === 'object' && original !== null ? original : sandbox
+}
+
+/** The background runner attached for the `bash` tools built over `sandbox`, if any. */
+function backgroundFor(sandbox: SandboxService): BashBackground | undefined {
+  return backgrounds.get(serviceOf(sandbox))
+}
+
+/** Attach a background runner for the `bash` tools built over `sandbox`; answers the detach. */
+export function attachBashBackground(sandbox: SandboxService, background: BashBackground): () => void {
+  const key = serviceOf(sandbox)
+  backgrounds.set(key, background)
+  return () => {
+    if (backgrounds.get(key) === background) backgrounds.delete(key)
+  }
+}
+
+/** The default for `bashMaxTimeoutMs`: the most wall time a call may ask for, DSH's `maxTimeoutMs` (ten minutes). */
+export const BASH_MAX_TIMEOUT_MS = 600_000
+
+/**
+ * The longest delay one Node timer can hold (2^31-1 ms, about 24.8 days). `setTimeout` runs a larger one after a
+ * millisecond, so no cap or request may exceed it: the setting refuses a larger `bashMaxTimeoutMs`, and the wall time is
+ * cut to it here as well (developer-five's review of #13; DSH bounds its grace by the same `MAX_TIMER_DELAY_MS`).
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
+ * The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
+ *
+ * DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the default; a
+ * value that is not a finite positive number is refused; a larger one is cut to the cap. Before it, the value went
+ * straight into `setTimeout`, which runs `0`, a negative delay or one above 2^31-1 ms after one millisecond, so the
+ * command was killed before it ran and the result claimed it had timed out (live-testing issue #13).
+ */
+export function bashWallTime(requested: unknown, defaultMs: number, maxMs: number): { readonly ms: number } | { readonly refusal: string } {
+  const cap = Math.min(maxMs, MAX_TIMER_DELAY_MS)
+  if (requested === undefined || requested === null) return { ms: Math.min(defaultMs, cap) }
+  if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
+    return { refusal: `invalid timeoutMs: expected a positive number, got ${JSON.stringify(requested)}` }
+  }
+  return { ms: Math.min(Math.max(1, Math.round(requested)), cap) }
+}
+
 /** Build the standard tools around one sandbox. */
-export function builtinTools(sandbox: SandboxService, options: { readonly bashTimeoutMs?: number } = {}): readonly ToolDefinition[] {
+export function builtinTools(
+  sandbox: SandboxService,
+  options: { readonly bashTimeoutMs?: number; readonly bashMaxTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
+): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
+  const maxTimeoutMs = Math.min(options.bashMaxTimeoutMs ?? BASH_MAX_TIMEOUT_MS, MAX_TIMER_DELAY_MS)
+  /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
+  const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)
 
   const writeFile: ToolDefinition = {
@@ -73,12 +392,25 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
-      context.log(`wrote ${target} (${content.length} bytes)`)
-      return { output: `wrote ${content.length} bytes to ${relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target) || target}`, data: { path: target, bytes: content.length } }
+      /**
+       * Bytes, as the sentence says: UTF-8 bytes on disk, not UTF-16 code units (five Chinese characters are 15
+       * bytes). The path is relative to the workspace only when the target is inside it; a file elsewhere (the host
+       * temp area under workspace-write) is named absolutely, never as a climb of `../`. The Rust build's twin
+       * already reports both this way (issue #3).
+       */
+      const bytes = Buffer.byteLength(content, 'utf8')
+      context.log(`wrote ${target} (${bytes} bytes)`)
+      const inside = relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target)
+      // Outside is exactly `..` or a climb (`../…`): a file inside whose name starts with two dots stays relative.
+      const climbs = inside === '..' || inside.startsWith(`..${sep}`)
+      const shown = inside.length > 0 && !climbs && !isAbsolute(inside) ? inside : target
+      return { output: `wrote ${bytes} bytes to ${shown}`, data: { path: target, bytes } }
     },
   }
 
   const readFile: ToolDefinition = {
+    /** Reads only, so two reads of one step run together (DSH's fs read tools are concurrency-safe). */
+    concurrencySafe: true,
     spec: {
       name: 'read_file',
       description: 'Read a text file and return its contents. Refused for a path outside the sandbox in confined modes.',
@@ -93,12 +425,26 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'read_file needs a path' } }
       const target = sandbox.assertReadable(path, context.mode, context.cwd)
-      const text = readFileSync(target, 'utf8')
+      /**
+       * A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
+       * `resolveRegularReadTarget`): `FS_NOT_FOUND` and `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …`, not the
+       * platform's raw error (live-testing issue #4).
+       */
+      const shown = displayPath(context.cwd, path)
+      const info = await stat(target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return undefined
+        throw error
+      })
+      if (info === undefined) return { output: '', error: { code: 'FS_NOT_FOUND', message: `cannot read "${shown}": not found` } }
+      if (!info.isFile()) return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot read "${shown}": not a regular file` } }
+      // Read without blocking the event loop, so the other reads of a parallel group run alongside this one.
+      const text = await readFileText(target, 'utf8')
       return { output: text, data: { path: target, bytes: text.length } }
     },
   }
 
   const listDir: ToolDefinition = {
+    concurrencySafe: true,
     spec: {
       name: 'list_dir',
       description: 'List the entries of a directory inside the workspace, one per line, directories marked with a trailing slash.',
@@ -110,131 +456,138 @@ export function builtinTools(sandbox: SandboxService, options: { readonly bashTi
     },
     run: async (args, context): Promise<ToolResult> => {
       const target = sandbox.assertReadable(String(args.path ?? '.'), context.mode, context.cwd)
-      const entries = readdirSync(target, { withFileTypes: true })
-        .sort((left, right) => left.name.localeCompare(right.name))
-        .map((entry) => {
-          const stats = statSync(join(target, entry.name))
+      // Listed without blocking the event loop, as read_file reads, so a parallel group's calls run together.
+      const dirents = (await readdir(target, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))
+      const entries = await Promise.all(
+        dirents.map(async (entry) => {
+          const stats = await stat(join(target, entry.name))
           return `${entry.isDirectory() ? `${entry.name}/` : entry.name}${entry.isDirectory() ? '' : ` (${stats.size}B)`}`
-        })
+        }),
+      )
       return { output: entries.join('\n'), data: { path: target, entries: entries.length } }
     },
   }
 
   const bash: ToolDefinition = {
-    spec: {
-      name: 'bash',
-      description:
-        'Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'Command line, run through sh -c.' },
-          timeoutMs: { type: 'number', description: `Wall time before the command is killed; default ${timeoutMs}.` },
-          ...escalation,
+    /**
+     * Read per call rather than fixed: `run_in_background` is in the schema only while the jobs row has attached
+     * a background runner to this sandbox (DSH shows the parameter only when a job registry is loaded). With none
+     * attached, this is the foreground schema exactly.
+     */
+    get spec() {
+      const background = backgroundFor(sandbox)
+      return {
+        name: 'bash',
+        description:
+          'Run a shell command in the workspace and return its combined output. The command runs under the session’s sandbox mode: read-only and workspace-write confine the whole process tree at the kernel (writes denied, or allowed only under the workspace and host temp areas), and danger-full-access runs unconfined. A blocked file operation is reported as [sandbox: file access denied under <mode> mode]; if no sandbox backend is usable the command is refused rather than run unconfined.',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'Command line, run through sh -c.' },
+            timeoutMs: { type: 'number', description: `Wall time before the command is killed, in milliseconds; default ${timeoutMs}, at most ${maxTimeoutMs}.` },
+            ...(background !== undefined ? { run_in_background: background.property } : {}),
+            ...escalation,
+          },
+          required: ['command'],
+          additionalProperties: false,
         },
-        required: ['command'],
-        additionalProperties: false,
-      },
+      }
     },
     run: async (args, context): Promise<ToolResult> => {
       const command = String(args.command ?? '')
       if (command.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'bash needs a command' } }
+      const wallTime = bashWallTime(args.timeoutMs, timeoutMs, maxTimeoutMs)
+      if ('refusal' in wallTime) return { output: '', error: { code: 'BAD_ARGS', message: wallTime.refusal } }
+      const limit = wallTime.ms
       const mode = context.mode
 
-      /**
-       * Confine the exact argv, or refuse to run it.
-       *
-       * `danger-full-access` is the only mode that never asks a provider. Every confined mode asks the sandbox
-       * service for a wrapped argv; if this host cannot confine, the call fails closed with the reason rather than
-       * running unconfined — that is the difference between a sandbox and a suggestion.
-       */
-      let confined: ConfinedArgv | null = null
-      try {
-        if (mode !== 'danger-full-access') confined = sandbox.confine(['/bin/sh', '-c', command], mode, context.cwd)
-      } catch (error) {
-        if (error instanceof SandboxUnavailableError) {
-          context.log(`refused a '${mode}' shell: ${error.message}`)
+      /** A background call is the jobs row's (DSH's refusal text when no job registry is loaded, adapted). */
+      if (args.run_in_background === true) {
+        const background = backgroundFor(sandbox)
+        if (background === undefined) {
           return {
             output: '',
-            error: { code: 'SANDBOX_UNAVAILABLE', message: error.message },
-            data: { sandbox: { mode, denied: false, unavailable: true } },
+            error: { code: 'JOB_UNAVAILABLE', message: 'background jobs unavailable: load the jobs row (src/plugins/jobs.ts)' },
           }
         }
-        throw error
+        return await background.start(args, context)
       }
-      const argv = confined?.argv ?? ['/bin/sh', '-c', command]
+
+      const launch = launchShell(sandbox, command, context)
+      if ('refusal' in launch) return launch.refusal
+      const { argv } = launch
+      const render = (end: ShellEnd): ToolResult => shellResult(end, launch, mode, outputLimit)
+
+      /**
+       * With the jobs row attached and promoting, the call runs as a job (DSH's `promoteOnTimeout`): a command that
+       * outlives its wall time keeps running in the background instead of being killed. A registration the row
+       * refuses (a session at its job cap) falls through to the foreground run and its wall-time kill.
+       */
+      const runForeground = backgroundFor(sandbox)?.runForeground
+      if (runForeground !== undefined) {
+        const answered = await runForeground({ args, context, launch, limitMs: limit, render })
+        if (answered !== undefined) return answered
+      }
       // The working directory is the call's folder — the session's workspace, resolved by the loop — not the
       // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
       const cwd = context.cwd
-      const limit = Number(args.timeoutMs ?? timeoutMs)
       return await new Promise<ToolResult>((resolve) => {
-        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' } })
+        /**
+         * The command leads its own process group (`detached`), so a Stop or the wall time reaches everything it
+         * started, as DSH's launcher does. Killing only the shell left its children running orphaned, and the turn
+         * waited for them because they still held the output pipes (live-testing draft developer-five-5).
+         *
+         * Stdin is `ignore` (`/dev/null`), so a command that reads it gets end-of-file at once. The tool has no
+         * input to give, and DSH's shell leaves stdin closed when no input is supplied. Node's default, an open pipe
+         * that nothing writes or ends, made `read` and any stdin reader wait until the wall time killed them (#97).
+         * The Rust build gave EOF only when the server's own stdin was /dev/null, as under a daemon; it now uses
+         * `Stdio::null()` too.
+         */
+        const child = spawn(argv[0] as string, argv.slice(1), {
+          cwd,
+          env: shellEnv(),
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
         let stdout = ''
         let stderr = ''
         let timedOut = false
+        let stopped = false
+        const stop = () => {
+          if (!killProcessGroup(child.pid)) child.kill('SIGKILL')
+        }
         const timer = setTimeout(() => {
           timedOut = true
-          child.kill('SIGKILL')
+          stop()
         }, limit)
+        // One decoder per stream holds a character's bytes until the rest arrive: a UTF-8 sequence split across two
+        // chunks used to decode as replacement characters (live-testing issue #96). DSH concatenates the bytes first.
+        const stdoutText = new StringDecoder('utf8')
+        const stderrText = new StringDecoder('utf8')
         child.stdout.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString()
+          stdout += stdoutText.write(chunk)
         })
         child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString()
+          stderr += stderrText.write(chunk)
         })
-        context.signal?.addEventListener('abort', () => child.kill('SIGKILL'), { once: true })
+        context.signal?.addEventListener(
+          'abort',
+          () => {
+            stopped = true
+            stop()
+          },
+          { once: true },
+        )
         child.on('error', (error) => {
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
         })
         child.on('close', (code) => {
           clearTimeout(timer)
-          const combined = stdout + stderr
-          const trimmed = combined.length > 20_000 ? `${combined.slice(0, 20_000)}\n… truncated` : combined
-          /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
-          const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
-          if (timedOut) {
-            resolve({
-              output: trimmed,
-              error: { code: 'TIMEOUT', message: `the command exceeded ${limit}ms and was killed` },
-              data: { sandbox: { ...sandboxFacts, denied: false } },
-            })
-            return
-          }
-          const outcome = confined === null ? ({ kind: 'exited' } as const) : classifyOutcome({ exitCode: code ?? 1, stderr, confined })
-          /**
-           * A runner failure means the command **never ran**, so it is reported as a sandbox problem and outranks
-           * any denial sentence in the output. An ordinary denial says which mode refused the effect.
-           */
-          if (outcome.kind === 'runner-failure') {
-            resolve({
-              output: trimmed,
-              error: {
-                code: 'SANDBOX_UNAVAILABLE',
-                message: `the sandbox runner failed under '${mode}' mode — the command did not run: ${outcome.detail}`,
-              },
-              data: { sandbox: { ...sandboxFacts, denied: false, runnerFailed: true } },
-            })
-            return
-          }
-          if (outcome.kind === 'denied') {
-            resolve({
-              output: trimmed,
-              error: { code: 'SANDBOX', message: `[sandbox: file access denied under ${mode} mode]` },
-              data: { sandbox: { ...sandboxFacts, denied: true } },
-            })
-            return
-          }
-          if (code !== 0) {
-            resolve({
-              output: trimmed,
-              error: { code: 'EXIT', message: `the command exited ${code}` },
-              data: { sandbox: { ...sandboxFacts, denied: false } },
-            })
-            return
-          }
-          resolve({ output: trimmed, data: { exitCode: code, sandbox: { ...sandboxFacts, denied: false } } })
+          stdout += stdoutText.end()
+          stderr += stderrText.end()
+          resolve(render({ stdout, stderr, code, stopped, timedOut, limitMs: limit }))
         })
       })
     },

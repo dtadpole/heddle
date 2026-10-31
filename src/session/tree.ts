@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, type Stats } from 'node:fs'
 import { basename, join, sep } from 'node:path'
 
 import { canonicalPath, depthOf, isUnder } from '../paths.ts'
@@ -166,20 +166,43 @@ function currentByFolder(sessions: readonly SessionMeta[]): Map<string, SessionM
  * Folders first is what makes a tree navigable — the structure a person is walking stays together at
  * the top, and the leaves sit under it. Dot-entries and the two noise directories are not returned at
  * all, which is the same judgement the tree made when it showed folders only.
+ *
+ * A **symlink is what it resolves to**, as DSH lists one: `dsh-fs-local`'s `listDirectory` probes each child's resolved
+ * target for its type and reports a size only for a regular file, so a linked folder lists as a folder and expands like
+ * its target (`dsh-api-workspace-files`, `list` follows a final directory link). A directory entry's own type does not
+ * follow the link, which is why this asks `stat`: measured, a link to a folder was a 0-byte file that could not be
+ * opened. A link that resolves to nothing stays a 0-byte leaf. `link` tells the caller to keep the row at the link's own
+ * path rather than its target's.
  */
-function entries(dir: string): { readonly name: string; readonly directory: boolean; readonly bytes: number }[] {
+function entries(dir: string): { readonly name: string; readonly directory: boolean; readonly bytes: number; readonly link: boolean }[] {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith('.') && !PLUMBING.has(entry.name))
-      .map((entry) => ({
-        name: entry.name,
-        directory: entry.isDirectory(),
-        bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0,
-      }))
+      .map((entry) => {
+        if (!entry.isSymbolicLink()) {
+          return { name: entry.name, directory: entry.isDirectory(), bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0, link: false }
+        }
+        const target = statOf(join(dir, entry.name))
+        return {
+          name: entry.name,
+          directory: target?.isDirectory() === true,
+          bytes: target?.isFile() === true ? target.size : 0,
+          link: true,
+        }
+      })
       .sort((left, right) => (left.directory === right.directory ? collator.compare(left.name, right.name) : left.directory ? -1 : 1))
   } catch {
     // A folder that cannot be read is a folder with nothing to show, not a failure of the tree.
     return []
+  }
+}
+
+/** What a path resolves to, following links, or `undefined` when it resolves to nothing. */
+function statOf(path: string): Stats | undefined {
+  try {
+    return statSync(path)
+  } catch {
+    return undefined
   }
 }
 
@@ -202,7 +225,7 @@ export interface FileReading {
   readonly bytes: number
   readonly lines: number
   readonly text: string
-  /** The file is longer than the limit, so `text` is its beginning and not all of it. */
+  /** The file is longer than the limit, so `text` is its beginning and not all of it: the complete characters before the limit. */
   readonly truncated: boolean
 }
 
@@ -233,15 +256,35 @@ export function readFileText(path: string, options: { readonly limit?: number } 
   const whole = readFileSync(canonical)
   const slice = whole.subarray(0, limit)
   if (slice.includes(0)) throw new Error(`${canonical} looks like a binary file, so it has no text to show`)
-  const text = slice.toString('utf8')
-  if (text.includes('\uFFFD')) throw new Error(`${canonical} is not UTF-8 text, so it has no text to show`)
+  const truncated = whole.length > slice.length
+  const text = decodeUtf8(slice, truncated)
+  if (text === undefined) throw new Error(`${canonical} is not UTF-8 text, so it has no text to show`)
   return {
     path: canonical,
     name: basename(canonical),
     bytes: stats.size,
     lines: text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0),
     text,
-    truncated: whole.length > slice.length,
+    truncated,
+  }
+}
+
+/**
+ * The slice's text, or `undefined` when its bytes are not UTF-8 (issue #78).
+ *
+ * Decoded **strictly**: a literal U+FFFD in the file is a character like any other, and only bytes that are not UTF-8
+ * are refused — DSH's reader decodes with `TextDecoder('utf-8', { fatal: true })` (dsh-fs-local lib/index.js:454). When
+ * the limit cut the file, its last character may be cut too, so the slice is decoded in **stream** mode, which holds
+ * back a trailing sequence that is incomplete but valid so far and throws on any byte that begins no character — DSH
+ * decodes its chunks the same way (:342), and it is the Rust port's `Utf8Error::error_len() == None` at the end. The
+ * text is then the complete characters before the cut. A file that is not cut has no such excuse, so a final incomplete
+ * character is refused. `ignoreBOM` keeps a leading BOM in the text, as `Buffer.toString` did and the Rust port does.
+ */
+function decodeUtf8(slice: Uint8Array, truncated: boolean): string | undefined {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(slice, { stream: truncated })
+  } catch {
+    return undefined
   }
 }
 
@@ -366,7 +409,13 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
   const parentIsSessions = basename(dir) === SESSIONS_FOLDER
 
   for (const entry of entries(dir)) {
-    const path = canonicalPath(join(dir, entry.name))
+    /**
+     * A link's row stays at the **link's own path**, DSH's rule (a child's path is the listed directory's joined with its
+     * name, `dsh-api-workspace-files` types.d.ts). Canonicalising it put the row at its target's path, which the target's
+     * own row already holds, so two rows shared one path. Asking for the link's path lists its target: `tree` resolves it,
+     * and the caller's containment check refuses a link that leads outside every root.
+     */
+    const path = entry.link ? join(dir, entry.name) : canonicalPath(join(dir, entry.name))
 
     /**
      * The sessions folder is **not a node**; the sessions inside it are this branch's own.

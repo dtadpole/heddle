@@ -51,6 +51,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
     }
+    // The agent presets (inventory A96): `GET /api/presets`, and the preset a session the page creates runs under.
+    harness.presets = boot
+        .services
+        .get::<Arc<heddle_config::PresetRoster>>("presets");
     if let Some(service) = boot
         .services
         .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
@@ -125,6 +129,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.team = Some(Arc::new(Team { service }));
     }
+    // The live-turn registry: a Stop also reaches the turns the rows start themselves (#93).
+    if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
+        harness.interrupter = Some(Arc::new(LiveTurns { turns }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -132,6 +140,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
         .get::<Arc<heddle_sandbox::ApprovalService>>("approvals")
     {
         harness.approvals = Some(Arc::new(Approvals { service }));
+    }
+    if let Some(preference) = boot
+        .services
+        .get::<Arc<heddle_config::LocalePreference>>("locale")
+    {
+        harness.locale = Some(*preference);
     }
     harness
 }
@@ -173,7 +187,10 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         harness: &harness,
         // The hub the session store was given its listener over at boot.
         events: boot.services.get::<heddle_server::EventHub>("event-hub"),
-        routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref()),
+        routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref())
+            .into_iter()
+            .chain(settings_router(args, invocation))
+            .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
@@ -327,7 +344,66 @@ fn page_routers(
             .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
             .map(|schedule| Arc::clone(&schedule.service)),
     ));
+    // The background-job routes: DSH's job controller (list, follow, kill); 503 when the profile has no jobs row.
+    routers.push(heddle_jobs::http::router(
+        boot.services
+            .get::<Arc<heddle_jobs::JobsPlugin>>("jobs")
+            .map(|jobs| jobs.registry.clone()),
+    ));
     routers
+}
+
+/// `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`: the active profile's patch
+/// as a writable surface, as DSH's settings controller offers it. Every answer is `heddle-config`'s
+/// ([`heddle_config::handle_settings_request`]); the service is built from the same layer options, in-memory
+/// layers and catalog the boot used, and it is mounted behind the door like the other feature routers.
+fn settings_router(args: &Args, invocation: &Invocation) -> Option<axum::Router> {
+    let options = crate::cli::layer_options(args, &invocation.cwd, &invocation.env);
+    let overrides: Vec<heddle_config::NamedLayer> =
+        crate::cli::root_overrides(args, &invocation.cwd)
+            .into_iter()
+            .collect();
+    let catalog =
+        crate::builtins::BuiltinCatalog::new(invocation.env.clone(), invocation.cwd.clone());
+    let service = heddle_config::SettingsService::new(
+        &options,
+        &overrides,
+        invocation.env.clone(),
+        Box::new(catalog),
+    )
+    .ok()?;
+    Some(
+        axum::Router::new()
+            .route("/api/settings", axum::routing::any(settings_answer))
+            .route("/api/settings/{ns}", axum::routing::any(settings_answer))
+            .with_state(Arc::new(service)),
+    )
+}
+
+/// One settings request, answered off the async runtime because it reads and writes the profile patch.
+async fn settings_answer(
+    axum::extract::State(service): axum::extract::State<Arc<heddle_config::SettingsService>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = uri.path().to_owned();
+    let answer = tokio::task::spawn_blocking(move || {
+        heddle_config::handle_settings_request(&service, method.as_str(), &path, &body)
+    })
+    .await
+    .ok()
+    .flatten();
+    match answer {
+        Some(response) => (
+            axum::http::StatusCode::from_u16(response.status)
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+            axum::Json(response.body),
+        )
+            .into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// What the composer's routes read: the booted session store, the model service and the sandbox.
@@ -828,6 +904,17 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         // The booted store's own records, as `tree` and `remove` read them.
         serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
     }
+
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.service
+            .insert_before(id, before)
+            .map_err(|error| match error {
+                heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
+                    heddle_server::services::workspace_not_found(&missing)
+                }
+                other => refusal(other),
+            })
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under
@@ -888,6 +975,15 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
             }));
         }
         schedule.start_delivery();
+    }
+    // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+    if let (Some(jobs), Some(hub)) = (
+        boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs"),
+        boot.services.get::<heddle_server::EventHub>("event-hub"),
+    ) {
+        jobs.on_change(move || {
+            hub.publish(heddle_server::SseFrame::new("jobs", &serde_json::json!({})));
+        });
     }
     notes
 }
@@ -1028,6 +1124,17 @@ impl heddle_server::services::GoalService for Goals {
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
+}
+
+/// The agent runtime's live-turn registry as the server's interrupter: what `turns.abort` is in web.ts's stop route.
+struct LiveTurns {
+    turns: heddle_agent::TurnRegistry,
+}
+
+impl heddle_server::services::TurnInterrupter for LiveTurns {
+    fn interrupt(&self, session: &str) -> bool {
+        self.turns.abort(session, Some("stopped by the user"))
+    }
 }
 
 impl heddle_server::services::TodoService for Todos {
@@ -1209,9 +1316,91 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            4,
-            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
+            5,
+            "files, trajectory, the composer, the reminder routes and the job routes (each 503 without its row)"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_settings_routes_write_the_active_profiles_patch() {
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let profile = root.join("home/profiles/dev");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("cordis.yml"),
+            "- insert:\n    - id: tools\n      name: ./src/plugins/tools.ts\n      config: {bashTimeoutMs: 30000}\n",
+        )
+        .unwrap();
+        let invocation = Invocation {
+            argv: Vec::new(),
+            env: heddle_config::Env::default()
+                .with("HEDDLE_HOME", root.join("home").to_string_lossy())
+                .with("HOME", root.to_string_lossy()),
+            cwd: root.clone(),
+        };
+        let args = Args {
+            profile: Some("dev".into()),
+            ..Args::default()
+        };
+        let router = settings_router(&args, &invocation).expect("a settings router");
+        drop(router);
+        let options = crate::cli::layer_options(&args, &invocation.cwd, &invocation.env);
+        let service = Arc::new(
+            heddle_config::SettingsService::new(
+                &options,
+                &[],
+                invocation.env.clone(),
+                Box::new(crate::builtins::BuiltinCatalog::new(
+                    invocation.env.clone(),
+                    invocation.cwd.clone(),
+                )),
+            )
+            .unwrap(),
+        );
+        let call = |method: axum::http::Method, path: &str, body: &str| {
+            let service = Arc::clone(&service);
+            let response = crate::runtime::tokio().block_on(settings_answer(
+                axum::extract::State(service),
+                method,
+                path.parse().unwrap(),
+                axum::body::Bytes::from(body.to_owned()),
+            ));
+            let status = response.status().as_u16();
+            let bytes = crate::runtime::tokio()
+                .block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        };
+        let (status, view) = call(axum::http::Method::GET, "/api/settings", "");
+        assert_eq!(status, 200, "{view}");
+        assert_eq!(view["writable"], true);
+        let (status, entry) = call(
+            axum::http::Method::POST,
+            "/api/settings/tools",
+            r#"{"update": {"bashTimeoutMs": 60000}, "expectedRevision": 1}"#,
+        );
+        assert_eq!(status, 200, "{entry}");
+        assert_eq!(entry["value"]["bashTimeoutMs"], 60000);
+        let written = std::fs::read_to_string(profile.join("heddle.patch.yml")).unwrap();
+        assert!(written.contains(heddle_config::SETTINGS_BEGIN), "{written}");
+        let (status, stale) = call(
+            axum::http::Method::POST,
+            "/api/settings/tools",
+            r#"{"update": {"bashTimeoutMs": 1}, "expectedRevision": 1}"#,
+        );
+        assert_eq!(status, 409, "{stale}");
+        assert_eq!(stale["code"], "settings-conflict");
         std::fs::remove_dir_all(&root).ok();
     }
 

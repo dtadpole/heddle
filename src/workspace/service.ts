@@ -79,6 +79,19 @@ export class WorkspaceNameConflict extends Error {
   }
 }
 
+/**
+ * A reorder naming a workspace that is not in the order — DSH's `WorkspaceOrderInvalidError` (dsh-workspace
+ * lib/index.js:333-344), with its sentence. The route answers it `404` with DSH's `workspace/not-found`.
+ */
+export class WorkspaceOrderInvalid extends Error {
+  readonly code = 'workspace/not-found'
+  readonly workspaceId: string
+  constructor(workspaceId: string) {
+    super(`cannot reorder unknown workspace '${workspaceId}'`)
+    this.workspaceId = workspaceId
+  }
+}
+
 /** What `add` reports: the record, and whether this call is what created it. */
 export interface WorkspaceAddition {
   readonly record: WorkspaceRecord
@@ -286,6 +299,37 @@ export class WorkspaceService extends Service {
     shape.workspaces[record.id] = updated
     this.write(shape)
     return updated
+  }
+
+  /**
+   * Move one workspace within the stored order, DOM-`insertBefore`-like — DSH's `workspace/insertBefore`
+   * (dsh-workspace lib/index.js:473-499).
+   *
+   * With an anchor the workspace lands just before it; without one it goes to the end. Both are named by id or by
+   * path, as the other routes name a workspace, and either missing from the order is {@link WorkspaceOrderInvalid}.
+   * Naming itself as its anchor, or a move that changes nothing, writes nothing. The order is the same
+   * `workspaceIds` array a new root is prepended to, so the file keeps its shape and the other build reads it as
+   * before. The order is registry-wide and flat: nesting is drawn from paths, so the page only offers a drop among a
+   * workspace's siblings, as DSH's does. Answers the complete order, as DSH's does.
+   */
+  insertBefore(idOrPath: string, beforeIdOrPath?: string): readonly string[] {
+    const shape = this.read()
+    const listed = (key: string): string => {
+      const record = this.find(key)
+      if (record === undefined || !shape.workspaceIds.includes(record.id)) throw new WorkspaceOrderInvalid(key)
+      return record.id
+    }
+    const id = listed(idOrPath)
+    const before = beforeIdOrPath === undefined ? undefined : listed(beforeIdOrPath)
+    if (before === id) return shape.workspaceIds
+    const without = shape.workspaceIds.filter((each) => each !== id)
+    const at = before === undefined ? without.length : without.indexOf(before)
+    const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
+    if (workspaceIds.length === shape.workspaceIds.length && workspaceIds.every((each, index) => each === shape.workspaceIds[index])) {
+      return shape.workspaceIds
+    }
+    this.write({ ...shape, workspaceIds })
+    return workspaceIds
   }
 
   /**

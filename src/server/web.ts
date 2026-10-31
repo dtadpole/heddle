@@ -8,6 +8,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
@@ -20,15 +21,22 @@ import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
+import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
+import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
+import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
+import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
+import { handleJobsRoute } from '../jobs/http.ts'
+import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
   cookieHeader,
@@ -115,6 +123,11 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
+   * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
+   */
+  readonly settings?: SettingsService
 }
 
 export interface WebServer {
@@ -187,6 +200,13 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
     // publish already does for the same event (phase B item 3).
     const line = log.record('schedule', '{}')
+    for (const client of subscribers) client.write(line)
+  })
+
+  // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+  ctx.on('jobs/changed', () => {
+    // Through the stream's log too, so the frame is numbered and replayed to a page that reconnects (phase B item 3).
+    const line = log.record('jobs', '{}')
     for (const client of subscribers) client.write(line)
   })
 
@@ -274,6 +294,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
         try {
@@ -354,6 +375,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 }
 
 interface RequestState {
+  /** The settings surface, when the server was started with one. */
+  readonly settings?: SettingsService
   readonly token: string
   readonly secret: string
   readonly host: string
@@ -527,7 +550,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page())
+      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -577,16 +600,23 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
+      /**
+       * The bytes are read **before** the answer starts, so a file that cannot be read still gets its 404. The head
+       * used to go out first: a file without read permission threw EACCES after writeHead(200), the catch's 404 then
+       * threw ERR_HTTP_HEADERS_SENT, and the response was never ended, so the request hung for good (live issue
+       * developer-two-13). The length is what was read, so it cannot disagree with the body if the file changed.
+       */
+      const bytes = readFileSync(wanted)
       const contentType = inlineContentType(wanted)
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
-        'content-length': String(stats.size),
+        'content-length': String(bytes.length),
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
-        'content-disposition': contentType === null ? `attachment; filename="${basename(wanted).replace(/"/g, '')}"` : 'inline',
+        'content-disposition': contentType === null ? attachmentDisposition(basename(wanted)) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
-      response.end(readFileSync(wanted))
+      response.end(bytes)
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
@@ -631,15 +661,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
+      /** Read before the head, as the raw route does, so an unreadable upload still gets its 404. */
+      const bytes = readFileSync(wanted)
       const contentType = inlineContentType(wanted)
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
-        'content-length': String(stats.size),
-        'content-disposition': contentType === null ? `attachment; filename="${leaf.replace(/"/g, '')}"` : 'inline',
+        'content-length': String(bytes.length),
+        'content-disposition': contentType === null ? attachmentDisposition(leaf) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
-      response.end(readFileSync(wanted))
+      response.end(bytes)
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
@@ -735,6 +767,41 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * Content search: DSH's `session.search` (dsh-api-session-controller lib/index.js:2010-2123), the sessions whose
+   * user or assistant messages hold `q` as a phrase, ranked, at most 20, each with its snippet, and `hasMore`. The
+   * rules live in `src/session/search.ts`; a refused query answers 400 with DSH's sentence. Matched before the
+   * `/api/sessions/<id>` routes below, which would otherwise answer it as "not a session id".
+   */
+  if (url.pathname === '/api/sessions/search' && request.method === 'GET') {
+    try {
+      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '')
+      respond(response, 200, 'application/json', `${JSON.stringify(page, null, 2)}\n`)
+    } catch (error) {
+      const refused = error instanceof SessionSearchQueryError
+      const message = refused ? error.message : `session search failed: ${String(error)}`
+      respond(response, refused ? 400 : 500, 'application/json', `${JSON.stringify({ error: message })}\n`)
+    }
+    return
+  }
+
+  /**
+   * The agent presets (inventory A96): DSH's `agentPresets/list`, the roster and its default, for the new-session
+   * picker and the Settings roster. Each preset says what it narrows: the tools its sessions are offered (absent means
+   * every tool) and its persona. A profile without the `presets` row answers its one implicit preset, marked so.
+   */
+  if (url.pathname === '/api/presets' && request.method === 'GET') {
+    const presets = ctx.get('presets') as PresetRegistry | undefined
+    const roster = presets === undefined ? presetRoster() : { default: presets.defaultId(), presets: presets.list() }
+    respond(
+      response,
+      200,
+      'application/json',
+      `${JSON.stringify({ default: roster.default, presets: roster.presets, ...(presets === undefined ? { implicit: true } : {}) }, null, 2)}\n`,
+    )
+    return
+  }
+
+  /**
    * What a session can be switched onto.
    *
    * The composer's model seat needs the list before it can offer anything, and the list is the model
@@ -744,6 +811,25 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the route reuses it: a key, a key *path* and a header value are all secrets that can live in an
    * endpoint, and none of them may reach a browser.
    */
+  /**
+   * Settings: the active profile's patch, read and written the way DSH's settings controller does it. Every
+   * answer is `src/config/settings.ts`'s (the Rust port's twin is `heddle-config`), behind the fence and the
+   * token like every other route.
+   */
+  if (url.pathname === '/api/settings' || url.pathname.startsWith('/api/settings/')) {
+    if (state.settings === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ code: 'settings-rejected', error: 'this server was started without a settings surface' })}\n`)
+      return
+    }
+    const body = request.method === 'POST' ? await readText(request, response) : ''
+    if (body === null) return
+    const answer = await handleSettingsRequest(state.settings, request.method ?? 'GET', url.pathname, body)
+    if (answer !== undefined) {
+      respond(response, answer.status, 'application/json', `${JSON.stringify(answer.body, null, 2)}\n`)
+      return
+    }
+  }
+
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
     const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
@@ -906,6 +992,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    */
   // The reminder routes: DSH's remote `schedule` namespace, answered by the schedule module.
   if (await handleScheduleRoute(ctx.schedule, url, request, response)) return
+  // The background-job routes: DSH's job controller (list, follow, kill), answered by the jobs module.
+  if (await handleJobsRoute(ctx.get('jobs') as JobRegistry | undefined, url, request, response)) return
 
   if (url.pathname === '/api/goal' && request.method === 'GET') {
     const goals = ctx.goal
@@ -1230,9 +1318,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the path must be absolute' })}\n`)
       return
     }
+    /**
+     * A leading `~` is the home folder, and what is checked **and stored** is the canonical path of the expanded
+     * spelling — the Rust route's `canonical_path(expand_home(raw))` (heddle-server `add_workspace`). This route used
+     * to check the expanded path and store the raw string, which `canonicalPath` then resolved against the server's
+     * working folder: `~/x` became a record at `<cwd>/~/x`, a folder that does not exist (GitHub issue #1). heddle keeps
+     * the `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path that is not fully qualified
+     * (dsh-workspace `realpathNormalize`, lib/index.js:20-24, :48-50). The sentences keep the path as it was written.
+     */
+    const folder = canonicalPath(expandHome(path))
     let stat
     try {
-      stat = statSync(expandHome(path))
+      stat = statSync(folder)
     } catch {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${path} does not exist` })}\n`)
       return
@@ -1246,7 +1343,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a name must be lowercase letters, digits and dashes' })}\n`)
       return
     }
-    const { record, created } = workspaces.add(path, name)
+    const { record, created } = workspaces.add(folder, name)
     if (created) push(state, 'workspace', { type: 'workspace/added', workspace: record })
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
@@ -1307,6 +1404,44 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         return
       }
       respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
+    }
+    return
+  }
+
+  /**
+   * Move a workspace in the stored order — DSH's `workspace/insertBefore` (dsh-api-workspace-controller lib/index.js:
+   * 262-269), what dropping a dragged workspace row asks for.
+   *
+   * `{workspaceId, beforeWorkspaceId?}` (an id or a path each): before the anchor, or last without one. The answer is
+   * DSH's `{workspaceIds}`, the complete order; a workspace or anchor not in it is `404` with DSH's
+   * `workspace/not-found` and sentence. The order lives with the host, in the record file, so it holds across a
+   * reload, a restart and the other build.
+   */
+  if (url.pathname === '/api/workspaces/insertBefore' && request.method === 'POST') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    if (typeof body.workspaceId !== 'string' || body.workspaceId.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a workspaceId is required' })}\n`)
+      return
+    }
+    const before = body.beforeWorkspaceId
+    if (before !== undefined && before !== null && (typeof before !== 'string' || before.length === 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'beforeWorkspaceId must be a workspace id' })}\n`)
+      return
+    }
+    try {
+      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
+    } catch (error) {
+      const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
+      if (!missing) throw error
+      const id = String((error as { workspaceId?: unknown }).workspaceId)
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `Workspace "${id}" not found`, code: 'workspace/not-found' })}\n`)
     }
     return
   }
@@ -1458,8 +1593,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Retitle a conversation — the `Rename…` item in a session's or an instance's menu.
    *
    * The session's own log is append-only and stays that way: this rewrites the meta record, which is
-   * what a listing and a tree row read. The title is a label rather than a fact about the run, and the
-   * empty string clears it.
+   * what a listing and a tree row read. The title is a label rather than a fact about the run; the store
+   * cleans it as DSH does, and a title with nothing visible left is refused (`400 session/title-invalid`).
    *
    * `folder` is the session's **definition** folder when the caller knows it, and it is why one rename
    * reaches both halves: the store holds the label this UI reads, while the definition is the record a
@@ -1475,6 +1610,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     if (body === null) return
     if (typeof body.title !== 'string') {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a title is required' })}\n`)
+      return
+    }
+    /**
+     * A title with nothing visible left once cleaned is **refused**, as DSH's rename refuses it (`dsh-session-title`
+     * `rename`, lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838, `session/title-invalid`). The store
+     * cleans what it accepts (`src/session/title-text.ts`). Measured before: three spaces cleared the title with a 200.
+     * An unknown session is still a `404` first, as DSH resolves the session before it judges the title.
+     */
+    if (normalizeSessionTitle(body.title).length === 0) {
+      if (!ctx.session.list().some((meta) => meta.id === id)) {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+        return
+      }
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: TITLE_INVALID.message, code: TITLE_INVALID.code })}\n`)
       return
     }
     const folder = typeof body.folder === 'string' && body.folder.length > 0 ? canonicalPath(body.folder) : undefined
@@ -1627,8 +1776,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${wanted} is not under any workspace root` })}\n`)
       return
     }
+    const named = requestedPreset(ctx, body.preset)
+    if ('refusal' in named) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: named.refusal })}\n`)
+      return
+    }
+    const preset = newSessionPreset(ctx, named.preset)
     const { handle, definition } = ctx.session.createAt(wanted, {
       ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+      ...(preset !== undefined ? { preset } : {}),
     })
     respond(
       response,
@@ -1771,6 +1927,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * come back to what the server recorded rather than to the endpoint's default.
            */
           reasoningEffort: meta?.reasoningEffort ?? null,
+          /** The agent preset the session runs under (inventory A96); `null` until a turn records one. */
+          preset: meta?.preset ?? null,
           /**
            * The name the session is read under, and the folder it belongs to — the two things DSH prints above a
            * conversation's tabs. The page had them only in the sidebar, so a reader had to look away to know which
@@ -1998,7 +2156,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const stopped = abortSession(state.controllers, id)
+    /**
+     * Every turn of the session, not only the ones this route started (#93). A goal round, a reminder's turn and a
+     * background job's notice turn are started by their rows through `runTurn`, which registers each with the
+     * live-turn registry; the route's own table never held them, so Stop answered `stopped: 0` and a goal round ran
+     * on. A turn this route started is in both tables and is counted once.
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    const live = turns?.isRunning(id) === true
+    const fromRoute = abortSession(state.controllers, id)
+    if (live) turns?.abort(id, 'stopped by the user')
+    const stopped = Math.max(fromRoute, live ? 1 : 0)
     respond(response, 200, 'application/json', `${JSON.stringify({ stopped, session: id })}\n`)
     return
   }
@@ -2097,6 +2265,19 @@ export function rejectUntrusted(request: { headers: Record<string, string | stri
  * failure mode of a helper that both reports and returns is a second response written onto a socket
  * that is already finished.
  */
+/** A request body as text, or `null` once a 413 has been sent. */
+async function readText(request: IncomingMessage, response: ServerResponse): Promise<string | null> {
+  let raw = ''
+  for await (const chunk of request) {
+    raw += chunk
+    if (raw.length > 10 * 1024 * 1024) {
+      respond(response, 413, 'text/plain', 'request too large\n')
+      return null
+    }
+  }
+  return raw
+}
+
 async function readJson(request: IncomingMessage, response: ServerResponse): Promise<Record<string, unknown> | null> {
   let raw = ''
   for await (const chunk of request) {
@@ -2142,6 +2323,34 @@ export function abortSession(controllers: Map<string, Set<AbortController>>, id:
   return stopped
 }
 
+/**
+ * The refusal a turn into a one-shot subagent's session gets, or `null` when the session takes turns.
+ *
+ * DSH's generic session route leaves a subagent's child to subagent routing and answers a prompt into it with
+ * `session/agent-busy`, `session "<id>" is owned by subagent routing`, reason `use subagent delivery for this child
+ * session` (dsh-api-session-controller `lib/index.js:128-142`, reached from `prompt` at `:925-926` through
+ * `resolveAgent` `:221-246`). A one-shot child has no delivery at all: heddle's `delegate` runs it for one task and
+ * settles it. Phase A measured `POST /api/turn` into one answering `200` and growing its log from one turn to two
+ * (R-developer-eight-26). The answer is `409`, the status this server gives the steer refusal DSH words the same way,
+ * with DSH's code, sentence and reason in the body.
+ *
+ * A teammate (`teamId`) is a continuable child — DSH's teammates are — and this route is the delivery heddle's page
+ * uses for it, so it is not refused here.
+ */
+export function subagentTurnRefusal(
+  meta: Pick<SessionMeta, 'id' | 'origin' | 'teamId'> | undefined,
+): { readonly status: 409; readonly body: { readonly error: string; readonly code: 'session/agent-busy'; readonly reason: string } } | null {
+  if (meta?.origin !== 'subagent' || (typeof meta.teamId === 'string' && meta.teamId.length > 0)) return null
+  return {
+    status: 409,
+    body: {
+      error: `session "${meta.id}" is owned by subagent routing`,
+      code: 'session/agent-busy',
+      reason: 'use subagent delivery for this child session',
+    },
+  }
+}
+
 export function resolveTurnEndpoint(sources: {
   readonly requested?: string
   readonly recorded?: string
@@ -2170,6 +2379,38 @@ export function resolveTurnEffort(sources: {
     if (typeof candidate === 'string' && candidate.length > 0) return candidate
   }
   return undefined
+}
+
+/** The `presets` service as the server reads it: optional, so a profile without the row offers the implicit roster. */
+interface PresetRegistry {
+  list(): readonly PresetDefinition[]
+  defaultId(): string
+  resolve(id: string | undefined): PresetResolution
+}
+
+/**
+ * The agent preset a request names (inventory A96), checked before anything is written: `{}` when it names none, the
+ * declared id, or the sentence a `400` answers. A profile without the `presets` row declares only `standard`.
+ */
+export function requestedPreset(ctx: Context, value: unknown): { readonly preset?: string } | { readonly refusal: string } {
+  if (typeof value !== 'string' || value.trim().length === 0) return {}
+  const wanted = value.trim()
+  const presets = ctx.get('presets') as PresetRegistry | undefined
+  const declared = presets === undefined ? presetRoster().presets.map((preset) => preset.id) : presets.list().map((preset) => preset.id)
+  /** DSH's sentence for an undeclared preset (dsh-agent-preset-registry: `Unknown agent preset: <id>`), with what is declared. */
+  if (!declared.includes(wanted)) return { refusal: `Unknown agent preset: ${wanted}; declared: ${declared.join(', ')}` }
+  return { preset: wanted }
+}
+
+/** The `409` body for another preset named for a session that recorded one: a session keeps the preset it was created with. */
+function presetFixedBody(recordedPreset: string): string {
+  return `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`
+}
+
+/** The preset a new session is created under: the one the request named, else the registry's default. */
+function newSessionPreset(ctx: Context, named: string | undefined): string | undefined {
+  if (named !== undefined) return named
+  return (ctx.get('presets') as PresetRegistry | undefined)?.defaultId()
 }
 
 /**
@@ -2209,6 +2450,8 @@ export function sessionRequestSelection(
     reasoningEffort?: string
     folder?: string
     new?: boolean
+    /** The agent preset a session this turn creates runs under (inventory A96). */
+    preset?: string
   }
   try {
     body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
@@ -2216,7 +2459,12 @@ export function sessionRequestSelection(
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
   }
-  if (typeof body.prompt !== 'string' || body.prompt.length === 0) {
+  /**
+   * A prompt of only whitespace is no prompt (#32). Measured: `"   "` was accepted and ran a model turn while `""`
+   * was refused. DSH refuses content without non-whitespace text (`hasPromptContent`, "prompt content must include
+   * non-whitespace text or an attachment"); a prompt here always carries its text, so blank text is refused.
+   */
+  if (typeof body.prompt !== 'string' || body.prompt.trim().length === 0) {
     respond(response, 400, 'text/plain', 'a prompt is required\n')
     return
   }
@@ -2262,18 +2510,60 @@ export function sessionRequestSelection(
   const model = typeof body.model === 'string' && body.model.length > 0 ? body.model : undefined
   const requestedEffort =
     typeof body.reasoningEffort === 'string' && body.reasoningEffort.length > 0 ? body.reasoningEffort : undefined
+  /** The agent preset the request names (inventory A96), checked before a session exists, as the endpoint is. */
+  const namedPreset = requestedPreset(ctx, body.preset)
+  if ('refusal' in namedPreset) {
+    respond(response, 400, 'text/plain', `${namedPreset.refusal}\n`)
+    return
+  }
+  const bornPreset = newSessionPreset(ctx, namedPreset.preset)
   const born = {
     ...(requested !== undefined ? { endpoint: requested } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(requestedEffort !== undefined ? { reasoningEffort: requestedEffort } : {}),
+    ...(bornPreset !== undefined ? { preset: bornPreset } : {}),
   }
+  /**
+   * A one-shot subagent's session takes no turn from here (`subagentTurnRefusal`), and the refusal comes before the session
+   * is opened, so a refused request writes nothing into the child's log.
+   */
+  if (typeof body.session === 'string' && body.session.length > 0) {
+    const resumeId = body.session
+    const resumed = ctx.session.list().find((entry) => entry.id === resumeId)
+    const refusal = subagentTurnRefusal(resumed)
+    if (refusal !== null) {
+      respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
+      return
+    }
+    /** A session keeps the preset it was created with (DSH): another one named for it is refused before it is opened. */
+    const recordedPreset = resumed?.preset
+    if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
+      respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
+      return
+    }
+  }
+  /**
+   * A session this route opens is born **untitled**, as DSH's is (#68): its first message writes the fallback name and
+   * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
+   * read as a person's name, and no title would ever be generated.
+   */
   const handle: SessionHandle =
     typeof body.session === 'string' && body.session.length > 0
       ? ctx.session.start({ resume: body.session })
       : folder !== null
-        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), title: body.prompt.slice(0, 60), ...born })
-        : ctx.session.start({ cwd: process.cwd(), title: body.prompt.slice(0, 60), ...born })
+        ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
+        : ctx.session.start({ cwd: process.cwd(), ...born })
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
+  /**
+   * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it
+   * is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
+   * once the endpoint checks below have passed, so a refused turn records nothing.
+   */
+  const recordedPreset = ctx.session.list().find((entry) => entry.id === handle.id)?.preset
+  if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
+    respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
+    return
+  }
   /**
    * Which endpoint answers: the request, then the session's own record, then the server's default, then the
    * configuration's. The session's record sits above the server's because a session switched from the panel
@@ -2341,6 +2631,8 @@ export function sessionRequestSelection(
       ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
     })
   }
+  /** The preset the request named, for a session that recorded none: now that nothing above refused the turn. */
+  if (namedPreset.preset !== undefined && recordedPreset === undefined) ctx.session.store.recordPreset(handle.id, namedPreset.preset)
 
   /**
    * The session is marked running **before** the stream opens, and unmarked in the `finally` below.
@@ -2546,19 +2838,43 @@ function respondSse(response: ServerResponse): void {
  * such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps a
  * download from being read as a page. A policy on an image or a stylesheet does not affect the page that embeds it.
  */
+/**
+ * The `attachment` disposition for a file's own name, with nothing but visible ASCII in the header. A name of visible
+ * ASCII without `"` or a backslash is sent as it is. Any other name keeps an ASCII `filename="…"` fallback, each other
+ * character (per code point) replaced by `_`, and carries the real name in `filename*=UTF-8''…` (RFC 6266, RFC 5987):
+ * `encodeURIComponent` with `'()*` also encoded, the same bytes the Rust server's `attachment_disposition` writes.
+ * Before this the raw name went into the header: Node refused a name above U+00FF part-way through `writeHead`
+ * (`ERR_INVALID_CHAR`, and the catch then wrote a 404 over the started 200 with the file's length), and a Latin-1
+ * name went out as a raw byte (live issues developer-two-2 and developer-two-3).
+ */
+export function attachmentDisposition(name: string): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/gu, '_')
+  if (fallback === name) return `attachment; filename="${name}"`
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
+}
+
 export const FILE_ANSWER_HEADERS: Readonly<Record<string, string>> = {
   'content-security-policy': "sandbox; default-src 'none'",
   'x-content-type-options': 'nosniff',
 }
 
-function inlineContentType(path: string): string | null {
+/**
+ * The type a document may embed inline, by lower-cased extension, or `null` for a download.
+ *
+ * A stylesheet is on the list because an HTML preview's `<link rel="stylesheet">` is rewritten to this route, and a
+ * browser **refuses a stylesheet whose type is not `text/css`** in a standards-mode document: measured 2026-10-29
+ * (DSH parity R-developer-twelve-14), a preview's relative CSS never applied because it arrived as a download type.
+ * CSS runs no script, so serving it inline adds nothing a viewed file could execute.
+ */
+export function inlineContentType(path: string): string | null {
   const extension = extname(path).toLowerCase()
   const known: Readonly<Record<string, string>> = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
     '.webp': 'image/webp', '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon',
     '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg',
     '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.woff': 'font/woff', '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf',
+    '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf', '.css': 'text/css; charset=utf-8',
   }
   return known[extension] ?? null
 }
@@ -2656,16 +2972,22 @@ export function transcriptTurns(
   let openAssistant = -1
   let openReasoning = -1
   /**
-   * The files written since the last user message, which the exchange's answer carries as its panel data. A write
-   * that arrives after the answer has been drawn belongs to no answer, so it is kept for the next one rather than
-   * retroactively attached.
+   * The files written since the last user message are the exchange's answer's panel data. A `write_file` call is
+   * noted when it is made and **counted only once its result says it succeeded**.
+   *
+   * A call's arguments say what the model asked for, not what happened: a write the sandbox refused, or one that
+   * failed for any other reason, changed nothing on disk. Measured 2026-10-29 (DSH parity R-developer-twelve-11):
+   * with every write refused, the panel still named three files with their added lines. So a write is held
+   * against its call until the paired result arrives, and only an `ok` result makes it an edited file.
    */
-  let written: { path: string; added: number }[] = []
-  /** Writes kept per exchange, keyed by the index of the user turn that opened it. */
-  const sections = new Map<number, { path: string; added: number }[]>()
+  interface NotedWrite { readonly path: string; readonly added: number; ok: boolean }
+  /** Writes kept per exchange in call order, keyed by the index of the user turn that opened it. */
+  const sections = new Map<number, NotedWrite[]>()
+  /** The write each open call would make, by the index of its turn. */
+  const writeOfCall = new Map<number, NotedWrite>()
   let sectionStart = -1
-  const noteWrite = (name: string, argumentsText: string): void => {
-    if (name !== 'write_file') return
+  const noteWrite = (name: string, argumentsText: string, callIndex: number): void => {
+    if (name !== 'write_file' || sectionStart < 0) return
     let args: { path?: unknown; content?: unknown }
     try {
       args = JSON.parse(argumentsText) as { path?: unknown; content?: unknown }
@@ -2675,14 +2997,22 @@ export function transcriptTurns(
     if (typeof args.path !== 'string' || typeof args.content !== 'string') return
     /** Lines a file will have, not segments: a trailing newline closes the last line rather than starting one. */
     const lines = args.content === '' ? 0 : args.content.split('\n').length - (args.content.endsWith('\n') ? 1 : 0)
-    if (sectionStart >= 0) {
-      const bucket = sections.get(sectionStart) ?? []
-      sections.set(sectionStart, bucket)
-      written = bucket
+    const write: NotedWrite = { path: args.path, added: lines, ok: false }
+    const bucket = sections.get(sectionStart) ?? []
+    sections.set(sectionStart, bucket)
+    bucket.push(write)
+    writeOfCall.set(callIndex, write)
+  }
+  /** The edited files of one exchange: its successful writes, first position per path, the latest lines. */
+  const editedFiles = (writes: readonly NotedWrite[]): { path: string; added: number }[] => {
+    const files: { path: string; added: number }[] = []
+    for (const write of writes) {
+      if (!write.ok) continue
+      const existing = files.find((file) => file.path === write.path)
+      if (existing === undefined) files.push({ path: write.path, added: write.added })
+      else existing.added = write.added
     }
-    const existing = written.find((file) => file.path === args.path)
-    if (existing === undefined) written.push({ path: args.path, added: lines })
-    else existing.added = lines
+    return files
   }
   const closeRuns = (): void => {
     openAssistant = -1
@@ -2716,7 +3046,11 @@ export function transcriptTurns(
   const close = (index: number, result: string): void => {
     const turn = turns[index]
     if (turn === undefined) return
-    turns[index] = { ...turn, result, state: /^error/i.test(result) ? 'error' : 'ok' }
+    const state = /^error/i.test(result) ? 'error' : 'ok'
+    turns[index] = { ...turn, result, state }
+    /** Only a write whose call succeeded is an edited file. */
+    const write = writeOfCall.get(index)
+    if (write !== undefined && state === 'ok') write.ok = true
   }
 
   for (const event of events) {
@@ -2733,7 +3067,6 @@ export function transcriptTurns(
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
-        written = []
         sectionStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
         turns.push({
@@ -2810,7 +3143,7 @@ export function transcriptTurns(
      * built, which is why it travels as a field.
      */
     else if (chunk.type === 'tool-call' && chunk.name !== undefined) {
-      noteWrite(chunk.name, chunk.arguments ?? '')
+      noteWrite(chunk.name, chunk.arguments ?? '', turns.length)
       turns.push({
         kind: 'tool',
         name: chunk.name,
@@ -2830,7 +3163,8 @@ export function transcriptTurns(
    * exchange's last answer once the whole log is folded — not to the first delta of a streamed answer, which is
    * created before the writes that followed it are known.
    */
-  for (const [start, files] of sections) {
+  for (const [start, writes] of sections) {
+    const files = editedFiles(writes)
     if (files.length === 0) continue
     let lastAnswer = -1
     for (let index = start + 1; index < turns.length; index += 1) {
@@ -2979,8 +3313,19 @@ export function markedPage(html: string): string {
  * which on screen look identical. (It happened: the live daemon served a stale deployment checkout while the source
  * and the checks were already correct, and a row's geometry read as "not implemented".)
  */
-function page(): string {
-  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8'))
+function page(lang = 'en'): string {
+  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')).replace('<html lang="en">', `<html lang="${lang}">`)
+}
+
+/**
+ * The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one the
+ * browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`, as DSH
+ * writes it. The page's marker stays the file's own, so a language never reads as a different build.
+ */
+export function pageLanguage(ctx: Context, acceptLanguage: string | string[] | undefined): string {
+  const header = Array.isArray(acceptLanguage) ? acceptLanguage.join(',') : acceptLanguage
+  const locale = ctx.get('locale') as { forRequest(header: string | undefined): Locale } | undefined
+  return documentLanguage(locale?.forRequest(header) ?? negotiateLocale(undefined, acceptedLanguages(header)))
 }
 
 /** The addresses a person could reach this server on, for a LAN-aware message. */

@@ -1,3 +1,5 @@
+import { missingPresetMessage, presetAllows, presetToolSpecs } from '../config/presets.ts'
+import type { PresetDefinition, PresetResolution } from '../config/presets.ts'
 import { mergeTokenUsage } from '../llm/usage.ts'
 import type { TokenUsage } from '../llm/usage.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -195,22 +197,128 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
    * turns without inject". The row stays optional, which is the other half of why this is a store read.
    */
   const turns = ctx.get('turns') as TurnRegistry | undefined
-  const live = turns?.begin(options.session.id)
+  /**
+   * One turn at a time per session (#28): a turn sent to a busy session waits for the running one, as DSH's
+   * follow-up does. An idle session registers at once, without an await, so the prompt is still written before
+   * this function's first await for a caller that starts a turn and does not wait for it.
+   */
+  const ticket = turns?.enqueue(options.session.id)
+  const live = ticket === undefined ? undefined : 'live' in ticket ? ticket.live : await ticket.wait
   const signal =
     live === undefined
       ? options.signal
       : options.signal === undefined
         ? live.signal
         : AbortSignal.any([options.signal, live.signal])
+  /**
+   * The session's agent preset (inventory A96), resolved once the turn holds its session and **before** the turn's
+   * own recording begins: a refused preset writes nothing, so it is thrown past `recordUnfinished`, which would
+   * otherwise close a turn that never started.
+   */
+  let preset: PresetDefinition | undefined
   try {
-    return await runTurnBody(ctx, options, signal)
+    preset = sessionPreset(ctx, options.session)
+  } catch (error) {
+    live?.settle()
+    throw error
+  }
+  const progress: TurnProgress = { text: '', reasoning: '', rounds: 0, denials: 0, completed: false }
+  try {
+    return await runTurnBody(ctx, options, signal, progress, preset)
+  } catch (error) {
+    recordUnfinished(ctx, options.session, error, signal, progress)
+    throw error
   } finally {
     live?.settle()
   }
 }
 
+/** The `presets` service as the loop reads it: optional, so a profile without the row runs every tool. */
+interface PresetRegistry {
+  defaultId(): string
+  resolve(id: string | undefined): PresetResolution
+}
+
+/**
+ * The agent preset a turn's session runs under (inventory A96), or undefined when the profile declares none.
+ *
+ * DSH's rules: a session keeps the preset it recorded, so a later change of the default does not move it; a session
+ * that recorded none (one from before presets, or created by a path that named none) records the current default now
+ * and keeps it from then on; and a recorded preset that is no longer declared is **rejected** rather than replaced, so
+ * the turn is refused with a sentence naming it before anything is written to the log.
+ */
+function sessionPreset(ctx: Context, session: SessionHandle): PresetDefinition | undefined {
+  const presets = ctx.get('presets') as PresetRegistry | undefined
+  if (presets === undefined) return undefined
+  let recorded = ctx.session.store.list().find((meta) => meta.id === session.id)?.preset
+  if (recorded === undefined) recorded = ctx.session.store.recordPreset(session.id, presets.defaultId())?.preset ?? presets.defaultId()
+  const resolution = presets.resolve(recorded)
+  if ('missing' in resolution) throw new Error(missingPresetMessage(resolution))
+  return resolution.preset
+}
+
+/**
+ * End a turn that threw, durably (#16, #29).
+ *
+ * A turn whose model call failed (a refused connection, a socket timeout, a provider error) or that a stop cut
+ * mid-stream threw out of the loop before its `assistant/completed` and `turn/completed`. The live stream showed the
+ * error, but the log kept only the prompt, so a reload, a second tab or a client whose stream dropped saw a message
+ * with no answer and no failure, and the next turn's model read two prompts in a row. DSH's loop appends `turn/end`
+ * with its reason (`{ kind: 'error', error }`) in a `finally`. Here the turn ends the way a stopped turn already
+ * does: `assistant/completed` names the reason in `ended`, which the transcript draws as the turn's notice, and
+ * `turn/completed` closes it. The error still reaches the caller.
+ */
+function recordUnfinished(
+  ctx: Context,
+  session: SessionHandle,
+  error: unknown,
+  signal: AbortSignal | undefined,
+  progress: TurnProgress,
+): void {
+  const stopped = signal?.aborted === true
+  const message = error instanceof Error ? error.message : String(error)
+  try {
+    /**
+     * The record keeps what the turn did before it failed: the answer of its earlier rounds, its reasoning, its round
+     * and denial counts (developer-five's review). A turn whose completion was already written (only the closing
+     * `turn/completed` failed) is not completed twice.
+     */
+    if (!progress.completed) {
+      ctx.session.store.append(session, {
+        type: 'assistant/completed',
+        text: progress.text,
+        reasoning: progress.reasoning,
+        finishReason: stopped ? 'aborted' : 'error',
+        rounds: progress.rounds,
+        denials: progress.denials,
+        ended: [stopped ? 'stopped by the caller' : `failed: ${message}`],
+        ...(stopped ? {} : { error: message }),
+      })
+    }
+    ctx.session.store.append(session, { type: 'turn/completed', rounds: progress.rounds, ...(stopped ? { stopped: true } : { error: message }) })
+  } catch {
+    // The log could not take the record either; the caller still gets the turn's own error.
+  }
+}
+
 /** One turn's body; the exported `runTurn` adds the live-turn registration around it. */
-async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortSignal | undefined): Promise<TurnResult> {
+/** What a turn has done so far, kept where `runTurn`'s catch can read it when the turn throws (#16, #29). */
+interface TurnProgress {
+  text: string
+  reasoning: string
+  rounds: number
+  denials: number
+  /** Whether the turn's `assistant/completed` is already in the log. */
+  completed: boolean
+}
+
+async function runTurnBody(
+  ctx: Context,
+  options: RunTurnOptions,
+  signal: AbortSignal | undefined,
+  progress: TurnProgress,
+  preset: PresetDefinition | undefined,
+): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
@@ -224,6 +332,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const cwd = ctx.sandbox.rootFor(folder)
   // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
   const instructionCwd = folder ?? ctx.sandbox.workspaceRoot
+  /**
+   * The session's preset narrows what this turn offers: its tools, and the persona its system prompt is written from
+   * when the caller names none. `runTurn` resolved it before anything was written, so a refused preset leaves no
+   * dangling message and no closed-but-empty turn.
+   */
+  const system = options.system ?? preset?.persona
 
   /**
    * Write what waits in the session's inbox into the conversation (src/session/inbox.ts).
@@ -246,7 +360,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     )
   }
 
-  const tools = specsOf(ctx.tools)
+  const tools = preset === undefined ? specsOf(ctx.tools) : presetToolSpecs(preset, specsOf(ctx.tools))
   const denials: { tool: string; code: string; message: string }[] = []
   const toolCallRecords: { name: string; arguments: string; result: ToolResult }[] = []
   let text = ''
@@ -277,6 +391,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     claimSteered()
     rounds += 1
+    progress.rounds = rounds
 
     /**
      * What the person had already said when this round started.
@@ -315,7 +430,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       endpoint: options.endpoint,
       ...(options.model !== undefined ? { model: options.model } : {}),
       tools,
-      ...(options.system !== undefined ? { system: options.system } : {}),
+      ...(system !== undefined ? { system } : {}),
     })
 
     /**
@@ -349,6 +464,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       const reason = isHookRefusal(error) ? (error as Error).message : `a hook failed at agent/pre-step — ${(error as Error).message}`
       throw new Error(reason)
     }
+    /**
+     * The session's preset is applied again to what the hook answered (developer-five's review of A96): a listener may
+     * add a registered tool, and one outside the preset would otherwise reach the model's tool list even though a call
+     * to it is refused. A profile without presets is unchanged.
+     */
+    if (preset !== undefined) prepared = { ...prepared, tools: presetToolSpecs(preset, prepared.tools) }
 
     const calls: { id: string; name: string; arguments: string }[] = []
     let roundText = ''
@@ -362,7 +483,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
        * for one message. What the rule is about is a message that arrives *while the model is answering*.
        */
       inputBefore = userInputSeqs(ctx, options.session)
-      const request = {
+      const asked = {
         endpoint: options.endpoint,
         messages: prepared.messages,
         ...(options.model !== undefined ? { model: options.model } : {}),
@@ -373,13 +494,26 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         sessionId: options.session.id,
         round,
       }
+      /**
+       * The record names the request this step **sends**, not the one the turn started with (issue #14).
+       *
+       * The `model/request` waterfall is where a selection policy rewrites a call: the server's running-turn rule
+       * moves a step to the session's current endpoint, model and level, so a switch made mid-turn lands on the next
+       * step, as DSH's does. The record used to be written from the turn's options before that rewrite, so a step that
+       * went to the new model was logged under the old one, and the log read as if the switch had been ignored. DSH's
+       * request header names the provider, model and effort actually used. So the request is resolved here, **once**:
+       * the record (its endpoint, model, level, message and tool counts) and the call both take that answer, and the
+       * call goes out through `streamResolved`, which does not run the waterfall again. A listener may rewrite freely or
+       * have effects; running it twice could send something other than what was recorded.
+       */
+      const request = ctx.model.resolve(asked)
 
       ctx.session.store.modelRequest(options.session, {
-        endpoint: options.endpoint,
-        ...(options.model !== undefined ? { model: options.model } : {}),
-        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-        messages: prepared.messages.length,
-        tools: prepared.tools.map((tool) => tool.name),
+        endpoint: request.endpoint,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        messages: request.messages.length,
+        tools: (request.tools ?? []).map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,
         thresholdTokens: report.thresholdTokens,
         pruned: report.pruned,
@@ -389,12 +523,20 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       })
 
       try {
-        for await (const chunk of ctx.model.stream(request, signal)) {
+        for await (const chunk of ctx.model.streamResolved(request, signal)) {
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
-          if (chunk.type === 'text-delta') roundText += chunk.text
-          else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
+          if (chunk.type === 'text-delta') {
+            roundText += chunk.text
+            // The round's partial answer is the turn's answer so far (the last non-empty round, as above), should the
+            // stream fail or be stopped before the round ends; a round with no text yet leaves the previous answer.
+            progress.text = roundText
+          }
+          else if (chunk.type === 'reasoning-delta') {
+            reasoning += chunk.text
+            progress.reasoning = reasoning
+          }
           else if (chunk.type === 'tool-call') calls.push({ id: chunk.id, name: chunk.name, arguments: chunk.arguments })
           else if (chunk.type === 'done') {
             finishReason = chunk.finishReason
@@ -421,6 +563,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
          * sending the same too-long request again would fail identically, which is why the loop
          * re-derives the request before trying.
          */
+        /**
+         * A stopped request is a cancellation, not a request failure (#99): it is not offered to the recovery
+         * listener, which would otherwise log a `compaction/recovery` decision for a call that never failed. The
+         * Rust turn checks its stop first the same way, and DSH's loop treats an abort as its own end.
+         */
+        if (signal?.aborted === true) throw error
         const failure = modelFailure(error)
         if (failure === undefined || attempt >= maxOverflowRetries) throw error
         const action = await ctx.waterfall(
@@ -448,7 +596,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         const retried = ctx.context.assemble(options.session, {
           cwd: instructionCwd,
           tools,
-          ...(options.system !== undefined ? { system: options.system } : {}),
+          ...(system !== undefined ? { system } : {}),
           endpoint: options.endpoint,
           ...(options.model !== undefined ? { model: options.model } : {}),
         })
@@ -470,7 +618,14 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         })
       }
     }
-    text += roundText
+    /**
+     * The turn's answer is its **last non-empty round**, DSH's rule for what a run hands back (`dsh-subagent`
+     * `finalAssistantOutput`: "the last non-empty assistant message"). Adding every round's text fused the remark a
+     * model makes before a tool call to its answer ("I'll read both files.Both reads…") in the API's answer, the CLI's
+     * printed answer and a child's closing message (live-testing issue #9). The log keeps every round's own message.
+     */
+    if (roundText.length > 0) text = roundText
+    progress.text = text
 
     /**
      * A message that arrived while the model was answering is answered **by this turn**.
@@ -490,55 +645,73 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       break
     }
 
-    for (const call of calls) {
+    /**
+     * The step's calls run as DSH's loop runs them (`dsh-agent-loop` `runGroup`): a call whose tool is parallel-safe
+     * (`concurrencySafe`, DSH's `isConcurrencySafe`) joins the consecutive safe calls around it in a pool of
+     * `tools.maxParallelToolCalls`; any other call runs alone, a barrier between groups. Results commit in model order
+     * after each group, so a call that finishes first is still answered in its place, and the step boundary (where
+     * steered input is claimed) stays after the whole step, never between two results of one group.
+     *
+     * Every call the model asked for is answered in the log — even one that cannot run. The assistant's `tool_calls`
+     * message and its tool messages are one unit to the provider: a Stop or a thrown tool between them used to leave a
+     * call unanswered, and every later request failed with the pairing error. A stopped turn, a refused call and a tool
+     * that threw all become an `error` result the model can read; a call a stop overtook before it started is one.
+     */
+    const runCall = async (call: (typeof calls)[number]): Promise<ToolResult> => {
       const args = parseArguments(call.arguments)
-      /**
-       * Every call the model asked for is answered in the log — even one that cannot run.
-       *
-       * The assistant's `tool_calls` message and its tool messages are one unit to the provider: a Stop or a thrown
-       * tool between them used to leave a call unanswered, and every later request failed with the pairing error.
-       * A stopped turn, a refused call and a tool that threw all become an `error` result the model can read.
-       */
-      let result: ToolResult
       if (stoppedByCaller()) {
-        result = { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
-      } else {
-        try {
-          result = await ctx.tools.call(call.name, args, {
-            cwd,
-            session: options.session,
-            ...(signal !== undefined ? { signal } : {}),
-            log: (message) => ctx.logger.info('turn: %s', message),
-          })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          result = {
-            output: '',
-            error: {
-              code: 'INTERRUPTED',
-              message: stoppedByCaller() ? 'the turn was stopped while this call ran' : message,
-            },
-          }
+        return { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
+      }
+      /**
+       * A tool outside the session's preset does not exist for this agent, so the call gets the registry's own answer
+       * for an unknown tool, naming the tools the preset does offer. The model is never shown such a tool; this is
+       * the answer to one it names anyway.
+       */
+      if (preset !== undefined && !presetAllows(preset, call.name)) {
+        return {
+          output: '',
+          error: { code: 'UNKNOWN_TOOL', message: `no tool named '${call.name}'; known: ${tools.map((tool) => tool.name).join(', ') || '(none)'}` },
         }
       }
+      try {
+        return await ctx.tools.call(call.name, args, {
+          cwd,
+          session: options.session,
+          ...(signal !== undefined ? { signal } : {}),
+          log: (message) => ctx.logger.info('turn: %s', message),
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return {
+          output: '',
+          error: {
+            code: 'INTERRUPTED',
+            message: stoppedByCaller() ? 'the turn was stopped while this call ran' : message,
+          },
+        }
+      }
+    }
+    const commitCall = (call: (typeof calls)[number], result: ToolResult) => {
       toolCallRecords.push({ name: call.name, arguments: call.arguments, result })
       if (result.error) {
         denials.push({ tool: call.name, code: result.error.code, message: result.error.message })
+        progress.denials = denials.length
       }
       ctx.session.store.message(options.session, {
         role: 'tool',
         toolCallId: call.id,
-        content: [
-          {
-            type: 'text',
-            text: result.error
-              ? `error (${result.error.code}): ${result.error.message}`
-              : result.output.length > 0
-                ? result.output
-                : '(the tool produced no output)',
-          },
-        ],
+        content: [{ type: 'text', text: toolMessageText(result) }],
       })
+    }
+    const limit = Math.max(1, ctx.tools.maxParallelToolCalls ?? 1)
+    const safe = (name: string) => limit > 1 && ctx.tools.isConcurrencySafe?.(name) === true
+    for (let first = 0; first < calls.length; ) {
+      let end = first + 1
+      if (safe(calls[first]!.name)) while (end < calls.length && safe(calls[end]!.name)) end += 1
+      const group = calls.slice(first, end)
+      const results = await runPool(group, limit, runCall)
+      group.forEach((call, index) => commitCall(call, results[index]!))
+      first = end
     }
   }
 
@@ -560,6 +733,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     ...(ended.length > 0 ? { ended } : {}),
   })
+  progress.completed = true
   ctx.session.store.append(options.session, { type: 'turn/completed', rounds })
 
   return {
@@ -652,4 +826,37 @@ export class HookRefusal extends Error {
 /** Whether an error came from a hook that meant to refuse. */
 export function isHookRefusal(error: unknown): boolean {
   return error instanceof Error && (error.name === 'HookRefusal' || error.message.startsWith('refused by hook:'))
+}
+
+/** Run `run` over `items` with at most `limit` in flight, starting each as a slot frees; results keep `items`' order. */
+async function runPool<T, R>(items: readonly T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next
+      next += 1
+      results[index] = await run(items[index]!)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
+/**
+ * The text a tool result is recorded and replayed to the model as.
+ *
+ * A failed result keeps what it printed (live-testing issue #82): a bash call that exited 7 used to reach the model as
+ * the bare `error (EXIT): the command exited 7`, its stdout and stderr dropped, so the model ran a second command to
+ * see them. DSH's bash `renderResult` keeps the body and adds an `[exit code: N]` marker. Here the error line stays first,
+ * because the page reads the first line as the failed row's summary and a leading `error` as the failure, and the
+ * output follows it.
+ */
+export function toolMessageText(result: ToolResult): string {
+  const output = result.output ?? ''
+  if (result.error) {
+    const line = `error (${result.error.code}): ${result.error.message}`
+    return output.length > 0 ? `${line}\n${output}` : line
+  }
+  return output.length > 0 ? output : '(the tool produced no output)'
 }
