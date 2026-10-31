@@ -6597,9 +6597,20 @@ function paintSessionHeading(meta = current === null ? null : sessionMetas.get(c
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
-  const response = await fetch('/api/sessions')
-  if (!response.ok) return
-  const sessions = await response.json()
+  /**
+   * A list that cannot be read changes nothing: the rows keep what they last showed, the tree's own read says it failed,
+   * and the stream's reconnect reads again (`StreamBaseline`). This used to reject, and every action that refreshes after
+   * its request — a rename, a pin, an archive, a fork — left an unhandled rejection when the network dropped right after
+   * the server had applied it (#91).
+   */
+  let sessions
+  try {
+    const response = await fetch('/api/sessions')
+    if (!response.ok) return
+    sessions = await response.json()
+  } catch (error) {
+    return
+  }
   listedMetas.clear()
   for (const meta of Array.isArray(sessions) ? sessions : []) {
     if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string') listedMetas.set(meta.id, meta)
@@ -6744,6 +6755,95 @@ function scheduleTreeRefresh() {
     void renderTree()
   }, 400)
 }
+
+/* stream-baseline:begin */
+/**
+ * When the tree reads its baselines again — DSH's connection generation, as far as this page's stream can follow it (#91).
+ *
+ * DSH re-acquires the Workspace and Session baselines on every new connection. Its `ConnectionController` publishes
+ * `connected` and calls `onConnected` only once the stream's `ready` item has arrived (dsh-client-connection
+ * lib/client.browser.js:1094-1100, README "Connection generation"); the Session controller re-reads its list there
+ * (dsh-api-session-controller lib/client.js:4289-4296, `handleConnected` :3570-3584), and the Workspace state stream
+ * reopens on a `baseline` frame that replaces the projection and clears its error (dsh-api-workspace-controller
+ * lib/client.js:473-490, `replaceBaseline` :183-194). A browser `offline` aborts the stream and suspends the retries; the
+ * next `online` starts again at the 500 ms tier (lib/client.browser.js:989-999, `watchBrowserNetwork` :1359-1376, README
+ * "Browser offline aborts active work…").
+ *
+ * This page follows `GET /api/events` with an `EventSource`, which reconnects on its own and whose every connection
+ * opens with the server's `ready` frame (`src/server/stream.ts`). So:
+ * - the **first** `ready` is the page's own load, whose boot reads the tree itself: nothing more;
+ * - every **later** `ready` is a reconnect: read again at once, as `onConnected` does;
+ * - `offline` reads nothing (the read would fail) and is remembered;
+ * - `online` after an `offline` reads again after DSH's first tier, because an `EventSource` does not watch the browser's
+ *   network state: it may have kept its connection through the cut, and then no `ready` comes.
+ *
+ * Pure, so `test/stream-baseline.test.ts` judges it out of the page. `next` answers the next state and the delay before
+ * a read, `null` for none.
+ */
+const StreamBaseline = (() => {
+  const ONLINE_DELAY_MS = 500
+
+  function initial() {
+    return { generations: 0, offline: false }
+  }
+
+  function next(state, signal) {
+    if (signal === 'ready') {
+      const generations = state.generations + 1
+      return { state: { ...state, generations }, reread: generations > 1 ? 0 : null }
+    }
+    if (signal === 'offline') return { state: { ...state, offline: true }, reread: null }
+    if (signal === 'online') return { state: { ...state, offline: false }, reread: state.offline ? ONLINE_DELAY_MS : null }
+    return { state, reread: null }
+  }
+
+  return { ONLINE_DELAY_MS, initial, next }
+})()
+/* stream-baseline:end */
+
+/**
+ * Read the tree's baselines again: `/api/workspaces` and `/api/sessions` through `renderTree`, whose successful draw
+ * replaces a stale "could not read the workspaces" note, then the session list's running state through
+ * `refreshSessions`. The search index is a cache of the session list, so it is dropped first; the one-column list draws
+ * from it. A read asked for while one is in flight runs once more after it, so the last answer drawn is never the older.
+ */
+let baselineFollow = StreamBaseline.initial()
+let baselineTimer = 0
+let baselineRead = null
+let baselineAgain = false
+function reacquireBaselines() {
+  if (baselineRead !== null) {
+    baselineAgain = true
+    return baselineRead
+  }
+  baselineRead = (async () => {
+    try {
+      do {
+        baselineAgain = false
+        clearTimeout(treeRefreshTimer)
+        searchIndex = null
+        await renderTree()
+        await refreshSessions()
+      } while (baselineAgain)
+    } catch (error) {
+      setNote('could not read the workspaces: ' + (error && error.message))
+    } finally {
+      baselineRead = null
+    }
+  })()
+  return baselineRead
+}
+function followConnection(signal) {
+  const step = StreamBaseline.next(baselineFollow, signal)
+  baselineFollow = step.state
+  if (step.reread === null) return
+  clearTimeout(baselineTimer)
+  baselineTimer = setTimeout(() => void reacquireBaselines(), step.reread)
+}
+events.addEventListener('ready', () => followConnection('ready'))
+window.addEventListener('offline', () => followConnection('offline'))
+window.addEventListener('online', () => followConnection('online'))
+
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
@@ -11205,11 +11305,18 @@ function menuItemsFor(node) {
         run: async () => {
           const title = window.prompt('Rename this conversation', node.session.title ?? '')
           if (title === null) return
-          const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ title }),
-          })
+          let response
+          try {
+            response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ title }),
+            })
+          } catch (error) {
+            /** Said in the note rather than left to the console; the stream's reconnect shows what the server holds (#91). */
+            setNote('could not rename that conversation: ' + (error && error.message))
+            return
+          }
           const body = await response.json().catch(() => ({}))
           if (!response.ok) {
             setNote(body.error ?? 'could not rename that conversation')
@@ -11317,6 +11424,11 @@ async function confirmSessionRename() {
       return
     }
   } catch (error) {
+    /**
+     * A request that fails in flight is said in the dialog, which stays open, as DSH's `RenameForm` does
+     * (`dsh-client-ui-workspace` `lib/client.js:4449-4455`). The server may have applied it before the cut; the
+     * stream's reconnect reads what it holds (`StreamBaseline`, #91).
+     */
     refuse('could not rename that session: ' + (error && error.message))
     return
   }
@@ -11326,6 +11438,7 @@ async function confirmSessionRename() {
     sessionRenameDialog.close()
   }
   setNote('')
+  /** Neither read rejects: a failed one leaves the tree's note, and the stream's reconnect reads again (#91). */
   await renderTree()
   await refreshSessions()
 }
@@ -11415,13 +11528,24 @@ async function archiveSession(node) {
  * One function for both flags because the route is one: the record and the definition are written together, and
  * a row's menu only decides which of the two it is changing. Answers `{ ok, status, body }`; a refusal the caller
  * handles itself (`options.quiet`) is not written to the tree's note.
+ *
+ * A request that fails in flight answers `{ ok: false, status: 0, body: {}, error }` and says so in the note, as DSH's
+ * pin says "Pin failed. Try again later." (`dsh-client-ui-workspace` `lib/client.js:5085-5094`) rather than leaving the
+ * rejection to the console: the row and menu buttons that call this do not catch (#91). Whether the server applied it
+ * anyway is the next read's to show, which the stream's reconnect makes (`StreamBaseline`).
  */
 async function setSessionFlags(node, patch, extra = {}, options = {}) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  })
+  let response
+  try {
+    response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
+    })
+  } catch (error) {
+    if (typeof options.quiet !== 'function' || !options.quiet(0, {})) setNote('could not change that session: ' + (error && error.message))
+    return { ok: false, status: 0, body: {}, error }
+  }
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
     if (typeof options.quiet !== 'function' || !options.quiet(response.status, body)) setNote(body.error ?? 'could not change that session')
@@ -11494,7 +11618,8 @@ document.getElementById('session-archive-confirm').addEventListener('click', asy
     const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
     settle(false)
     if (!result.ok) {
-      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      const failed = result.error !== undefined ? 'could not stop and archive that session: ' + (result.error && result.error.message) : null
+      dialogError('session-archive-error', failed ?? result.body?.error ?? 'could not stop and archive that session')
       return
     }
     stopArchiveTarget = null
@@ -15582,7 +15707,10 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
     }
     if (activeFolder === deleteTarget.path) activeFolder = null
     deleteTarget = null
+    /** The dialog closes with its Deleting… line put away, not left set behind it (#91). */
+    document.getElementById('workspace-delete-status').hidden = true
     workspaceDelete.close()
+    /** A redraw that cannot read the tree says so in its note, and the stream's reconnect reads again (#91). */
     await renderTree()
   } catch (error) {
     if (deleteTarget !== null) deleteTarget.busy = false
