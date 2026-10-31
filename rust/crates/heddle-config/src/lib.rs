@@ -58,6 +58,7 @@ mod local;
 mod model_row;
 pub mod paths;
 mod plugin_inventory;
+mod presets;
 mod profile;
 mod references;
 mod retry;
@@ -84,6 +85,10 @@ pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nomi
 pub use paths::{canonical_path, depth_of, is_under};
 pub use plugin_inventory::{
     PluginFiberPhase, PluginInventoryEntry, PluginInventorySnapshot, plugin_inventory,
+};
+pub use presets::{
+    PresetDefinition, PresetResolution, PresetRoster, missing_preset_message, preset_roster,
+    standard_preset,
 };
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,
