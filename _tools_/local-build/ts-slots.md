@@ -1,9 +1,9 @@
 ---
 title: Local build TypeScript slots
 created: 2026-10-31T03:50:00Z
-modified: 2026-10-31T03:50:00Z
+modified: 2026-10-31T04:20:00Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: The ts slot class of the slot runner, which queues TypeScript test runs in a pool of two and caps each run's node test concurrency at four, so full gates from several seats cannot overload the Mac.
 status: unverified
 grounded_in:
@@ -38,7 +38,8 @@ and `verify:fast` can go through it the same way.
   `--test-concurrency=4` (`LOCAL_BUILD_TS_CONCURRENCY` changes it). npm scripts and `#!/usr/bin/env node` find
   it. A caller's own `--test-concurrency` comes later on the command line and wins.
 - The release on exit and on a signal, dead-owner reclaim, the hour-old stamp and the bounded wait (exit 75) are
-  the cargo slots' rules ([slots.md](slots.md)). No `-j`, no shared-target guard and no build output sweep apply.
+  the cargo slots' rules ([slots.md](slots.md)), and so is the first-come-first-served queue, kept apart in
+  `ts-slot.queue` with its own `ts-slot.next` ([queue.md](queue.md)). No `-j`, no shared-target guard and no build output sweep apply.
 
 ## Bounds
 
