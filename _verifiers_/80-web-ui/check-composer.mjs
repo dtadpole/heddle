@@ -700,7 +700,7 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
       await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000),
       'the dock fills once the turn ended and its usage was reported',
     )
-    await browser.waitFor('(document.querySelector(\'[data-stat="steps"]\') || {}).textContent === "1 steps"', 20_000)
+    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="steps"]\') || {}).textContent === "1 steps" && (document.querySelector(\'[data-stat="context"]\') || {}).textContent === "50%"', 20_000), 'the durable fold supplies both steps and context, not only live tokens')
     const first = JSON.parse(await dock())
     assert.equal(first.turns, '1 turns', 'the reference\u2019s label is always plural')
     assert.equal(first.steps, '1 steps', 'one model round is one agent step')
