@@ -10,7 +10,7 @@ import { heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfi
 /**
  * The page's Browser tab (#86), after DSH's `ui-sidebar-browser` on Web.
  *
- * Three claims, each judged where it lives:
+ * Four claims, each judged where it lives:
  *
  * 1. **Opt-in.** DSH's Web profile ships its Browser disabled; here the operator enables it with `HEDDLE_WEB_BROWSER=1`.
  *    A default server's `/api/status` carries no `browser` key and its page shows no entry point.
@@ -20,6 +20,8 @@ import { heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfi
  * 3. **The frame is contained.** It carries DSH's default sandbox and no referrer; a framed script runs but cannot
  *    navigate the application; the page's own history drives Back and Forward; and a page that moves itself is marked
  *    unknown, with Back, Forward and Open in system browser disabled and Reload returning to the last known address.
+ * 4. **The pane does not squeeze the conversation.** DSH's column budget holds beside any left-sidebar width and in any
+ *    window: a 400-pixel conversation beside a track of at least 300, or a pane that covers the conversation column.
  *
  * The server never fetches or proxies a page, so the framed pages here come from a loopback double this check owns,
  * which also records every request it was sent — the evidence that a refused address loaded nothing and that no
@@ -336,6 +338,99 @@ test('an enabled Browser tab refuses unsafe addresses and frames HTTP(S) pages i
   } finally {
     await browser.close()
     await pages.close()
+    server.close()
+  }
+})
+
+/**
+ * The columns as the reader sees them, for DSH's budget (`dsh-client-ui-layout` `computeColumns`): beside a right track
+ * the conversation keeps 400 pixels and the track 300, or there is no track.
+ */
+const COLUMNS = `(() => {
+  const pane = document.getElementById('right-sidebar')
+  const main = document.querySelector('main').getBoundingClientRect()
+  const rect = pane.getBoundingClientRect()
+  return {
+    fixed: getComputedStyle(pane).position === 'fixed',
+    main: Math.round(main.width),
+    mainLeft: Math.round(main.left),
+    left: Math.round(rect.left),
+    right: Math.round(rect.right),
+    width: Math.round(rect.width),
+    viewport: document.documentElement.clientWidth,
+    sidebar: document.body.dataset.sidebar,
+  }
+})()`
+
+/** A track leaves the conversation its minimum; a pane with no room for a track covers the whole conversation column. */
+function assertBudget(columns, label) {
+  const seen = JSON.stringify(columns)
+  if (columns.fixed) {
+    assert.ok(columns.left <= columns.mainLeft && columns.right >= columns.viewport, `${label}: a pane without room covers the conversation column, not part of it ${seen}`)
+    return
+  }
+  assert.ok(columns.main >= 400, `${label}: the conversation keeps DSH's 400-pixel minimum beside the track ${seen}`)
+  assert.ok(columns.width >= 300, `${label}: the track keeps DSH's 300-pixel minimum ${seen}`)
+  assert.ok(columns.mainLeft + columns.main + columns.width <= columns.viewport + 1, `${label}: the columns fit the window ${seen}`)
+}
+
+test('on a desktop the right sidebar never squeezes the conversation, whatever the left sidebar\'s width', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('page-budget', true)
+  const browser = await openBrowser({ width: 1280, height: 800 })
+  const settle = () => browser.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 50))))`)
+  const key = (name) => browser.evaluate(`document.getElementById('gutter-left').dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(name)}, bubbles: true }))`)
+  const resize = (width) => browser.send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false })
+  try {
+    // A reader who once dragged the left sidebar to its widest: the page restores that width on every visit.
+    await browser.goto(server.url)
+    await browser.waitFor(`document.body.dataset.ready === 'true'`, 15_000)
+    await browser.evaluate(`localStorage.setItem('heddle.layout.sidebar.v1', '48')`)
+    await browser.goto(server.url)
+    await browser.waitFor(`document.body.dataset.ready === 'true'`, 15_000)
+    await browser.waitFor(`document.getElementById('browser-open').hidden === false`, 5_000)
+    await browser.evaluate(`document.getElementById('browser-open').click()`)
+    await settle()
+    const widest = await browser.evaluate(COLUMNS)
+    assertBudget(widest, 'opened beside a 48rem left sidebar at 1280 pixels')
+    assert.equal(widest.fixed, true, `with no room for a 300-pixel track beside 400 of conversation, the pane covers ${JSON.stringify(widest)}`)
+
+    await key('Home')
+    await settle()
+    const narrowest = await browser.evaluate(COLUMNS)
+    assertBudget(narrowest, 'after the left sidebar shrank to its minimum')
+    assert.equal(narrowest.fixed, false, `room made by the left sidebar turns the pane back into a track ${JSON.stringify(narrowest)}`)
+
+    await key('End')
+    await settle()
+    assertBudget(await browser.evaluate(COLUMNS), 'after the left sidebar grew to its maximum with the pane open')
+
+    await browser.evaluate(`document.getElementById('gutter-left').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`)
+    await settle()
+    const standard = await browser.evaluate(COLUMNS)
+    assertBudget(standard, 'beside the default left sidebar')
+    assert.equal(standard.fixed, false, `the default left sidebar leaves room for a track at 1280 pixels ${JSON.stringify(standard)}`)
+
+    for (const width of [1100, 1000, 800]) {
+      await resize(width)
+      await settle()
+      assertBudget(await browser.evaluate(COLUMNS), `in a window resized to ${width} pixels`)
+    }
+
+    // DSH's `openRightbar`: opening below 1024 pixels puts a narrow opening of the left sidebar back to its rail.
+    await resize(1000)
+    await browser.evaluate(`document.getElementById('rs-close').click()`)
+    await browser.evaluate(`document.getElementById('sidebar-toggle').click()`)
+    await settle()
+    assert.equal(await browser.evaluate(`document.body.dataset.sidebar`), 'expanded', 'the narrow toggle opened the left sidebar')
+    await browser.evaluate(`document.getElementById('browser-open').click()`)
+    await settle()
+    const reopened = await browser.evaluate(COLUMNS)
+    assert.equal(reopened.sidebar, 'collapsed', `opening the pane below 1024 pixels returns the left sidebar to its rail ${JSON.stringify(reopened)}`)
+    assertBudget(reopened, 'reopened below 1024 pixels')
+  } finally {
+    await browser.close()
     server.close()
   }
 })

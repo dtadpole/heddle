@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T07:30:00Z
+modified: 2026-10-31T08:25:00Z
 level: L3
-version: 1.2.0
+version: 1.2.1
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -61,7 +61,9 @@ grounded_in:
   `HEDDLE_WEB_BROWSER=1` the tab refuses `javascript:`, `file:`, `data:` and `blob:` input, credentials and the
   application's own origin before anything reaches the network, frames a loopback page in DSH's default sandbox with
   no referrer, keeps its own Back and Forward, marks a page that moved itself unknown, and covers the window at phone
-  width.
+  width. On a desktop it keeps DSH's column budget whatever the left sidebar's stored or dragged width and the
+  window's: beside a track the conversation keeps 400 pixels and the track 300, a pane with no room for that covers the
+  conversation column, and opening it below 1024 pixels returns a narrow opening of the left sidebar to its rail.
 
 ## What it deliberately does not judge
 
