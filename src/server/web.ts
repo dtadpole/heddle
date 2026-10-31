@@ -177,6 +177,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const completedAt = new Map<string, number>()
   // Tracked so shutdown can reach a connection whose handler is still awaiting a turn.
   const sockets = new Set<import('node:net').Socket>()
+  /** Set when the shutdown begins; from then on a turn is refused rather than started (see `stopRunningTurns`). */
+  const lifecycle = { closing: false }
 
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
@@ -275,6 +277,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       controllers,
       runningSince,
       completedAt,
+      lifecycle,
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
@@ -353,6 +356,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
    * agents at teardown (`dsh-bash-local` graceMs 3000).
    */
   async function stopRunningTurns(): Promise<void> {
+    // The listener stays open through the grace, so a turn asked for now would start a command nothing stops.
+    lifecycle.closing = true
     let stopping = 0
     for (const id of [...controllers.keys()]) stopping += abortSession(controllers, id)
     if (stopping === 0) return
@@ -420,6 +425,8 @@ interface RequestState {
    * the composer grew a Stop.
    */
   readonly controllers: Map<string, Set<AbortController>>
+  /** The server's shutdown state: `closing` once `close()` has begun stopping the turns. */
+  readonly lifecycle: { readonly closing: boolean }
   /**
    * Rounds an interactive turn may take before the loop stops it — `Infinity` by default, so the loop ends the way
    * DSH's does (the model stops calling tools), and only an explicit `--max-rounds` turns this into a limit.
@@ -2407,6 +2414,7 @@ export function sessionRequestSelection(
 }
 
 /** Run one turn and stream its session events back as they are written. */async function handleTurn(ctx: Context, request: IncomingMessage, response: ServerResponse, state: RequestState): Promise<void> {
+  if (refuseWhileClosing(response, state)) return
   let raw = ''
   for await (const chunk of request) {
     raw += chunk
@@ -2624,6 +2632,8 @@ export function sessionRequestSelection(
    * turn begins on an idle session; a second concurrent turn on the same session does not reset the first one's
    * clock.
    */
+  // Checked again here, after the awaits above: the shutdown may have begun while the request was read.
+  if (refuseWhileClosing(response, state)) return
   const activeTurns = state.running.get(handle.id) ?? 0
   state.running.set(handle.id, activeTurns + 1)
   if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
@@ -2819,6 +2829,16 @@ export function inlineContentType(path: string): string | null {
     '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf', '.css': 'text/css; charset=utf-8',
   }
   return known[extension] ?? null
+}
+
+/**
+ * A turn asked for during the shutdown grace is refused: the running turns were already stopped, so one started now
+ * would run a command that nothing ends before the process goes (developer-nine's follow-up to issue #6).
+ */
+function refuseWhileClosing(response: ServerResponse, state: RequestState): boolean {
+  if (!state.lifecycle.closing) return false
+  respond(response, 503, 'application/json', `${JSON.stringify({ error: 'the server is shutting down', code: 'server/closing' })}\n`)
+  return true
 }
 
 function respond(

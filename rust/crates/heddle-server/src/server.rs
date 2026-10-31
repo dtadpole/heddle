@@ -1849,7 +1849,20 @@ fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
     }))
 }
 
+/// A turn asked for during the shutdown grace: the running turns were already stopped, so one started now would run a
+/// command nothing ends before the process goes (developer-nine's follow-up to issue #6).
+fn closing_refusal() -> Response {
+    respond::error_with_code(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the server is shutting down",
+        "server/closing",
+    )
+}
+
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
+    if state.runs().is_closing() {
+        return closing_refusal();
+    }
     // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
     let Some(prompt) = body
         .str("prompt")
@@ -2010,6 +2023,11 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         sessions.record_preset(&session, named);
     }
 
+    // Checked again here: the shutdown may have begun while the session was opened. A turn that slips past this
+    // starts stopped (`RunRegistry::begin`).
+    if state.runs().is_closing() {
+        return closing_refusal();
+    }
     let guard = state.runs().begin(&session);
     let cancel = guard.cancellation();
     let request = crate::services::TurnRequest {
