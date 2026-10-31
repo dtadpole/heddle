@@ -100,8 +100,8 @@ pub use plugin_inventory::{
     PluginFiberPhase, PluginInventoryEntry, PluginInventorySnapshot, plugin_inventory,
 };
 pub use presets::{
-    PresetDefinition, PresetResolution, PresetRoster, missing_preset_message, preset_roster,
-    standard_preset,
+    LivePresets, PresetDefinition, PresetResolution, PresetRoster, missing_preset_message,
+    preset_roster, standard_preset,
 };
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,

@@ -196,6 +196,47 @@ pub fn preset_roster(config: Option<&Value>) -> Result<PresetRoster, ConfigError
     })
 }
 
+/// The `presets` row's roster as a running server holds it (A96, slice 3): a turn and the `/api/presets` route take a
+/// [`snapshot`](LivePresets::snapshot) each time they need it, and a settings write to the row replaces the roster, so a
+/// new session starts under the default just chosen without a restart. The TypeScript build gets the same from its
+/// loader, which re-creates the presets plugin with the written row; this is the Rust loader's stand-in, as
+/// `LiveLocale` is for the interface language. A session keeps the preset it recorded: only the default for new
+/// sessions, and the declarations a turn resolves against, change.
+#[derive(Debug)]
+pub struct LivePresets(std::sync::RwLock<std::sync::Arc<PresetRoster>>);
+
+impl LivePresets {
+    /// A holder starting at the roster the row booted with.
+    pub fn new(roster: PresetRoster) -> Self {
+        Self(std::sync::RwLock::new(std::sync::Arc::new(roster)))
+    }
+
+    /// The roster now; one turn resolves against one snapshot, so a write mid-turn cannot change it halfway.
+    pub fn snapshot(&self) -> std::sync::Arc<PresetRoster> {
+        std::sync::Arc::clone(
+            &self
+                .0
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Take the row's newly written configuration, read as [`preset_roster`] reads it at boot; a configuration it
+    /// refuses (an undeclared default, a duplicate id) leaves the roster as it was and names the problem.
+    ///
+    /// # Errors
+    ///
+    /// The configuration's problems, as [`preset_roster`] words them.
+    pub fn set_config(&self, config: &Value) -> Result<(), String> {
+        let roster = preset_roster(Some(config)).map_err(|error| error.to_string())?;
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = std::sync::Arc::new(roster);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +313,45 @@ mod tests {
             missing_preset_message("retired", &["standard".into(), "reader".into()]),
             "the session's preset 'retired' is not declared in this profile; declared: standard, reader"
         );
+    }
+    #[test]
+    fn a_live_roster_takes_a_written_default_and_keeps_its_snapshot_for_a_turn_already_running() {
+        let declared = |default: &str| {
+            serde_json::json!({
+                "default": default,
+                "presets": [
+                    { "id": "standard", "name": "Standard" },
+                    { "id": "reader", "name": "Reader" },
+                ],
+            })
+        };
+        let live = LivePresets::new(preset_roster(Some(&declared("standard"))).unwrap());
+        let running = live.snapshot();
+        live.set_config(&declared("reader")).unwrap();
+        assert_eq!(
+            live.snapshot().default,
+            "reader",
+            "the next new session starts under the written default"
+        );
+        assert_eq!(
+            running.default, "standard",
+            "a turn already holding its snapshot is not changed under it"
+        );
+    }
+
+    #[test]
+    fn a_live_roster_refuses_an_undeclared_default_and_keeps_the_roster_it_had() {
+        let live = LivePresets::new(
+            preset_roster(Some(
+                &serde_json::json!({ "presets": [{ "id": "reader", "name": "Reader" }] }),
+            ))
+            .unwrap(),
+        );
+        let before = live.snapshot();
+        let refused = live
+            .set_config(&serde_json::json!({ "default": "writer", "presets": [{ "id": "reader", "name": "Reader" }] }))
+            .unwrap_err();
+        assert!(refused.contains("writer"), "{refused}");
+        assert_eq!(*live.snapshot(), *before, "a refused write changes nothing");
     }
 }
