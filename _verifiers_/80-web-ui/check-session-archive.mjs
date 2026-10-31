@@ -12,7 +12,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
  * DSH's sidebar (`dsh-client-ui-workspace`): an archived session comes back from the **Archived only** filter through
  * its row menu's `Unarchive session`, and from **search**, where an archived result carries an `Unarchive session`
  * button and choosing the result explains that it cannot be opened ("Archived sessions cannot be opened. Unarchive it
- * to view.") without clearing the query or navigating. Archiving a session with running work asks first: the Host
+ * to view.") without clearing the query or navigating. Search follows the archive filter (`deriveSearchResults` keeps
+ * only what `sessionVisible` shows, lib/client.js:1185), so the archived result is searched for under *All
+ * conversations (show archived)*. Archiving a session with running work asks first: the Host
  * refuses the plain archive and names the work, and the stop-and-archive dialog lists it ("The turn in progress", and
  * its running bash call as "1 background job: sleep 40"),
  * Cancel leaves it running, and Stop and archive stops it, archives it and shows a notice with `undo`.
@@ -235,8 +237,13 @@ test('an archived session is restored from Archived only and from search, and a 
     )
     assert.equal(await noticeText('archived'), 'Session archived. You can undo or filter archived sessions', "and DSH's notice offers undo and the filter")
 
-    /** Search: an archived result carries Unarchive, and choosing the result explains rather than opens. */
+    /**
+     * Search: an archived result carries Unarchive, and choosing the result explains rather than opens. Search follows
+     * the archive filter, as DSH's does (`sessionVisible` in `deriveSearchResults`, lib/client.js:1185), so the archived
+     * session is a result under *All conversations (show archived)*, the filter DSH's stop-and-archive dialog names.
+     */
     const opened = await browser.evaluate(`document.getElementById('session-title').textContent`)
+    await chooseView('All conversations (show archived)')
     await search('kestrel')
     assert.ok(await browser.waitFor(`document.querySelector('#search-results .hit[data-archived="true"]') !== null`, 10_000), 'the archived session is a search result, marked archived')
     const hit = JSON.parse(
@@ -258,6 +265,7 @@ test('an archived session is restored from Archived only and from search, and a 
     assert.equal(await until(async () => (await meta(kestrel))?.archived !== true), true, 'Unarchive session in the result restores it')
     assert.ok(await browser.waitFor(`document.querySelector('#search-results .hit[data-archived="true"]') === null && document.querySelectorAll('#search-results .hit').length === 1`, 10_000), 'and the result redraws as an ordinary one')
     await search('')
+    await chooseView('Hide archived')
 
     /** A running session: the archive asks first, lists the work, Cancel keeps it running, Stop and archive stops it. */
     writeFileSync(server.script, `${JSON.stringify({ steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } }, { text: 'slept' }] }, null, 2)}\n`)
