@@ -180,6 +180,9 @@ pub struct SessionService {
     store: Arc<SessionStore>,
 }
 
+/// The event a change of model selection appends (DSH's durable selection event); see [`SessionService::set_model`].
+pub const MODEL_SELECTION_EVENT: &str = "model/selection";
+
 impl SessionService {
     /// A service over a store rooted where the configuration says (else
     /// [`crate::default_session_root`]), telling `listener` about every append.
@@ -497,7 +500,33 @@ impl SessionService {
         id: &str,
         selection: ModelSelection,
     ) -> Result<Option<SessionMeta>, SessionError> {
-        self.store.set_model(id, selection)
+        let before = self.store.meta(id);
+        let changed = before.as_ref().is_none_or(|meta| {
+            meta.endpoint() != Some(selection.endpoint.as_str())
+                || meta.model() != selection.model.as_deref()
+                || meta.reasoning_effort() != selection.reasoning_effort.as_deref()
+        });
+        let event = changed.then(|| {
+            let mut event =
+                NewEvent::new(MODEL_SELECTION_EVENT).field("endpoint", selection.endpoint.clone());
+            if let Some(model) = &selection.model {
+                event = event.field("model", model.clone());
+            }
+            if let Some(effort) = &selection.reasoning_effort {
+                event = event.field("reasoningEffort", effort.clone());
+            }
+            event
+        });
+        let meta = self.store.set_model(id, selection)?;
+        // A change of selection is also an event in the session's log (DSH's durable `model/selection`), which
+        // every page following the session reads to move its model seat (#46). The meta record stays the source
+        // for a reload; the event is how a live page learns the selection changed.
+        if let (Some(_), Some(event)) = (&meta, event)
+            && let Some(handle) = self.store.open(id)
+        {
+            self.store.append(&handle, event, Default::default())?;
+        }
+        Ok(meta)
     }
 
     /// The last complete answer's text.
@@ -593,6 +622,57 @@ mod tests {
         let mut meta = SessionMeta::from_value(value).unwrap();
         meta.set("created", json!(created));
         std::fs::write(&handle.meta, meta.to_file_text()).unwrap();
+    }
+
+    #[test]
+    fn a_change_of_model_selection_is_one_model_selection_event_and_a_repeat_writes_none() {
+        // #46: a page follows the session's selection from this event, as DSH's clients follow modelSelection.
+        let (_dir, service) = service();
+        let handle = service.start(StartOptions::default()).expect("a session");
+        let selection = |model: &str| ModelSelection {
+            endpoint: "second".into(),
+            model: Some(model.into()),
+            reasoning_effort: Some("high".into()),
+        };
+        let selections = || -> Vec<serde_json::Value> {
+            service
+                .events(&handle)
+                .unwrap()
+                .iter()
+                .filter(|event| event.kind == MODEL_SELECTION_EVENT)
+                .map(|event| {
+                    json!({
+                        "endpoint": event.get("endpoint").cloned(),
+                        "model": event.get("model").cloned(),
+                        "reasoningEffort": event.get("reasoningEffort").cloned(),
+                    })
+                })
+                .collect()
+        };
+        service
+            .set_model(&handle.id, selection("pro"))
+            .unwrap()
+            .expect("recorded");
+        let logged = selections();
+        assert_eq!(logged.len(), 1, "one event for the change");
+        assert_eq!(logged[0]["endpoint"], "second");
+        assert_eq!(logged[0]["model"], "pro");
+        assert_eq!(logged[0]["reasoningEffort"], "high");
+        service.set_model(&handle.id, selection("pro")).unwrap();
+        assert_eq!(
+            selections().len(),
+            1,
+            "choosing what is already chosen writes nothing"
+        );
+        service.set_model(&handle.id, selection("lite")).unwrap();
+        assert_eq!(selections().len(), 2, "a new choice is a new event");
+        assert!(
+            service
+                .set_model("session-missing", selection("pro"))
+                .unwrap()
+                .is_none(),
+            "no session, no record and no event"
+        );
     }
 
     #[test]

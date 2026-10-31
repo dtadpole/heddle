@@ -5562,6 +5562,13 @@ function scheduleTreeRefresh() {
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
+  /**
+   * Another page (or this one) changed the shown session's model selection: the seat follows it, as every DSH
+   * client follows the session's `modelSelection` (#46).
+   */
+  if (event.type === 'model/selection' && payload.session === current && current !== null) {
+    applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
+  }
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -6679,15 +6686,18 @@ async function runTurn(text, key, attachments = [], onAccepted) {
      * session. With no selection the request is what it always was — a session in the server's own
      * working directory — so a window opened without touching the tree still works.
      *
-     * The endpoint and model named here are the composer's own choice, which is what makes the model seat
-     * more than a label: the turn asks the backend a person picked, and the server records it on the session
-     * so a reload comes back to it.
+     * The endpoint and model are named only for a turn that **creates** its session, which is born with the
+     * composer's choice. A turn into an existing session names none and runs on the session's own selection:
+     * DSH's prompt carries no model, and the selection is session state every page follows (`model/selection`).
+     * Sending the seat with every turn let a second tab, still showing the model it opened with, silently switch
+     * the session back over another tab's choice (#46). A choice made here is recorded at once by
+     * `recordSelection`, so nothing is lost.
      */
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
     folder: activeFolder,
-    ...selectionForTurn(),
+    ...(target === null ? selectionForTurn() : {}),
   })
   if (!response.ok) {
     /**

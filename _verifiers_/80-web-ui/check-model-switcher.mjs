@@ -722,6 +722,58 @@ test('choosing a model type and an effort is recorded, sent, and survives a relo
   }
 })
 
+/**
+ * The selection is session state every page follows (#46, DSH's `modelSelection`).
+ *
+ * Measured on both builds before: a second tab kept the model it opened with, and its next message, which carried that
+ * stale seat, switched the session back over the other tab's choice. Here the other tab is the route a page posts to;
+ * this page's seat must move without a reload, and its next message must run on, and keep, that selection.
+ */
+test('a selection made from another page moves this page’s seat, and this page’s next message keeps it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('follow')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`document.getElementById('model-trigger') !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'first'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from one')`, 20_000), 'the first endpoint answered')
+    assert.ok(await until(() => server.one.turns.length === 1), 'the session exists')
+    const session = (await sessionsOf(server))[0]?.id
+    assert.ok(typeof session === 'string', 'the session is listed')
+
+    // Another page switches the session, through the route the seat posts to.
+    const cookie = await cookieFor(server.url)
+    const switched = await fetch(new URL(`/api/sessions/${encodeURIComponent(session)}/model`, server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ endpoint: 'double-two', model: 'model-two', reasoningEffort: 'high' }),
+    })
+    assert.equal(switched.status, 200, `the other page's switch was recorded\n${await switched.text()}`)
+
+    assert.ok(
+      await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model Two, reasoning effort High')`, 10_000),
+      `this page's seat followed the other page's choice without a reload (it reads ${JSON.stringify(await browser.evaluate(`${SEAT}.getAttribute('aria-label')`))})`,
+    )
+
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'who answers now?'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the other page’s endpoint answered')
+    assert.ok(await until(() => server.two.turns.length === 1), 'the chosen double was asked')
+    assert.equal(server.one.turns.length, 1, 'and the old selection was not asked again')
+    const record = (await sessionsOf(server))[0]
+    assert.equal(record?.endpoint, 'double-two', 'the session keeps the other page’s endpoint')
+    assert.equal(record?.model, 'model-two', 'and model')
+    assert.equal(record?.reasoningEffort, 'high', 'and level: this page’s message did not switch it back')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('the menu is keyboard-operable and a selection restores focus without a ring', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return

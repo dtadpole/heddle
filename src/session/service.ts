@@ -326,7 +326,29 @@ export class SessionService extends Service {
     id: SessionId,
     selection: { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string },
   ): SessionMeta | null {
-    return this.store.setModel(id, selection)
+    const before = this.store.list().find((meta) => meta.id === id)
+    const meta = this.store.setModel(id, selection)
+    /**
+     * A change of selection is also an event in the session's log, `model/selection` (DSH's durable selection event,
+     * which its `modelSelection` projection follows). Every page following the session reads it on the stream and
+     * moves its model seat, so a second tab no longer shows, and then sends, the selection it opened with (#46).
+     * The meta record stays the selection's source for a reload; the event is how a live page learns it changed.
+     */
+    if (
+      meta !== null &&
+      (before?.endpoint !== selection.endpoint || before?.model !== selection.model || before?.reasoningEffort !== selection.reasoningEffort)
+    ) {
+      const handle = this.store.open(id)
+      if (handle !== null) {
+        this.store.append(handle, {
+          type: 'model/selection',
+          endpoint: selection.endpoint,
+          ...(selection.model !== undefined ? { model: selection.model } : {}),
+          ...(selection.reasoningEffort !== undefined ? { reasoningEffort: selection.reasoningEffort } : {}),
+        })
+      }
+    }
+    return meta
   }
 
   /** The last complete answer, which is what a transcript read returns. */
