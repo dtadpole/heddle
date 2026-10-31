@@ -217,3 +217,97 @@ test('content search: a phrase found only inside a turn joins the hits with its 
     for (const dir of [home, root]) removeDir(dir)
   }
 })
+
+/**
+ * A failed host request (#58). DSH's README, Search: "a failed content search leaves metadata matches visible without an
+ * additional warning" — its error state draws the name matches and no sentence (dsh-client-ui-workspace
+ * `lib/client.js:3753-3760`, `:3492`). A failure is not the query's answer either: the next search for the same query
+ * asks the host again, and the session found inside a conversation joins the hits. The browser's own `fetch` is
+ * switched to fail `/api/sessions/search` the way a lost network does, then back.
+ */
+test('content search: a failed host request leaves the name matches with no warning, and the same query asks the host again', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('content-search-down')
+  const root = fixtureDir('content-search-down-repo')
+  const folders = ['named', 'inside'].map((name) => join(root, name))
+  for (const folder of folders) mkdirSync(folder, { recursive: true })
+  const { config, script } = scriptedConfig({ home, steps: [{ text: 'noted' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `registered the workspace (${added.text})`)
+    const turn = async (folder, prompt, answer) => {
+      writeFileSync(script, `${JSON.stringify({ steps: [{ text: answer }] })}\n`)
+      const ran = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt, folder }) })
+      assert.equal(ran.status, 200, `the turn "${prompt}" ran (${ran.status})`)
+    }
+    await turn(folders[0], 'quokka ledger plans', 'noted')
+    await turn(folders[1], 'tell me about the colony', 'The Qu\u00f6kka-Ledger is balanced, says the colony.')
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+
+    const outcome = JSON.parse(
+      await browser.evaluate(
+        `(async () => {
+          const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+          const read = ${READ}
+          const original = window.fetch
+          let down = true
+          let asked = 0
+          window.fetch = (input, init) => {
+            const url = String(input instanceof Request ? input.url : input)
+            if (url.includes('/api/sessions/search')) {
+              asked += 1
+              if (down) return Promise.reject(new TypeError('Failed to fetch'))
+            }
+            return original(input, init)
+          }
+          const field = document.getElementById('session-search')
+          field.value = 'quokka ledger'
+          field.dispatchEvent(new Event('input', { bubbles: true }))
+          let deadline = performance.now() + 5000
+          while (performance.now() < deadline && (asked === 0 || read().pending !== null)) await wait(25)
+          await wait(150)
+          const failed = read()
+          const askedWhileDown = asked
+          down = false
+          /** The same query again, as a person re-entering it does. */
+          field.dispatchEvent(new Event('input', { bubbles: true }))
+          deadline = performance.now() + 5000
+          while (performance.now() < deadline && !read().hits.some((hit) => hit.title.includes('colony'))) await wait(25)
+          const again = read()
+          window.fetch = original
+          return JSON.stringify({ failed, askedWhileDown, again, asked })
+        })()`,
+        20_000,
+      ),
+    )
+    assert.deepEqual(
+      outcome.failed,
+      { hits: [{ title: 'quokka ledger plans', snippet: null }], pending: null, note: null },
+      `the name match stays, the status goes, and no warning is added\nsaw: ${JSON.stringify(outcome)}`,
+    )
+    assert.ok(outcome.askedWhileDown >= 1, `the host was asked, and the request failed\nsaw: ${JSON.stringify(outcome)}`)
+    assert.deepEqual(
+      outcome.again.hits,
+      [
+        { title: 'quokka ledger plans', snippet: 'quokka ledger plans' },
+        { title: 'tell me about the colony', snippet: 'The Qu\u00f6kka-Ledger is balanced, says the colony.' },
+      ],
+      `the same query asks the host again, and the session found inside its answer joins the hits\nsaw: ${JSON.stringify(outcome)}`,
+    )
+    assert.ok(outcome.asked > outcome.askedWhileDown, `the failure was not kept as the query's answer\nsaw: ${JSON.stringify(outcome)}`)
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
+  }
+})

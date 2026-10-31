@@ -11419,14 +11419,23 @@ async function applySearch() {
  * The host half of content search (R-developer-eight-19): DSH's remote-search effect (dsh-client-ui-workspace
  * `lib/client.js:3727-3767`). A new non-empty query is `loading` at once; after a 250 ms pause the host is asked
  * (`GET /api/sessions/search`), and a newer keystroke aborts the older request. An answer redraws the search; a failure
- * is `error`, which leaves the name matches alone. The same query again asks nothing.
+ * is `error`, which leaves the name matches alone, with no warning of their own ("a failed content search leaves
+ * metadata matches visible without an additional warning", dsh-client-ui-workspace README, Search). The same query
+ * again asks nothing — unless its request failed: a failure is not kept as the query's answer (#58), so the redraw that
+ * reports it asks nothing and the next search for that query asks the host again.
  */
 let contentSearch = { query: '', status: 'idle', items: [], hasMore: false }
 let contentSearchTimer = null
 let contentSearchAbort = null
 
 function requestContentSearch(query) {
-  if (query === contentSearch.query) return
+  if (query === contentSearch.query) {
+    if (contentSearch.status !== 'error') return
+    if (contentSearch.reported !== true) {
+      contentSearch.reported = true
+      return
+    }
+  }
   if (contentSearchTimer !== null) clearTimeout(contentSearchTimer)
   contentSearchAbort?.abort()
   contentSearchTimer = null

@@ -56,7 +56,8 @@ grounded_in:
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
   four keystrokes, the session found only inside its answer joining the hits with its snippet, "No matching
-  sessions" only once the host has answered, and a content hit opening like any hit.
+  sessions" only once the host has answered, and a content hit opening like any hit; a failed host request leaving
+  the name matches with no warning of their own, and the same query asking the host again (#58).
 
 ## What it deliberately does not judge
 

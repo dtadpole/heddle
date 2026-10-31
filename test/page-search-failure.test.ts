@@ -157,9 +157,12 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
       for (const due of timers.splice(0)) due()
     }
     const note = registry.get('search-note')!
+    const pending = registry.get('search-pending')
     return {
       hits: registry.get('search-results')!.children.map((hit) => hit.children[0]?.textContent),
       note: note.hidden ? null : note.textContent,
+      /** The skeleton rows still waiting on the host; `null` when none are shown (or the page has no content search). */
+      pending: pending === undefined || pending.hidden ? null : pending.children.length,
       treeHidden: treeList.hidden,
     }
   }
@@ -208,33 +211,36 @@ test('a failed sessions read searches the rows the tree holds, is not kept, and 
   })
 
   const first = await view.search('kestrel')
+  const readsWhileDown = view.requests.filter((url) => url === '/api/sessions').length
   down = false
   const second = await view.search('kestrel')
   assert.deepEqual(
     { offline: first, online: second },
     {
       /** Offline: the matching rows the tree holds, with no "No matching sessions" beside them and no other warning. */
-      offline: { hits: ['Kestrel notes', 'Kestrel plan'], note: null, treeHidden: true },
+      offline: { hits: ['Kestrel notes', 'Kestrel plan'], note: null, pending: null, treeHidden: true },
       /** Back online: the same query reads the sessions again and finds them all, the one the tree never drew included. */
-      online: { hits: ['Kestrel retro', 'Kestrel notes', 'Kestrel plan'], note: null, treeHidden: true },
+      online: { hits: ['Kestrel retro', 'Kestrel notes', 'Kestrel plan'], note: null, pending: null, treeHidden: true },
     },
     'the search during the failure and the same search after it',
   )
-  assert.equal(view.requests.filter((url) => url === '/api/sessions').length, 2, 'the failed read was not kept: the second search asked again')
+  const readsAfter = view.requests.filter((url) => url === '/api/sessions').length
+  assert.ok(readsWhileDown >= 1 && readsAfter > readsWhileDown, `the failed read was not kept: the second search asked again (${readsWhileDown}, then ${readsAfter})`)
 
   const third = await view.search('retro')
   assert.deepEqual(third.hits, ['Kestrel retro'], 'and an answer that arrived is kept for the next keystroke')
-  assert.equal(view.requests.filter((url) => url === '/api/sessions').length, 2, 'without a third read')
+  assert.equal(view.requests.filter((url) => url === '/api/sessions').length, readsAfter, 'without another read')
 })
 
 test('with no rows to fall back to, a failed read says the search could not run, and an error answer is not kept either', async () => {
+  let state: 'offline' | 'error' | 'up' = 'offline'
   let reads = 0
   const view = loadPage({
     treeGroups: [],
     route: server(
       () => {
         reads += 1
-        return reads === 1 ? offline() : reads === 2 ? answer({ error: 'unavailable' }, 503) : answer(after)
+        return state === 'offline' ? offline() : state === 'error' ? answer({ error: 'unavailable' }, 503) : answer(after)
       },
       () => workspacesAfter,
     ),
@@ -245,11 +251,55 @@ test('with no rows to fall back to, a failed read says the search could not run,
   assert.ok(first.note !== null && /could not/i.test(first.note), `the note says the search could not run\nsaw: ${JSON.stringify(first)}`)
   assert.doesNotMatch(first.note ?? '', /no (matching sessions|session matches)/i, 'rather than that nothing matched')
 
+  state = 'error'
   const second = await view.search('kestrel')
   assert.ok(second.note !== null && /could not/i.test(second.note), `a 503 from /api/sessions is a failed read too\nsaw: ${JSON.stringify(second)}`)
 
+  state = 'up'
+  const readsBefore = reads
   const third = await view.search('kestrel')
   assert.deepEqual(third.hits, ['Kestrel retro', 'Kestrel notes', 'Kestrel plan'], `once the sessions arrive, the search finds them\nsaw: ${JSON.stringify(third)}`)
   assert.equal(third.note, null)
-  assert.equal(reads, 3, 'each failed read was asked again, not kept')
+  assert.ok(readsBefore >= 2 && reads > readsBefore, `each failed read was asked again, not kept (${readsBefore}, then ${reads})`)
+})
+
+/**
+ * The content half (R-developer-eight-19) fails on its own: DSH's README, Search — "a failed content search leaves metadata
+ * matches visible without an additional warning" (the error state draws the name matches and no sentence,
+ * dsh-client-ui-workspace `lib/client.js:3753-3760`, `:3492`). And a failure is not the query's answer: the next search
+ * for the same query asks the host again (#58).
+ */
+test('a failed content request leaves the name matches with no warning of their own, and the same query asks the host again', async () => {
+  const treeGroups = libraries.WorkspaceTree.deriveGroups(workspacesAfter, after, { grouping: 'tree', archived: 'hide' })
+  let hostDown = true
+  const asked: string[] = []
+  const names = server(
+    () => answer(after),
+    () => workspacesAfter,
+  )
+  const view = loadPage({
+    treeGroups,
+    route: (url) => {
+      if (!url.startsWith('/api/sessions/search')) return names(url)
+      asked.push(url)
+      return hostDown ? offline() : answer({ items: [{ sessionId: 's-sync', snippet: 'the kestrel came up in the sync' }], hasMore: false })
+    },
+  })
+
+  const failed = await view.search('kestrel')
+  const askedWhileDown = asked.length
+  hostDown = false
+  const again = await view.search('kestrel')
+  assert.deepEqual(
+    { failed, again },
+    {
+      /** The name matches, the status gone, and no sentence added for the failure. */
+      failed: { hits: ['Kestrel retro', 'Kestrel notes', 'Kestrel plan'], note: null, pending: null, treeHidden: true },
+      /** The same query again: the host is asked, and the session it found inside a conversation joins after the names. */
+      again: { hits: ['Kestrel retro', 'Kestrel notes', 'Kestrel plan', 'weekly sync'], note: null, pending: null, treeHidden: true },
+    },
+    'the search when the content request fails and the same search after it',
+  )
+  assert.equal(askedWhileDown, 1, 'one content request for the first search, which failed, and the redraw reporting it asked nothing more')
+  assert.equal(asked.length, 2, 'the failure was not kept: the same query asked the host again')
 })
