@@ -109,6 +109,12 @@ grounded_in:
   workspace row's menu and View options have DSH's `Menu` keyboard: ArrowDown enters at the first item, the arrows rove
   and wrap, Home and End jump, Tab enters and Shift+Tab closes onto the trigger, Escape closes and gives focus back to
   the trigger, and a choice made with Enter does the same (#95).
+- [`check-narrow-layout.mjs`](check-narrow-layout.mjs) — a narrow window at DSH parity: below 1024 pixels the
+  sidebar is the 56-pixel rail (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so at phone width (390 x 844, the
+  protocol's device metrics) the conversation keeps a readable width and the composer and its send button stay on
+  screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
+  breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
+  (live-testing draft developer-ten-9).
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every

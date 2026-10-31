@@ -529,6 +529,9 @@ impl SessionStore {
         if let Some(team) = options.team_id.clone() {
             record.insert("teamId".to_string(), Value::String(team));
         }
+        if let Some(preset) = options.preset.clone() {
+            record.insert("preset".to_string(), Value::String(preset));
+        }
         record.insert("turns".to_string(), Value::from(0u64));
         let meta = SessionMeta::from_value(Value::Object(record)).expect("the record has an id");
         write_text(&handle.meta, &meta.to_file_text())?;
@@ -588,6 +591,34 @@ impl SessionStore {
         } else {
             next.set("title", Value::String(cleaned));
         }
+        let Some(meta_path) = self.meta_file(id) else {
+            return Ok(None);
+        };
+        write_text(&meta_path, &next.to_file_text())?;
+        Ok(Some(next))
+    }
+
+    /// Record the agent preset a session runs under, **only when it has none** (inventory A96).
+    ///
+    /// A session keeps its preset, so this never replaces one: it is how a session created before presets, or by a
+    /// path that named none, takes the current default once and then keeps it. The preset is trimmed, and a blank
+    /// one writes nothing. Answers the record as it now is; `Ok(None)` for an unknown session.
+    pub fn record_preset(
+        &self,
+        id: &str,
+        preset: &str,
+    ) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
+        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+            return Ok(None);
+        };
+        // `current.preset !== undefined`: a record that carries the key keeps it, whatever it holds.
+        let trimmed = preset.trim();
+        if current.as_map().contains_key("preset") || trimmed.is_empty() {
+            return Ok(Some(current));
+        }
+        let mut next = current;
+        next.set("preset", Value::String(trimmed.to_string()));
         let Some(meta_path) = self.meta_file(id) else {
             return Ok(None);
         };
@@ -682,6 +713,9 @@ impl SessionStore {
             origin: attribution.origin,
             delegation_depth: attribution.delegation_depth,
             team_id: attribution.team_id.clone(),
+            // The store's fork copies no preset, as the TypeScript one does not: the service's fork and a team's
+            // teammate record the source's with `record_preset` (inventory A96).
+            preset: None,
             id: attribution.id.clone(),
         })?;
 
@@ -1824,6 +1858,65 @@ mod tests {
         let text = read_text(&handle.meta);
         assert!(!text.contains("\"model\""));
         assert!(!text.contains("reasoningEffort"));
+    }
+
+    /// Inventory A96: the preset is written at creation after `teamId` and before `turns`, the TypeScript literal's
+    /// order.
+    #[test]
+    fn a_created_session_records_its_preset_before_its_turns() {
+        let (_dir, store) = store();
+        let handle = store
+            .create(CreateOptions {
+                team_id: Some("session-lead".to_string()),
+                preset: Some("reader".to_string()),
+                ..CreateOptions::default()
+            })
+            .unwrap();
+        let meta = store.meta(&handle.id).unwrap();
+        assert_eq!(meta.preset(), Some("reader"));
+        let keys: Vec<&str> = meta.as_map().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["id", "created", "cwd", "teamId", "preset", "turns"]);
+    }
+
+    /// Inventory A96: `record_preset` writes a preset only when the session has none — trimmed, never replacing one,
+    /// and a blank one is a no-op — and answers the record as it now is.
+    #[test]
+    fn record_preset_writes_only_when_the_session_has_none_and_never_replaces() {
+        let (_dir, store) = store();
+        let handle = store.create(CreateOptions::default()).unwrap();
+        let unchanged = store.record_preset(&handle.id, "   ").unwrap().unwrap();
+        assert_eq!(unchanged.preset(), None, "a blank preset writes nothing");
+        assert!(!read_text(&handle.meta).contains("preset"));
+
+        let recorded = store
+            .record_preset(&handle.id, "  standard ")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.preset(), Some("standard"), "trimmed");
+        let keys: Vec<String> = store
+            .meta(&handle.id)
+            .unwrap()
+            .as_map()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys.last().map(String::as_str),
+            Some("preset"),
+            "a new key is appended, as the spread appends it"
+        );
+
+        let kept = store.record_preset(&handle.id, "reader").unwrap().unwrap();
+        assert_eq!(
+            kept.preset(),
+            Some("standard"),
+            "a session keeps its preset"
+        );
+        assert_eq!(store.meta(&handle.id).unwrap().preset(), Some("standard"));
+        assert_eq!(
+            store.record_preset("session-nobody", "reader").unwrap(),
+            None
+        );
     }
 
     fn note(role: &str, text: &str) -> NewEvent {

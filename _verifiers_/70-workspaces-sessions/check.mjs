@@ -3307,6 +3307,60 @@ test('a session forks into a new one named after it, with its conversation and i
   }
 })
 
+test("a fork is named from its source's title alone: a second fork of T is T (1) again (#67)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-title')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    await runCli(adminArgs(h, ['--turn', 'a conversation worth forking']), { env: h.env, cwd: branch })
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(new URL(path, live.url), {
+        method: 'POST',
+        headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      })
+    const fork = async (id) => {
+      const response = await post(`/api/sessions/${id}/fork`)
+      assert.equal(response.status, 200, `${id} forks\n${await response.clone().text()}`)
+      return (await response.json()).session
+    }
+    const titleOf = async (id) => (await sessionsOf(h)).find((meta) => meta.id === id)?.title
+    assert.equal((await post(`/api/sessions/${made.session}/title`, { title: 'T' })).status, 200, 'the source is named T')
+
+    /**
+     * DSH's table in #67, read from its code: `increasedForkTitle(sourceTitle)` (`dsh-api-session-controller`
+     * lib/client.js:3714-3720, applied at :4003) looks at the source's title and nothing else. Measured on both builds
+     * before the fix: T (1), T (2), T (3), T (4), because every number another session held was skipped.
+     */
+    const first = await fork(made.session)
+    const second = await fork(made.session)
+    const ofFirst = await fork(first)
+    assert.equal((await post(`/api/sessions/${ofFirst}/flags`, { archived: true })).status, 200, 'the fork of the first fork is archived')
+    const ofArchived = await fork(ofFirst)
+    const seen = { first: await titleOf(first), second: await titleOf(second), ofFirst: await titleOf(ofFirst), ofArchived: await titleOf(ofArchived) }
+    assert.deepEqual(
+      seen,
+      { first: 'T (1)', second: 'T (1)', ofFirst: 'T (2)', ofArchived: 'T (3)' },
+      `fork T, fork T again, fork the first fork, fork the archived T (2): DSH names them T (1), T (1), T (2), T (3)\nsaw: ${JSON.stringify(seen)}`,
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 /**
  * Fork a session through the server and read both conversations as the chat draws them.
  *
@@ -5904,6 +5958,120 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
     )
     assert.equal(reduced.animations, 0, `reduced motion skips the glide\nsaw: ${JSON.stringify(reduced)}`)
     assert.notEqual(reduced.first, result.beforeOrder[1], 'while the order still changes')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('the later pin leads, and the tree and the flat list put the same sessions in the same order', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * R-developer-eight-17 (DSH parity C13), measured on both builds: two pins showed in one order in the tree and in the
+   * other order in In one list, because the tree ordered pins by when they were pinned and the flat list by when the
+   * sessions were created. DSH keeps one registry-global pin list, most recent pin first, and fronts a new pin in both the
+   * group and the flat list. The flat list also ordered the unpinned rows by creation while the tree and the View options
+   * item (Last updated) order them by the last write.
+   *
+   * The fixture makes every one of those rules disagree with creation order: four sessions in one workspace, the third
+   * pinned before the second, and the first written to last.
+   */
+  const h = harness('session-pin-order')
+  let live
+  let browser
+  try {
+    entry(join(h.work, 'INDEX.md'), '# a workspace for the pin order\n')
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its root\n${added.stdout}${added.stderr}`)
+    const made = []
+    for (let index = 0; index < 4; index += 1) {
+      const created = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(created.code, 0, `session ${index + 1} was created\n${created.stdout}${created.stderr}`)
+      made.push(parseJson(created.stdout).session)
+      const turn = await runCli(adminArgs(h, ['--turn', `pin order conversation ${index + 1}`]), { env: h.env, cwd: h.work })
+      assert.equal(turn.code, 0, `session ${index + 1} took a turn\n${turn.stdout}${turn.stderr}`)
+      await new Promise((done) => setTimeout(done, 30))
+    }
+    const [first, second, third, fourth] = made
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    /** The first session is written to last, so it is the most recently updated of the unpinned two. */
+    const written = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest written', folder: h.work }),
+    })
+    assert.equal(written.status, 200, `the follow-up turn runs\n${await written.clone().text()}`)
+    await written.text()
+    /** The third session is pinned, then the second: the second is the later pin, though it was created earlier. */
+    const pin = (id) =>
+      fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ pinned: true }),
+      })
+    assert.equal((await pin(third)).status, 200, 'the first pin was accepted')
+    await new Promise((done) => setTimeout(done, 30))
+    assert.equal((await pin(second)).status, 200, 'the second pin was accepted')
+    const metas = await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json()
+    const metaOf = (id) => metas.find((meta) => meta.id === id)
+    assert.ok(String(metaOf(second)?.pinnedAt) > String(metaOf(third)?.pinnedAt), `the store says which pin is later\nsaw: ${JSON.stringify(metas)}`)
+    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which session was written last\nsaw: ${JSON.stringify(metas)}`)
+    const expected = [second, third, first, fourth]
+
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const reading = JSON.parse(
+      await browser.evaluate(`(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        const rows = () => [...document.querySelectorAll('#tree .row')]
+        const sessionIds = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId ?? null)
+        /** The workspace is opened only if closed: a first visit opens the first workspace on its own. */
+        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
+        const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
+        if (workspaceLi === null) return JSON.stringify({ error: 'no workspace row' })
+        for (let attempt = 0; attempt < 30 && workspaceLi.dataset.open !== 'true'; attempt += 1) {
+          if (attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
+          await wait(200)
+        }
+        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
+        const tree = sessionIds()
+        const treePinned = [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.pinned === 'true')
+        document.querySelector('#view-options button').click()
+        await wait(250)
+        const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === 'In one list')
+        if (item === undefined) return JSON.stringify({ error: 'no In one list item', tree })
+        item.click()
+        for (let attempt = 0; attempt < 30 && document.querySelector('#tree li[data-kind="workspace"]') !== null; attempt += 1) await wait(150)
+        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
+        await wait(300)
+        const flat = sessionIds()
+        const ages = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .age')].map((age) => age.textContent)
+        return JSON.stringify({ tree, treePinned, flat, ages })
+      })()`, 30_000),
+    )
+    assert.equal(reading.error, undefined, `the page drew the workspace and offered In one list\nsaw: ${JSON.stringify(reading)}`)
+    const name = (ids) => ids.map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
+    /** The tree: the later pin first, then the earlier pin, then the rest by their last write. */
+    assert.deepEqual(name(reading.tree), name(expected), `the tree puts the later pin first, then the latest written\nsaw: ${JSON.stringify(name(reading.tree))}`)
+    assert.deepEqual(reading.treePinned, [true, true, false, false], 'and draws the two leading rows as pinned')
+    /** The flat list: the same rule, so the same order — which is the regression this check was written for. */
+    assert.deepEqual(
+      name(reading.flat),
+      name(expected),
+      `In one list puts the later pin first and orders the rest by their last write, as the tree does\nsaw: ${JSON.stringify({ flat: name(reading.flat), tree: name(reading.tree) })}`,
+    )
+    assert.equal(reading.ages.length, 4, `every flat row says where it lives and when\nsaw: ${JSON.stringify(reading.ages)}`)
   } finally {
     browser?.close()
     live?.kill()

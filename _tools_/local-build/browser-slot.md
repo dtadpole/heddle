@@ -1,15 +1,17 @@
 ---
 title: Browser slot queue
 created: 2026-10-29T13:08:51Z
-modified: 2026-10-31T01:20:28Z
+modified: 2026-10-31T07:45:00Z
 level: L2
-version: 1.3.0
+version: 1.5.0
 description: How browser-slot shares the team's browser slots fairly. It covers the slot count and the integrator reservation, the queue and tickets, the coordinator's priority turn, the memory gate, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
 status: unverified
 grounded_in:
   - source: coordinator task 2026-10-29 - replace the ad-hoc browser lock with a fair FIFO tool, since 30-second retries starved some seats for an hour
   - source: '[hd] build-and-resources.md, Browser lock bullet: mkdir browser.lock with an owner file, at most 10 minutes, browser.next for a P0 gate'
   - source: 'coordinator D-060, 2026-10-29: a slot count in browser-cap, a slot reserved for integrators (browser.lock2), and no new holder while memory is short'
+  - source: 'coordinator report 2026-10-30 23:47: an integrator waited for the reserved slot while two shared slots were free; a reservation means integrators may take the reserved slot and any free shared one'
+  - source: 'coordinator D-067, 2026-10-31: the disk stop line for builds and browser holds moves from 20 GiB to 16 GiB; between 16 and 20 GiB the coordinator sweeps every pass'
 ---
 
 # Browser slot queue
@@ -20,9 +22,11 @@ right moment, so some seats waited an hour. `browser-slot` serves the seats in t
 ## The slots and the queue
 
 - **The slots.** `~/.hd-build-slots/browser-cap` reads `<count> [reserve=<role>]`, and is 1 when the file is
-  missing. Today it is `2 reserve=integrator`. Slot 1 is `browser.lock`, and slot n is `browser.lock<n>`. With
-  a reservation, the last slot serves only that role and the other slots serve everyone else. A seat's role
-  is `--role`, or `integrator` for an `integrator-*` key.
+  missing, for example `4 reserve=integrator`. Slot 1 is `browser.lock`, and slot n is `browser.lock<n>`. With
+  a reservation, the last slot serves only that role. The other slots are shared: they serve every seat, that
+  role included, in one first-come line. A seat of the reserved role tries its own slot first, and takes a free
+  shared slot when its own is held, so it never waits for the reserved slot while a shared one is free. A seat's
+  role is `--role`, or `integrator` for an `integrator-*` key.
 - **Each slot** is a mkdir directory with an `owner` file inside. The
   owner's first line keeps the old format, `<seat> <purpose> <HH:MM:SS>`. The tool adds `seat=`, `pid=` and
   `start=` lines.
@@ -31,7 +35,8 @@ right moment, so some seats waited an hour. `browser-slot` serves the seats in t
   stopped asking.
 - **`take`** waits up to `--wait` seconds (default 100, inside the two-minute tool-call bound). It gets a slot
   only when that slot is free and the seat is the first waiter that slot serves. Otherwise it exits 75 and keeps the ticket, so the
-  next `take` keeps the place.
+  next `take` keeps the place. The exit-75 line gives the seat's position: the reserved role counts only its own
+  role ahead of it, and every other seat counts every earlier waiter, since the reserved role takes shared slots too.
 - **`browser.next`**, written by the coordinator, puts its first word's seat first while that seat is queued.
   It does not hold the slot for a seat that is not asking. It is deleted when that seat takes the slot, and
   ignored once it is 30 minutes old.
@@ -45,10 +50,11 @@ already in use exits 78 with an instruction to sync `_tools_/local-build` from m
 ticket, so it expires after 5 minutes. `status` shows each waiter's last verdict, the reason it did not take a
 slot.
 
-**Memory and disk gate (D-064).** No new holder is admitted while `memory_pressure` reports under 25% free,
-or the volume of the slot folder has under 20 GiB free. Swap is no gate: macOS keeps stale pages there and grows
+**Memory and disk gate (D-064, D-067).** No new holder is admitted while `memory_pressure` reports under 25%
+free, or the volume of the slot folder has under 16 GiB free (D-067 moved the disk line from 20 GiB; between 16
+and 20 GiB the coordinator sweeps every pass instead). Swap is no gate: macOS keeps stale pages there and grows
 it on demand. The seat stays queued, and the exit-75 line says why. `browser-cap` may move the lines
-(`min-free=25 disk-min=20`); older swap keys in it are ignored.
+(`min-free=25 disk-min=16`); older swap keys in it are ignored.
 
 ## Holding and releasing
 
