@@ -6040,6 +6040,15 @@ test('archiving a session with running work is refused with the work named, and 
     pending.push(stream)
     const running = await until(async () => (await metas()).find((meta) => meta.running === true))
     assert.ok(running, 'the turn is running')
+    /**
+     * The turn reads as running a moment before its bash call is registered as a job, and a plain archive asked in that
+     * moment is refused with the turn alone (seen in 2 of 3 full no-UI runs on Rust). Wait, bounded, until the
+     * 'sleep 40' job is listed, so the refusal below can be judged in its exact order.
+     */
+    const sessionJobs = async () =>
+      (await (await fetch(new URL(`/api/jobs?session=${encodeURIComponent(running.id)}`, live.url), { headers: { cookie } })).json()).jobs ?? []
+    const job = await until(async () => (await sessionJobs()).find((one) => one.label === 'sleep 40' && one.status === 'running'))
+    assert.ok(job, `the turn's bash call is registered as a running job\nsaw: ${JSON.stringify(await sessionJobs())}`)
     const refused = await post(`/api/sessions/${running.id}/flags`, { archived: true })
     assert.equal(refused.status, 409, 'a running session is not archived quietly')
     const refusal = await refused.json()
