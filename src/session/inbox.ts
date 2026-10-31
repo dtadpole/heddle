@@ -108,6 +108,52 @@ export function hasPendingStep(store: InboxStore, handle: SessionHandle): boolea
 }
 
 /**
+ * The steer gate (#31): whether the session's running turn still accepts a steer.
+ *
+ * A turn opens it when it begins, and closes it in the **same tick** as its final "nothing pending" decision
+ * (`hasPendingStepOrClose`), so no steer can be queued after the loop stopped looking and before the turn ends.
+ * Measured window before (developer-ten's review): the loop's last check ran before the route's own running count
+ * dropped, and a steer accepted in between waited in the inbox until the person sent something else. The route
+ * answers `session/steer-unavailable` when the gate is shut, and the page queues the message instead (DSH).
+ * In memory only: a gate belongs to a live turn of this process.
+ */
+const steerGates = new WeakMap<InboxStore, Set<string>>()
+
+function steerGate(store: InboxStore): Set<string> {
+  let open = steerGates.get(store)
+  if (open === undefined) {
+    open = new Set()
+    steerGates.set(store, open)
+  }
+  return open
+}
+
+/** A turn began on the session: steers are accepted until it ends. */
+export function openSteering(store: InboxStore, handle: SessionHandle): void {
+  steerGate(store).add(handle.id)
+}
+
+/** The turn ended, whichever way: a steer now waits for a turn of its own. */
+export function closeSteering(store: InboxStore, handle: SessionHandle): void {
+  steerGate(store).delete(handle.id)
+}
+
+/** Whether a steer sent now would still be claimed by the running turn. */
+export function steeringOpen(store: InboxStore, handle: SessionHandle): boolean {
+  return steerGate(store).has(handle.id)
+}
+
+/**
+ * The loop's end-of-turn question: `true` when a message waits for the next step; otherwise the gate closes in the
+ * same tick and the answer is `false`, so nothing can slip in between this decision and the turn's end.
+ */
+export function hasPendingStepOrClose(store: InboxStore, handle: SessionHandle): boolean {
+  if (hasPendingStep(store, handle)) return true
+  closeSteering(store, handle)
+  return false
+}
+
+/**
  * Steer: put a message at the end of the next-step list (DSH's `steer`, `send(message, 'next-step', true)`).
  *
  * Nothing reaches the conversation here. The running loop writes the message at its next step boundary, which

@@ -384,6 +384,15 @@ test('a steered message is answered by the running turn, and a steer with nothin
 
     await type(browser, 'answer this too')
     await press(browser, { key: 'Enter', ctrlKey: true })
+    /**
+     * An accepted steer waits in the session's next-step inbox until the loop claims it at its step boundary (#31,
+     * DSH's steer), and the dock shows it as steering until then, as DSH's queue does. Measured before: the page
+     * dropped it on the route's 200, and it was visible nowhere until the claim.
+     */
+    assert.ok(
+      await browser.waitFor('document.querySelector(\'#queue .row[data-status="steering"]\') !== null', 5_000),
+      'the accepted steer shows in the dock as steering until the loop claims it',
+    )
     assert.ok(
       await browser.waitFor('document.getElementById("log").innerText.includes("answer this too")', 15_000),
       'the steered message reached the transcript',

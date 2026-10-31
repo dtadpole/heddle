@@ -262,6 +262,41 @@ impl SessionService for StoreSessions {
             .map_err(failure)
     }
 
+    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<String, ServiceError> {
+        let handle = self
+            .handle(id)
+            .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
+        let parts = content
+            .into_iter()
+            .map(serde_json::from_value::<heddle_session::ContentPart>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ServiceError::new(format!("a content part is malformed: {error}")))?;
+        // Unique within this server: the clock in nanoseconds and a process-wide counter.
+        static STEERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let count = STEERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let steer_id = format!("steer-{nanos:x}-{count}");
+        let source = serde_json::json!({ "kind": "steer", "steerId": steer_id });
+        // Queued only while the running turn's steer gate is open, under the gate's own lock: the loop shuts it in
+        // the same critical section as its final "nothing pending" decision (#31).
+        match heddle_session::inbox::queue_steer_if_open(
+            self.service.store(),
+            &handle,
+            parts,
+            Some(source),
+        ) {
+            Ok(Some(_)) => Ok(steer_id),
+            Ok(None) => Err(ServiceError::with_code(
+                "the current turn no longer accepts steering",
+                "session/steer-unavailable",
+            )),
+            Err(error) => Err(ServiceError::new(error.to_string())),
+        }
+    }
+
     fn folder(&self, id: &str) -> Option<PathBuf> {
         let handle = self.handle(id)?;
         self.service.folder(&handle).map(PathBuf::from)

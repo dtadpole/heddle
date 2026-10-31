@@ -210,8 +210,16 @@ pub trait SessionService: Send + Sync {
     /// Write the session's mode as one append-only event.
     fn set_mode(&self, id: &str, mode: &str, fallback: &str) -> Result<ModeWrite, ServiceError>;
 
-    /// Append a user message with the given content parts — the delivery of a steer.
+    /// Append a user message with the given content parts.
     fn user_content(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError>;
+
+    /// Queue a steer in the session's next-step inbox: the running loop writes it at its next step boundary,
+    /// after the result of any tool call still running (#31; DSH's steer). Answers the steer's id, which the
+    /// claimed message carries in its source (`{"kind": "steer", "steerId": ...}`) so the page can keep the row
+    /// as "steering" until then. A service with no inbox writes it at once and answers an empty id.
+    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<String, ServiceError> {
+        self.user_content(id, content).map(|()| String::new())
+    }
 
     /// The folder the session belongs to, if it has one.
     fn folder(&self, id: &str) -> Option<PathBuf>;

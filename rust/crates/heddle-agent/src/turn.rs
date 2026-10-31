@@ -277,6 +277,9 @@ impl BegunTurn {
                 &progress,
             );
         }
+        // However the turn ended (a stop, a failure, the round limit), a steer from now on waits for a turn of
+        // its own; one accepted before stays in the inbox for the next turn to claim, as DSH keeps its inbox.
+        runtime.session.close_steering(&options.session);
         if let Some(live) = &live {
             live.settle();
         }
@@ -381,9 +384,12 @@ fn begin_registered(
     };
     // Counted before the prompt, as the turn's own writes: the completed result reports what it added.
     let started = runtime.session.count(&options.session);
+    // The steer gate opens with the turn and closes at its final "nothing pending" decision (#31).
+    runtime.session.open_steering(&options.session);
     // A steer a stopped turn left in the inbox is DSH's next-step input, and DSH's boundary claims next-step
     // input before the queued prompt, so it is written ahead of this turn's prompt.
     if let Err(error) = runtime.session.claim_pending_input(&options.session) {
+        runtime.session.close_steering(&options.session);
         if let Some(live) = &live {
             live.settle();
         }
@@ -702,7 +708,7 @@ async fn run_turn_body(
                 &input_before,
                 &user_input_seqs(runtime.session.as_ref(), session),
             )
-            && !runtime.session.has_pending_input(session)
+            && !runtime.session.has_pending_input_or_close(session)
         {
             break;
         }

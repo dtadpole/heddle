@@ -938,6 +938,38 @@ async fn status(State(state): State<AppState>) -> Response {
     )
 }
 
+/// The steers still waiting in the session's next-step inbox (#31), with their ids and text: what DSH's queue
+/// shows as steering until the loop claims them. A reloaded page or a second tab draws them from here.
+fn pending_steers(events: &[Value]) -> Value {
+    let Ok(inbox) = heddle_session::inbox::fold_inbox_values(events.iter()) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(
+        inbox
+            .next_step
+            .iter()
+            .filter_map(|message| {
+                let source = message.source.as_ref()?;
+                if source.get("kind").and_then(Value::as_str) != Some("steer") {
+                    return None;
+                }
+                let steer_id = source.get("steerId").and_then(Value::as_str)?;
+                let content = serde_json::to_value(&message.content).unwrap_or(Value::Null);
+                let text: String = content
+                    .as_array()
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(|part| part.get("text").and_then(Value::as_str))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(json!({"steerId": steer_id, "text": text}))
+            })
+            .collect(),
+    )
+}
+
 fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
     match error.code {
         Some(code) => respond::error_with_code(status, error.message, code),
@@ -1087,6 +1119,7 @@ async fn session_view_route(
         "turns".into(),
         serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
     );
+    body.insert("pendingSteers".into(), pending_steers(&events));
     if let Some(stats) = state.harness().stats.as_ref() {
         body.insert("stats".into(), stats.stats(id.as_str(), &events));
     }
@@ -1262,11 +1295,17 @@ async fn steer_session(
     }
     let mut content = vec![json!({"type": "text", "text": prompt})];
     content.extend(attachments);
-    match state.harness().sessions.user_content(id.as_str(), content) {
-        Ok(()) => respond::json(
+    // Queued, not written: the running loop writes it at its next step boundary (#31).
+    match state.harness().sessions.queue_steer(id.as_str(), content) {
+        // The steer's id lets the page keep the row as "steering" until the claimed message names it (#31).
+        Ok(steer_id) => respond::json(
             StatusCode::OK,
-            &json!({"accepted": true, "session": id.to_string()}),
+            &json!({"accepted": true, "session": id.to_string(), "steerId": steer_id}),
         ),
+        // The turn already took its final decision: the page queues the message instead (DSH).
+        Err(error) if error.code.as_deref() == Some("session/steer-unavailable") => {
+            service_refusal(error, StatusCode::CONFLICT)
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
     }
 }

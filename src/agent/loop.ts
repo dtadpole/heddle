@@ -7,7 +7,7 @@ import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
-import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
+import { claimNextStep, closeSteering, hasPendingStepOrClose, openSteering } from '../session/inbox.ts'
 import { recordTimeContext } from '../schedule/time-context.ts'
 
 /**
@@ -215,6 +215,9 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
     recordUnfinished(ctx, options.session, error, signal, progress)
     throw error
   } finally {
+    // However the turn ended (a stop, a failure, the round limit), a steer from now on waits for a turn of its own;
+    // one accepted before stays in the inbox for the next turn to claim, as DSH keeps its inbox on a stop.
+    closeSteering(ctx.session.store, options.session)
     live?.settle()
   }
 }
@@ -305,6 +308,8 @@ async function runTurnBody(
   const claimSteered = (): void => {
     claimNextStep(ctx.session.store, options.session, (content, source) => ctx.session.userContent(options.session, content, source))
   }
+  // The steer gate opens with the turn and closes at its final "nothing pending" decision (#31).
+  openSteering(ctx.session.store, options.session)
   claimSteered()
 
   if (options.answerPending !== true) {
@@ -583,7 +588,7 @@ async function runTurnBody(
     if (
       calls.length === 0 &&
       !hasNewInput(inputBefore, userInputSeqs(ctx, options.session)) &&
-      !hasPendingStep(ctx.session.store, options.session)
+      !hasPendingStepOrClose(ctx.session.store, options.session)
     ) {
       break
     }
