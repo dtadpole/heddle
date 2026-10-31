@@ -842,7 +842,64 @@ impl Component for QuestionsComponent {
                 config,
             )),
         );
+        // A plan row that started first is handed its review channel here (`hand_plan_review_channel`).
+        hand_plan_review_channel(services);
         Ok(())
+    }
+}
+
+/// `src/plan/service.ts` `reviewChannel`: `exit_plan_mode` puts its plan to the person through the question
+/// service when that row is loaded, as DSH's plan mode asks through `userQuestions`, and refuses with DSH's sentence
+/// when it is not. The TypeScript plan service looks the service up per call; here whichever of the `plan` and
+/// `questions` rows starts second hands the channel over, so the rows' order does not matter.
+fn hand_plan_review_channel(services: &Services) {
+    let (Some(plan), Some(questions)) = (
+        services.get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME),
+        services.get::<Arc<heddle_questions::QuestionService>>("questions"),
+    ) else {
+        return;
+    };
+    plan.provide_review_channel(heddle_plan::questions_review_channel(Arc::new(
+        PlanReviewAsker(questions),
+    )));
+}
+
+/// The question service as the plan review's asker: its `ask`, with the answers in the plan crate's words.
+struct PlanReviewAsker(Arc<heddle_questions::QuestionService>);
+
+impl heddle_plan::QuestionAsker for PlanReviewAsker {
+    fn ask(
+        &self,
+        session: &heddle_session::SessionHandle,
+        questions: Value,
+        options: heddle_plan::AskOptions,
+    ) -> futures::future::BoxFuture<'static, Result<heddle_plan::QuestionOutcome, String>> {
+        let service = Arc::clone(&self.0);
+        let session = session.id.clone();
+        Box::pin(async move {
+            let timeout = options.timeout.map(Value::from);
+            match service
+                .ask(&session, &questions, timeout.as_ref(), options.cancel)
+                .await
+            {
+                Ok(heddle_questions::AskOutcome::Answered(answers)) => {
+                    Ok(heddle_plan::QuestionOutcome::Answered {
+                        answers: answers
+                            .into_iter()
+                            .map(|answer| heddle_plan::QuestionAnswer {
+                                id: answer.id,
+                                selected: answer.selected,
+                                custom: answer.custom,
+                            })
+                            .collect(),
+                    })
+                }
+                Ok(heddle_questions::AskOutcome::Pending { call_id }) => {
+                    Ok(heddle_plan::QuestionOutcome::Pending { call_id })
+                }
+                Err(error) => Err(error.message),
+            }
+        })
     }
 }
 
@@ -1090,6 +1147,8 @@ impl Component for PlanComponent {
             models.add_hooks(plan.model_hooks());
         }
         services.provide(heddle_plan::NAME, plan);
+        // A questions row that started first hands its review channel over here (`hand_plan_review_channel`).
+        hand_plan_review_channel(services);
         Ok(())
     }
 }
@@ -2395,6 +2454,49 @@ mod tests {
                 "model first: {model_first} — the hook is registered exactly once either way"
             );
             assert_eq!(sent[1].messages.len(), 2, "one section, not two");
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
+    /// `exit_plan_mode` reviews through the question service when the `questions` row is loaded, whichever of it
+    /// and the `plan` row starts first, and has no review channel without it (`src/plan/service.ts` `reviewChannel`).
+    #[test]
+    fn the_plan_row_reviews_through_the_question_service_whichever_of_the_two_starts_first() {
+        use crate::builtins::{BuiltinCatalog, Catalog, resolve_component};
+        for (label, tail) in [
+            ("plan-then-questions", vec!["plan", "questions"]),
+            ("questions-then-plan", vec!["questions", "plan"]),
+            ("plan-alone", vec!["plan"]),
+        ] {
+            let home = scratch(label);
+            let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+            let mut services = Services::new();
+            let mut rows = vec![
+                ("session", json!({ "root": home.join("sessions") })),
+                ("sandbox", json!({})),
+                ("approvals", json!({})),
+                ("tools", json!({})),
+                ("commands", json!({})),
+            ];
+            rows.extend(tail.iter().map(|bare| (*bare, json!({}))));
+            for (bare, config) in rows {
+                let reference =
+                    resolve_component(&heddle_config::ComponentName::Bare(bare.to_owned()));
+                let component = catalog
+                    .component(&reference)
+                    .unwrap_or_else(|| panic!("{bare} has an adapter"));
+                component
+                    .start(&config, &mut services)
+                    .unwrap_or_else(|error| panic!("{bare} starts: {error}"));
+            }
+            let plan = services
+                .get::<Arc<heddle_plan::PlanService>>("plan")
+                .expect("the plan service is provided");
+            let expected = tail.contains(&"questions");
+            assert!(
+                format!("{plan:?}").contains(&format!("review_channel: {expected}")),
+                "{label}: a review channel exactly when the questions row is loaded ({plan:?})"
+            );
             let _ = std::fs::remove_dir_all(&home);
         }
     }
