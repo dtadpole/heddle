@@ -27,6 +27,8 @@ ten minutes by default; live-testing issue #13).
 `FS_NOT_REGULAR_FILE`, each naming the path (live-testing issue #4).
 `check-utf8-chunks.mjs` holds bash output to whole characters when a UTF-8 sequence arrives split across chunks
 (live-testing issue #96: the TypeScript build decoded each chunk alone).
+`check-output-limit.mjs` holds bash output to the tools row's `bashOutputLimit`: a cut keeps the **end** of the output
+and names a file holding all of it, `[output truncated; full output: <path>]`, as DSH's bash does (live-testing issue #83).
 
 ## Under `HEDDLE_BIN`
 

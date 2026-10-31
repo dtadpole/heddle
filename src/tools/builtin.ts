@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { closeSync, mkdirSync, openSync, rmSync, writeFileSync, writeSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
 import { StringDecoder } from 'node:string_decoder'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
@@ -45,6 +47,98 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
       description:
         'Required with sandbox_permissions: one sentence for the user explaining why this exact operation needs the wider access. Use the language of the user’s current request.',
     },
+  }
+}
+
+/** The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB). */
+export const BASH_SPILL_MAX_BYTES = 64 * 1024 * 1024
+
+/**
+ * What the model is shown of a command's output: all of it within `limit` characters, otherwise its **end** and the
+ * path of a file holding the whole of it.
+ *
+ * Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long command's
+ * closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream and names the
+ * spill file, `[output truncated; full output: <path>]` (`dsh-tool-bash` streamText; `(unavailable)` when no file could
+ * be written). Stated differences: heddle cuts the combined stdout and stderr, by characters (`bashOutputLimit`),
+ * where DSH cuts each stream at 64,000 bytes.
+ */
+export function tailOutput(combined: string, limit: number, spillMaxBytes = BASH_SPILL_MAX_BYTES, io: SpillIo = NODE_SPILL_IO): string {
+  if (combined.length <= limit) return combined
+  let tail = combined.slice(combined.length - limit)
+  // Never start on the second half of a surrogate pair.
+  const first = tail.charCodeAt(0)
+  if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1)
+  return `${tail}\n[output truncated; full output: ${spillOutput(combined, spillMaxBytes, io) ?? '(unavailable)'}]`
+}
+
+/** The file operations a spill makes. A test replaces them to model a failed write or a failed cleanup. */
+export interface SpillIo {
+  /** Create the file exclusively (`wx`, mode 0600) and answer its descriptor; throws when it cannot. */
+  readonly open: (path: string) => number
+  readonly write: (fd: number, bytes: Buffer) => void
+  readonly close: (fd: number) => void
+  readonly unlink: (path: string) => void
+}
+
+const NODE_SPILL_IO: SpillIo = {
+  open: (path) => openSync(path, 'wx', 0o600),
+  write: (fd, bytes) => {
+    let offset = 0
+    while (offset < bytes.length) offset += writeSync(fd, bytes, offset, bytes.length - offset)
+  },
+  close: (fd) => closeSync(fd),
+  unlink: (path) => rmSync(path, { force: true }),
+}
+
+/**
+ * Write a command's whole output to a private temporary file and return its path, or none.
+ *
+ * Only a complete copy is ever named: an output over `spillMaxBytes` gets no file, and a write that fails removes what
+ * it left, as DSH discards a spill past its cap and unlinks one that failed (`dsh-subprocess-local`), so the marker never
+ * points at a partial file (developer-five's review of #83). A completed file stays in the temporary directory, as DSH's do.
+ */
+function spillOutput(full: string, spillMaxBytes: number, io: SpillIo): string | undefined {
+  /**
+   * The spill is optional, so nothing in it may fail the command: every step, the name included, is contained,
+   * and any failure answers "no file". Ownership is tracked rather than guessed. A file is removed only after this
+   * call's exclusive open succeeded, so an open that fails (an existing name, a missing or unwritable directory)
+   * removes nothing. A cleanup that fails is ignored, as the Rust twin ignores `remove_file`'s error
+   * (developer-five's review of #83).
+   */
+  try {
+    const bytes = Buffer.from(full, 'utf8')
+    if (bytes.length > spillMaxBytes) return undefined
+    const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
+    let fd: number
+    try {
+      fd = io.open(path)
+    } catch {
+      return undefined
+    }
+    let closed = false
+    try {
+      io.write(fd, bytes)
+      closed = true
+      io.close(fd)
+      return path
+    } catch {
+      if (!closed) {
+        try {
+          io.close(fd)
+        } catch {
+          // Best effort: a close that fails here is not retried, and the answer is still (unavailable).
+        }
+      }
+      try {
+        io.unlink(path)
+      } catch {
+        // Best effort: a cleanup failure must not replace the command's result.
+      }
+      return undefined
+    }
+  } catch {
+    return undefined
   }
 }
 
@@ -293,7 +387,7 @@ export function builtinTools(
           stdout += stdoutText.end()
           stderr += stderrText.end()
           const combined = stdout + stderr
-          const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
+          const trimmed = tailOutput(combined, outputLimit)
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
           /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
