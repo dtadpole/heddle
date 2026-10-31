@@ -1,7 +1,7 @@
 ---
 title: Browser Use Component Rules
-version: 1.1.0
-description: The rules the browser tool's helpers implement, judged without a browser, Chrome's command line among them.
+version: 1.2.0
+description: The rules the browser tool's helpers implement, judged without a browser, Chrome's command line and the bounded DevTools handshake among them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-17, separating component tests from delivery verifiers
 ---
@@ -34,3 +34,9 @@ there as a hidden `.com.google.Chrome.XXXXXX` file (30,000 of them, 5.3 GiB, by 
 Chrome output cleanup is tested without a browser: `releaseChromeOutput` destroys only this launch's
 read streams and does not signal unrelated processes. A helper retaining inherited descriptors must
 not keep a finished verifier alive.
+
+The DevTools handshake is tested against a local socket that plays a busy or dying Chrome: one that takes
+the connection and never answers must make `connect` reject within its bound, one that hangs up first must
+make it reject at once, and `stopChrome` against the first must reach SIGTERM within seconds. A listening
+socket completes a TCP connect whether or not the browser reads it, so before the bound a wedged browser
+held `connect` — and the `stopChrome` that connects before it signals — forever.

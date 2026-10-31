@@ -67,6 +67,8 @@ pub struct Context<'a> {
     pub views: Vec<(String, Arc<dyn SessionView>)>,
     /// Where `/vendor/purify.js` is looked for (the repository root and the working directory).
     pub asset_roots: Vec<PathBuf>,
+    /// Whether the serving invocation explicitly enabled Browser framing.
+    pub browser: bool,
     /// The cookie-signing secret's path, `<heddle home>/web-secret` as the boot's environment resolves
     /// it (`token::secret_path_for`). Pass it: `None` falls back to the server reading `HEDDLE_HOME` and
     /// `HOME` from the process itself.
@@ -101,6 +103,7 @@ pub fn options_for(args: &Args, context: &Context<'_>) -> ServerOptions {
         token: None,
         default_endpoint: args.endpoint.clone(),
         asset_roots: context.asset_roots.clone(),
+        browser: context.browser,
     }
 }
 
@@ -202,6 +205,7 @@ mod tests {
             routers: Vec::new(),
             views: Vec::new(),
             asset_roots: Vec::new(),
+            browser: false,
             secret_path: Some(secret(label)),
             notes: Vec::new(),
             shutdown: CancellationToken::new(),

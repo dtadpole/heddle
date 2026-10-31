@@ -454,9 +454,14 @@ impl SessionService {
         self.store.meta(id)
     }
 
-    /// Whether this store holds a session with that id.
+    /// Whether this store holds a session with that id: a metadata record, and a log that opens.
+    ///
+    /// A session whose log cannot be read opens as no session ([`SessionStore::open`]), so every route that asks this
+    /// first answers it as an unknown id. Measured before (#130): `POST /api/turn` into such a session passed this
+    /// check on its record alone and came back `400 no session '<id>' under <store root>`, naming the store on disk,
+    /// where web.ts answers `404 session/not-found`.
     pub fn exists(&self, id: &str) -> bool {
-        self.store.meta(id).is_some()
+        self.store.meta(id).is_some() && self.store.open(id).is_some()
     }
 
     /// Open an existing session by id, in whichever layout it was written in.
