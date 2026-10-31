@@ -16,7 +16,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | File | What it is | Ported from |
 |---|---|---|
 | [`lib.rs`](lib.rs) | the crate root, the contract, the re-exports | — |
-| [`activity.rs`](activity.rs) | `session_activity`: the running work a plain archive is refused for (the turn, running subagent descendants), in DSH's `workspace/session-activity` shape (R-developer-eight-13) | `activity.ts` |
+| [`activity.rs`](activity.rs) | `session_activity`: the running work a plain archive is refused for (the turn, live jobs, running subagent descendants, active reminders), in DSH's `workspace/session-activity` shape and listener order; `refusal_sentence`, `activity_sessions` (R-developer-eight-13) | `activity.ts` |
 | [`clock.rs`](clock.rs) | timestamps as `toISOString` prints them | `new Date().toISOString()` |
 | [`command.rs`](command.rs) | `heddle sessions` and `heddle transcript`, answered here (D-043): `run(Command, &Args, &Context, out, err) -> i32`, plus the shared `refuse` and `write_pretty` | `src/cli.ts`, the `sessions` and `transcript` branches |
 | [`layout.rs`](layout.rs) | `workspace_key`: the folder a log is filed under | `layout.ts` |
