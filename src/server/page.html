@@ -9485,7 +9485,8 @@ function selectionForSeat(seat) {
  * view of a session switched away from, or one overtaken by a newer choice, changes no seat.
  */
 function adoptViewSelection(id, body, selectionAt) {
-  const endpoint = typeof body?.endpoint === 'string' && body.endpoint.length > 0 ? body.endpoint : null
+  if (body === null || typeof body !== 'object') return
+  const endpoint = typeof body.endpoint === 'string' && body.endpoint.length > 0 ? body.endpoint : null
   const newerChoice = (latestSelection.get(id) ?? 0) > (selectionAt ?? 0)
   if (endpoint !== null) {
     recordedSelections.add(id)
@@ -9499,7 +9500,7 @@ function adoptViewSelection(id, body, selectionAt) {
     serverSeats.delete(id)
   }
   if (current !== id || newerChoice) return
-  applySessionModel(body?.endpoint ?? null, body?.model ?? null, body?.reasoningEffort ?? null)
+  applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
   // A blank session holds the seat it was opened with, which its first turn carries.
   if (endpoint === null) heldSeats.set(id, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
 }
