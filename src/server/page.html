@@ -6971,6 +6971,13 @@ function restoreChatScroll(id) {
  * counter, `showGeneration`, for both): the older one draws nothing when its read returns.
  */
 let sessionLoading = null
+/**
+ * The open session's own folder (its record's `cwd`), read by showSession. A relative link in an answer means this folder
+ * (C62). It is kept apart from activeFolder, which only a row click or a workspace action sets: a reload that restores
+ * the saved session opens it by id, and that left the link handler with no folder, so the browser followed the link
+ * (#41, developer-two's live acceptance run).
+ */
+let sessionFolder = null
 
 /**
  * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
@@ -6988,6 +6995,7 @@ async function showSession(id) {
   const generation = ++showGeneration
   /** Where the reader left the session being replaced, before anything below changes the view. */
   rememberChatScroll()
+  sessionFolder = null
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -7117,6 +7125,7 @@ async function showSession(id) {
     }
     const branchCell = document.getElementById('session-branch')
     if (branchCell !== null) branchCell.textContent = typeof body.cwd === 'string' ? body.cwd : ''
+    sessionFolder = typeof body.cwd === 'string' && body.cwd !== '' ? body.cwd : null
     /**
      * Each turn renders inside its own guard.
      *
@@ -12233,7 +12242,7 @@ log.addEventListener('click', (clickEvent) => {
   if (anchor === null) return
   if (clickEvent.metaKey || clickEvent.ctrlKey || clickEvent.shiftKey || clickEvent.altKey || clickEvent.button !== 0) return
   const href = anchor.getAttribute('href') ?? ''
-  const path = chatLinkPath(href, activeFolder)
+  const path = chatLinkPath(href, sessionFolder ?? activeFolder)
   if (path === null) return
   clickEvent.preventDefault()
   const fragment = href.split('#')[1] ?? ''
