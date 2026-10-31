@@ -85,9 +85,12 @@ test('below 1024 pixels the sidebar is a rail and the conversation and composer 
     await browser.goto(server.url)
     await browser.waitFor(`document.querySelector('#prompt textarea') !== null`)
     // One answered turn, so the conversation has text to squeeze.
-    await browser.evaluate(`fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'hello' }) }).then((r) => r.text())`, 15_000)
+    const answered = String(await browser.evaluate(`fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'hello' }) }).then((r) => r.text())`, 15_000))
+    const session = /"session":"(session-[^"]+)"/.exec(answered)?.[1]
+    assert.ok(session, `the turn named its session\n${answered.slice(0, 200)}`)
     await metrics(PHONE)
-    await browser.goto(server.url)
+    /** The page opens no session on its own (#17): the answered one is opened by name, so the conversation has text. */
+    await browser.gotoSession(server.url, session)
     await browser.waitFor(`document.querySelector('#prompt textarea') !== null && document.body.dataset.sidebar !== undefined`)
     await settle(400)
 
