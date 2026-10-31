@@ -3365,6 +3365,8 @@ function add(kind, text, merge = true, label, tool) {
      * attaches; `dataset.copyText` is snapshotted before the button is inside the row.
      */
     node.dataset.copyText = node.innerText
+    /** The answer that closed a completed turn carries that turn's end seq, which its Branch action forks at. */
+    if (Number.isSafeInteger(tool.forkSeq)) node.dataset.forkSeq = String(tool.forkSeq)
     node.append(messageActions(node))
     if (tool !== undefined && Array.isArray(tool.files) && tool.files.length > 0) node.append(editedFilesPanel(tool.files))
     if (tool !== undefined && Array.isArray(tool.ended) && tool.ended.length > 0) node.append(turnNotice(tool.ended))
@@ -3541,7 +3543,89 @@ function messageActions(row) {
   const bar = document.createElement('div')
   bar.className = 'actions'
   bar.append(copyAction(row, 'Copy this answer'))
+  if (row.dataset.forkSeq !== undefined) bar.append(branchAction(row))
   return bar
+}
+
+/** DSH's `IconBranchOutlineRegular`: two strokes leaving one stem, each ending at a ring. */
+function branchIcon() {
+  const svg = iconSvg()
+  for (const d of [
+    'M1.01503 8.0001L5.6964 8.0001C6.41913 8.0001 6.78049 8.0001 7.12115 7.91951C7.4232 7.84804 7.71233 7.73014 7.97821 7.57C8.27809 7.38939 8.5364 7.13669 9.05303 6.63129L11.3281 4.40564',
+    'M1.01221 7.9999L5.6964 7.9999C6.41913 7.9999 6.78049 7.9999 7.12115 8.08049C7.4232 8.15196 7.71233 8.26986 7.97821 8.43C8.27809 8.61061 8.5364 8.86331 9.05303 9.36871L11.3281 11.5944',
+  ]) {
+    const path = document.createElementNS(ICON_NS, 'path')
+    path.setAttribute('d', d)
+    path.setAttribute('stroke', 'currentColor')
+    svg.append(path)
+  }
+  for (const cy of ['3.3079', '12.6921']) {
+    const ring = document.createElementNS(ICON_NS, 'circle')
+    ring.setAttribute('cx', '12.4502')
+    ring.setAttribute('cy', cy)
+    ring.setAttribute('r', '1.56962')
+    ring.setAttribute('stroke', 'currentColor')
+    svg.append(ring)
+  }
+  return svg
+}
+
+/**
+ * Branch from a completed turn: DSH's turn footer action, "Branch into a new conversation".
+ *
+ * The reference's footer (dsh-client-ui-chat `TurnTailNodeView` and its `forkAt`, client.js:6963-7001 and 13266-13285)
+ * forks with `atSeq` set to the seq that ended the turn and an incremented title, then **opens** the child, unlike the
+ * row menu's fork, which leaves the view where it was. The seq rides on the answer that closes the turn (`forkSeq`
+ * from the transcript, or the live `turn/completed`), so only a completed turn offers it.
+ */
+function branchAction(row) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'action'
+  button.dataset.action = 'branch'
+  button.append(branchIcon())
+  button.title = 'Branch into a new conversation'
+  button.setAttribute('aria-label', 'Branch into a new conversation')
+  button.onclick = async () => {
+    const source = current
+    const atSeq = Number(row.dataset.forkSeq)
+    if (source === null || !Number.isSafeInteger(atSeq)) return
+    button.disabled = true
+    try {
+      const response = await fetch('/api/sessions/' + encodeURIComponent(source) + '/fork', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ atSeq }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || typeof body.session !== 'string') {
+        setNote(body.error ?? 'could not branch from that turn')
+        return
+      }
+      setNote('')
+      await renderTree()
+      await showSession(body.session)
+    } finally {
+      button.disabled = false
+    }
+  }
+  return button
+}
+
+/**
+ * A turn just completed on the stream: the answer that closed it can now be branched from.
+ *
+ * The same rule as the transcript's `forkSeq`: the turn's last row must be an answer with text (DSH refuses the branch
+ * when a call came after the answer, or there was no answer). The button joins an action bar that is already drawn,
+ * because the row may have settled before the turn's end arrived.
+ */
+function markBranchable(seq) {
+  if (!Number.isSafeInteger(seq)) return
+  const row = lastTurnRow()
+  if (row === null || !row.classList.contains('assistant') || row.textContent.trim() === '') return
+  row.dataset.forkSeq = String(seq)
+  const bar = row.querySelector(':scope > .actions')
+  if (bar !== null && bar.querySelector('[data-action="branch"]') === null) bar.append(branchAction(row))
 }
 
 /**
@@ -5862,6 +5946,7 @@ events.addEventListener('session', (message) => {
      */
     if (current === null || payload.session === current) {
       settleChat()
+      markBranchable(event.seq)
       void renderSettledAnswers()
     }
   }

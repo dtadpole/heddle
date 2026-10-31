@@ -925,6 +925,11 @@ export class SessionStore {
       readonly teamId?: SessionId
       readonly title?: string
       readonly id?: SessionId
+      /**
+       * DSH's `atSeq`: the inclusive event seq to cut at. Left out, the cut is the last completed turn. The caller
+       * checks that the seq exists in the source.
+       */
+      readonly atSeq?: number
     } = {},
   ): SessionHandle | null {
     const from = this.open(source)
@@ -944,9 +949,12 @@ export class SessionStore {
     })
     /**
      * The fork inherits what the source had **finished**: its log cut at the last completed turn. A dangling user
-     * message — one whose answer never arrived — is not carried over.
+     * message — one whose answer never arrived — is not carried over. An explicit `atSeq` is DSH's inclusive cut instead
+     * (dsh-api-session-controller/lib/index.js:843-872): the chat's Branch action passes the seq that ended the turn it
+     * sits on. Either way the child is seeded with the source's own events up to the cut, as DSH's `buildForkSeed` does.
      */
-    const events = completedPrefix(this.read(from))
+    const cut = attribution.atSeq
+    const events = cut === undefined ? completedPrefix(this.read(from)) : this.read(from).filter((event) => event.seq <= cut)
     this.seed(handle, events)
     return handle
   }

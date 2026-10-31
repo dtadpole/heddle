@@ -3449,6 +3449,74 @@ test("a fork shows its source's turns and no more: the runtime-context note stay
   }
 })
 
+test('a fork at a chosen turn ends after that turn, and refuses a cut the reference refuses', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-at')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    const asked = ['turn one', 'turn two', 'turn three']
+    for (const prompt of asked) {
+      const turn = await runCli(adminArgs(h, ['--turn', prompt]), { env: h.env, cwd: branch })
+      assert.equal(turn.code, 0, `the turn ran\n${turn.stdout}${turn.stderr}`)
+    }
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const detail = async (id) => (await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })).json()
+    const fork = (id, body) =>
+      fetch(new URL(`/api/sessions/${id}/fork`, live.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+    /**
+     * DSH's chat footer branches with atSeq set to the seq that ended the turn (dsh-client-ui-chat TurnTailNodeView and
+     * forkAt; the cut is inclusive, dsh-api-session-controller session/fork). The transcript carries that seq on each
+     * completed turn's closing answer, which is what the page's Branch action sends. Phase A (R-developer-eight-16):
+     * atSeq was ignored and the child held every turn.
+     */
+    const source = await detail(made.session)
+    const ends = (source.turns ?? []).filter((turn) => Number.isSafeInteger(turn.forkSeq)).map((turn) => turn.forkSeq)
+    const ended = (await readTranscript(join(h.home, 'sessions', made.session))).filter((event) => event.type === 'turn/completed').map((event) => event.seq)
+    assert.deepEqual(ends, ended, `each completed turn's answer carries its turn/completed seq\nsaw: ${JSON.stringify(source.turns)}`.slice(0, 600))
+
+    const atTwo = await fork(made.session, { atSeq: ends[1] })
+    assert.equal(atTwo.status, 200, `a fork at the second turn's end is made\n${await atTwo.clone().text()}`)
+    const child = (await atTwo.json()).session
+    const prompts = ((await detail(child)).turns ?? []).filter((turn) => turn.kind === 'user').map((turn) => turn.text)
+    assert.deepEqual(prompts, asked.slice(0, 2), 'the child ends after turn two')
+    const listed = await sessionsOf(h)
+    const title = listed.find((meta) => meta.id === made.session)?.title ?? ''
+    assert.equal(listed.find((meta) => meta.id === child)?.title, `${title} (1)`, 'it is titled after its source, as a row fork is')
+    assert.equal(listed.find((meta) => meta.id === child)?.parentSession, made.session, 'and records its parent')
+
+    /** DSH's two refusals, in its words: a value that is not a non-negative safe integer, and a seq the source lacks. */
+    for (const bad of [-1, 1.5, 'two']) {
+      const refused = await fork(made.session, { atSeq: bad })
+      assert.equal(refused.status, 400, `atSeq ${JSON.stringify(bad)} is a bad request`)
+      assert.equal((await refused.json()).error, 'atSeq must be a non-negative safe integer')
+    }
+    const last = ended.length === 0 ? -1 : Math.max(...(await readTranscript(join(h.home, 'sessions', made.session))).map((event) => event.seq))
+    const missing = await fork(made.session, { atSeq: 99999 })
+    assert.equal(missing.status, 409, 'a seq the source does not have is refused')
+    assert.equal((await missing.json()).error, `event 99999 does not exist in session "${made.session}" (last seq: ${last})`)
+
+    /** Without atSeq the fork still cuts at the last completed turn. */
+    const whole = await fork(made.session, {})
+    assert.equal(whole.status, 200, 'a fork without atSeq is made')
+    const all = ((await detail((await whole.json()).session)).turns ?? []).filter((turn) => turn.kind === 'user').map((turn) => turn.text)
+    assert.deepEqual(all, asked, 'and holds every completed turn')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test("a session row's controls appear on hover, and a search replaces the tree with named hits", async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return

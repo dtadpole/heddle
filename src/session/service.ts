@@ -159,9 +159,17 @@ export class SessionService extends Service {
    * The folder keeps the conventions' instance naming rule — a title with spaces and brackets is a label, not
    * an instance name — so the identity is generated as for any other session while the title carries the name.
    */
-  fork(id: SessionId): { readonly handle: SessionHandle; readonly definition: SessionDefinition } | null | { readonly error: 'unavailable' } {
+  fork(
+    id: SessionId,
+    options: { readonly atSeq?: number } = {},
+  ):
+    | { readonly handle: SessionHandle; readonly definition: SessionDefinition }
+    | null
+    | { readonly error: 'unavailable' }
+    | { readonly error: 'no-such-event'; readonly atSeq: number; readonly lastSeq?: number } {
     const source = this.store.list().find((one) => one.id === id)
     if (source === undefined) return null
+    if (options.atSeq !== undefined) return this.forkAt(id, source, options.atSeq)
     /**
      * A fork is cut at the last **completed** turn, as DSH's is: a session with none has nothing to fork from, and a child
      * carrying a half-finished turn would invite the model to continue work it never saw finish.
@@ -177,6 +185,39 @@ export class SessionService extends Service {
     /** The child records its parent, which is the provenance DSH's header keeps (`parentSession`). */
     const handle = this.store.fork(id, { parentSession: id })
     if (handle === null) return null
+    return this.nameFork(handle, source)
+  }
+
+  /**
+   * Fork at an explicit event: DSH's `session/fork` with `atSeq` (dsh-api-session-controller/lib/index.js:849-872).
+   *
+   * The cut is inclusive and must name an event the source has; DSH refuses any other with "event N does not exist in
+   * session ... (last seq: M)", and so does this. An explicit cut does not have to fall on a completed turn: DSH accepts
+   * any existing event seq. The chat's Branch action only offers the seq that ended a completed turn.
+   */
+  private forkAt(
+    id: SessionId,
+    source: SessionMeta,
+    atSeq: number,
+  ):
+    | { readonly handle: SessionHandle; readonly definition: SessionDefinition }
+    | null
+    | { readonly error: 'unavailable' }
+    | { readonly error: 'no-such-event'; readonly atSeq: number; readonly lastSeq?: number } {
+    const sourceHandle = this.store.open(id)
+    if (sourceHandle === null) return { error: 'unavailable' }
+    const events = this.store.read(sourceHandle)
+    if (!events.some((event) => event.seq === atSeq)) {
+      const last = events.at(-1)?.seq
+      return { error: 'no-such-event', atSeq, ...(last !== undefined ? { lastSeq: last } : {}) }
+    }
+    const handle = this.store.fork(id, { parentSession: id, atSeq })
+    if (handle === null) return null
+    return this.nameFork(handle, source)
+  }
+
+  /** Title the child after its source (DSH's increased fork title) and write its definition into the source's folder. */
+  private nameFork(handle: SessionHandle, source: SessionMeta): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const created = this.store.list().find((one) => one.id === handle.id)
     const base = source.title !== undefined && source.title.trim().length > 0 ? source.title.trim() : 'session'
     const title = forkTitle(base, this.store.list().map((one) => one.title ?? ''))

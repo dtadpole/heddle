@@ -1423,9 +1423,31 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id)
+    /**
+     * An optional `atSeq` body field is DSH's inclusive cut (dsh-api-session-controller/lib/index.js:849-872): the chat's
+     * Branch action sends the seq that ended its turn. DSH refuses a value that is not a non-negative safe integer as a
+     * bad request, and a seq the source does not have as fork-unavailable, with the same two sentences used here.
+     */
+    const body = await readJson(request, response)
+    if (body === null) return
+    const atSeq = body.atSeq
+    if (atSeq !== undefined && !(typeof atSeq === 'number' && Number.isSafeInteger(atSeq) && atSeq >= 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
+      return
+    }
+    const forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    if ('error' in forked && forked.error === 'no-such-event') {
+      const last = forked.lastSeq === undefined ? 'none' : String(forked.lastSeq)
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: `event ${forked.atSeq} does not exist in session "${id}" (last seq: ${last})`, code: 'unavailable' })}\n`,
+      )
       return
     }
     if ('error' in forked) {
@@ -2865,6 +2887,18 @@ export function transcriptTurns(
           else turns.push({ kind: 'assistant', text: typeof event.text === 'string' ? event.text : '', ended })
         }
       }
+      /**
+       * A completed turn can be branched from its closing answer — DSH's turn footer offers "Branch into a new
+       * conversation" there and forks with `atSeq` set to the turn's end (dsh-client-ui-chat/lib/client.js:6963-7001,
+       * 11094-11115, 13266-13285). DSH refuses the branch when the turn's last row is not an answer with text (a call
+       * after the answer, or no text at all), so only that case carries the seq.
+       */
+      if (event.type === 'turn/completed' && typeof event.seq === 'number') {
+        const last = turns[turns.length - 1]
+        if (last !== undefined && last.kind === 'assistant' && last.text.trim().length > 0) {
+          turns[turns.length - 1] = { ...last, forkSeq: event.seq }
+        }
+      }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()
       continue
@@ -2971,6 +3005,11 @@ export interface ChatTurn {
   readonly result?: string
   /** DSH's phases, simplified: a call is running until its result says otherwise. */
   readonly state?: 'running' | 'ok' | 'error'
+  /**
+   * On the answer that closes a completed turn: the seq of that turn's `turn/completed`, which the page's Branch action
+   * sends as the fork's `atSeq` — DSH's turn footer forks at the turn's end seq.
+   */
+  readonly forkSeq?: number
 }
 
 /**
