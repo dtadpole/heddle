@@ -152,6 +152,19 @@
   #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 8%, transparent); outline: none; }
   #search-results .hit-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
+  /**
+   * An archived hit, DSH's `SearchResultItem`: grayed like an archived row, explained to a screen reader, and carrying
+   * its Unarchive button at the end — search is where the filter surfaces an archived session for recovery. It is a
+   * treeitem `div` rather than a `button` because a button cannot hold the Unarchive button.
+   */
+  #search-results div.hit { box-sizing: border-box; align-items: center; }
+  #search-results .hit[data-archived='true'] .hit-title, #search-results .hit[data-archived='true'] .hit-workspace { opacity: .5; }
+  #search-results .hit-unarchive {
+    display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0;
+    color: var(--text-2); background: none; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  #search-results .hit-unarchive:hover, #search-results .hit-unarchive:focus-visible { background: var(--hover); color: var(--text); outline: none; }
+  #search-results .hit-unarchive svg { width: 14px; height: 14px; }
   #session-search { width: 100%; margin: 0 0 .5rem; padding: .3rem .45rem; font: inherit; font-size: .8rem; color: inherit; background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: .3rem; }
   #session-search::placeholder { opacity: .6; }
   /**
@@ -1385,6 +1398,13 @@
     background: none;
   }
   /**
+   * While its menu is open the slot rises to the menus' own layer. Its `z-index: 1` makes it a stacking context, so the
+   * fixed-positioned menu inside it painted at layer 1 — under the conversation panel's column grip (layer 4) wherever
+   * the menu crossed the sidebar's edge. Measured on 29 Oct: a click on the right part of `Archive session` landed on
+   * the grip and did nothing (R-developer-eight-14). DSH portals its menus for the same reason.
+   */
+  #tree li:has(.menu:not([hidden])) > .row .row-tools { z-index: 40; }
+  /**
    * The row's action buttons, measured from DSH's own sheet: its `._actionButton` is **20×16**, radius 4px, with **no
    * background at all** — hover only lifts the colour from secondary to primary. The 26px centre-to-centre step in its
    * row is a 20px button plus a 6px gap, which the slot keeps.
@@ -2007,6 +2027,20 @@
   .ws-dialog .ws-actions button.ws-primary { background: var(--text); color: #0f1115; border: 0; }
   .ws-dialog .ws-actions button.ws-danger { color: #ff7b72; border-color: color-mix(in oklab, #ff7b72 45%, var(--border)); }
   .ws-dialog .ws-actions button:disabled { opacity: .45; cursor: default; }
+  /** DSH's stop-and-archive list: one line per family of work that will be stopped (its `archiveActivity` list). */
+  #session-archive-activity { margin: .7rem 0 0; padding-left: 1.2rem; font-size: 13px; line-height: 1.6; color: var(--text); }
+  /**
+   * The archive notice — DSH's workspace toast: one line, its action words inline ("Session archived. You can undo or
+   * filter archived sessions"), held six seconds, bottom-left over the column it is about.
+   */
+  #archive-notice {
+    position: fixed; left: 12px; bottom: 12px; z-index: 70; box-sizing: border-box; max-width: min(440px, calc(100vw - 24px));
+    padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-menu);
+  }
+  #archive-notice[hidden] { display: none; }
+  #archive-notice[data-tone='warning'] { border-color: color-mix(in oklab, #d29922 45%, var(--border)); }
+  #archive-notice button { padding: 0; font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; text-decoration: underline; }
   /** Rows, not the page's column `form`: the field and its button share one line. */
   .ws-dialog .ws-path-row, .ws-dialog .ws-new-row { display: flex; flex-direction: row; gap: .5rem; align-items: center; margin-top: .9rem; }
   .ws-dialog .ws-new-row[hidden] { display: none; }
@@ -2420,8 +2454,18 @@
    * quiet affordance — the row is what a person is looking at — so it paints nothing, and only its opacity
    * answers the pointer.
    */
-  /** An archived row is drawn only when asked for, and then quietly: it is not part of the live list. */
-  #tree li[data-archived='true'] { opacity: .55; }
+  /**
+   * An archived row is drawn only when asked for, and then quietly: it is not part of the live list.
+   *
+   * The dimming is on the row's **words and glyph**, never on the item. Measured on 29 Oct (R-developer-eight-14): the
+   * opacity sat on the `li`, which makes the item a stacking context, so the row's `…` menu — fixed-positioned, but
+   * still inside that item — was painted under the conversation panel wherever it crossed the sidebar's edge
+   * ("Renai", "Unarc"), and a click on the right of an item landed in the panel.
+   */
+  #tree li[data-archived='true'] > .row > .icon,
+  #tree li[data-archived='true'] > .row > .label,
+  #tree li[data-archived='true'] > .row .age,
+  #tree li[data-archived='true'] > .row .pin-slot { opacity: .55; }
   /**
    * The row's quick controls: present for a reader, invisible to the eye until the row is hovered or focused —
    * DSH's own behaviour, and the reason the row reads as a name rather than as a strip of buttons. A touch device
@@ -3142,6 +3186,21 @@
     <button type="button" id="session-rename-confirm" class="ws-primary" disabled>Rename</button>
   </div>
 </dialog>
+<dialog id="session-archive" class="ws-dialog" aria-labelledby="session-archive-title" aria-describedby="session-archive-desc">
+  <div class="ws-head">
+    <h2 id="session-archive-title">Stop and archive this session?</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <p id="session-archive-desc" class="ws-desc"></p>
+  <ul id="session-archive-activity" aria-label="Work that will be stopped"></ul>
+  <p id="session-archive-status" class="ws-status" role="status" hidden>Stopping and archiving…</p>
+  <p id="session-archive-error" class="ws-error" role="alert" hidden></p>
+  <div class="ws-actions">
+    <button type="button" data-ws-close>Cancel</button>
+    <button type="button" id="session-archive-confirm" class="ws-danger">Stop and archive</button>
+  </div>
+</dialog>
+<div id="archive-notice" role="status" aria-live="polite" hidden></div>
 <script type="module">
 const log = document.getElementById('log')
 const ledger = document.getElementById('ledger')
@@ -10136,28 +10195,33 @@ function pinSession(node) {
 }
 
 /**
- * Archive (or unarchive) a session.
+ * Archive (or unarchive) a session — DSH's order of events.
  *
- * Archiving a session with a turn in flight is refused by the route unless the caller says to stop it — DSH puts this
- * behind a dialog that offers exactly that choice. A native confirm is that dialog here: it says what will happen to the
- * work, and declining leaves everything as it was.
+ * A quiet session is archived at once, with no question, and a notice offers `undo` (DSH's `toast.archived`). A session
+ * with running work is the one case that asks first, and the **server** decides it, as DSH's Host does: the plain archive
+ * is refused `409 active` with the work it found (`activity`: the turn in progress, running subagents), and only then
+ * does the stop-and-archive dialog open, listing that work. The page used to guess from its own running set and ask a
+ * native confirm that named only "the turn"; a subagent still working under an idle session was archived unasked.
  */
 async function archiveSession(node) {
-  if (!node.archived && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
-    const answer = window.confirm('This session is running. Stop the turn and archive it?')
-    if (!answer) return
-    return setSessionFlags(node, { archived: true }, { stop: true })
+  if (node.archived) return setSessionFlags(node, { archived: false })
+  const result = await setSessionFlags(node, { archived: true }, {}, { quiet: (status, body) => SessionArchive.refusedActivity(status, body) !== undefined })
+  if (result.ok) {
+    showArchiveNotice('archived', node)
+    return
   }
-  return setSessionFlags(node, { archived: !node.archived })
+  const activity = SessionArchive.refusedActivity(result.status, result.body)
+  if (activity !== undefined) openStopAndArchive(node, activity)
 }
 
 /**
  * Pin, unpin, archive or unarchive a session, then redraw what the change affects.
  *
  * One function for both flags because the route is one: the record and the definition are written together, and
- * a row's menu only decides which of the two it is changing.
+ * a row's menu only decides which of the two it is changing. Answers `{ ok, status, body }`; a refusal the caller
+ * handles itself (`options.quiet`) is not written to the tree's note.
  */
-async function setSessionFlags(node, patch, extra = {}) {
+async function setSessionFlags(node, patch, extra = {}, options = {}) {
   const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -10165,8 +10229,8 @@ async function setSessionFlags(node, patch, extra = {}) {
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
-    setNote(body.error ?? 'could not change that session')
-    return
+    if (typeof options.quiet !== 'function' || !options.quiet(response.status, body)) setNote(body.error ?? 'could not change that session')
+    return { ok: false, status: response.status, body }
   }
   setNote('')
   /**
@@ -10178,6 +10242,116 @@ async function setSessionFlags(node, patch, extra = {}) {
   await renderTree()
   await refreshSessions()
   glideRows(previousBoxes)
+  return { ok: true, status: response.status, body }
+}
+
+/**
+ * The stop-and-archive dialog — DSH's `SessionArchiveConfirmDialog`: its title, the description naming the session and
+ * the restore path, the work that will be stopped one family per line, and Cancel / Stop and archive. Confirming asks
+ * the server to stop that work the way the Stop button does and archive (`stop: true`); the archive is written first and
+ * the stops settle behind it. Cancelling leaves the session running and in its place. A failure stays in the dialog.
+ */
+const sessionArchiveDialog = document.getElementById('session-archive')
+let stopArchiveTarget = null
+for (const close of sessionArchiveDialog.querySelectorAll('[data-ws-close]')) {
+  close.addEventListener('click', () => {
+    if (stopArchiveTarget?.busy !== true) sessionArchiveDialog.close()
+  })
+}
+sessionArchiveDialog.addEventListener('click', (clickEvent) => {
+  if (clickEvent.target === sessionArchiveDialog && stopArchiveTarget?.busy !== true) sessionArchiveDialog.close()
+})
+sessionArchiveDialog.addEventListener('cancel', (cancelEvent) => {
+  if (stopArchiveTarget?.busy === true) cancelEvent.preventDefault()
+})
+
+function openStopAndArchive(node, activity) {
+  stopArchiveTarget = { node, busy: false }
+  const title = node.session?.title !== undefined && node.session.title.length > 0 ? node.session.title : node.label ?? node.session.id
+  document.getElementById('session-archive-desc').textContent = SessionArchive.confirmDescription(title)
+  document.getElementById('session-archive-activity').replaceChildren(
+    ...activity.map((entry) => {
+      const item = document.createElement('li')
+      item.textContent = SessionArchive.activityLine(entry)
+      return item
+    }),
+  )
+  document.getElementById('session-archive-status').hidden = true
+  dialogError('session-archive-error', '')
+  document.getElementById('session-archive-confirm').disabled = false
+  for (const close of sessionArchiveDialog.querySelectorAll('[data-ws-close]')) close.disabled = false
+  if (!sessionArchiveDialog.open) sessionArchiveDialog.showModal()
+}
+
+document.getElementById('session-archive-confirm').addEventListener('click', async () => {
+  if (stopArchiveTarget === null || !sessionArchiveDialog.open || stopArchiveTarget.busy) return
+  const target = stopArchiveTarget
+  const button = document.getElementById('session-archive-confirm')
+  const settle = (busy) => {
+    target.busy = busy
+    button.disabled = busy
+    for (const close of sessionArchiveDialog.querySelectorAll('[data-ws-close]')) close.disabled = busy
+    document.getElementById('session-archive-status').hidden = !busy
+  }
+  settle(true)
+  dialogError('session-archive-error', '')
+  try {
+    const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
+    settle(false)
+    if (!result.ok) {
+      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      return
+    }
+    stopArchiveTarget = null
+    sessionArchiveDialog.close()
+    showArchiveNotice('stoppedAndArchived', target.node)
+  } catch (error) {
+    settle(false)
+    dialogError('session-archive-error', 'could not stop and archive that session: ' + (error && error.message))
+  }
+})
+
+/**
+ * The archive notice — DSH's workspace toast. After an archive it reads "Session archived. You can undo", and while
+ * archived rows are hidden it adds "or filter archived sessions", which switches the filter to show them; undo
+ * unarchives without resuming any stopped work. The same seat says why an archived session cannot be opened.
+ */
+const archiveNotice = document.getElementById('archive-notice')
+let archiveNoticeTimer = null
+function showArchiveNotice(kind, node) {
+  const spec = SessionArchive.notice(kind, archiveMode)
+  if (archiveNoticeTimer !== null) clearTimeout(archiveNoticeTimer)
+  const dismiss = () => {
+    if (archiveNoticeTimer !== null) clearTimeout(archiveNoticeTimer)
+    archiveNoticeTimer = null
+    archiveNotice.hidden = true
+    archiveNotice.replaceChildren()
+  }
+  const parts = [document.createTextNode(spec.text)]
+  for (const action of spec.actions) {
+    if (action.prefix !== undefined) parts.push(document.createTextNode(action.prefix))
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.dataset.action = action.action
+    button.textContent = action.label
+    button.addEventListener('click', async () => {
+      dismiss()
+      if (action.action === 'undo' && node !== undefined) {
+        await setSessionFlags({ ...node, archived: true }, { archived: false })
+        if (document.getElementById('session-search').value.trim().length > 0) await applySearch()
+      } else if (action.action === 'filter') {
+        archiveMode = 'show'
+        rememberArchived()
+        await renderTree()
+      }
+    })
+    parts.push(button)
+  }
+  archiveNotice.replaceChildren(...parts)
+  archiveNotice.dataset.tone = spec.tone
+  archiveNotice.dataset.kind = kind
+  archiveNotice.hidden = false
+  archiveNoticeTimer = setTimeout(dismiss, spec.holdMs)
 }
 
 /**
@@ -11297,6 +11471,83 @@ const WorkspaceTree = (() => {
 function placeholderDrawn(id) {
   return WorkspaceTree.flatten(treeGroups).some((group) => group.sessions.some((meta) => meta.id === id && WorkspaceTree.placeholder(meta)))
 }
+
+/* session-archive:begin */
+/**
+ * Archive and unarchive, in DSH's words and by DSH's rules (`dsh-client-ui-workspace`: the en dictionary,
+ * `activityLine`, `activeSessionRefusal`, the archive toasts and `SearchResultItem`).
+ *
+ * Pure, like the tree's block, so `test/session-archive.test.ts` loads it out of the page and judges the wording and
+ * the decisions in Node: what a `409 active` refusal means (the stop-and-archive dialog, listing the work it names),
+ * how each family of work is worded, and which actions an archive notice carries.
+ */
+const SessionArchive = (() => {
+  const TEXT = {
+    unarchiveSession: 'Unarchive session',
+    unarchive: 'Unarchive',
+    archivedNotOpenable: 'Archived sessions cannot be opened. Unarchive it to view.',
+    archived: 'Session archived. You can ',
+    stoppedAndArchived: 'Session stopped and archived. You can ',
+    undo: 'undo',
+    or: ' or ',
+    filter: 'filter archived sessions',
+    confirmTitle: 'Stop and archive this session?',
+    confirmActivity: 'Work that will be stopped',
+    confirmAction: 'Stop and archive',
+    confirmPending: 'Stopping and archiving…',
+  }
+
+  /** `archive.confirm.desc`: what stops, where the session comes back from, and that the work does not resume. */
+  function confirmDescription(title) {
+    return (
+      `“${title}” still has work in progress. Archiving stops it first; you can restore the session later from the ` +
+      '“All conversations (show archived)” filter in the sidebar, and the stopped work will not resume on its own.'
+    )
+  }
+
+  /** One family's line: its count and its items' labels (ids when an item has none); an unknown family is generic. */
+  function activityLine(entry) {
+    const items = Array.isArray(entry?.items) ? entry.items : []
+    const n = items.length
+    const names = items.map((item) => item.label ?? item.id).join(', ')
+    const one = n === 1
+    switch (entry?.kind) {
+      case 'turn':
+        return 'The turn in progress'
+      case 'subagent':
+        return `${n} running ${one ? 'subagent' : 'subagents'}: ${names}`
+      case 'job':
+        return `${n} background ${one ? 'job' : 'jobs'}: ${names}`
+      case 'schedule':
+        return `${n} scheduled ${one ? 'reminder' : 'reminders'}: ${names}`
+      default:
+        return `${n} other ${one ? 'item' : 'items'} of work (${String(entry?.kind)})`
+    }
+  }
+
+  /**
+   * The work a refused archive names, or `undefined` for any other answer. The route answers `409` with
+   * `code: 'active'` and DSH's `activity`; a server that predates the list still names a running turn.
+   */
+  function refusedActivity(status, body) {
+    if (status !== 409 || body === null || typeof body !== 'object' || body.code !== 'active') return undefined
+    return Array.isArray(body.activity) && body.activity.length > 0 ? body.activity : [{ kind: 'turn' }]
+  }
+
+  /**
+   * An archive notice's text and actions: `undo` always, and `filter archived sessions` only while archived rows are
+   * hidden, since otherwise the row is already in view. A not-openable notice carries none.
+   */
+  function notice(kind, archiveMode) {
+    if (kind === 'archivedNotOpenable') return { text: TEXT.archivedNotOpenable, tone: 'warning', holdMs: 4000, actions: [] }
+    const actions = [{ action: 'undo', label: TEXT.undo }]
+    if (archiveMode === 'hide') actions.push({ action: 'filter', prefix: TEXT.or, label: TEXT.filter })
+    return { text: kind === 'stoppedAndArchived' ? TEXT.stoppedAndArchived : TEXT.archived, tone: 'success', holdMs: 6000, actions }
+  }
+
+  return { TEXT, confirmDescription, activityLine, refusedActivity, notice }
+})()
+/* session-archive:end */
 
 /**
  * The page's state for the workspace tree: the groups the last render drew, each group's watermark, and the definition
@@ -12777,8 +13028,18 @@ async function applySearch() {
   results.hidden = false
   results.replaceChildren(
     ...hits.map((meta) => {
-      const button = document.createElement('button')
-      button.type = 'button'
+      /**
+       * An **archived** hit is DSH's archived `SearchResultItem`: it cannot be opened — choosing it says why, keeping the
+       * query and the view where they are — and it carries an `Unarchive session` button that restores it in place (the
+       * hit then redraws as an ordinary one). A `div` treeitem, since a button cannot hold a button.
+       */
+      const archived = meta.archived === true
+      const button = document.createElement(archived ? 'div' : 'button')
+      if (archived) {
+        button.tabIndex = 0
+        button.dataset.archived = 'true'
+        button.setAttribute('aria-description', SessionArchive.TEXT.archivedNotOpenable)
+      } else button.type = 'button'
       button.className = 'hit'
       button.setAttribute('role', 'treeitem')
       const title = document.createElement('span')
@@ -12793,6 +13054,27 @@ async function applySearch() {
        */
       place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       button.append(title, place)
+      if (archived) {
+        const restore = document.createElement('button')
+        restore.type = 'button'
+        restore.className = 'hit-unarchive'
+        restore.setAttribute('aria-label', SessionArchive.TEXT.unarchiveSession)
+        restore.title = SessionArchive.TEXT.unarchive
+        restore.append(kindIcon('archive-restore', false))
+        restore.onclick = async (clickEvent) => {
+          clickEvent.stopPropagation()
+          const result = await setSessionFlags({ kind: 'session', session: meta, archived: true, path: definitionOf.get(meta.id) }, { archived: false })
+          if (result.ok) await applySearch()
+        }
+        button.append(restore)
+        button.onclick = () => showArchiveNotice('archivedNotOpenable')
+        button.onkeydown = (keyEvent) => {
+          if (keyEvent.target !== button || (keyEvent.key !== 'Enter' && keyEvent.key !== ' ')) return
+          keyEvent.preventDefault()
+          showArchiveNotice('archivedNotOpenable')
+        }
+        return button
+      }
       button.onclick = () => showSession(meta.id)
       return button
     }),

@@ -5045,6 +5045,98 @@ test('pin, archive and fork refuse what the reference refuses, and record their 
   }
 })
 
+test('archiving a session with running work is refused with the work named, and stop: true stops it and archives', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * R-developer-eight-13. DSH refuses a plain `workspace/archiveSession` while the session has work in flight and names that
+   * work by family (`dsh-workspace` `archiveSession` → `workspace/session-active`, `details.activity`): `{kind: 'turn'}`
+   * for its own running turn (`dsh-agent`), `{kind: 'subagent', items}` for running subagent descendants (`dsh-subagent`,
+   * by lineage) — and a subagent still working under an idle parent counts. With `stopActivity` the archive is written and
+   * the work is stopped. The sidebar's stop-and-archive dialog lists exactly what the refusal names, so the refusal has to
+   * name it; heddle's used to carry only `running: <count>` and let an idle parent with a working child archive unasked.
+   */
+  const h = harness('archive-running')
+  let live
+  const pending = []
+  try {
+    const script = join(h.home, 'script.json')
+    const setScript = (steps) => writeFileSync(script, `${JSON.stringify({ steps }, null, 2)}\n`)
+    const sleepStep = { toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } }
+    setScript([sleepStep, { text: 'slept' }])
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const post = (path, body) =>
+      fetch(new URL(path, live.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const metas = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    const until = async (probe, ms = 15_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; ) {
+        const value = await probe()
+        if (value) return value
+        await new Promise((done) => setTimeout(done, 200))
+      }
+      return undefined
+    }
+
+    /** Its own turn: a bash step that sleeps keeps the turn running while the archive is asked for. */
+    const stream = post('/api/turn', { prompt: 'start a long job', folder: h.work }).then((response) => response.text())
+    pending.push(stream)
+    const running = await until(async () => (await metas()).find((meta) => meta.running === true))
+    assert.ok(running, 'the turn is running')
+    const refused = await post(`/api/sessions/${running.id}/flags`, { archived: true })
+    assert.equal(refused.status, 409, 'a running session is not archived quietly')
+    const refusal = await refused.json()
+    assert.equal(refusal.code, 'active', `and the refusal says why\n${JSON.stringify(refusal)}`)
+    assert.deepEqual(refusal.activity, [{ kind: 'turn' }], `and names the work, DSH's activity list\n${JSON.stringify(refusal)}`)
+    const untouched = (await metas()).find((meta) => meta.id === running.id)
+    assert.equal(untouched?.running, true, 'the refusal stops nothing')
+    assert.notEqual(untouched?.archived, true, 'and archives nothing')
+    const stopped = await post(`/api/sessions/${running.id}/flags`, { archived: true, stop: true })
+    assert.equal(stopped.status, 200, 'stop: true is the caller agreeing to stop it')
+    assert.equal((await stopped.json()).archived, true, 'and the session is archived')
+    await stream
+    const after = (await metas()).find((meta) => meta.id === running.id)
+    assert.equal(after?.running, false, `and its turn has stopped\n${JSON.stringify(after)}`)
+
+    /**
+     * A subagent still working under a parent whose own turn has ended: the parent is idle, the work is not, and the
+     * refusal names the child. The child's bash step sleeps; the parent's turn starts it and ends.
+     */
+    setScript([
+      { toolCall: { name: 'delegate', arguments: { prompt: 'look things up slowly' } } },
+      { text: 'the child is working' },
+      { purpose: 'subagent', ...sleepStep },
+      { purpose: 'subagent', text: 'the child is done' },
+    ])
+    const parentTurn = await (await post('/api/turn', { prompt: 'delegate a slow job', folder: h.work })).text()
+    const parent = /"session":"(session-[^"]+)"/.exec(parentTurn)?.[1]
+    assert.ok(parent, `the parent turn names its session\n${parentTurn.slice(0, 400)}`)
+    const child = await until(async () => (await metas()).find((meta) => meta.parentSession === parent && meta.origin === 'subagent'))
+    assert.ok(child, 'the parent started a subagent')
+    const childRefused = await post(`/api/sessions/${parent}/flags`, { archived: true })
+    assert.equal(childRefused.status, 409, 'an idle parent whose subagent still works is not archived quietly')
+    const childRefusal = await childRefused.json()
+    assert.deepEqual(
+      (childRefusal.activity ?? []).map((entry) => [entry.kind, (entry.items ?? []).map((item) => item.id)]),
+      [['subagent', [child.id]]],
+      `and the refusal names the running subagent, not a turn\n${JSON.stringify(childRefusal)}`,
+    )
+    const childStopped = await post(`/api/sessions/${parent}/flags`, { archived: true, stop: true })
+    assert.equal(childStopped.status, 200, 'stop: true archives the parent')
+    const childEnded = await until(() => readTranscript(join(h.home, 'sessions', child.id)).some((event) => event.type === 'turn/completed'))
+    assert.ok(childEnded, "and the stop reached the subagent: its turn ended long before its 40-second step would have")
+  } finally {
+    live?.kill()
+    await Promise.allSettled(pending)
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a clipped session title crawls on hover and returns on leave', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return

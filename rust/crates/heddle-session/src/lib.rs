@@ -31,6 +31,7 @@
 //! read by `src/session/transcript.ts` through the `heddle` binary, which is what
 //! `_verifiers_/70-workspaces-sessions` judges once the command line composes this crate.
 
+pub mod activity;
 pub mod clock;
 pub mod command;
 pub mod definition;
@@ -53,6 +54,7 @@ pub mod unicode61;
 /// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
 pub mod title_text;
 
+pub use activity::{ActivityEntry, ActivityItem, LineageMeta, activity_sessions, session_activity};
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,
