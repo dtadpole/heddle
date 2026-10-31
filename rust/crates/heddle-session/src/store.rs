@@ -1549,6 +1549,34 @@ impl SessionStore {
         handle: &SessionHandle,
         message: RecordedMessage,
     ) -> Result<Arc<SessionEvent>, SessionError> {
+        self.record_message(handle, message, None)
+    }
+
+    /// [`SessionStore::message`] for a user message that also **names a session nothing has named yet**: when the
+    /// record has no title, or a blank one, `fallback_title` is written as [`SessionStore::rename`] writes a title
+    /// (cleaned; nothing visible left clears the key), in the **same** meta write that counts the turn. An empty
+    /// `fallback_title` names nothing.
+    ///
+    /// One write, because the record is read without the store's lock: the web server lists sessions on its own
+    /// threads while a turn records its first message on another, and with the count and the name written one after
+    /// the other a list in between showed the session with a turn and no title. A delegated child, which no route
+    /// marks running, was listed that way (80's check-subagents, Rust only: Node runs no request between the
+    /// TypeScript build's two synchronous writes, `src/session/service.ts` `userContent`).
+    pub fn user_message_named(
+        &self,
+        handle: &SessionHandle,
+        message: RecordedMessage,
+        fallback_title: &str,
+    ) -> Result<Arc<SessionEvent>, SessionError> {
+        self.record_message(handle, message, Some(fallback_title))
+    }
+
+    fn record_message(
+        &self,
+        handle: &SessionHandle,
+        message: RecordedMessage,
+        fallback_title: Option<&str>,
+    ) -> Result<Arc<SessionEvent>, SessionError> {
         let event = self.append(
             handle,
             NewEvent::new("message").field(
@@ -1559,7 +1587,7 @@ impl SessionStore {
         )?;
         if message.role == Role::User {
             let prompted_at = message.source.is_none().then_some(event.at.as_str());
-            self.touch(handle, true, prompted_at);
+            self.write_meta_touch(handle, 1, prompted_at, fallback_title);
         }
         Ok(event)
     }
@@ -1651,7 +1679,21 @@ impl SessionStore {
     /// inherited user message at once and dates nothing, so a fork's row is dated by its creation until its
     /// own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
     fn touch_counting(&self, handle: &SessionHandle, turns: u64, prompted_at: Option<&str>) {
-        if turns == 0 && prompted_at.is_none() {
+        self.write_meta_touch(handle, turns, prompted_at, None);
+    }
+
+    /// [`SessionStore::touch_counting`], also naming an untitled session with `fallback_title` in the same write
+    /// ([`SessionStore::user_message_named`]). The keys change in the order the separate writes changed them —
+    /// `updated`, `turns`, then `title` — so the record's bytes are the ones a touch then a rename left.
+    fn write_meta_touch(
+        &self,
+        handle: &SessionHandle,
+        turns: u64,
+        prompted_at: Option<&str>,
+        fallback_title: Option<&str>,
+    ) {
+        let fallback_title = fallback_title.filter(|title| !title.is_empty());
+        if turns == 0 && prompted_at.is_none() && fallback_title.is_none() {
             return;
         }
         let _meta = self.meta_guard();
@@ -1669,6 +1711,17 @@ impl SessionStore {
         }
         if turns > 0 {
             meta.set("turns", Value::from(meta.turns() + turns));
+        }
+        if let Some(title) = fallback_title
+            && meta.title().is_none_or(|title| title.trim().is_empty())
+        {
+            // `rename`'s cleaning and its clearing of a title with nothing visible left.
+            let cleaned = crate::title_text::clean_session_title(title);
+            if cleaned.is_empty() {
+                meta.remove("title");
+            } else {
+                meta.set("title", Value::String(cleaned));
+            }
         }
         let _ = crate::fsio::write_atomic(&handle.meta, meta.to_file_text());
     }
@@ -2089,6 +2142,61 @@ mod tests {
         assert_eq!(meta.preset(), Some("reader"));
         let keys: Vec<&str> = meta.as_map().keys().map(String::as_str).collect();
         assert_eq!(keys, ["id", "created", "cwd", "teamId", "preset", "turns"]);
+    }
+
+    /// `user_message_named` writes the record a touch then a rename wrote — `updated`, `turns`, then `title`, cleaned as
+    /// `rename` cleans one — in one write; a blank title is replaced, a set one is kept, and an empty name names nothing.
+    #[test]
+    fn a_named_user_message_leaves_the_record_a_touch_then_a_rename_left() {
+        let (_dir, store) = store();
+        let keys = |id: &str| -> Vec<String> {
+            store.meta(id).unwrap().as_map().keys().cloned().collect()
+        };
+        let named = store.create(CreateOptions::default()).unwrap();
+        let plain = store.create(CreateOptions::default()).unwrap();
+        store
+            .user_message_named(&named, user("child task"), "child\u{202E} task")
+            .unwrap();
+        store.message(&plain, user("child task")).unwrap();
+        store.rename(&plain.id, "child\u{202E} task").unwrap();
+        assert_eq!(keys(&named.id), keys(&plain.id));
+        assert_eq!(
+            keys(&named.id),
+            ["id", "created", "cwd", "turns", "updated", "title"]
+        );
+        let meta = store.meta(&named.id).unwrap();
+        assert_eq!(
+            meta.title(),
+            Some("child task"),
+            "cleaned as rename cleans a title"
+        );
+        assert_eq!(meta.turns(), 1);
+
+        store
+            .user_message_named(&named, user("a later turn"), "a later turn")
+            .unwrap();
+        let meta = store.meta(&named.id).unwrap();
+        assert_eq!(meta.title(), Some("child task"), "a title is kept");
+        assert_eq!(meta.turns(), 2);
+
+        let blank = store.create(CreateOptions::default()).unwrap();
+        let mut meta = store.meta(&blank.id).unwrap();
+        meta.set("title", json!("   "));
+        std::fs::write(&blank.meta, meta.to_file_text()).unwrap();
+        store
+            .user_message_named(&blank, user("hello there"), "hello there")
+            .unwrap();
+        assert_eq!(
+            store.meta(&blank.id).unwrap().title(),
+            Some("hello there"),
+            "a blank title is replaced"
+        );
+
+        let silent = store.create(CreateOptions::default()).unwrap();
+        store.user_message_named(&silent, user(""), "").unwrap();
+        let meta = store.meta(&silent.id).unwrap();
+        assert_eq!(meta.title(), None, "an empty name names nothing");
+        assert_eq!(meta.turns(), 1);
     }
 
     /// Inventory A96: `record_preset` writes a preset only when the session has none — trimmed, never replacing one,
