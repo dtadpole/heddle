@@ -16013,6 +16013,17 @@ async function renderFlatList() {
       li.dataset.kind = 'session'
       li.dataset.sessionId = meta.id
       li.setAttribute('aria-selected', meta.id === current ? 'true' : 'false')
+      /**
+       * An archived row, shown under Show archived or Archived only, does not open: DSH's `FlatList` draws its tree's
+       * `SessionNodeItem`, whose archived row says why to a screen reader (`aria-description`, `dsh-client-ui-workspace`
+       * lib/client.js:2279), and hands it the same `guardedOpen` as the tree (:3978-3987), which raises the not-openable
+       * notice instead of opening (:3532-3538), as the tree's rows here do (developer-ten's F3).
+       */
+      const node = { kind: 'session', archived: meta.archived === true }
+      if (!WorkspaceTree.opensOnClick(node)) {
+        li.dataset.archived = 'true'
+        li.setAttribute('aria-description', WorkspaceTree.ARCHIVED_NOT_OPENABLE)
+      }
       const row = document.createElement('div')
       row.className = 'row'
       row.dataset.path = meta.cwd
@@ -16037,6 +16048,10 @@ async function renderFlatList() {
        * the selection through `chooseSelected`; the flat list is a view of the same selection and must say so too.
        */
       row.onclick = async () => {
+        if (!WorkspaceTree.opensOnClick(node)) {
+          notifyArchivedNotOpenable()
+          return
+        }
         /** A session that could not be loaded is not the open one, so no row is marked for it (#56). */
         if (!(await showSession(meta.id))) return
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
