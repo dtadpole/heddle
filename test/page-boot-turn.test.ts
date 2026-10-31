@@ -28,7 +28,10 @@ interface Run {
   send(): Promise<void>
   /** The boot's restoreSelection opening `id` (null for none), then the tree read resolving. */
   boot(id: string | null): void
+  /** The boot's restore of `id` failing (#56): nothing is current, and `id` is the unavailable session on screen. */
+  bootUnavailable(id: string): void
   current(): string | null
+  unavailable(): string | null
   opened(): string
   adopted(): string
   /** The workspace the page remembered as this browser's last (#142), or null. */
@@ -41,6 +44,7 @@ function harness(created: string): Run {
     const QUEUE_KEY_NONE = '__none__'
     const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
     let current = null
+    let unavailableSession = null
     let activeFolder = null
     let workspaceRoutes = 'served'
     let liveTurns = 0
@@ -62,8 +66,8 @@ function harness(created: string): Run {
     const adoptSession = (id) => { adopted.push(id) }
     const fetchSessionAccess = async () => {}
     const stopTurn = async () => {}
-    /** The page's own open: it makes the session current and redraws it (here, records that it was asked). */
-    const showSession = async (id) => { opened.push(id); current = id; return true }
+    /** The page's own open: it ends an unavailable session's state, makes the session current and redraws it (here, records that it was asked). */
+    const showSession = async (id) => { opened.push(id); unavailableSession = null; current = id; return true }
     const frames = 'event: session\\ndata: ' + JSON.stringify({ session: CREATED }) + '\\n\\n'
     const sendTurn = async () => ({
       ok: true,
@@ -79,7 +83,9 @@ function harness(created: string): Run {
     ;({
       send() { running = runTurn('hello', QUEUE_KEY_NONE); return running },
       boot(id) { if (id !== null) { current = id; opened.push(id) } ready() },
+      bootUnavailable(id) { opened.push(id); unavailableSession = id; current = null; ready() },
       current: () => current,
+      unavailable: () => unavailableSession,
       opened: () => opened.join(','),
       adopted: () => adopted.join(','),
       remembered: () => remembered,
@@ -118,4 +124,20 @@ test('a turn that created its session in a workspace remembers that workspace ev
   run.boot(X)
   await sent
   assert.equal(run.remembered(), '/work/default-workspace', 'the workspace the first message started its session in')
+})
+
+test('a turn sent during the boot opens the session it created when the boot\'s restore failed and shows Session unavailable (N1a)', async () => {
+  /**
+   * developer-ten's N1a on follow-up 2: the session frame asked only `current !== null`. After a failed restore (#56)
+   * nothing is current and session A is the unavailable one on screen, with the composer disabled; the frame then set
+   * `current = N` and left `unavailableSession = A`, so the composer stayed "Session unavailable" over N's live turn.
+   * It now opens N through `showSession`, which ends A's state, whenever the panel shows another session or A's failure.
+   */
+  const run = harness(N)
+  const sent = run.send()
+  run.bootUnavailable(X)
+  await sent
+  assert.equal(run.opened(), `${X},${N}`, 'the created session is opened as any open is')
+  assert.equal(run.current(), N)
+  assert.equal(run.unavailable(), null, 'and the unavailable state is over, so the composer takes N\'s turn')
 })

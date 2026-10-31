@@ -9269,9 +9269,11 @@ async function runTurn(text, key, attachments = [], onAccepted) {
            * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
            * the created session is opened as any open is, a new generation and a redraw from its own log, because only
            * pointing `current` at it would leave the other session's history on screen with this turn's live events
-           * appended under it.
+           * appended under it. The same holds when the boot's restore failed (#56) and the panel shows that session's
+           * "Failed to load history" with nothing current (developer-ten's N1a): pointing `current` at the new session
+           * left `unavailableSession` set, and the composer stayed "Session unavailable"; `showSession` ends that state.
            */
-          if (current !== null && current !== payload.session) void showSession(payload.session)
+          if ((current ?? unavailableSession) !== null && current !== payload.session) void showSession(payload.session)
           else {
             current = payload.session
             rememberCurrent()
