@@ -1,8 +1,8 @@
 ---
 title: The heddle-session sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T01:06:15Z
-version: 0.3.0
+modified: 2026-10-31T03:09:52Z
+version: 0.5.0
 description: The sources of the heddle-session crate, one module per TypeScript source, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -31,6 +31,8 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`title_text.rs`](title_text.rs) | DSH's title cleaning: `clean_session_title`, applied to every title the store and a definition write | `title-text.ts` |
 | [`service.rs`](service.rs) | `SessionService`, `title_from`, `fork_title` | `service.ts`, `src/plugins/session.ts` |
 | [`error.rs`](error.rs) | `SessionError`, `SessionFlagError` | the thrown messages |
+| [`search.rs`](search.rs) | content search: DSH's `session.search` over the current user and assistant messages — FTS5 `unicode61` phrase matching, DSH's ranking and 240-code-point snippet, and `SessionSearchIndex`, a scan cached per log (R-developer-eight-19) | `search.ts` |
+| [`unicode61.rs`](unicode61.rs) | the tokenizer's tables, generated from SQLite by `src/session/unicode61-generate.ts`; do not edit | `unicode61.ts` |
 
 ## Read next
 

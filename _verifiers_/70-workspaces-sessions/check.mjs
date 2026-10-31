@@ -3797,6 +3797,95 @@ test('a session log downloads as decoded JSONL, named after the session', async 
   }
 })
 
+/**
+ * Content search (R-developer-eight-19): DSH's `session.search`, which finds a phrase **inside** the conversation and
+ * not only in a session's name (dsh-api-session-controller lib/index.js:2010-2123; ranking and snippet in
+ * dsh-session-query-sqlite lib/index.js:325-367 and :818-834).
+ *
+ * Five sessions, each answered by the scripted endpoint with its own text — the script is read on every call, so
+ * rewriting it between `--new` turns gives each session its answer. Only the answers hold the phrase.
+ */
+test('content search finds a phrase inside an answer, ranked and quoted the way DSH answers it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  const h = harness('content-search')
+  let live
+  try {
+    mkdirSync(h.work, { recursive: true })
+    const answers = [
+      ['first', 'The quokka ledger is balanced.'],
+      ['second', 'A quokka ledger here, another QUOKKA LEDGER there, and a long tail of words after both of them.'],
+      ['third', 'The Qu\u00f6kka-Ledger is balanced.'],
+      ['fourth', 'quokkaledger, or the quokka and its ledger.'],
+      ['fifth', `${'x'.repeat(150)} quokka ledger ${'y'.repeat(150)}`],
+    ]
+    const ids = {}
+    for (const [name, text] of answers) {
+      writeFileSync(join(h.home, 'script.json'), `${JSON.stringify({ steps: [{ text }] })}\n`)
+      const known = new Set((await sessionsOf(h)).map((meta) => meta.id))
+      const turn = await runCli([...h.args, '--new', '--turn', `tell me about the ${name} one`], { env: h.env, cwd: h.work })
+      assert.equal(turn.code, 0, `the ${name} turn ran\n${turn.stdout}${turn.stderr}`)
+      const made = (await sessionsOf(h)).map((meta) => meta.id).filter((id) => !known.has(id))
+      assert.equal(made.length, 1, `the ${name} turn made one session`)
+      ids[name] = made[0]
+    }
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...h.args], { ...h.env, HOME: h.home })
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const search = async (query) => {
+      const url = new URL('/api/sessions/search', live.url)
+      if (query !== undefined) url.searchParams.set('q', query)
+      const response = await fetch(url, { headers: { cookie } })
+      return { status: response.status, body: await response.json() }
+    }
+
+    const found = await search('Quokka Ledger')
+    assert.equal(found.status, 200, `the search is served\n${JSON.stringify(found.body)}`)
+    /**
+     * DSH's order: the most highlighted phrase groups first (the second answer holds two), then the shortest message,
+     * then the latest — the third answer is as long as the first and newer, because `Quökka-Ledger` is the same two
+     * tokens folded — and the long fifth last. `quokkaledger` is one token and `the quokka and its ledger` no phrase,
+     * so the fourth session is not a hit at all.
+     */
+    assert.deepEqual(
+      found.body.items.map((item) => item.sessionId),
+      [ids.second, ids.third, ids.first, ids.fifth],
+      `the hits are in DSH's order\n${JSON.stringify(found.body, null, 2)}\nids: ${JSON.stringify(ids)}`,
+    )
+    assert.equal(found.body.hasMore, false, 'and there is no more')
+    assert.deepEqual(
+      found.body.items.map((item) => item.snippet),
+      [
+        answers[1][1],
+        answers[2][1],
+        answers[0][1],
+        `\u2026${'x'.repeat(79)} quokka ledger ${'y'.repeat(144)}\u2026`,
+      ],
+      'each hit quotes its message, and a long one is cut to 240 code points with the match a third of the way in',
+    )
+    assert.equal(Array.from(found.body.items[3].snippet).length, 240)
+
+    assert.deepEqual((await search('quokkaled')).body, { items: [], hasMore: false }, 'a fragment of a token is not a match')
+    assert.deepEqual((await search('!!!')).body, { items: [], hasMore: false }, 'a query with no word finds nothing')
+    for (const [query, sentence] of [
+      [undefined, 'session search query must not be empty'],
+      ['   ', 'session search query must not be empty'],
+      ['q'.repeat(501), 'session search query must contain at most 500 UTF-16 code units'],
+      ['a\u0000b', 'session search query must not contain NUL'],
+    ]) {
+      const refused = await search(query)
+      assert.deepEqual([refused.status, refused.body.error], [400, sentence], `DSH's refusal for ${JSON.stringify(query?.slice(0, 12))}`)
+    }
+    const one = await fetch(new URL(`/api/sessions/${ids.first}`, live.url), { headers: { cookie } })
+    assert.equal(one.status, 200, 'and a session id is still a session')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('View options groups the sessions the two ways DSH offers: the tree, or one list', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
