@@ -44,12 +44,14 @@ test("the failure line is DSH's, with the server's reason and the status code", 
 
 test('a session that cannot be loaded shows the failure line, is not kept, and lets its stale row go', () => {
   const show = lift('showSession')
-  const refused = /if \(!response\.ok\) \{[\s\S]*?\n {4}\}/.exec(show)?.[0] ?? ''
+  const refused = /async function failHistory\([\s\S]*?\n {2}\}/.exec(show)?.[0] ?? ''
   assert.ok(refused.length > 0, 'showSession has a branch for a refused read')
-  assert.match(refused, /if \(current !== id\) return false/, 'a later open that replaced this one is not overwritten')
+  assert.match(refused, /generation !== showGeneration \|\| current !== id/, 'a later open that replaced this one is not overwritten')
   assert.match(refused, /unavailableSession = id/, 'the session is marked unavailable')
   assert.match(refused, /current = null/, 'and it is not the open session (the stack-1 404 branch)')
-  assert.match(refused, /historyFailureText\(response\.status/, 'the failure line is written')
+  assert.match(refused, /historyFailureText\(status, statusText, failure\)/, 'the shared failure line is written')
+  assert.match(show, /failHistory\(response\.status, response\.statusText, failure\)/, 'HTTP refusals use the shared failure state')
+  assert.match(show, /failHistory\(0, '', \{ error: error && error\.message \}\)/, 'transport and JSON failures use the shared failure state')
   assert.match(refused, /log\.append\(note\)[\s\S]*paintEmptyState\(\)/, 'into the conversation before the empty state is judged, so the line wins over it')
   assert.match(refused, /rememberCurrent\(\)/, 'the saved selection is emptied, so a reload starts a fresh session (restoreSelection)')
   assert.match(refused, /selectedPath = null[\s\S]*await renderTree\(\)[\s\S]*markSelection\(\)/, 'the tree is read again and the selection dropped')

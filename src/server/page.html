@@ -6911,7 +6911,7 @@ function historyFailureText(status, statusText, failure) {
     failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
       ? failure.error
       : statusText || 'no reason given'
-  return `Failed to load history: ${reason} (${status})`
+  return `Failed to load history: ${reason}${status > 0 ? ` (${status})` : ''}`
 }
 
 /* chat-scroll:begin */
@@ -7043,55 +7043,60 @@ async function showSession(id) {
    */
   sessionLoading = { id, generation, events: [] }
   log.replaceChildren()
+  /**
+   * A session that is no longer there is **not** the session being shown.
+   *
+   * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
+   * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
+   * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+   *
+   * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
+   * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
+   * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
+   * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
+   * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
+   *
+   * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
+   * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
+   * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
+   * selection with it.
+   */
+  async function failHistory(status, statusText, failure) {
+    if (generation !== showGeneration || current !== id) return false
+    // Lifecycle state was processed on first delivery. A partial live tail is not history.
+    if (sessionLoading?.generation === generation) {
+      sessionLoading.events.length = 0
+      sessionLoading = null
+    }
+    unavailableSession = id
+    current = null
+    paintSessionHeading()
+    const branch = document.getElementById('session-branch')
+    if (branch !== null) branch.textContent = ''
+    const note = document.createElement('div')
+    note.className = 'turn denied load-error'
+    note.setAttribute('role', 'alert')
+    note.textContent = historyFailureText(status, statusText, failure)
+    log.append(note)
+    paintEmptyState()
+    applySessionAccess(null)
+    /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
+    rememberCurrent()
+    paintComposerAccess()
+    renderComposerState()
+    selectedPath = null
+    await renderTree()
+    markSelection()
+    jobsSessionChanged()
+    paintScheduleHeader()
+    return false
+  }
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
     if (generation !== showGeneration) return false
     if (!response.ok) {
-      if (sessionLoading?.generation === generation) sessionLoading = null
-      /**
-       * A session that is no longer there is **not** the session being shown.
-       *
-       * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
-       * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
-       * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
-       *
-       * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
-       * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
-       * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
-       * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
-       * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
-       *
-       * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
-       * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
-       * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
-       * selection with it.
-       */
       const failure = await response.json().catch(() => ({}))
-      /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
-      if (generation !== showGeneration) return false
-      if (current !== id) return false
-      unavailableSession = id
-      current = null
-      paintSessionHeading()
-      const branch = document.getElementById('session-branch')
-      if (branch !== null) branch.textContent = ''
-      const note = document.createElement('div')
-      note.className = 'turn denied load-error'
-      note.setAttribute('role', 'alert')
-      note.textContent = historyFailureText(response.status, response.statusText, failure)
-      log.append(note)
-      paintEmptyState()
-      applySessionAccess(null)
-      /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
-      rememberCurrent()
-      paintComposerAccess()
-      renderComposerState()
-      selectedPath = null
-      await renderTree()
-      markSelection()
-      jobsSessionChanged()
-      paintScheduleHeader()
-      return false
+      return await failHistory(response.status, response.statusText, failure)
     }
     const body = await response.json()
     /** The same check after the body is read: only the latest open appends its turns. */
@@ -7132,7 +7137,9 @@ async function showSession(id) {
         holder.dataset.kind = 'command'
         holder.dataset.commandId = String(turn.commandId)
         log.append(holder)
-        void slashReady.then((commands) => commands?.drawTurn(turn))
+        void slashReady.then((commands) => {
+          if (generation === showGeneration && unavailableSession === null && current === id) commands?.drawTurn(turn)
+        })
         continue
       }
       try {
@@ -7151,12 +7158,7 @@ async function showSession(id) {
   } catch (error) {
     /** An older open's failed read says nothing in the conversation a later open is drawing. */
     if (generation !== showGeneration) return false
-    // A history that cannot be read must not empty the live view as well; the stream keeps appending.
-    drawKeptEvents(generation, null)
-    const note = document.createElement('div')
-    note.className = 'turn denied'
-    note.textContent = 'could not read this session: ' + (error && error.message)
-    log.append(note)
+    return await failHistory(0, '', { error: error && error.message })
   }
   await refreshGoal()
   await refreshTodo()
@@ -7642,10 +7644,6 @@ events.addEventListener('session', (message) => {
     runningSince.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
-    if (current === null || payload.session === current) {
-      drawTurnFailure(payload.session, event.message)
-      settleChat()
-    }
     if (payload.session === composerKey) void pumpQueue()
     renderComposerState()
   }
@@ -7667,6 +7665,29 @@ events.addEventListener('session', (message) => {
      */
     if (queues.has(payload.session)) void pumpQueue(payload.session)
     renderComposerState()
+  }
+  // Keep all-session lifecycle bookkeeping above, but no transcript drawing while unavailable.
+  if (unavailableSession !== null) return
+  if (current && payload.session !== current) return
+  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
+  if (sessionLoading !== null && payload.session === sessionLoading.id) {
+    sessionLoading.events.push(payload)
+    return
+  }
+  drawSessionEvent(payload)
+})
+
+/**
+ * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
+ * the events kept aside while the session's history was read.
+ */
+function drawSessionEvent(payload) {
+  const event = payload.event
+  if (unavailableSession !== null) return
+  if (event.type === 'turn/failed') {
+    drawTurnFailure(payload.session, event.message)
+    settleChat()
+  } else if (event.type === 'turn/completed') {
     /**
      * And it is when the answer stops arriving, so the rows settle and the document is drawn.
      *
@@ -7690,24 +7711,11 @@ events.addEventListener('session', (message) => {
       void attachEditedFiles()
     }
   }
-  if (current && payload.session !== current) return
-  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
-  if (sessionLoading !== null && payload.session === sessionLoading.id) {
-    sessionLoading.events.push(payload)
-    return
-  }
-  drawSessionEvent(payload)
-})
-
-/**
- * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
- * the events kept aside while the session's history was read.
- */
-function drawSessionEvent(payload) {
-  const event = payload.event
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
-    void slashReady.then((commands) => commands?.draw(event))
+    void slashReady.then((commands) => {
+      if (unavailableSession === null && (current === null || payload.session === current)) commands?.draw(event)
+    })
     return
   }
   /**
@@ -7800,7 +7808,7 @@ function drawSessionEvent(payload) {
 /**
  * Draw the events kept aside during a history read. When the answer said how far it reaches (`upTo`, its `seq`), only
  * the events past it are drawn; an event without a `seq` is a live-only fragment the history's card already covers.
- * Without a `seq` (a read that failed), every kept event is drawn, as the stream would have.
+ * Without a snapshot `seq`, every kept event is drawn. A failed read discards them instead.
  */
 function drawKeptEvents(generation, upTo) {
   if (sessionLoading === null || sessionLoading.generation !== generation) return
@@ -9071,9 +9079,9 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       if (name === 'session') {
         /**
          * A turn with no session starts one, and the panel follows it: the queue that was loose while the
-         * turn ran belongs to the session it created.
+         * turn ran belongs to the session it created. A history failure that took the panel meanwhile stays unavailable.
          */
-        if (target === null && adopted === null) {
+        if (target === null && adopted === null && unavailableSession === null) {
           adopted = payload.session
           current = payload.session
           rememberCurrent()
