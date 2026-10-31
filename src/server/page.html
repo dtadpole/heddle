@@ -6609,6 +6609,37 @@ async function showSession(id, retry = true) {
   const load = { events: [], bytes: 0, controller: new AbortController(), abandoned: false, retry }
   transcriptLoads.set(id, load)
   let snapshotSeq = null
+  async function failHistory(status, statusText, failure) {
+    if (stale() || transcriptLoads.get(id) !== load) return false
+    // Both HTTP and transport failures release live updates before marking the view unavailable.
+    transcriptLoads.delete(id)
+    transcriptWatermarks.delete(id)
+    for (const payload of load.events) handleSessionPayload(payload, true)
+    load.events.length = 0
+    unavailableSession = id
+    current = null
+    paintSessionHeading()
+    const branch = document.getElementById('session-branch')
+    if (branch !== null) branch.textContent = ''
+    const note = document.createElement('div')
+    note.className = 'turn denied load-error'
+    note.setAttribute('role', 'alert')
+    note.textContent = historyFailureText(status, statusText, failure)
+    log.append(note)
+    paintEmptyState()
+    applySessionAccess(null)
+    /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
+    rememberCurrent()
+    paintComposerAccess()
+    renderComposerState()
+    selectedPath = null
+    await renderTree()
+    if (generation !== historyLoadGeneration) return false
+    markSelection()
+    jobsSessionChanged()
+    paintScheduleHeader()
+    return false
+  }
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id), { signal: load.controller.signal })
     if (stale() || load.abandoned || transcriptLoads.get(id) !== load) return false
@@ -6634,29 +6665,7 @@ async function showSession(id, retry = true) {
       const failure = await response.json().catch(() => ({}))
       /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
       if (stale() || load.abandoned || transcriptLoads.get(id) !== load) return false
-      unavailableSession = id
-      current = null
-      paintSessionHeading()
-      const branch = document.getElementById('session-branch')
-      if (branch !== null) branch.textContent = ''
-      const note = document.createElement('div')
-      note.className = 'turn denied load-error'
-      note.setAttribute('role', 'alert')
-      note.textContent = historyFailureText(response.status, response.statusText, failure)
-      log.append(note)
-      paintEmptyState()
-      applySessionAccess(null)
-      /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
-      rememberCurrent()
-      paintComposerAccess()
-      renderComposerState()
-      selectedPath = null
-      await renderTree()
-      if (generation !== historyLoadGeneration) return false
-      markSelection()
-      jobsSessionChanged()
-      paintScheduleHeader()
-      return false
+      return await failHistory(response.status, response.statusText, failure)
     }
     const body = await response.json()
     if (stale() || transcriptLoads.get(id) !== load) return false
@@ -6718,12 +6727,7 @@ async function showSession(id, retry = true) {
     followChatTail(true)
   } catch (error) {
     if (stale() || transcriptLoads.get(id) !== load) return false
-    // A failed snapshot establishes no watermark: replay the buffered live events below.
-    // A history that cannot be read must not empty the live view as well; the stream keeps appending.
-    const note = document.createElement('div')
-    note.className = 'turn denied'
-    note.textContent = 'could not read this session: ' + (error && error.message)
-    log.append(note)
+    return await failHistory(0, '', { error: error instanceof Error ? error.message : String(error) })
   } finally {
     if (transcriptLoads.get(id) === load) {
       transcriptLoads.delete(id)
