@@ -22,6 +22,37 @@ impl LocalePreference {
     }
 }
 
+/// The `locale` row's preference as a running server holds it (issue #80): every page request reads it, and a settings
+/// write to the row replaces it, so the next page is served in the language just chosen without a restart. The TypeScript
+/// build gets the same from its loader, which re-applies the written row; this is the Rust loader's stand-in.
+#[derive(Debug, Default)]
+pub struct LiveLocale(std::sync::RwLock<LocalePreference>);
+
+impl LiveLocale {
+    /// A holder starting at the preference the row booted with.
+    pub fn new(preference: LocalePreference) -> Self {
+        Self(std::sync::RwLock::new(preference))
+    }
+
+    /// The preference now.
+    pub fn get(&self) -> LocalePreference {
+        *self
+            .0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Take the row's newly written configuration; a value its schema refuses leaves the preference as it was.
+    pub fn set_config(&self, config: &Value) -> Result<(), String> {
+        let preference = locale_preference(Some(config)).map_err(|error| error.to_string())?;
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = LocalePreference(preference);
+        Ok(())
+    }
+}
+
 /// The languages heddle ships, in the order a tie is broken.
 pub const SUPPORTED_LOCALES: [&str; 2] = ["en", "zh"];
 
@@ -118,6 +149,34 @@ pub fn negotiate_locale(preference: Option<&str>, requested: &[String]) -> &'sta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_written_preference_reaches_the_next_request_and_a_refused_one_changes_nothing() {
+        let live = LiveLocale::new(LocalePreference(None));
+        assert_eq!(live.get().for_request(Some("en-US")), "en");
+        live.set_config(&serde_json::json!({"preference": "zh"}))
+            .unwrap();
+        assert_eq!(
+            live.get().for_request(Some("en-US")),
+            "zh",
+            "the stored choice wins over the browser"
+        );
+        assert!(
+            live.set_config(&serde_json::json!({"preference": "fr"}))
+                .is_err()
+        );
+        assert_eq!(
+            live.get(),
+            LocalePreference(Some("zh")),
+            "a refused value leaves the choice as it was"
+        );
+        live.set_config(&serde_json::json!({})).unwrap();
+        assert_eq!(
+            live.get().for_request(Some("zh-TW")),
+            "zh",
+            "no choice: the browser's language again"
+        );
+    }
     use serde_json::json;
 
     #[test]
