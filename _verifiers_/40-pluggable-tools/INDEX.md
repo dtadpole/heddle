@@ -29,6 +29,8 @@ ten minutes by default; live-testing issue #13).
 (live-testing issue #96: the TypeScript build decoded each chunk alone).
 `check-output-limit.mjs` holds bash output to the tools row's `bashOutputLimit`: a cut keeps the **end** of the output
 and names a file holding all of it, `[output truncated; full output: <path>]`, as DSH's bash does (live-testing issue #83).
+`check-failed-output.mjs` holds a failed bash call to keeping what it printed: the error line first, then its stdout
+and stderr, as DSH's renderResult keeps the body of a non-zero exit (live-testing issue #82).
 
 ## Under `HEDDLE_BIN`
 
