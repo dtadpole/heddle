@@ -45,8 +45,10 @@ pub mod mode;
 pub mod service;
 pub mod store;
 pub mod surface;
-pub mod title_text;
 pub mod transcript;
+
+/// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
+pub mod title_text;
 
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,

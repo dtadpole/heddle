@@ -19,8 +19,8 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
-import { normalizeSessionTitle } from './title-text.ts'
 import { decodeTranscript, encodeFrame } from './transcript.ts'
+import { normalizeSessionTitle } from './title-text.ts'
 
 /**
  * The session store.

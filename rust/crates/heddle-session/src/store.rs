@@ -47,7 +47,6 @@ use crate::surface::{
     SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface,
     index_by_seq, is_surface_eligible,
 };
-use crate::title_text::clean_session_title;
 use crate::transcript::{TranscriptFormat, decode_transcript, encode_frame};
 
 /// The transcript file name inside an **old-layout** session directory, current format.
@@ -477,7 +476,7 @@ impl SessionStore {
         let title = options
             .title
             .as_deref()
-            .map(clean_session_title)
+            .map(crate::title_text::clean_session_title)
             .filter(|title| !title.is_empty());
 
         // The record's key order is the TypeScript literal's: an absent option is not written.
@@ -536,7 +535,7 @@ impl SessionStore {
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(None);
         };
-        let cleaned = clean_session_title(title);
+        let cleaned = crate::title_text::clean_session_title(title);
         let mut next = current;
         if cleaned.is_empty() {
             next.remove("title");
