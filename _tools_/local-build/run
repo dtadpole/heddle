@@ -11,7 +11,8 @@
 # atomically with mkdir and removed when the command ends, so two seats never build at
 # once in the same slot. A slot whose owner process is gone, or whose stamp is older
 # than an hour, is reclaimed. The command runs from the caller's working directory, so
-# run it from inside your own worktree.
+# run it from inside your own worktree. Waiting runs are served first come, first served
+# from a ticket queue, not by whoever polls first (queue.md).
 set -eu
 
 SLOTS=${LOCAL_BUILD_SLOTS:-3}
@@ -205,8 +206,106 @@ take() {
     return 0
 }
 
-# Clean up after killed owners first, so a dead slot never lingers; then take a free
-# one; only when every slot is busy, break an hour-old stamp.
+# Waiters are served first come, first served (queue.md). Each waiting run holds one ticket,
+# $ROOT/<class>.queue/<ms>-<pid>, holding "<pid> <epoch> <seat> <tree>", and touches it on
+# every poll. A ticket whose run is gone, or that has not been touched for $TICKET_STALE
+# seconds, is dropped. A waiter silent for $HEAD_GRACE seconds is passed over but keeps its
+# place. $ROOT/<class>.next, written by the coordinator, puts the waiter it names first.
+QUEUE="$ROOT/$PREFIX.queue"
+NEXT_FILE="$ROOT/$PREFIX.next"
+HEAD_GRACE=${LOCAL_BUILD_HEAD_GRACE_SECONDS:-60}
+TICKET_STALE=${LOCAL_BUILD_TICKET_SECONDS:-300}
+NEXT_STALE=${LOCAL_BUILD_NEXT_SECONDS:-1800}
+POLL=${LOCAL_BUILD_POLL_SECONDS:-3}
+TICKET=
+SEAT=${HD_SEAT:--}
+case "$SEAT" in '' | *[!a-z0-9-]*) SEAT=- ;; esac
+TREE=$(git rev-parse --show-toplevel 2>/dev/null) || TREE=$PWD
+
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+ms_now() { perl -MTime::HiRes=time -e 'printf "%013d\n", time * 1000' 2>/dev/null || printf '%s000\n' "$(stamp)"; }
+
+# The waiter the .next file names, while the file is younger than $NEXT_STALE: a seat key or
+# a tree. It matches a ticket's seat, its tree, the tree's folder name, or a folder named
+# "<repo>--<key>" or "<repo>--<key>-<suffix>", so a seat key covers every worktree of the seat.
+next_token() {
+    [ -f "$NEXT_FILE" ] || return 0
+    [ $(( $(stamp) - $(mtime "$NEXT_FILE") )) -le "$NEXT_STALE" ] || return 0
+    n_tok=
+    read -r n_tok < "$NEXT_FILE" 2>/dev/null || true
+    printf '%s' "$n_tok"
+}
+names_waiter() {
+    [ -n "$1" ] && [ "$1" != - ] || return 1
+    case "$1" in
+        "$2" | "$3" | "${3##*/}") return 0 ;;
+    esac
+    case "${3##*/}" in
+        *"--$1" | *"--$1-"*) return 0 ;;
+    esac
+    return 1
+}
+
+join_queue() {
+    mkdir -p "$QUEUE"
+    TICKET="$QUEUE/$(ms_now)-$$"
+    # Written aside and renamed, so no reader ever sees a ticket without its pid.
+    printf '%s %s %s %s\n' "$$" "$(stamp)" "$SEAT" "$TREE" > "$QUEUE/.new-$$"
+    mv "$QUEUE/.new-$$" "$TICKET"
+}
+leave_queue() {
+    if [ -n "$TICKET" ]; then
+        rm -f "$TICKET" 2>/dev/null || true
+        TICKET=
+    fi
+}
+
+# Walk the tickets oldest first: drop dead ones, then set POS to this
+# run's place among the waiters that are not passed over, with the .next waiter first.
+# QLEN counts those waiters; Q_HEAD names the first of them.
+scan_queue() {
+    POS=0; QLEN=0; Q_HEAD=; s_first=; s_pri=; s_mine_at=0; s_pri_at=0; s_pri_mine=0
+    [ -d "$QUEUE" ] || return 0
+    s_now=$(stamp)
+    s_tok=$(next_token)
+    for f in "$QUEUE"/*; do
+        [ -f "$f" ] || continue
+        q_pid=0; q_ts=0; q_seat=-; q_tree=
+        read -r q_pid q_ts q_seat q_tree < "$f" 2>/dev/null || true
+        case "$q_pid" in '' | *[!0-9]*) q_pid=0 ;; esac
+        q_quiet=$(( s_now - $(mtime "$f") ))
+        if [ "$f" != "$TICKET" ]; then
+            if [ "$q_pid" = 0 ] || ! kill -0 "$q_pid" 2>/dev/null || [ "$q_quiet" -gt "$TICKET_STALE" ]; then
+                rm -f "$f" 2>/dev/null || true
+                continue
+            fi
+            [ "$q_quiet" -le "$HEAD_GRACE" ] || continue
+        fi
+        QLEN=$((QLEN + 1))
+        [ "$QLEN" = 1 ] && s_first="pid $q_pid in $q_tree"
+        if [ "$s_pri_at" = 0 ] && names_waiter "$s_tok" "$q_seat" "$q_tree"; then
+            s_pri_at=$QLEN
+            s_pri="pid $q_pid in $q_tree (named by $NEXT_FILE)"
+            [ "$f" = "$TICKET" ] && s_pri_mine=1
+        fi
+        [ "$f" = "$TICKET" ] && s_mine_at=$QLEN
+    done
+    Q_HEAD=${s_pri:-$s_first}
+    # Moving the .next waiter to the front shifts everyone who queued before it back by one.
+    if [ "$s_mine_at" = 0 ]; then
+        POS=0
+    elif [ "$s_pri_mine" = 1 ]; then
+        POS=1
+    elif [ "$s_pri_at" -gt "$s_mine_at" ]; then
+        POS=$((s_mine_at + 1))
+    else
+        POS=$s_mine_at
+    fi
+}
+
+# Clean up after killed owners first, so a dead slot never lingers. Then this run may take a
+# free slot only when its place in the queue is within the number of free slots; only the
+# head, when every slot is busy, may break an hour-old stamp.
 try_acquire() {
     i=0
     while [ "$i" -lt "$SLOTS" ]; do
@@ -216,13 +315,24 @@ try_acquire() {
         fi
         i=$((i + 1))
     done
-    i=0
+    touch -c "$TICKET" 2>/dev/null || true
+    [ -f "$TICKET" ] || join_queue
+    scan_queue
+    free=0; i=0
     while [ "$i" -lt "$CAP" ]; do
-        if take "$i"; then
-            return 0
-        fi
+        [ -d "$ROOT/$PREFIX-$i" ] || free=$((free + 1))
         i=$((i + 1))
     done
+    if [ "$POS" -ge 1 ] && [ "$POS" -le "$free" ]; then
+        i=0
+        while [ "$i" -lt "$CAP" ]; do
+            if take "$i"; then
+                return 0
+            fi
+            i=$((i + 1))
+        done
+    fi
+    [ "$POS" = 1 ] || return 1
     i=0
     while [ "$i" -lt "$CAP" ]; do
         d="$ROOT/$PREFIX-$i"
@@ -236,6 +346,58 @@ try_acquire() {
         i=$((i + 1))
     done
     return 1
+}
+
+# The queue in serving order, without changing it: every ticket, with why a waiter is skipped.
+show_queue() {
+    v_tok=$(next_token)
+    if [ -n "$v_tok" ]; then
+        printf 'next: %s (from %s; that waiter goes first, once)\n' "$v_tok" "$NEXT_FILE"
+    else
+        printf 'next: none\n'
+    fi
+    v_now=$(stamp)
+    v_n=0; v_lines=; v_pri=
+    if [ -d "$QUEUE" ]; then
+        for f in "$QUEUE"/*; do
+            [ -f "$f" ] || continue
+            q_pid=0; q_ts=0; q_seat=-; q_tree=
+            read -r q_pid q_ts q_seat q_tree < "$f" 2>/dev/null || true
+            case "$q_pid" in '' | *[!0-9]*) q_pid=0 ;; esac
+            case "$q_ts" in '' | *[!0-9]*) q_ts=$v_now ;; esac
+            q_quiet=$(( v_now - $(mtime "$f") ))
+            note=
+            if [ "$q_pid" = 0 ] || ! kill -0 "$q_pid" 2>/dev/null; then
+                note=' (run gone; dropped on the next poll)'
+            elif [ "$q_quiet" -gt "$TICKET_STALE" ]; then
+                note=" (silent ${q_quiet}s; dropped on the next poll)"
+            elif [ "$q_quiet" -gt "$HEAD_GRACE" ]; then
+                note=" (silent ${q_quiet}s; passed over, keeps its place)"
+            fi
+            line="pid=$q_pid seat=$q_seat waiting=$((v_now - q_ts))s tree=$q_tree$note"
+            if [ -z "$v_pri" ] && [ -z "$note" ] && names_waiter "$v_tok" "$q_seat" "$q_tree"; then
+                v_pri="$line (named by next)"
+            else
+                v_lines="$v_lines$line
+"
+            fi
+            v_n=$((v_n + 1))
+        done
+    fi
+    if [ "$v_n" = 0 ]; then
+        printf 'queue: empty\n'
+        return 0
+    fi
+    printf 'queue: %s waiting, first come first served\n' "$v_n"
+    v_i=0
+    if [ -n "$v_pri" ]; then
+        v_i=1
+        printf '  1. %s\n' "$v_pri"
+    fi
+    printf '%s' "$v_lines" | while IFS= read -r line; do
+        v_i=$((v_i + 1))
+        printf '  %s. %s\n' "$v_i" "$line"
+    done
 }
 
 show_status() {
@@ -277,6 +439,7 @@ show_status() {
             printf 'trash: %s\n' "$t"
         fi
     done
+    show_queue
     printf 'summary: busy=%s stale=%s free=%s\n' "$busy" "$stale" "$free"
     if [ "$stale" -eq 0 ]; then
         return 0
@@ -314,19 +477,39 @@ for arg in "$@"; do
     esac
 done
 
+# A waiting run leaves the queue however it ends; a signal becomes an exit so the trap runs.
+trap leave_queue EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 deadline=$(( $(stamp) + WAIT ))
+said_pos=0
 while ! try_acquire; do
     if [ "$(stamp)" -ge "$deadline" ]; then
-        echo "local-build: no free slot within ${WAIT}s; try again later or raise LOCAL_BUILD_WAIT_SECONDS" >&2
+        echo "local-build: no free $LABEL within ${WAIT}s (queue position $POS of $QLEN); try again later or raise LOCAL_BUILD_WAIT_SECONDS" >&2
         exit 75
     fi
-    sleep 3
+    if [ "$POS" != "$said_pos" ]; then
+        if [ "$POS" = 1 ]; then
+            echo "local-build: first in the queue for a $LABEL (cap $CAP); waiting for one to free" >&2
+        else
+            echo "local-build: queued for a $LABEL at position $POS of $QLEN (cap $CAP); first is ${Q_HEAD:-?}" >&2
+        fi
+        said_pos=$POS
+    fi
+    sleep "$POLL"
 done
+# The slot is ours: give up the ticket, and a .next turn that named this run is used.
+leave_queue
+if names_waiter "$(next_token)" "$SEAT" "$TREE"; then
+    rm -f "$NEXT_FILE" 2>/dev/null || true
+fi
 
 # Only remove the slot while it still names this process as its owner. A slot can be
 # reclaimed and re-acquired while a command runs (an hour-old stamp, a reused pid), and
 # this process must never delete the new occupant's directory.
 cleanup() {
+    leave_queue
     if [ -n "${TREE_LOCK:-}" ] && [ -f "$TREE_LOCK/owner" ]; then
         l_pid=0
         read -r l_pid l_rest < "$TREE_LOCK/owner" 2>/dev/null || true
