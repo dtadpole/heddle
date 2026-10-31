@@ -14,6 +14,7 @@ import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
+import { declaredModuleNames } from './config/plugin-inventory.ts'
 import { resetProfileFromTemplate } from './config/profile-template.ts'
 import { ConfigError, heddleHome, profilesDir } from './config/schema.ts'
 
@@ -525,9 +526,22 @@ async function runWeb(args: Args): Promise<void> {
       // The endpoint the flag named becomes the server's default, so a turn posted without one
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
+      // The plugin inventory reports each row's module name as the layer wrote it, not as `boot` resolved it.
+      pluginModuleNames: declaredModuleNames(app),
       // The page's Browser tab is opt-in, as DSH's Web profile ships it (#86); exactly `1` enables it.
       browser: process.env.HEDDLE_WEB_BROWSER === '1',
     })
+    /**
+     * The sessions the startup sweeps read: every listed one whose log reads whole. A log that does not is named once
+     * and left out (`SessionStore.loads`), because these sweeps run after the listener is up and before the login line:
+     * one throw here used to unwind this function into `app.dispose()`, leaving a listener with every plugin gone and
+     * no link printed (#130).
+     */
+    const sweepHandles = () =>
+      app.ctx.session
+        .list()
+        .map((meta) => app.ctx.session.store.open(meta.id))
+        .filter((handle): handle is NonNullable<typeof handle> => handle !== null && app.ctx.session.store.loads(handle))
     /**
      * A restarted harness picks up the goals it finds still active.
      *
@@ -537,10 +551,7 @@ async function runWeb(args: Args): Promise<void> {
      * the startup edge that asks it.
      */
     if (app.ctx.goalDriver !== undefined) {
-      const handles = app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const handles = sweepHandles()
       const resumed = await app.ctx.goalDriver.resumeAtStart(handles)
       if (resumed.requested > 0) process.stdout.write(`heddle web: resuming ${resumed.requested} active goal(s)\n`)
     }
@@ -550,10 +561,7 @@ async function runWeb(args: Args): Promise<void> {
      * turns for teams it is not working on.
      */
     if (app.ctx.team !== undefined) {
-      const handles = app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const handles = sweepHandles()
       const recovered = await app.ctx.team.recoverAll(handles)
       if (recovered.recovered > 0 || recovered.failed > 0) {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)

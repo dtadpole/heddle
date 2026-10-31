@@ -176,6 +176,12 @@ pub trait SessionService: Send + Sync {
     /// Every session's meta, in the store's order.
     fn list(&self) -> Vec<SessionMeta>;
 
+    /// Append one record to a session's log — the turn route's `turn/failed`, which web.ts writes through
+    /// `ctx.session.store.append`. An implementation that keeps no log writes nothing and answers `Ok`.
+    fn record(&self, _id: &str, _kind: &str, _fields: Value) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
     /// One session's meta.
     fn meta(&self, id: &str) -> Option<SessionMeta> {
         self.list().into_iter().find(|meta| meta.id == id)
@@ -329,6 +335,14 @@ pub trait WorkspaceService: Send + Sync {
         let _ = before;
         Err(workspace_not_found(id))
     }
+
+    /// First use — DSH's `workspace/initializeDefault`, `POST /api/workspaces/default`: the default workspace's
+    /// record when this install is a first use (created or reused), `Ok(None)` when it is not, `Err` when its
+    /// folder cannot be made (`500`). The default answers `None`, for doubles that do not model first use.
+    fn initialize_default(&self, sessions: &[SessionMeta]) -> Result<Option<Value>, ServiceError> {
+        let _ = sessions;
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -419,6 +433,34 @@ pub trait SandboxService: Send + Sync {
         requested: Option<&Value>,
         confirm: Option<&Value>,
     ) -> Result<String, String>;
+
+    /// The folder a session's calls run in (`rootFor`): the session's folder, or the configured root when the
+    /// operator named one or the session has none. A page terminal starts here (#85).
+    fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        match folder {
+            Some(folder) if !folder.as_os_str().is_empty() => folder.to_path_buf(),
+            _ => PathBuf::from(self.workspace_root()),
+        }
+    }
+
+    /// Wrap `argv` under `mode`, rooted at `root`, the way a bash call is wrapped (#85: a page terminal is
+    /// confined like bash). `Err` carries the sandbox's sentence when this host cannot confine the mode. The
+    /// default confines nothing, so it refuses every mode but `danger-full-access`: it fails closed.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let _ = root;
+        if mode == "danger-full-access" {
+            Ok(argv.to_vec())
+        } else {
+            Err(format!(
+                "sandbox mode \"{mode}\" is requested but this server's sandbox cannot confine a terminal; refusing to run it unconfined"
+            ))
+        }
+    }
 }
 
 /// How a person answered an approval question.
@@ -515,6 +557,32 @@ pub trait TurnInterrupter: Send + Sync {
     fn interrupt(&self, session: &str) -> bool;
 }
 
+/// Work a session holds besides its turns, which an archive is refused by unless the caller agrees to stop it: DSH's
+/// `workspace/session-activity` waterfall and `workspace/session-stop` (`dsh-workspace` archive,
+/// `lib/index.js:512-540`). The binary supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`).
+pub trait SessionActivity: Send + Sync {
+    /// The live work that blocks archiving `session`, in provider order (DSH's activity entries).
+    fn active(&self, session: &str) -> Vec<ActivityItem>;
+    /// Stop it, once the archive is written: a background job is killed with `session archived`.
+    fn stop(&self, session: &str);
+}
+
+/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`. Turns are counted by the server itself today;
+/// the kind lets them come through the same port later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Turn,
+    Job,
+}
+
+/// One piece of live work an archive is refused by (DSH's activity item: `{ id, label }` under a `kind`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    pub kind: ActivityKind,
+    pub id: String,
+    pub label: String,
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -572,6 +640,11 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// Work besides turns that an archive stops or is refused by; `None`: turns are the only activity.
+    pub activity: Option<Arc<dyn SessionActivity>>,
+    /// The interface language the optional `locale` row stores (issue #80): the page is served with its
+    /// `<html lang>`; `None` follows each browser's `Accept-Language`.
+    pub locale: Option<heddle_config::LocalePreference>,
     /// The agent presets (inventory A96), from the optional `presets` row: `GET /api/presets` answers them, and a
     /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
     /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
@@ -605,6 +678,8 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
+            locale: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -651,6 +726,8 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
+            locale: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -846,6 +923,17 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    pub fn activity(mut self, service: Arc<dyn SessionActivity>) -> Self {
+        self.harness.activity = Some(service);
+        self
+    }
+
+    /// The interface language the profile's `locale` row stores (issue #80).
+    pub fn locale(mut self, preference: heddle_config::LocalePreference) -> Self {
+        self.harness.locale = Some(preference);
         self
     }
 

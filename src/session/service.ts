@@ -5,9 +5,10 @@ import { readFileSync } from 'node:fs'
 
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
-import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
+import { ensureSessionsFolder, existingSessionNames, unwritableIn, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
+import { interruptedTurnClosers } from './repair.ts'
 
 import { inheritsAnswer, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
 
@@ -148,17 +149,32 @@ export class SessionService extends Service {
     } = {},
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
+    /**
+     * The branch is written **before** the store records anything (#106): a folder heddle cannot write is refused with
+     * `SessionUnwritableError` and leaves no session behind — measured, the old order recorded one, which then listed
+     * under a branch whose definition was never written.
+     */
+    try {
+      ensureSessionsFolder(canonical)
+    } catch (error) {
+      throw unwritableIn(canonical, error)
+    }
     const taken = existingSessionNames(canonical)
     const handle = this.openAt(canonical, { fresh: true, ...options })
     const meta = this.list().find((entry) => entry.id === handle.id)
-    const definition = writeSessionDefinition(handle, canonical, {
-      createdAt: meta?.created ?? new Date().toISOString(),
-      taken,
-      ...(options.title !== undefined ? { title: options.title } : {}),
-      ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-    })
+    let definition: SessionDefinition
+    try {
+      definition = writeSessionDefinition(handle, canonical, {
+        createdAt: meta?.created ?? new Date().toISOString(),
+        taken,
+        ...(options.title !== undefined ? { title: options.title } : {}),
+        ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
+      })
+    } catch (error) {
+      throw unwritableIn(canonical, error)
+    }
     return { handle, definition }
   }
 
@@ -310,9 +326,18 @@ export class SessionService extends Service {
     return this.store.deriveNode(handle, seq)
   }
 
-  /** What has already happened, for a caller that wants to show it. */
-  events(handle: SessionHandle) {
-    return this.store.read(handle)
+  /**
+   * What has already happened, for a caller that wants to show it.
+   *
+   * A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the closers the
+   * next write-open will append (`./repair.ts`), and nothing is written — DSH's cold read (`readColdSessionLog`,
+   * dsh-session-query lib/index.js:26-52). So a call cut by a restart reads as interrupted at once, not as running until
+   * somebody writes the session (issue #5). The model's view is `messages`, which reads the log itself.
+   */
+  events(handle: SessionHandle): readonly SessionEvent[] {
+    const events = this.store.read(handle)
+    const closers = interruptedTurnClosers(events)
+    return closers.length === 0 || this.store.writerHeld(handle) ? events : [...events, ...closers]
   }
 
   /** Every session, newest first. */
@@ -335,6 +360,14 @@ export class SessionService extends Service {
   /** Pin, unpin, archive or unarchive a session — the state behind a row's menu. */
   flags(id: SessionId, patch: { readonly pinned?: boolean; readonly archived?: boolean }): SessionMeta | null {
     return this.store.flags(id, patch)
+  }
+
+  /**
+   * Whether an archived session owns this one's steps: it is archived itself, or a session above it in its subagent
+   * lineage is. DSH's archived-session gate asks exactly this before every model step; the agent loop asks it here.
+   */
+  underArchived(id: SessionId): boolean {
+    return this.store.underArchived(id)
   }
 
   /**

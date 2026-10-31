@@ -42,6 +42,7 @@ pub mod layout;
 pub mod message;
 pub mod meta;
 pub mod mode;
+pub mod repair;
 pub mod search;
 pub mod service;
 pub mod store;
@@ -69,8 +70,10 @@ pub use message::{
 };
 pub use meta::{
     CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta, SessionOrigin,
+    under_archived_session,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
+pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
 pub use search::{
     SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
     SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,
@@ -82,8 +85,8 @@ pub use service::{
 };
 pub use store::{
     EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, SessionStore,
-    TRANSCRIPT_NAME, can_compress, default_session_root, is_framed, lock_path, log_name, meta_name,
-    transcript_in,
+    TRANSCRIPT_NAME, Warn, can_compress, default_session_root, is_framed, lock_path, log_name,
+    meta_name, read_log_header, skipped_log_line, transcript_in,
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
@@ -95,6 +98,7 @@ pub use title::{
     TitleSpawn, TitleTask, normalize_session_title, title_from_answer,
 };
 pub use transcript::{
-    DecodedTranscript, FRAME_MAGIC, Frame, TranscriptFormat, decode_transcript, encode_frame,
-    frame_end, is_compressed, looks_compressed, split_frames,
+    DecodedTranscript, FRAME_MAGIC, Frame, FrameExtent, LogHeader, TranscriptFormat,
+    decode_transcript, encode_frame, frame_end, frame_extent, is_compressed, is_event_record,
+    judge_log_header, looks_compressed, split_frames,
 };

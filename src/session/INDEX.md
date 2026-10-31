@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.4.0
+version: 1.5.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -63,6 +63,17 @@ frame walk stops at the first incomplete frame, so appending past one writes eve
 read. Measured before the repair existed: a torn file plus one appended frame read back as one event
 instead of two, with the new event silently gone.
 
+**A log that is not a log is left out, and named** (issue #130). DSH lists a session by its header and omits one
+whose header is unreadable, a corrupt Zstandard header frame included (dsh-session-persistence-jsonl README, "Reading
+the logs"; `listArtifacts`, lib/index.js:3102-3138). A heddle log's header is its first record, so `list()` and `open()`
+judge that record (`judgeLogHeader` in [`transcript.ts`](transcript.ts)): a first frame that is malformed or does not
+decode, or a first line that is not JSON or not a session event, keeps the session out of the list, opens it as no
+session (`404 no session <id>`), and prints `heddle session: skipped unreadable log <path>: <reason>` once. DSH says
+nothing when it omits one; heddle names the file because it is the one thing a person has to find. An empty log, a
+missing one and a torn frame still read as before. Every later line must be an event too (the Rust reader's rule), and
+the server's startup sweeps leave out a log that does not read whole (`SessionStore.loads`): a throw there used to
+dispose every plugin after the listener was up and before the login line.
+
 **The file is read once per process** (`SessionStore.load`). Events are kept in memory and advanced
 on append, because a single turn used to re-read and re-parse the whole transcript twenty-one times:
 five `read` calls and sixteen `count` calls, and `count` read the file too. That made a turn's cost
@@ -70,6 +81,15 @@ grow with the square of the session's length, and it is also what made decompres
 it now happens once per session per process. The trade is stated in the code rather than hidden: a
 second process appending to the same session while this one holds it open would not be seen, and
 heddle runs one process per session.
+
+**A turn its writer never finished is closed when the session is next opened for writing**
+([`repair.ts`](repair.ts), issue #5). A server restarted while `bash` ran used to leave the log at the call:
+no result, no answer record, no turn end, and the view drew the call as running for good. As DSH does on
+attach for writing, the first process to take the session's writer lock appends the closers before anything
+else: an `error (INTERRUPTED)` result for each open call, then `assistant/completed` and `turn/completed`
+with `reason: { kind: 'interrupted' }`. A session no live writer holds reads with the same closers added and
+nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
+restart. A turn running in this process holds the lock already and is never closed.
 
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns

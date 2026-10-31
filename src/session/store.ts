@@ -6,6 +6,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   statSync,
   truncateSync,
@@ -19,8 +20,9 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
+import { interruptedTurnClosers } from './repair.ts'
 import { SessionTitles } from './title.ts'
-import { decodeTranscript, encodeFrame } from './transcript.ts'
+import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
 
 /**
@@ -110,11 +112,11 @@ export interface SessionMeta {
   readonly id: SessionId
   readonly created: string
   /**
-   * When the session was **last written to**, which is the age a row shows.
+   * When a **person last prompted or steered** the session, which is the age a row shows and what Last updated sorts by.
    *
-   * The reference's session rows are aged by their latest activity, not by their creation: a conversation that continues for
-   * an hour reads as live, while one created an hour ago and untouched reads as old. `created` is still kept for duration and
-   * ordering records; this field moves with the log.
+   * DSH's list dates a row `max(createdAt, lastPromptAt)` (dsh-api-session-controller/lib/index.js:2124-2125), where
+   * `lastPromptAt` is the time of the latest user-sourced `user/message`. So an answer, a tool result, a turn boundary or
+   * a harness-written message (one with a `source`) does not move it; absent until the first prompt, when `created` stands.
    */
   readonly updated?: string
   readonly cwd: string
@@ -595,6 +597,30 @@ export class SessionFlagError extends Error {
 }
 
 /**
+ * Whether a session, or a session above it in its **subagent** lineage, is archived — the question DSH's archived-session
+ * gate asks before every model step (`underArchivedSession`, dsh-api-session-controller lib/index.js:2528-2541).
+ *
+ * The walk follows `parentSession` only through `origin: 'subagent'` records, as DSH's follows its durable header: a
+ * delegated child of an archived session runs no step either, while a fork (a `parentSession` with no origin) is an
+ * independent conversation. A parent whose record cannot be read ends the walk unarchived, and a cycle ends it too.
+ * Pure over a lookup so a caller can judge it without a store.
+ */
+export function underArchivedSession(
+  lookup: (id: SessionId) => Pick<SessionMeta, 'id' | 'archived' | 'origin' | 'parentSession'> | null | undefined,
+  id: SessionId,
+): boolean {
+  let meta = lookup(id)
+  const visited = new Set<string>()
+  while (meta !== null && meta !== undefined && !visited.has(meta.id)) {
+    if (meta.archived === true) return true
+    visited.add(meta.id)
+    if (meta.origin !== 'subagent' || meta.parentSession === undefined) return false
+    meta = lookup(meta.parentSession)
+  }
+  return false
+}
+
+/**
  * A write refused because another process holds the session's writer lock.
  *
  * The sentence is DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and the
@@ -612,6 +638,61 @@ export class SessionOwnedError extends Error {
     this.name = 'SessionAlreadyOwnedError'
     this.id = id
     this.pid = pid
+  }
+}
+
+/**
+ * A session log the store cannot read: a line that is not JSON, or not a session event.
+ *
+ * The message keeps the store's old shape, `<log>:<line> is not valid JSON — <detail>`, with the log named by its
+ * **file name** alone: the message reaches HTTP answers (a turn's `error` frame, a route's `500`), and the absolute
+ * path put the store root, home directory included, into them (#130, measured on both builds). `path` keeps the
+ * absolute path, so the server's own line names the file whole (`heddle session: skipped unreadable log …`).
+ */
+export class SessionLogUnreadableError extends Error {
+  readonly path: string
+  readonly reason: string
+
+  constructor(path: string, line: number, problem: string) {
+    super(`${basename(path)}:${line} ${problem}`)
+    this.name = 'SessionLogUnreadableError'
+    this.path = path
+    this.reason = `line ${line} ${problem}`
+  }
+}
+
+/** The line the store prints when it leaves a session out because its log cannot be read; the Rust store prints the same. */
+export function skippedLogLine(path: string, reason: string): string {
+  return `heddle session: skipped unreadable log ${path}: ${reason}`
+}
+
+/**
+ * Judge a log file by its first record ({@link judgeLogHeader}), reading only as far as that record ends.
+ *
+ * A file that cannot be opened is judged as `readLog` reads it, an empty session: the store's rule for a log not
+ * written yet, and the reason a session whose log is missing entirely is still listed and still openable. The folder
+ * tree asks it too, of the log a session definition names (`./tree.ts`).
+ */
+export function readLogHeader(path: string): LogHeader {
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return { kind: 'readable' }
+  }
+  try {
+    let head = Buffer.alloc(0)
+    const chunk = Buffer.alloc(16 * 1024)
+    for (;;) {
+      const read = readSync(fd, chunk, 0, chunk.length, null)
+      if (read > 0) head = Buffer.concat([head, chunk.subarray(0, read)])
+      const verdict = judgeLogHeader(head, read === 0)
+      if (verdict.kind !== 'incomplete') return verdict
+    }
+  } catch {
+    return { kind: 'readable' }
+  } finally {
+    closeSync(fd)
   }
 }
 
@@ -673,12 +754,15 @@ function removeOwnLock(path: string): void {
  * file naming a pid that no longer exists, and that lock is removed and taken rather than blocking the session
  * forever. A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled writer's
  * resumed appends tear the log.
+ *
+ * Answers whether this process **took** the lock now (true) or already held it through another store (false): only a
+ * fresh take is a write-open after whatever wrote the session before, which is when an unfinished turn is closed.
  */
-function acquireWriterLock(path: string, id: string): void {
+function acquireWriterLock(path: string, id: string): boolean {
   const count = heldByProcess.get(path)
   if (count !== undefined) {
     heldByProcess.set(path, count + 1)
-    return
+    return false
   }
   const take = (): void => {
     heldByProcess.set(path, 1)
@@ -698,7 +782,7 @@ function acquireWriterLock(path: string, id: string): void {
         closeSync(fd)
       }
       take()
-      return
+      return true
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
@@ -714,7 +798,7 @@ function acquireWriterLock(path: string, id: string): void {
     const holder = lockHolder(text)
     if (holder === process.pid) {
       take()
-      return
+      return true
     }
     if (holder !== undefined && processAlive(holder)) throw new SessionOwnedError(id, holder)
     if (holder === undefined && Date.now() - modified < UNWRITTEN_LOCK_GRACE_MS) throw new SessionOwnedError(id)
@@ -779,14 +863,32 @@ export class SessionStore {
    */
   readonly titles: SessionTitles = new SessionTitles(this)
 
+  /**
+   * Each log's first-record verdict, keyed by path and valid while the file's size and modification time are the ones
+   * it was judged at. `list()` asks it of every session on every call, so a log is re-read only after it changed, and
+   * a skipped log is reported once per change rather than once per listing.
+   */
+  private readonly headers = new Map<string, { readonly size: number; readonly mtimeMs: number; readonly verdict: LogHeader }>()
+
+  /** Where a skipped log is reported; standard error unless the caller collects it. */
+  private readonly warn: (message: string) => void
+
+  /** The unreadable whole logs `loads` has already named, so a second sweep does not name one twice. */
+  private readonly reportedLoads = new Set<string>()
+
   constructor(
     root: string = defaultSessionRoot(),
-    options: { readonly onEvent?: (handle: SessionHandle, event: SessionEvent) => void } = {},
+    options: {
+      readonly onEvent?: (handle: SessionHandle, event: SessionEvent) => void
+      /** Receives the line naming a log the store leaves out ({@link skippedLogLine}); defaults to standard error. */
+      readonly warn?: (message: string) => void
+    } = {},
   ) {
     // `~` is expanded because the profile writes `~/.heddle/sessions` and a
     // literal `~` directory beside the project is the wrong place to put it.
     this.root = resolve(root.startsWith('~') ? join(homedir(), root.slice(1)) : root)
     this.onEvent = options.onEvent
+    this.warn = options.warn ?? ((message) => void process.stderr.write(`${message}\n`))
   }
 
   /**
@@ -932,6 +1034,26 @@ export class SessionStore {
     return next
   }
 
+  /** One session's record, read from its own file; `null` for an unknown id or an unreadable record. */
+  meta(id: SessionId): SessionMeta | null {
+    const file = this.metaFile(id)
+    if (file === null) return null
+    try {
+      const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta
+      return typeof meta?.id === 'string' ? meta : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Whether the session or a subagent ancestor is archived (`underArchivedSession`), read from the records **now**: the
+   * agent loop asks before every step, so an archive written by another process stops the next step too.
+   */
+  underArchived(id: SessionId): boolean {
+    return underArchivedSession((one) => this.meta(one), id)
+  }
+
   /**
    * Seed a new session with a session's **log** up to its last completed turn, and answer with the new session.
    *
@@ -1058,13 +1180,52 @@ export class SessionStore {
     return null
   }
 
-  /** Open an existing session by id, or by the newest one when `id` is omitted. */
+  /** The log of the session whose metadata is in `dir`: `<id>.v2.jsonl.zstd` beside it, else the directory's own transcript. */
+  private transcriptFor(dir: string, id: SessionId): string {
+    return existsSync(join(dir, logName(id))) ? join(dir, logName(id)) : transcriptIn(dir)
+  }
+
+  /**
+   * Whether a session's log can be read at all, judged by its first record ({@link readLogHeader}), and reported once
+   * when it cannot.
+   *
+   * This is DSH's discovery rule (dsh-session-persistence-jsonl README, "Reading the logs": "Unreadable or unsupported
+   * headers, including corrupt Zstandard header frames, are omitted from discovery and `list()`"; `listArtifacts`,
+   * lib/index.js:3102-3138). DSH omits such a session without a word; heddle prints one line naming the file
+   * ({@link skippedLogLine}), because the file is the one thing a person has to find. Measured before (#130): one log
+   * holding 64 random bytes, or the line `{"not":"zstd"}`, stopped the next `heddle web` start half-way.
+   */
+  private logReadable(path: string): boolean {
+    let size: number
+    let mtimeMs: number
+    try {
+      ;({ size, mtimeMs } = statSync(path))
+    } catch {
+      this.headers.delete(path)
+      return true
+    }
+    const known = this.headers.get(path)
+    if (known !== undefined && known.size === size && known.mtimeMs === mtimeMs) return known.verdict.kind === 'readable'
+    const verdict = readLogHeader(path)
+    this.headers.set(path, { size, mtimeMs, verdict })
+    if (verdict.kind === 'unreadable') this.warn(skippedLogLine(path, verdict.reason))
+    return verdict.kind === 'readable'
+  }
+
+  /**
+   * Open an existing session by id, or by the newest one when `id` is omitted.
+   *
+   * A session whose log cannot be read opens as no session, the answer `list()` gives by leaving it out: direct access
+   * to it is refused (DSH: "Direct access to a corrupt compressed header still rejects"), and the routes answer it as
+   * they answer an unknown id, `404 no session <id>`, which is what the Rust build already answered (#130).
+   */
   open(id?: SessionId): SessionHandle | null {
     if (id !== undefined) {
       const meta = this.metaFile(id)
       if (meta === null) return null
       const dir = dirname(meta)
-      const transcript = existsSync(join(dir, logName(id))) ? join(dir, logName(id)) : transcriptIn(dir)
+      const transcript = this.transcriptFor(dir, id)
+      if (!this.logReadable(transcript)) return null
       return { id, dir, transcript, meta }
     }
     const newest = this.list()[0]
@@ -1072,10 +1233,34 @@ export class SessionStore {
   }
 
   /**
+   * Whether a session's whole log reads: false, after printing the line that names it, for a log with a line that is
+   * not JSON or not a session event ({@link SessionLogUnreadableError}).
+   *
+   * For the server's startup sweeps, which read every session: one unreadable log must leave that session out, not
+   * stop the start. Any other failure is not about the log and still throws.
+   */
+  loads(handle: SessionHandle): boolean {
+    try {
+      this.load(handle)
+      return true
+    } catch (error) {
+      if (!(error instanceof SessionLogUnreadableError)) throw error
+      /** Once per log and line: the goal sweep and the team sweep each ask, and one file wants one line. */
+      const key = `${error.path}\n${error.reason}`
+      if (!this.reportedLoads.has(key)) {
+        this.reportedLoads.add(key)
+        this.warn(skippedLogLine(error.path, error.reason))
+      }
+      return false
+    }
+  }
+
+  /**
    * Sessions newest first, from both layouts.
    *
    * The walk reads a session's own directory (the old shape) and every workspace folder's `<id>.json` (the
-   * current one), so a store that holds both answers with all of its sessions and none of them twice.
+   * current one), so a store that holds both answers with all of its sessions and none of them twice. A session whose
+   * log cannot be read is left out, and named once ({@link SessionStore.logReadable}).
    */
   list(): readonly SessionMeta[] {
     let names: string[]
@@ -1085,10 +1270,12 @@ export class SessionStore {
       return []
     }
     const metas = new Map<string, SessionMeta>()
-    const remember = (text: string): void => {
+    const remember = (text: string, dir: string): void => {
       try {
         const meta = JSON.parse(text) as SessionMeta
-        if (typeof meta?.id === 'string' && !metas.has(meta.id)) metas.set(meta.id, meta)
+        if (typeof meta?.id !== 'string' || metas.has(meta.id)) return
+        if (!this.logReadable(this.transcriptFor(dir, meta.id))) return
+        metas.set(meta.id, meta)
       } catch {
         // A file that is not metadata is not a reason to lose the sessions that are.
       }
@@ -1097,7 +1284,7 @@ export class SessionStore {
       const at = join(this.root, name)
       if (name.startsWith('session-')) {
         try {
-          remember(readFileSync(join(at, 'meta.json'), 'utf8'))
+          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at)
         } catch {
           // A session directory without readable metadata is skipped, as it always was.
         }
@@ -1112,7 +1299,7 @@ export class SessionStore {
       for (const entry of entries) {
         if (!entry.startsWith('session-') || !entry.endsWith('.json')) continue
         try {
-          remember(readFileSync(join(at, entry), 'utf8'))
+          remember(readFileSync(join(at, entry), 'utf8'), at)
         } catch {
           continue
         }
@@ -1165,12 +1352,9 @@ export class SessionStore {
     appendFileSync(handle.transcript, this.load(handle).framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
     this.load(handle).events.push(record)
     /**
-     * A turn boundary is activity: the row's age moves while an answer is being produced, not only when a message is typed.
-     * Messages are touched by `message()` instead, which also counts the turn in the same write.
+     * No event here moves `updated`: DSH dates a row by the latest prompt or steer only (see `message()`), so an answer, a
+     * turn boundary or a harness note no longer re-dates it. This used to touch on those three types (R-developer-eight-20).
      */
-    if (record.type === 'turn/completed' || record.type === 'assistant/completed' || record.type === 'context/note') {
-      this.touch(handle)
-    }
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
@@ -1187,19 +1371,57 @@ export class SessionStore {
    * the session: what was read before may be behind the file, because the previous holder could have appended
    * and let go since, and a write counted from a stale fold is exactly the duplicate seq this lock exists to
    * prevent. Holding it again is free.
+   *
+   * Taking it **fresh** is DSH's write-open, so a turn the previous writer left unfinished is closed here, before the
+   * write that asked for the lock (`./repair.ts`, issue #5). A turn running in this process holds the lock already and
+   * never reaches this line.
    */
   claim(handle: SessionHandle): void {
     if (this.held.has(handle.id)) return
     const path = lockPath(handle)
-    acquireWriterLock(path, handle.id)
+    const fresh = acquireWriterLock(path, handle.id)
     this.held.set(handle.id, path)
     this.loaded.delete(handle.id)
     this.surfaceCache.delete(handle.id)
+    if (fresh) this.record(handle, interruptedTurnClosers(this.read(handle)))
+  }
+
+  /**
+   * Append events whose seq and time are already assigned, in one write, and without the side effects of `append`:
+   * no listener hears them and the meta's age does not move. The turn closers are the one caller — a repair of what the
+   * log already holds, not activity — and DSH seeds them into a resumed session rather than publishing them.
+   */
+  private record(handle: SessionHandle, records: readonly SessionEvent[]): void {
+    if (records.length === 0) return
+    const entry = this.load(handle)
+    const lines = records.map((record) => `${JSON.stringify(record)}\n`)
+    appendFileSync(handle.transcript, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    entry.events.push(...records)
   }
 
   /** Whether this store holds the session's writer lock. */
   holds(handle: SessionHandle): boolean {
     return this.held.has(handle.id)
+  }
+
+  /**
+   * Whether a live writer holds the session: this process (through any store), or the live process its lock names.
+   *
+   * A reader asks it before it shows a session's unfinished turn as closed (`SessionService.events`): a turn whose
+   * writer is alive may still be running, and one whose writer is gone never will. A lock naming this process that
+   * this process does not hold is a previous process's that had the same pid.
+   */
+  writerHeld(handle: SessionHandle): boolean {
+    const path = lockPath(handle)
+    if (heldByProcess.has(path)) return true
+    let text: string
+    try {
+      text = readFileSync(path, 'utf8')
+    } catch {
+      return false
+    }
+    const holder = lockHolder(text)
+    return holder !== undefined && holder !== process.pid && processAlive(holder)
   }
 
   /**
@@ -1280,13 +1502,22 @@ export class SessionStore {
       }
     }
 
+    /**
+     * Every line must be a session event, as the Rust build's reader requires of every line (`SessionEvent::from_line`):
+     * a line that is not JSON, or JSON without a whole-number `seq`, a string `at` and a string `type`, makes the log
+     * unreadable rather than handing an event with no `type` to every fold above (#130: `{"not":"zstd"}` reached the
+     * team sweep as an event and stopped the start on `event.type.startsWith`).
+     */
     const events: SessionEvent[] = []
     for (const [index, line] of decoded.lines.entries()) {
+      let record: unknown
       try {
-        events.push(JSON.parse(line) as SessionEvent)
+        record = JSON.parse(line)
       } catch (error) {
-        throw new Error(`${handle.transcript}:${index + 1} is not valid JSON — ${(error as Error).message}`)
+        throw new SessionLogUnreadableError(handle.transcript, index + 1, `is not valid JSON — ${(error as Error).message}`)
       }
+      if (!isEventRecord(record)) throw new SessionLogUnreadableError(handle.transcript, index + 1, 'is not a session event')
+      events.push(record as SessionEvent)
     }
     const framed = decoded.format === 'zstd-frames' || ((torn || decoded.lines.length === 0) && isFramed(handle.transcript))
     const entry = { events, framed }
@@ -1424,11 +1655,17 @@ export class SessionStore {
     return messages
   }
 
-  /** Record a message and keep the metadata's turn count honest. */
+  /** Record a message and keep the metadata's turn count and prompt time honest. */
   message(handle: SessionHandle, message: RecordedMessage): SessionEvent {
     const event = this.append(handle, { type: 'message', message })
-    /** One write for both facts: the age moved, and a user message is a turn. */
-    this.touch(handle, { bumpTurns: message.role === 'user' })
+    /**
+     * A user message is a turn; one a **person** wrote — a prompt or a steer, which is a user message with no `source` —
+     * also dates the row, with the event's own time, as DSH's `lastPromptAt` takes `event.time` from a `user/message`
+     * whose source is the user (dsh-api-session-controller/lib/index.js:1872-1879). One write for both facts.
+     */
+    if (message.role === 'user') {
+      this.touch(handle, { bumpTurns: true, ...(message.source === undefined ? { promptedAt: event.at } : {}) })
+    }
     return event
   }
 
@@ -1517,20 +1754,25 @@ export class SessionStore {
   }
 
   /**
-   * Record that the session was written to, and optionally count a user turn in the same write.
+   * Record a person's prompt time (`updated`) and/or count a user turn, in one meta write.
    *
    * The meta is a convenience beside the log: failing to write it must never lose the event that was just appended, which is
-   * why the catch swallows. `updated` is what a row's age reads, and `turns` what its tooltip counts.
+   * why the catch swallows. `updated` is what a row's age reads and what **Last updated** sorts by, and `turns` what its
+   * tooltip counts. A call with neither writes nothing.
    */
-  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean; readonly addTurns?: number } = {}): void {
+  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean; readonly addTurns?: number; readonly promptedAt?: string } = {}): void {
     const path = handle.meta
-    /** `addTurns` is a fork's seed, which counts every inherited user message in one write. */
+    /**
+     * `addTurns` is a fork's seed, which counts every inherited user message in one write and dates nothing: a fork's row
+     * is dated by its creation until its own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
+     */
     const added = (options.bumpTurns === true ? 1 : 0) + (options.addTurns ?? 0)
+    if (added === 0 && options.promptedAt === undefined) return
     try {
       const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
       const updated: SessionMeta = {
         ...meta,
-        updated: new Date().toISOString(),
+        ...(options.promptedAt !== undefined ? { updated: options.promptedAt } : {}),
         ...(added > 0 ? { turns: (meta.turns ?? 0) + added } : {}),
       }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)

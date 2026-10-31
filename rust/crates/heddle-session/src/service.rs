@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::clock::iso_now;
 use crate::definition::{
-    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+    CreatedDefinition, DefinitionOptions, ensure_sessions_folder, existing_session_names,
+    write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -28,6 +29,7 @@ use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, Ses
 use crate::mode::{
     MODE_EVENT, effective_mode as fold_effective_mode, recorded_mode as fold_recorded_mode,
 };
+use crate::repair::interrupted_turn_closers;
 use crate::store::{EventListener, SessionStore, default_session_root};
 use crate::surface::{SurfaceState, inherits_answer};
 
@@ -269,6 +271,10 @@ impl SessionService {
         let canonical = canonical_path(Path::new(branch))
             .to_string_lossy()
             .into_owned();
+        // The branch is written **before** the store records anything (#106): a folder heddle cannot write
+        // is refused with `SessionError::Unwritable` and leaves no session behind — measured, the old order
+        // recorded one, which then listed under a branch whose definition was never written.
+        ensure_sessions_folder(&canonical).map_err(|error| error.unwritable_in(&canonical))?;
         let taken = existing_session_names(&canonical);
         let handle = self.open_at(
             &canonical,
@@ -298,7 +304,8 @@ impl SessionService {
                 reasoning_effort: options.reasoning_effort,
                 taken,
             },
-        )?;
+        )
+        .map_err(|error| error.unwritable_in(&canonical))?;
         Ok(CreatedDefinition { handle, definition })
     }
 
@@ -423,9 +430,14 @@ impl SessionService {
         self.store.meta(id)
     }
 
-    /// Whether this store holds a session with that id.
+    /// Whether this store holds a session with that id: a metadata record, and a log that opens.
+    ///
+    /// A session whose log cannot be read opens as no session ([`SessionStore::open`]), so every route that asks this
+    /// first answers it as an unknown id. Measured before (#130): `POST /api/turn` into such a session passed this
+    /// check on its record alone and came back `400 no session '<id>' under <store root>`, naming the store on disk,
+    /// where web.ts answers `404 session/not-found`.
     pub fn exists(&self, id: &str) -> bool {
-        self.store.meta(id).is_some()
+        self.store.meta(id).is_some() && self.store.open(id).is_some()
     }
 
     /// Open an existing session by id, in whichever layout it was written in.
@@ -474,9 +486,22 @@ impl SessionService {
         self.store.derive_node(handle, seq)
     }
 
-    /// Every event so far.
+    /// Every event so far, for a caller that wants to show it.
+    ///
+    /// A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the
+    /// closers the next write-open will append ([`crate::repair`]), and nothing is written — DSH's cold read
+    /// (`readColdSessionLog`, dsh-session-query lib/index.js:26-52). So a call cut by a restart reads as
+    /// interrupted at once, not as running until somebody writes the session (issue #5). The model's view is
+    /// [`SessionService::messages`], which reads the log itself.
     pub fn events(&self, handle: &SessionHandle) -> Result<Events, SessionError> {
-        self.store.read(handle)
+        let events = self.store.read(handle)?;
+        let closers = interrupted_turn_closers(&events);
+        if closers.is_empty() || self.store.writer_held(handle) {
+            return Ok(events);
+        }
+        let mut balanced = events.as_ref().clone();
+        balanced.extend(closers.into_iter().map(Arc::new));
+        Ok(Arc::new(balanced))
     }
 
     /// Every session, newest first.
@@ -506,6 +531,12 @@ impl SessionService {
     /// Pin, unpin, archive or unarchive.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
         self.store.flags(id, patch)
+    }
+
+    /// Whether an archived session owns this one's steps: it is archived itself, or a session above it in its
+    /// subagent lineage is. DSH's archived-session gate asks exactly this before every model step.
+    pub fn under_archived(&self, id: &str) -> bool {
+        self.store.under_archived(id)
     }
 
     /// Record the agent preset a session runs under, only when it has none (inventory A96); see
@@ -971,6 +1002,51 @@ mod tests {
         );
         // The session is in the store too, so a resume finds it.
         assert_eq!(service.list().len(), 1);
+    }
+
+    /// Issue #106: a branch heddle cannot write failed with the I/O error and the definition's absolute path,
+    /// after the store had already recorded the session. It is refused by code, in words, naming the folder by
+    /// its name, and before anything is recorded.
+    #[test]
+    fn create_at_in_a_branch_heddle_cannot_write_is_refused_by_code_without_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let mode = |bits: u32| {
+            std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(bits)).unwrap()
+        };
+        mode(0o000);
+        // File modes do not stop the superuser, so a run as root cannot judge this.
+        if std::fs::read_dir(folder.path()).is_ok() {
+            mode(0o755);
+            return;
+        }
+        let error = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap_err();
+        mode(0o755);
+        let name = folder.path().file_name().unwrap().to_string_lossy();
+        assert_eq!(error.code(), Some("session/unwritable"));
+        assert_eq!(
+            error.to_string(),
+            format!("cannot write to \"{name}\": permission denied")
+        );
+        assert!(
+            !error.to_string().contains(folder_path),
+            "no absolute path in the sentence"
+        );
+        assert!(
+            service.list().is_empty(),
+            "the store holds no session for the refused branch"
+        );
+        let created = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap();
+        assert!(
+            Path::new(&created.definition.file).exists(),
+            "once writable, the branch takes one"
+        );
     }
 
     #[test]

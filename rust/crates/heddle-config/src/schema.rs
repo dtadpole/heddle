@@ -87,6 +87,12 @@ pub struct Schema {
     /// Schemas of which at least one must accept the value.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub any_of: Vec<Schema>,
+    /// The smallest number allowed (Schemastery's `min`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<f64>,
+    /// The largest number allowed (Schemastery's `max`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<f64>,
     /// The value a component uses when the key is absent; not applied by [`Schema::check`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<Value>,
@@ -116,6 +122,15 @@ impl fmt::Display for SchemaProblem {
             &self.path
         };
         write!(f, "{path} {}", self.message)
+    }
+}
+
+/// A bound as a person writes it: `1`, not `1.0`.
+fn plain_number(number: f64) -> String {
+    if number.fract() == 0.0 && number.abs() < 1e15 {
+        format!("{}", number as i64)
+    } else {
+        number.to_string()
     }
 }
 
@@ -165,6 +180,24 @@ impl Schema {
                 path: path.to_string(),
                 message: format!("must be {constant}"),
             });
+        }
+        if let Some(number) = value.as_f64() {
+            if let Some(minimum) = self.minimum
+                && number < minimum
+            {
+                problems.push(SchemaProblem {
+                    path: path.to_string(),
+                    message: format!("must be at least {}", plain_number(minimum)),
+                });
+            }
+            if let Some(maximum) = self.maximum
+                && number > maximum
+            {
+                problems.push(SchemaProblem {
+                    path: path.to_string(),
+                    message: format!("must be at most {}", plain_number(maximum)),
+                });
+            }
         }
         if !self.any_of.is_empty()
             && !self
@@ -422,6 +455,25 @@ mod tests {
             schema
                 .check(&json!({ "name": "x", "label": "y" }))
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_number_outside_its_bounds_names_the_bound() {
+        let bounded = schema(json!({ "type": "integer", "minimum": 1, "maximum": 3650 }));
+        assert_eq!(
+            bounded.check(&json!(0))[0].to_string(),
+            "(root) must be at least 1"
+        );
+        assert_eq!(
+            bounded.check(&json!(5000))[0].to_string(),
+            "(root) must be at most 3650"
+        );
+        assert!(bounded.check(&json!(30)).is_empty());
+        assert_eq!(
+            bounded.check(&json!("30"))[0].message,
+            type_message(&TypeSet::One(SchemaType::Integer), &json!("30")),
+            "a value of the wrong type says so once, without a bound sentence"
         );
     }
 

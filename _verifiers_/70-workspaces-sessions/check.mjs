@@ -10,7 +10,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -1358,6 +1358,242 @@ test('a session one process is writing refuses a second writer, so its log never
   }
 })
 
+test('a turn cut by a server restart reads as interrupted at once, and is closed in the log before the next turn', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #5, reproduced without a model: the scripted turn calls bash with a long sleep, and the server is killed
+   * while the call runs (SIGKILL, the hardest form of a restart; the SIGTERM the issue used leaves the same log on both
+   * builds). The log then ends at the call: no tool result, no answer record, no turn end. Before the fix the view drew
+   * the call as running for good, after the restart and after every later turn.
+   *
+   * DSH closes such a turn when the session is next opened for writing, before anything else is appended: an
+   * interrupted result for each open call, then the step's end and the turn's end (dsh-agent-loop, on attach for
+   * writing; dsh-session openTurnClosers). Its cold read shows the same closers without writing them, so the page is
+   * right from the first read after the restart (dsh-session-query readColdSessionLog).
+   */
+  const h = harness('turn-closers')
+  const { script } = scriptedConfig({
+    home: h.home,
+    steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 20' } } }, { text: 'never reached' }],
+  })
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', h.work, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const id = parseJson(made.stdout)?.session
+    assert.ok(typeof id === 'string', `the session has an id\n${made.stdout}`)
+    const sessionDir = join(h.home, 'sessions', id)
+    const connect = async () => {
+      live = await startServer(serverArgs, { ...h.env, HOME: h.home })
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      return String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    }
+    const isCall = (event) => event.type === 'assistant/chunk' && event.chunk?.type === 'tool-call' && event.chunk?.name === 'bash'
+
+    /** The turn is started and not awaited: its request stays open while bash sleeps. */
+    let cookie = await connect()
+    const cut = fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: 'run the slow command, then say done' }),
+    }).then((response) => response.text()).catch(() => '')
+    let crashed = []
+    for (let waited = 0; waited < 15_000; waited += 100) {
+      crashed = readTranscript(sessionDir)
+      if (crashed.some(isCall)) break
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const callAt = crashed.findIndex(isCall)
+    assert.ok(callAt >= 0, `the turn reached its bash call\n${crashed.map((event) => event.type).join(' ')}`)
+    const callId = crashed[callAt].chunk.id
+    live.kill()
+    live = undefined
+    await cut
+    await new Promise((done) => setTimeout(done, 300))
+
+    /** The fixture is the issue's log: it ends inside the turn, with the call unanswered. */
+    crashed = readTranscript(sessionDir)
+    const answered = (events) => events.some((event) => event.type === 'message' && event.message?.role === 'tool' && event.message.toolCallId === callId)
+    assert.ok(!answered(crashed), `the killed server left the call unanswered\n${crashed.map((event) => event.type).join(' ')}`)
+    assert.ok(!crashed.slice(callAt).some((event) => event.type === 'turn/completed'), 'and the turn without an end')
+    const crashedBytes = readFileSync(transcriptFile(sessionDir))
+
+    /** After the restart, the first read already shows the call interrupted and the turn ended, and writes nothing. */
+    cookie = await connect()
+    const view = async () => {
+      const response = await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })
+      assert.equal(response.status, 200, 'the session is served')
+      return (await response.json()).turns ?? []
+    }
+    const describe = (turns) => turns.map((turn) => `${turn.kind}:${turn.state ?? ''}`).join(' ')
+    const first = await view()
+    const row = first.find((turn) => turn.kind === 'tool' && turn.toolCallId === callId)
+    assert.equal(row?.state, 'error', `after the restart the cut call is drawn as interrupted, not running\n${describe(first)}\n${JSON.stringify(row)}`)
+    assert.match(String(row?.result ?? ''), /^error \(INTERRUPTED\)/, 'and its result says the turn ended before it answered')
+    assert.ok(!first.some((turn) => turn.state === 'running'), `nothing is drawn as running\n${describe(first)}`)
+    assert.ok(first.some((turn) => Array.isArray(turn.ended) && turn.ended.length > 0), `the turn is drawn as ended, with its reason\n${describe(first)}`)
+    assert.ok(readFileSync(transcriptFile(sessionDir)).equals(crashedBytes), 'and reading the session wrote nothing to its log')
+
+    /** The next turn opens the session for writing: the closers are appended first, then the turn. */
+    writeFileSync(script, JSON.stringify({ steps: [{ text: 'it was interrupted' }] }))
+    const next = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: 'did the command finish?' }),
+    })
+    const stream = await next.text()
+    assert.equal(next.status, 200, `the follow-up turn ran\n${stream}`)
+    assert.ok(!stream.includes('event: error'), `and did not fail\n${stream}`)
+    const after = readTranscript(sessionDir)
+    assert.deepEqual(after.map((event) => event.seq), after.map((_, index) => index), 'every seq is written once, in order')
+    const closers = after.slice(crashed.length, crashed.length + 3)
+    assert.deepEqual(
+      closers.map((event) => event.type),
+      ['message', 'assistant/completed', 'turn/completed'],
+      `the log is closed right after the cut turn, before anything else\n${after.slice(crashed.length).map((event) => event.type).join(' ')}`,
+    )
+    assert.equal(closers[0].message?.role, 'tool', 'the first closer answers the call')
+    assert.equal(closers[0].message?.toolCallId, callId)
+    assert.match((closers[0].message?.content ?? []).map((part) => part.text ?? '').join(''), /^error \(INTERRUPTED\)/)
+    const asked = after.findIndex((event, index) => index >= crashed.length && event.type === 'message' && event.message?.role === 'user')
+    assert.ok(asked >= crashed.length + 3, 'and the follow-up prompt comes after the closers')
+    assert.equal(after.filter((event) => event.type === 'message' && event.message?.role === 'tool' && event.message.toolCallId === callId).length, 1, 'the call has one answer')
+
+    const later = await view()
+    assert.equal(later.find((turn) => turn.kind === 'tool' && turn.toolCallId === callId)?.state, 'error', `after a later turn the cut call is still drawn as interrupted\n${describe(later)}`)
+    assert.ok(!later.some((turn) => turn.state === 'running'), `and nothing as running\n${describe(later)}`)
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a session log that is not a readable log is left out after a restart, and the server still starts whole (#130)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #130, by its own steps: register a folder, make sessions there (one with a turn, the rest blank), stop the
+   * server, replace one blank session's log with 64 random bytes and another's with the line {"not":"zstd"}, start
+   * again. Measured before the fix: the TypeScript server's start stopped at the first unreadable log after its listener
+   * was up, so every session answered 500, the tree and the workspaces 503, and no login line was printed; the Rust
+   * server started but still listed both damaged sessions while answering 404 for them. Neither named the file.
+   *
+   * DSH's rule (dsh-session-persistence-jsonl README, "Reading the logs"): "Unreadable or unsupported headers,
+   * including corrupt Zstandard header frames, are omitted from discovery and list(). Direct access to a corrupt
+   * compressed header still rejects." So the damaged sessions drop out of the list and are refused when named, every
+   * other session lists and opens, and the start completes. DSH says nothing when it omits one; heddle prints one
+   * line naming the file, and this check asks for the path in the server's output.
+   */
+  const h = harness('unreadable-log')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  const env = { ...h.env, HOME: h.home }
+  const randomBytes = Buffer.from('79ac1a9d5df6abd7a1b2c3d4e5f60718293a4b5c6d7e8f9011223344556677889900aabbccddeeff00112233445566778899aabbccddeeff0011223344556677', 'hex')
+  const plainLine = Buffer.from('{"not":"zstd"}\n')
+  let live
+  try {
+    const connect = async () => {
+      const origin = new URL(live.url).origin
+      const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+      return (path, init = {}) => fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    }
+    live = await startServer(serverArgs, env)
+    let call = await connect()
+    const registered = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: h.work }) })
+    assert.equal(registered.status, 200, `the folder was registered\n${await registered.text()}`)
+    const ids = []
+    for (let index = 0; index < 4; index += 1) {
+      const made = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: h.work }) })
+      const body = await made.text()
+      assert.equal(made.status, 200, `session ${index + 1} was created\n${body}`)
+      ids.push(JSON.parse(body).session)
+    }
+    const [turned, blank, random, plain] = ids
+    const turn = await call('/api/turn', { method: 'POST', body: JSON.stringify({ session: turned, prompt: 'remember this' }) })
+    const stream = await turn.text()
+    assert.equal(turn.status, 200, `the first session ran a turn\n${stream}`)
+    assert.ok(stream.includes('a remembered answer'), `and was answered\n${stream}`)
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 300))
+
+    const randomLog = transcriptFile(join(h.home, 'sessions', random))
+    const plainLog = transcriptFile(join(h.home, 'sessions', plain))
+    writeFileSync(randomLog, randomBytes)
+    writeFileSync(plainLog, plainLine)
+
+    try {
+      live = await startServer(serverArgs, env)
+    } catch (error) {
+      assert.fail(`the restarted server printed its login line (heddle web: http://…?token=…)\n${error.message}`)
+    }
+    call = await connect()
+    const listing = await call('/api/sessions')
+    const listed = await listing.text()
+    assert.equal(listing.status, 200, `the sessions are listed\n${listed}`)
+    const listedIds = JSON.parse(listed).map((meta) => meta.id)
+    assert.ok(listedIds.includes(turned) && listedIds.includes(blank), `every healthy session is listed\n${listed}`)
+    assert.ok(!listedIds.includes(random), `the session whose log holds random bytes is left out of the list, as DSH omits an unreadable header\n${listed}`)
+    assert.ok(!listedIds.includes(plain), `and so is the one whose log is a plain JSON line\n${listed}`)
+
+    const opened = await call(`/api/sessions/${turned}`)
+    const view = await opened.text()
+    assert.equal(opened.status, 200, `the healthy session with a turn opens\n${view}`)
+    assert.ok(view.includes('a remembered answer'), `and shows its answer\n${view}`)
+    const empty = await call(`/api/sessions/${blank}`)
+    assert.equal(empty.status, 200, `the healthy blank session opens\n${await empty.text()}`)
+    for (const id of [random, plain]) {
+      const refused = await call(`/api/sessions/${id}`)
+      const body = await refused.text()
+      assert.equal(refused.status, 404, `direct access to a damaged session is refused as no session\n${body}`)
+      assert.equal(JSON.parse(body).error, `no session ${id}`, 'with the words an unknown id gets')
+      /**
+       * A turn into it is refused the same way, before anything runs (developer-six on #130: the Rust turn route
+       * answered with the store's absolute path, and the page offered a live composer on the row).
+       */
+      const refusedTurn = await call('/api/turn', { method: 'POST', body: JSON.stringify({ session: id, prompt: 'are you there?' }) })
+      const answer = await refusedTurn.text()
+      assert.equal(refusedTurn.status, 404, `a turn into a damaged session is refused as no session\n${answer}`)
+      assert.deepEqual(JSON.parse(answer), { error: `no session ${id}`, code: 'session/not-found' }, 'with the turn route\'s answer for an unknown id')
+      assert.ok(!answer.includes(h.home), `and without the store's path on disk\n${answer}`)
+    }
+
+    const workspaces = await call('/api/workspaces')
+    const shown = await workspaces.text()
+    assert.equal(workspaces.status, 200, `the workspace plugin is loaded and answers\n${shown}`)
+    assert.ok(JSON.parse(shown).workspaces?.some((workspace) => workspace.path === realpathSync(h.work) || workspace.path === h.work), `and lists the folder\n${shown}`)
+    const tree = await call(`/api/tree?path=${encodeURIComponent(h.work)}`)
+    const level = await tree.text()
+    assert.equal(tree.status, 200, `the tree answers for the folder\n${level}`)
+    /**
+     * The tree draws a session from the definition it wrote into the folder (_sessions_/<name>/session.json), not from
+     * the store, so after the store dropped the damaged sessions their rows still opened on a 404. They are gone from
+     * the folder's level and from the roots' level; the healthy ones keep theirs.
+     */
+    assert.ok(level.includes(turned) && level.includes(blank), `the healthy sessions keep their rows in the folder\n${level}`)
+    const roots = await call('/api/tree')
+    const top = await roots.text()
+    assert.equal(roots.status, 200, `the roots' level answers\n${top}`)
+    for (const id of [random, plain]) {
+      assert.ok(!level.includes(id), `a damaged session has no row in the folder's tree\n${level}`)
+      assert.ok(!top.includes(id), `nor at the roots' level\n${top}`)
+    }
+    assert.ok(readFileSync(randomLog).equals(randomBytes) && readFileSync(plainLog).equals(plainLine), 'and neither damaged file was rewritten')
+
+    for (let waited = 0; waited < 2_000 && ![randomLog, plainLog].every((log) => live.output().includes(log)); waited += 100) {
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const output = live.output()
+    for (const log of [randomLog, plainLog]) {
+      assert.ok(output.split('\n').some((line) => line.includes(log) && /skipped/i.test(line)), `a line of the server's log names the skipped file ${log}\n${output}`)
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a turn into a one-shot subagent\'s session is refused the way DSH refuses it, and the child is left as it was', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   /**
@@ -1417,6 +1653,164 @@ test('a turn into a one-shot subagent\'s session is refused the way DSH refuses 
   }
 })
 
+test('a turn into an archived session is accepted and blocked before any model request, as DSH\'s gate blocks it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26. DSH's ArchivedSessionGate (dsh-api-session-controller lib/index.js:2508-2541) answers the agent's
+   * pre-step with reject while its session is archived: the prompt is accepted, the turn opens, its claimed input is
+   * dropped, no model request is made and the turn ends blocked (dsh-agent-loop lib/index.js:956-963). Measured before
+   * this gate on both builds: POST /api/turn into an archived session asked the model, answered, and grew the session
+   * from one turn to two while it stayed archived. The endpoint here is an HTTP double, so "no model request reached
+   * the endpoint" is a count of what it received, not a reading of the log alone.
+   */
+  const home = isolatedHome('archived-turn')
+  const work = fixtureDir('archived-turn-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the endpoint answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  /** What a turn must not leave in an archived session's log: an input message, a model call, an answer, a completion. */
+  const answerTypes = new Set(['message', 'model/request', 'assistant/chunk', 'assistant/completed', 'turn/completed'])
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1, 'and asked the endpoint once')
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const meta = async () => (await (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()).find((one) => one.id === id)
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const turnsBefore = (await meta())?.turns
+    assert.equal(turnsBefore, 1, 'with its one turn')
+    const eventsBefore = transcript().length
+
+    const response = await post('/api/turn', { session: id, prompt: 'into the archive' })
+    const text = await response.text()
+    assert.equal(response.status, 200, `the turn is accepted, as DSH accepts the prompt\nsaw: ${response.status} ${text.slice(0, 300)}`)
+    const doneLine = text.split('\n\n').find((frame) => frame.startsWith('event: done\n'))
+    assert.ok(doneLine !== undefined, `the turn ended\nsaw: ${text.slice(0, 600)}`)
+    const done = JSON.parse(doneLine.slice(doneLine.indexOf('data: ') + 'data: '.length))
+    assert.equal(done.finishReason, 'blocked', `it ended blocked\nsaw: ${JSON.stringify(done)}`)
+    assert.equal(done.rounds, 0, 'without a step')
+    assert.equal(done.text, '', 'and without an answer')
+    assert.ok(!text.includes('the endpoint answered'), 'the endpoint\'s answer never streamed')
+    assert.equal(double.requests.length, 1, 'no model request reached the endpoint')
+    const added = transcript().slice(eventsBefore)
+    assert.deepEqual(added.filter((event) => answerTypes.has(event.type)).map((event) => event.type), [], 'no input, model call or answer was appended')
+    assert.deepEqual(
+      added.filter((event) => event.type === 'turn/failed').map((event) => event.reason),
+      [{ kind: 'blocked' }],
+      `the log records the turn as blocked, DSH's turn-end reason\nsaw: ${JSON.stringify(added)}`,
+    )
+    const inserted = added.find((event) => event.type === 'agent/inbox/spliced' && event.target === 'next-turn' && Array.isArray(event.inserted) && event.inserted.length === 1)
+    assert.equal(inserted?.inserted[0]?.content?.[0]?.text, 'into the archive', 'the dropped prompt is recorded as claimed input, as DSH records it')
+    const after = await meta()
+    assert.equal(after?.turns, turnsBefore, 'the session records the same number of turns')
+    assert.equal(after?.archived, true, 'and stays archived')
+
+    /** The command line's --resume --turn into the same session meets the same gate. */
+    live.kill()
+    live = undefined
+    const resumed = await runCli([...args, '--resume', id, '--turn', 'the command line into the archive', '--json'], { env, cwd: work })
+    assert.equal(resumed.code, 0, `the command line's turn is accepted\n${resumed.stdout}${resumed.stderr}`)
+    assert.equal(parseJson(resumed.stdout).finishReason, 'blocked', `and ends blocked\n${resumed.stdout}`)
+    assert.equal(double.requests.length, 1, 'still without a model request')
+    const afterCli = transcript().slice(eventsBefore)
+    assert.deepEqual(afterCli.filter((event) => answerTypes.has(event.type)).map((event) => event.type), [], 'and without an answer')
+    assert.equal(afterCli.filter((event) => event.type === 'turn/failed').length, 2, 'two blocked turns, one per caller')
+    const listed = await runCli([...args, 'sessions', '--json'], { env, cwd: work })
+    assert.equal(parseJson(listed.stdout).find((one) => one.id === id)?.turns, turnsBefore, 'the turn count is unchanged')
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
+test('a goal round into an archived session blocks its goal as DSH does (prompt-rejected), and a resume after the unarchive runs it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26, the goal half. A goal round is a turn, so the archived-session gate refuses its first step before any
+   * model request. DSH's goal-round driver then blocks the goal with "prompt-rejected" and its own sentence
+   * (dsh-goal-round-driver lib/index.js:326-333), so the goal is not run again by itself, and after an unarchive a
+   * resume starts it. Measured before on both builds: the goal stayed active and armed, so the resume was refused as
+   * "already active and armed".
+   */
+  const home = isolatedHome('archived-goal')
+  const work = fixtureDir('archived-goal-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the goal round answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1)
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const goal = async () => (await (await fetch(`${origin}/api/goal?session=${id}`, { headers: { cookie } })).json()).goal
+    const reasonOf = (view) => view?.blockedReason ?? view?.blocked_reason
+    const waitFor = async (condition, what) => {
+      for (const started = Date.now(); Date.now() - started < 15_000; ) {
+        const value = await condition()
+        if (value !== undefined) return value
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+      return assert.fail(`timed out waiting for ${what}; the goal is ${JSON.stringify(await goal())}`)
+    }
+    const goalRounds = () =>
+      transcript().filter((event) => event.type === 'message' && event.message?.source?.kind === 'goal').map((event) => event.message.source.round)
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const created = await post('/api/goal', { session: id, action: 'create', objective: 'finish the report', max_goal_rounds: 1 })
+    assert.equal(created.status, 200, `the goal is created\n${await created.text()}`)
+
+    const blocked = await waitFor(async () => {
+      const current = await goal()
+      return current !== undefined && current.phase !== 'active' ? current : undefined
+    }, 'the refused round to block its goal (without DSH\'s prompt-rejected it stays active and armed)')
+    assert.equal(blocked.phase, 'blocked')
+    assert.deepEqual(reasonOf(blocked), { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' }, 'with DSH\'s code and sentence')
+    assert.equal(double.requests.length, 1, 'the refused round made no model request')
+    assert.deepEqual(goalRounds(), [], 'and admitted no message')
+    assert.deepEqual(transcript().filter((event) => event.type === 'turn/failed').map((event) => event.reason), [{ kind: 'blocked' }], 'one blocked turn, not started again')
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: false })).status, 200, 'the session is unarchived')
+    const resumed = await post('/api/goal', { session: id, action: 'resume', goal_id: blocked.id, revision: blocked.revision })
+    assert.equal(resumed.status, 200, `the blocked goal resumes\n${await resumed.text()}`)
+    const settled = await waitFor(async () => {
+      const current = await goal()
+      return reasonOf(current)?.code === 'round-limit' ? current : undefined
+    }, 'the resumed round to run to its cap')
+    assert.equal(settled.phase, 'blocked')
+    assert.deepEqual(goalRounds(), [1], 'the resume ran round 1')
+    assert.equal(double.requests.length, 2, 'and asked the endpoint for it')
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
@@ -1434,7 +1828,7 @@ function startServer(args, env) {
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
-          resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL') })
+          resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL'), output: () => output })
         }
       }
       child.stdout.on('data', onData)
@@ -2089,6 +2483,68 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test('a workspace added through the Web API with a ~ path is the folder under the home, stored canonical', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * GitHub issue #1. The route accepts a path that starts with `~` and expands it to the home folder; what it stores
+   * is the canonical path of that folder, so `~/x`, its expanded spelling, a trailing slash and (on a
+   * case-insensitive volume) a letter-case variant are one workspace. Measured on the TypeScript build: it checked
+   * the expanded path and stored the raw string, which resolved against the server's working folder — a record at
+   * `<server folder>/~/x`, a folder that does not exist, answered `200 created: true`. The Rust build stored the
+   * real folder. heddle keeps this `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path
+   * that is not fully qualified instead (dsh-workspace `realpathNormalize`), so this judges the two builds alike.
+   *
+   * `HOME` is the check's own scratch folder for the server, on either build, so nothing is read or written under a
+   * real home.
+   */
+  const h = harness('web-tilde')
+  const home = fixtureDir('web-tilde-home')
+  const folder = join(home, 'tilde-probe')
+  let live
+  try {
+    mkdirSync(folder, { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (body) => {
+      const response = await fetch(`${origin}/api/workspaces`, { method: 'POST', body: JSON.stringify(body), headers: { cookie, 'content-type': 'application/json' } })
+      return { status: response.status, body: await response.json() }
+    }
+    const canonical = realpathSync(folder)
+
+    const added = await post({ path: '~/tilde-probe', name: 'tilde-probe' })
+    assert.equal(added.status, 200, `a ~ path is added (${JSON.stringify(added.body)})`)
+    assert.equal(added.body.created, true, 'and this call created it')
+    assert.equal(added.body.record.path, canonical, 'as the canonical path of the folder under the home, not one under the server folder')
+    const views = (await (await fetch(`${origin}/api/workspaces`, { headers: { cookie } })).json()).workspaces ?? []
+    assert.deepEqual(views.map((view) => view.path), [canonical], `the listing holds that folder and nothing else\nsaw: ${JSON.stringify(views)}`)
+
+    for (const [what, path] of [
+      ['its expanded spelling', folder],
+      ['a trailing slash after ~', '~/tilde-probe/'],
+      ...(existsSync(join(home, 'TILDE-PROBE')) ? [['a letter-case variant', '~/TILDE-PROBE']] : []),
+    ]) {
+      const again = await post({ path })
+      assert.equal(again.status, 200, `${what} is not an error (${JSON.stringify(again.body)})`)
+      assert.equal(again.body.created, false, `${what} is the workspace already there`)
+      assert.equal(again.body.record.id, added.body.record.id, `${what} names the same record`)
+    }
+
+    const missing = await post({ path: '~/nowhere' })
+    assert.equal(missing.status, 400, `a ~ path that does not exist is refused (${JSON.stringify(missing.body)})`)
+    assert.equal(missing.body.error, '~/nowhere does not exist', 'naming the path as it was written')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(home)
+  }
+})
+
 test('a session title is cleaned as DSH cleans it, at creation and on rename, and one with nothing visible is refused', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
@@ -2395,6 +2851,195 @@ test("the Web API's tree lists only what a workspace root holds, and refuses a p
   }
 })
 
+test('first use creates or reuses default-workspace under the heddle home, once, the way DSH initializes its default', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's workspace/initializeDefault (dsh-workspace, dsh-api-workspace-controller): an empty install — no workspace,
+   * no session — gets a workspace over a folder named default-workspace, created when missing and reused when present;
+   * a repeated call answers the same workspace; deleting it turns first use off for good, and the folder stays; any
+   * install that is not empty gets nothing, which is not an error. No session is started. DSH's folder is under
+   * Documents/deepseek-harness; heddle's is under its own home, so HOME is a fixture here and its Documents must stay
+   * absent.
+   */
+  const fresh = harness('first-use')
+  const busy = harness('first-use-busy')
+  const userHome = fixtureDir('first-use-user')
+  const chosen = fixtureDir('first-use-chosen')
+  const live = []
+  try {
+    const serve = async (h) => {
+      const server = await startServer(
+        ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+        { ...h.env, HOME: userHome },
+      )
+      live.push(server)
+      const origin = new URL(server.url).origin
+      const handshake = await fetch(server.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      return async (path, init = {}) => {
+        const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+        const text = await response.text()
+        let body
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+        return { status: response.status, body }
+      }
+    }
+    const call = await serve(fresh)
+    const folder = join(fresh.home, 'default-workspace')
+    const first = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(first.status, 200, `an empty install asks for its default workspace (${JSON.stringify(first.body)})`)
+    assert.ok(first.body.workspace !== null && typeof first.body.workspace === 'object', `and gets one (${JSON.stringify(first.body)})`)
+    assert.ok(existsSync(folder), 'its folder is made under the heddle home')
+    assert.equal(first.body.workspace.path, realpathSync(folder), 'and the workspace is that folder')
+    assert.equal(first.body.workspace.title, 'default-workspace', "titled after the folder, as DSH stores it")
+    assert.equal(first.body.workspace.origin, 'added', 'a workspace the tree draws')
+    assert.equal(existsSync(join(userHome, 'Documents')), false, "nothing is made in the user's Documents")
+    const listed = (await call('/api/workspaces')).body.workspaces ?? []
+    assert.deepEqual(listed.map((view) => view.id), [first.body.workspace.id], 'it is the one workspace')
+    assert.deepEqual((await call('/api/sessions')).body, [], 'and no session was started')
+
+    const again = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(again.body.workspace?.id, first.body.workspace.id, 'a repeated call reuses it')
+    assert.equal(((await call('/api/workspaces')).body.workspaces ?? []).length, 1, 'rather than making a second')
+
+    const deleted = await call(`/api/workspaces/${encodeURIComponent(first.body.workspace.id)}`, { method: 'DELETE' })
+    assert.equal(deleted.status, 200, 'the default workspace can be deleted')
+    const after = await call('/api/workspaces/default', { method: 'POST' })
+    assert.equal(after.status, 200)
+    assert.equal(after.body.workspace, null, 'and once deleted it is not given back')
+    assert.deepEqual((await call('/api/workspaces')).body.workspaces ?? [], [], 'the list stays empty')
+    assert.ok(existsSync(folder), 'while its folder stays')
+
+    const other = await serve(busy)
+    assert.equal((await other('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: chosen }) })).status, 200)
+    const notFirst = await other('/api/workspaces/default', { method: 'POST' })
+    assert.equal(notFirst.status, 200, 'an install that is not empty is not refused')
+    assert.equal(notFirst.body.workspace, null, 'it gets no default workspace')
+    assert.equal(existsSync(join(busy.home, 'default-workspace')), false, 'and no folder')
+  } finally {
+    for (const server of live) server.kill()
+    for (const h of [fresh, busy]) {
+      removeDir(h.home)
+      removeDir(h.work)
+    }
+    removeDir(userHome)
+    removeDir(chosen)
+  }
+})
+
+test('a folder heddle cannot read is refused with a code, never listed as empty, and New session where heddle cannot write says why without the path (#106)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /** `chmod 000` does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * Issue #106. DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:483-489
+   * and :564-581): a failed level shows one line per code and the transport's own message otherwise, and its file
+   * backend's listing of a folder it may not read fails with "cannot list "<path>": permission denied"
+   * (dsh-fs-local lib/index.js:269) instead of answering no entries. Both builds answered `200` with `children: []`, which
+   * the page drew as "nothing inside". DSH has no code for that failure, so heddle answers its own in DSH's family,
+   * `workspace-file/unreadable`, `400` as heddle's folder picker answers `directory-picker/unreadable`, naming the folder
+   * relative to its workspace (the root by its title).
+   *
+   * New session writes a definition into the branch, so a branch heddle cannot write fails there. TS answered a raw
+   * `500 internal error: EACCES … mkdir '<home>/…'` and Rust a path; both now answer `400` with `session/unwritable` and
+   * a sentence naming the folder by its name, never its absolute path, and record no session for the refused branch.
+   * The modes are restored in `finally`, before the fixture is removed.
+   */
+  const h = harness('unreadable')
+  const root = fixtureDir('unreadable-root')
+  const locked = join(root, 'locked')
+  const { chmodSync } = await import('node:fs')
+  let live
+  try {
+    entry(join(locked, 'held.txt'), 'a file the server cannot list\n')
+    mkdirSync(join(root, 'empty'), { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const title = added.body.record?.title
+    assert.equal(typeof title, 'string', `the registration answers the root's title (${JSON.stringify(added.body)})`)
+    const canonicalRoot = realpathSync(root)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const empty = await treeOf(join(root, 'empty'))
+    assert.equal(empty.status, 200, `an empty folder still lists (${JSON.stringify(empty.body)})`)
+    assert.deepEqual(empty.body.children, [], 'as asked and empty')
+
+    chmodSync(locked, 0o000)
+    const sub = await treeOf(locked)
+    assert.equal(sub.status, 400, `an unreadable folder is refused, not listed as empty (${sub.status} ${JSON.stringify(sub.body)})`)
+    assert.deepEqual(
+      sub.body,
+      { error: 'cannot list "locked": permission denied', code: 'workspace-file/unreadable' },
+      'with a code and a sentence naming the folder relative to its workspace',
+    )
+    const cliTree = await runCli(adminArgs(h, ['tree', locked, '--json']), { env: h.env, cwd: root })
+    assert.notEqual(cliTree.code, 0, `the CLI refuses it too\n${cliTree.stdout}${cliTree.stderr}`)
+    assert.match(cliTree.stderr, /heddle: cannot list "locked": permission denied/, 'with the same sentence')
+
+    const parent = await treeOf(root)
+    assert.equal(parent.status, 200, `the readable root still lists (${JSON.stringify(parent.body)})`)
+    assert.ok(childOf(parent.body, 'locked'), 'and still names the unreadable folder in it')
+
+    chmodSync(root, 0o000)
+    const whole = await treeOf(root)
+    assert.equal(whole.status, 400, `an unreadable workspace root is refused, not listed as empty (${whole.status} ${JSON.stringify(whole.body)})`)
+    assert.deepEqual(whole.body, { error: `cannot list "${title}": permission denied`, code: 'workspace-file/unreadable' }, 'naming the root by its title')
+    const roots = await call('/api/tree')
+    assert.equal(roots.status, 200, 'the roots still list beside it')
+    const listedRoot = [...(roots.body.children ?? []), ...(roots.body.adHoc ?? [])].find((node) => node.path === canonicalRoot)
+    assert.ok(listedRoot, `the unreadable root is still one of them\n${JSON.stringify(roots.body)}`)
+    assert.equal(listedRoot.children, null, 'with its children not listed (null), never an empty list')
+
+    const created = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root }) })
+    assert.equal(created.status, 400, `New session in a folder heddle cannot write is a refusal, not an internal error (${created.status} ${JSON.stringify(created.body)})`)
+    assert.deepEqual(
+      created.body,
+      { error: `cannot write to "${root.split(sep).pop()}": permission denied`, code: 'session/unwritable' },
+      'with a code and a sentence that names the folder without its path',
+    )
+    for (const leak of [root, canonicalRoot, process.env.HOME].filter((text) => typeof text === 'string' && text.length > 1)) {
+      assert.ok(!JSON.stringify(created.body).includes(leak), `the answer carries no absolute path (${leak})`)
+    }
+    const listed = await call('/api/sessions')
+    const strays = (Array.isArray(listed.body) ? listed.body : []).filter((meta) => meta.cwd === canonicalRoot || meta.cwd === root)
+    assert.deepEqual(strays, [], 'and the refused branch holds no session record')
+  } finally {
+    live?.kill()
+    for (const dir of [root, locked]) {
+      try {
+        chmodSync(dir, 0o755)
+      } catch {
+        // already gone, or never made
+      }
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -2537,6 +3182,149 @@ test('a new session is filed under its workspace, and an old one keeps the shape
   } finally {
     removeDir(h.home)
     removeDir(h.work)
+  }
+})
+
+/**
+ * A server of the blank-session checks below: a scratch home, the work folder registered as a workspace, and a caller that
+ * holds the cookie the launch URL mints.
+ */
+async function blankSessionServer(h) {
+  const live = await startServer(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+    { ...h.env, HOME: h.home },
+  )
+  const origin = new URL(live.url).origin
+  const handshake = await fetch(live.url, { redirect: 'manual' })
+  const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+  const call = async (path, init = {}) => {
+    const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    const text = await response.text()
+    let body
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = text
+    }
+    return { status: response.status, body }
+  }
+  const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body) })
+  const added = await post('/api/workspaces', { path: h.work })
+  assert.equal(added.status, 200, `the folder is a workspace (${JSON.stringify(added.body)})`)
+  return { live, call, post, branch: realpathSync(h.work) }
+}
+
+test('a New session request never lands in an empty session another client made, even one it names', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's sidebar New session and its chord mint a fresh Session on every press (startSession with no options, then
+   * connectBlank with no reuse: dsh-client-ui-workspace lib/client.js:1403-1406 and 1520); the older blank is only hidden
+   * (sessionVisible, :964-966). On a shared server an empty session in the list can be another client's: the coordinator's
+   * request of 2026-10-29 reports a turn landing in one. So the session route makes a new session for every request, and a
+   * request that names a listed empty session (what an earlier page sent) is not handed that session.
+   */
+  const h = harness('blank-two-clients-api')
+  let server
+  try {
+    server = await blankSessionServer(h)
+    const { post, call, branch } = server
+    const first = await post('/api/sessions', { branch })
+    assert.equal(first.status, 200, `client A's New session starts a session (${JSON.stringify(first.body)})`)
+    const plain = await post('/api/sessions', { branch })
+    assert.equal(plain.status, 200, `client B's New session answers (${JSON.stringify(plain.body)})`)
+    assert.notEqual(plain.body.session, first.body.session, 'and is a session of its own')
+    const naming = await post('/api/sessions', { branch, session: first.body.session })
+    assert.equal(naming.status, 200, `a New session naming A's empty session still answers (${JSON.stringify(naming.body)})`)
+    assert.notEqual(naming.body.session, first.body.session, "and is not handed A's session")
+    assert.notEqual(naming.body.definition, first.body.definition, 'nor its definition')
+    const listed = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    assert.equal(new Set(listed.map((meta) => meta.id)).size, 3, `three requests, three sessions\nsaw: ${JSON.stringify(listed.map((meta) => meta.id))}`)
+    assert.equal(listed.find((meta) => meta.id === first.body.session)?.turns ?? 0, 0, "and A's session is as A left it")
+  } finally {
+    server?.live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('two clients pressing New session in the same folder get two different sessions, and each sees only its own blank', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The coordinator's case (2026-10-29): on a shared server the page's New session reopened an empty session another client
+   * had made, and a turn landed in it. DSH mints a fresh Session on every press of New session or its chord
+   * (dsh-client-ui-workspace lib/client.js:1403-1406, 1520) and shows a blank row only while it is the open session
+   * (sessionVisible, :959-966). Two browsers are two clients: each presses the page's own New session control.
+   */
+  const h = harness('blank-two-clients')
+  const elsewhere = fixtureDir('blank-two-clients-elsewhere')
+  let server
+  let clientA
+  let clientB
+  try {
+    server = await blankSessionServer(h)
+    const { live, call, branch } = server
+    /** One press of the panel's New session; resolves with the selected session before and after, and the session rows. */
+    const press = `(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const selected = () => document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null
+      for (let attempt = 0; attempt < 60 && document.querySelector('#tree li[data-kind="workspace"]') === null; attempt += 1) await wait(150)
+      await wait(300)
+      const before = selected()
+      document.getElementById('new-session').click()
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await wait(150)
+        const now = selected()
+        if (now !== null && now !== before) break
+      }
+      await wait(700)
+      return JSON.stringify({ before, after: selected(), rows: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId), note: document.getElementById('tree-note')?.textContent ?? '' })
+    })()`
+    const rows = `JSON.stringify([...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId))`
+
+    clientA = await openBrowser()
+    await clientA.goto(live.url)
+    await clientA.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const a = JSON.parse(await clientA.evaluate(press, 20_000))
+    assert.ok(typeof a.after === 'string' && a.after !== a.before, `client A's New session opens a session\nsaw: ${JSON.stringify(a)}`)
+
+    clientB = await openBrowser()
+    await clientB.goto(live.url)
+    await clientB.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const b = JSON.parse(await clientB.evaluate(press, 20_000))
+    assert.ok(typeof b.after === 'string', `client B's New session opens a session\nsaw: ${JSON.stringify(b)}`)
+    assert.notEqual(b.after, a.after, `client B's New session is not client A's session\nA: ${JSON.stringify(a)}\nB: ${JSON.stringify(b)}`)
+    const again = JSON.parse(await clientB.evaluate(press, 20_000))
+    assert.ok(typeof again.after === 'string' && again.after !== b.after && again.after !== a.after, `a second press makes another, as DSH's does\nsaw: ${JSON.stringify(again)}`)
+
+    const listed = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    const ids = new Set(listed.map((meta) => meta.id))
+    assert.ok([a.after, b.after, again.after].every((id) => ids.has(id)), `the server holds all three sessions\nsaw: ${JSON.stringify([...ids])}`)
+    assert.equal(listed.find((meta) => meta.id === a.after)?.turns ?? 0, 0, "and client A's is still empty, waiting for A")
+
+    /**
+     * Each client's rows: only its own open blank, never the other's nor an older one of its own. A turn elsewhere makes both
+     * pages redraw their trees from the server, so the rows below are drawn from the same list.
+     */
+    const turn = await server.post('/api/turn', { prompt: 'a turn somewhere else, so both trees redraw', folder: elsewhere })
+    assert.equal(turn.status, 200, `a turn elsewhere runs (${String(JSON.stringify(turn.body)).slice(0, 300)})`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const rowsA = JSON.parse(await clientA.evaluate(rows))
+    const rowsB = JSON.parse(await clientB.evaluate(rows))
+    assert.ok(rowsA.includes(a.after), `client A still sees its own blank\nsaw: ${JSON.stringify(rowsA)}`)
+    assert.ok(!rowsA.includes(b.after) && !rowsA.includes(again.after), `and none of client B's\nsaw: ${JSON.stringify(rowsA)}`)
+    assert.deepEqual(
+      rowsB.filter((id) => [a.after, b.after, again.after].includes(id)),
+      [again.after],
+      `client B sees its open blank only: not A's, not its own older one\nsaw: ${JSON.stringify(rowsB)}`,
+    )
+  } finally {
+    await clientA?.close()
+    await clientB?.close()
+    server?.live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(elsewhere)
   }
 })
 
@@ -3921,7 +4709,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.menuChrome.position, 'fixed', `a menu floats in viewport coordinates\nsaw: ${JSON.stringify(reading.menuChrome)}`)
     assert.equal(reading.menuChrome.insideViewport, true, 'and is entirely on screen')
     assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
-    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
+    /**
+     * Eight items since C17 added DSH's `Manual` (dsh-client-ui-workspace/lib/client.js:2914-2918, with its chevrons
+     * glyph): Workspace Tree, Workspace, In one list, Manual, Last updated, and the archive trio.
+     */
+    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
 
     /** **A session's glyph is a conversation**, not a folder: the reference's bubble artwork, distinct from the folder path. */
     const glyphs = JSON.parse(
@@ -4011,8 +4803,9 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      */
     /**
      * DSH's View options, read from its own menu on 2026-10-17, is four groups: a `WorkSpace` heading, the grouping pair,
-     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, `Last updated` (the only
-     * order it has) and the archive trio, in DSH's order — asserted as the list, because the order is the claim.
+     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, the ordering pair
+     * (`Manual` / `Last updated`, since C17) and the archive trio, in DSH's order — asserted as the list, because the
+     * order is the claim.
      */
     assert.deepEqual(
       reading.viewItems.filter((item) => item.label !== null).map((item) => item.label),
@@ -4020,7 +4813,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
        * The grouping is DSH's three since the workspace tree (owner goal, 2026-10-28; DSH 0.2.1's `SessionGroupBy` is
        * `workspace-tree | workspace | flat`): `Workspace Tree`, `Workspace` (sibling sections) and `In one list`.
        */
-      ['Workspace Tree', 'Workspace', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
+      ['Workspace Tree', 'Workspace', 'In one list', 'Manual', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
       `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
     )
     assert.deepEqual(
@@ -4370,16 +5163,23 @@ test('content search finds a phrase inside an answer, ranked and quoted the way 
 })
 
 test('View options groups the sessions the two ways DSH offers: the tree, or one list', async (context) => {
-  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-grouping')
   let live
   let browser
   try {
     await conventionsFixture(h)
+    /**
+     * Two conversations, each with a turn. Empty ones would not do: DSH draws a blank session as a row only while it is
+     * the open one (sessionVisible, dsh-client-ui-workspace lib/client.js:959-966), in the tree and in the list alike, and
+     * this page follows it, so two blanks would be one row whichever grouping is chosen. What is judged here is the grouping.
+     */
     for (const name of ['one', 'two']) {
       const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', name), '--json']), { env: h.env, cwd: h.work })
       assert.equal(made.code, 0, made.stderr)
+      const turn = await runCli(adminArgs(h, ['--turn', `a conversation in ${name}`]), { env: h.env, cwd: join(h.work, '_tools_', name) })
+      assert.equal(turn.code, 0, turn.stderr)
     }
     live = await startServer(
       ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
@@ -5728,18 +6528,26 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
   }
 })
 
-test('the later pin leads, and the tree and the flat list put the same sessions in the same order', async (context) => {
+test('pins follow DSH in both orders: prompt time under Last updated, the later pin first under Manual, the flat list like the tree', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
-   * R-developer-eight-17 (DSH parity C13), measured on both builds: two pins showed in one order in the tree and in the
-   * other order in In one list, because the tree ordered pins by when they were pinned and the flat list by when the
-   * sessions were created. DSH keeps one registry-global pin list, most recent pin first, and fronts a new pin in both the
-   * group and the flat list. The flat list also ordered the unpinned rows by creation while the tree and the View options
-   * item (Last updated) order them by the last write.
+   * R-developer-eight-17 (DSH parity C13) with C17 and issue #63. Two pins read one way in the tree and the other way in
+   * In one list, which sorted by creation. Since C17 the flat list follows the tree's rule in the **selected order**,
+   * as DSH's flat list partitions its own account's order (dsh-client-ui-workspace/lib/client.js:1146-1154,
+   * 3583-3584). The rule, from DSH's README (*Reordering and view options*):
+   * - **Last updated** sorts each partition by the latest prompt or steer, and pin time does not affect it.
+   * - **Manual** keeps a saved sequence. Entering it freezes the order on screen.
+   * - Pinning "moves the Session to the front of its complete saved sequence without changing the selected mode. It
+   *   leads the pinned partition in Manual but need not lead it in Last updated. Unpinning leaves the saved position
+   *   unchanged."
+   * DSH fronts a pin in the group's account and the flat list's (`pinSessionOrder` / `pinOrderAccounts`,
+   * client.js:1303-1309, 1343-1345). This check judged "the later pin leads" in the only order main had, and is
+   * rewritten to that rule.
    *
-   * The fixture makes every one of those rules disagree with creation order: four sessions in one workspace, the third
-   * pinned before the second, and the first written to last.
+   * The fixture: four sessions in one workspace, prompted first..fourth, then first again, so it has the latest prompt.
+   * The third is pinned before the second, so the second is the later pin and the third has the later prompt. Manual is
+   * entered from a freshly loaded In one list, so the tree has not been drawn in that page load.
    */
   const h = harness('session-pin-order')
   let live
@@ -5766,15 +6574,15 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const handshake = await fetch(live.url, { redirect: 'manual' })
     const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
     assert.ok(cookie.length > 0, 'the server issued a cookie')
-    /** The first session is written to last, so it is the most recently updated of the unpinned two. */
+    /** The first session is prompted again, so it has the latest prompt of the unpinned two. */
     const written = await fetch(new URL('/api/turn', live.url), {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest written', folder: h.work }),
+      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest prompted', folder: h.work }),
     })
     assert.equal(written.status, 200, `the follow-up turn runs\n${await written.clone().text()}`)
     await written.text()
-    /** The third session is pinned, then the second: the second is the later pin, though it was created earlier. */
+    /** The third session is pinned, then the second: the second is the later pin, the third the later prompt. */
     const pin = (id) =>
       fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
         method: 'POST',
@@ -5787,53 +6595,127 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const metas = await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json()
     const metaOf = (id) => metas.find((meta) => meta.id === id)
     assert.ok(String(metaOf(second)?.pinnedAt) > String(metaOf(third)?.pinnedAt), `the store says which pin is later\nsaw: ${JSON.stringify(metas)}`)
-    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which session was written last\nsaw: ${JSON.stringify(metas)}`)
-    const expected = [second, third, first, fourth]
+    assert.ok(String(metaOf(third)?.updated) > String(metaOf(second)?.updated), `and which pinned session was prompted later\nsaw: ${JSON.stringify(metas)}`)
+    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which unpinned session was prompted last\nsaw: ${JSON.stringify(metas)}`)
+
+    /**
+     * Page helpers, installed once per page load: read the rows of whichever view is drawn, choose a View options item,
+     * and press a row's pin control. Each read waits until it sees four rows, opening the workspace if it is closed.
+     */
+    const helpers = `(() => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const sessionLis = () => [...document.querySelectorAll('#tree li[data-kind="session"]')]
+      window.__pinOrder = {
+        async read() {
+          for (let attempt = 0; attempt < 40; attempt += 1) {
+            const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
+            if (workspaceLi !== null && workspaceLi.dataset.open !== 'true' && attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
+            if (sessionLis().length >= 4 && (workspaceLi === null || workspaceLi.dataset.open === 'true')) break
+            await wait(150)
+          }
+          await wait(400)
+          return {
+            view: document.querySelector('#tree li[data-kind="workspace"]') === null ? 'flat' : 'tree',
+            ids: sessionLis().map((li) => li.dataset.sessionId ?? null),
+            pinned: sessionLis().map((li) => li.dataset.pinned === 'true'),
+          }
+        },
+        async choose(label) {
+          document.querySelector('#view-options button').click()
+          await wait(250)
+          const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === label)
+          if (item === undefined) return false
+          item.click()
+          await wait(1200)
+          return true
+        },
+        async pin(id) {
+          const button = document.querySelector('#tree li[data-kind="session"][data-session-id="' + id + '"] > .row button.pin-action')
+          if (button === null) return false
+          button.click()
+          await wait(1500)
+          return true
+        },
+        stored() {
+          return localStorage.getItem('heddle.tree.order.v1')
+        },
+      }
+      return true
+    })()`
+    const page = async (call) => JSON.parse(await browser.evaluate(`(async () => JSON.stringify(await window.__pinOrder.${call}))()`, 30_000))
+    const name = (ids) => (ids ?? []).map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
+    const byPrompt = [third, second, first, fourth]
 
     browser = await openBrowser()
     await browser.goto(live.url)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
-    const reading = JSON.parse(
-      await browser.evaluate(`(async () => {
-        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
-        const rows = () => [...document.querySelectorAll('#tree .row')]
-        const sessionIds = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId ?? null)
-        /** The workspace is opened only if closed: a first visit opens the first workspace on its own. */
-        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
-        const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
-        if (workspaceLi === null) return JSON.stringify({ error: 'no workspace row' })
-        for (let attempt = 0; attempt < 30 && workspaceLi.dataset.open !== 'true'; attempt += 1) {
-          if (attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
-          await wait(200)
-        }
-        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
-        const tree = sessionIds()
-        const treePinned = [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.pinned === 'true')
-        document.querySelector('#view-options button').click()
-        await wait(250)
-        const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === 'In one list')
-        if (item === undefined) return JSON.stringify({ error: 'no In one list item', tree })
-        item.click()
-        for (let attempt = 0; attempt < 30 && document.querySelector('#tree li[data-kind="workspace"]') !== null; attempt += 1) await wait(150)
-        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
-        await wait(300)
-        const flat = sessionIds()
-        const ages = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .age')].map((age) => age.textContent)
-        return JSON.stringify({ tree, treePinned, flat, ages })
-      })()`, 30_000),
-    )
-    assert.equal(reading.error, undefined, `the page drew the workspace and offered In one list\nsaw: ${JSON.stringify(reading)}`)
-    const name = (ids) => ids.map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
-    /** The tree: the later pin first, then the earlier pin, then the rest by their last write. */
-    assert.deepEqual(name(reading.tree), name(expected), `the tree puts the later pin first, then the latest written\nsaw: ${JSON.stringify(name(reading.tree))}`)
-    assert.deepEqual(reading.treePinned, [true, true, false, false], 'and draws the two leading rows as pinned')
-    /** The flat list: the same rule, so the same order — which is the regression this check was written for. */
+    await browser.evaluate(helpers)
+
+    /** Last updated (the default): the pinned part by prompt time, so the later pin does not lead, in both views. */
+    const treeUpdated = await page('read()')
+    assert.equal(treeUpdated.view, 'tree', `the page opens on the tree\nsaw: ${JSON.stringify(treeUpdated)}`)
+    assert.deepEqual(name(treeUpdated.ids), name(byPrompt), `Last updated: the pin prompted later leads, not the later pin\nsaw: ${JSON.stringify(name(treeUpdated.ids))}`)
+    assert.deepEqual(treeUpdated.pinned, [true, true, false, false], 'and the two leading rows are drawn as pinned')
+    assert.equal(await page(`choose('In one list')`), true, 'View options offers In one list')
+    const flatUpdated = await page('read()')
+    assert.equal(flatUpdated.view, 'flat', `In one list drew no workspace rows\nsaw: ${JSON.stringify(flatUpdated)}`)
+    assert.deepEqual(name(flatUpdated.ids), name(treeUpdated.ids), `In one list reads as the tree does under Last updated\nsaw: ${JSON.stringify(name(flatUpdated.ids))}`)
+
+    /** Reload into the flat list, choose Manual there, and the tree keeps the order on screen rather than pin time. */
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    await browser.evaluate(helpers)
+    assert.equal(await page(`choose('Manual')`), true, 'View options offers Manual')
+    const flatManual = await page('read()')
+    assert.equal(flatManual.view, 'flat', 'the reload kept In one list')
+    assert.deepEqual(name(flatManual.ids), name(byPrompt), `entering Manual freezes the flat list as it was\nsaw: ${JSON.stringify(name(flatManual.ids))}`)
+    assert.equal(JSON.parse(String(await page('stored()'))).orderBy, 'manual', 'the browser stores Manual')
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'View options offers Workspace Tree')
+    const treeManual = await page('read()')
     assert.deepEqual(
-      name(reading.flat),
-      name(expected),
-      `In one list puts the later pin first and orders the rest by their last write, as the tree does\nsaw: ${JSON.stringify({ flat: name(reading.flat), tree: name(reading.tree) })}`,
+      name(treeManual.ids),
+      name(byPrompt),
+      `Manual chosen in the flat list froze the tree's order too, rather than putting the later pin first\nsaw: ${JSON.stringify(name(treeManual.ids))}`,
     )
-    assert.equal(reading.ages.length, 4, `every flat row says where it lives and when\nsaw: ${JSON.stringify(reading.ages)}`)
+
+    /**
+     * Under Manual an unpin moves nothing in the saved sequence. Manual froze Last updated's sequence, in which the second
+     * (the oldest prompt) is last, so the row returns to that slot.
+     */
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control')
+    const unpinned = await page('read()')
+    assert.deepEqual(name(unpinned.ids), name([third, first, fourth, second]), `the unpinned row goes back to its saved slot\nsaw: ${JSON.stringify(name(unpinned.ids))}`)
+    assert.deepEqual(unpinned.pinned, [true, false, false, false], 'and only the third is drawn as pinned')
+
+    /** Pinning it again under Manual fronts it: the later pin leads, in the tree and in the flat list alike. */
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control again')
+    const repinned = await page('read()')
+    const latestPinFirst = [second, third, first, fourth]
+    assert.deepEqual(name(repinned.ids), name(latestPinFirst), `under Manual the later pin leads the pinned part\nsaw: ${JSON.stringify(name(repinned.ids))}`)
+    assert.deepEqual(repinned.pinned, [true, true, false, false], 'and both pins are drawn')
+    assert.equal(await page(`choose('In one list')`), true, 'back to In one list')
+    const flatRepinned = await page('read()')
+    assert.deepEqual(name(flatRepinned.ids), name(latestPinFirst), `the pin fronted the flat list as well\nsaw: ${JSON.stringify(name(flatRepinned.ids))}`)
+
+    /** Unpinned again, it keeps the front slot the pin gave it: it heads the rest, ahead of later prompts. */
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'back to Workspace Tree')
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control a third time')
+    const kept = [third, second, first, fourth]
+    const unpinnedAgain = await page('read()')
+    assert.deepEqual(name(unpinnedAgain.ids), name(kept), `an unpin leaves the saved position under Manual\nsaw: ${JSON.stringify(name(unpinnedAgain.ids))}`)
+    assert.deepEqual(unpinnedAgain.pinned, [true, false, false, false], 'with only the third pinned')
+    assert.equal(await page(`choose('In one list')`), true, 'In one list once more')
+    const flatKept = await page('read()')
+    assert.deepEqual(name(flatKept.ids), name(kept), `and the flat list keeps it there too\nsaw: ${JSON.stringify(name(flatKept.ids))}`)
+
+    /** Last updated discards the layout: every part by prompt time again, in either view. */
+    assert.equal(await page(`choose('Last updated')`), true, 'View options offers Last updated')
+    const backByPrompt = [third, first, fourth, second]
+    const flatBack = await page('read()')
+    assert.deepEqual(name(flatBack.ids), name(backByPrompt), `Last updated orders by prompt time again\nsaw: ${JSON.stringify(name(flatBack.ids))}`)
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'back to Workspace Tree')
+    const treeBack = await page('read()')
+    assert.deepEqual(name(treeBack.ids), name(flatBack.ids), `and the tree reads as the flat list does\nsaw: ${JSON.stringify(name(treeBack.ids))}`)
   } finally {
     browser?.close()
     live?.kill()
@@ -5915,6 +6797,148 @@ test("a session's turn runs its tools in the session's own folder, through the s
     assert.equal(results[1], expected, `the resumed turn's bash ran in the session's folder, not in A (${folderA})`)
   } finally {
     live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('opening a session that holds long answers leaves the server answering: /healthz never waits (#19)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #19: the live TS server stopped answering for 15 s and more and was killed as hung. Measured on a scratch
+   * server, the cause is the session route: a page that opens a session (every load, every turn's end) has the server
+   * render each of its answers' markdown, and the TS build did that on its only thread, where a 30,000-item list took
+   * 7 s — /healthz unanswered and every stream on the server stopped for as long. The same document is then rendered
+   * once more for every page that follows the session (the settled answer it posts to /api/markdown).
+   *
+   * Main's markdown parse budget (1fa46b16, 64 KiB and 512 inline markers) now answers a 30,000-item list as its
+   * escaped text without parsing it, so one such answer no longer stalls anything. What still does is a session of
+   * answers **inside** the budget, because opening it renders every one: measured on main 4bb459ec, eight 61,892-byte
+   * lists held /healthz for 2.7 s and four for 1.6 s. So the session here holds ten distinct 9,000-item lists, each
+   * inside the budget, and each must arrive rendered as a list rather than as text.
+   *
+   * Judged from a supervisor's seat: while one page opens the session and two followers render its last answer,
+   * /healthz is probed every 100 ms and must answer every probe within 1.5 s (the deployment's supervisor kills a
+   * server that misses three 2 s probes in a row).
+   */
+  const h = harness('long-answer-liveness')
+  const ITEMS = 9_000
+  const TURNS = 10
+  const answers = Array.from({ length: TURNS }, (_, turn) => `# answer ${turn + 1}\n\n${Array.from({ length: ITEMS }, (_, index) => `- ${index + 1}`).join('\n')}`)
+  assert.ok(answers.every((answer) => Buffer.byteLength(answer) < 64 * 1024), 'every answer is inside the parse budget')
+  scriptedConfig({ home: h.home, steps: answers.map((text) => ({ text })) })
+  let live
+  try {
+    /** The folder is the session's identity: each later `--turn` continues the one the first created. */
+    for (let turn = 0; turn < TURNS; turn += 1) {
+      const seeded = await runCli(adminArgs(h, ['--turn', `write every whole number from 1 to ${ITEMS} as a list`]), { env: h.env, cwd: h.work })
+      assert.equal(seeded.code, 0, `long answer ${turn + 1} was recorded\n${seeded.stdout.slice(-400)}${seeded.stderr}`)
+    }
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const sessions = await (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()
+    assert.equal(sessions.length, 1, `the one session is listed\nsaw: ${JSON.stringify(sessions).slice(0, 300)}`)
+    const id = sessions[0].id
+
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const started = Date.now()
+        let ok = false
+        try {
+          ok = (await fetch(origin + '/healthz', { signal: AbortSignal.timeout(3000) })).ok
+        } catch {
+          ok = false
+        }
+        probes.push({ ms: Date.now() - started, ok })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+    })()
+    /** A request the server cut is an outcome to report, not an exception that leaves the prober running. */
+    const read = async (pending) => {
+      try {
+        const response = await pending
+        return { status: response.status, body: await response.json() }
+      } catch (error) {
+        return { status: 0, error: String(error?.cause?.code ?? error?.message ?? error) }
+      }
+    }
+    const render = () =>
+      read(fetch(origin + '/api/markdown', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ text: answers.at(-1) }) }))
+    let outcomes
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      outcomes = await Promise.all([read(fetch(`${origin}/api/sessions/${encodeURIComponent(id)}`, { headers: { cookie } })), render(), render()])
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    } finally {
+      probing = false
+      await prober
+    }
+
+    const slowest = Math.max(...probes.map((probe) => probe.ms))
+    const missed = probes.filter((probe) => !probe.ok || probe.ms > 1500).length
+    assert.equal(missed, 0, `/healthz waited while the answers rendered: ${missed} of ${probes.length} probes missed 1.5 s, the slowest took ${slowest} ms`)
+    const [opened, ...rendered] = outcomes
+    assert.equal(opened.status, 200, `the session opened\nsaw: ${JSON.stringify(opened).slice(0, 300)}`)
+    const htmls = (opened.body.turns ?? []).filter((turn) => turn.kind === 'assistant').map((turn) => String(turn.html ?? ''))
+    assert.equal(htmls.length, TURNS, `every answer is in the session\nsaw ${htmls.length}`)
+    const listed = new RegExp(`<li>${ITEMS}</li>`)
+    assert.ok(htmls.every((html) => listed.test(html)), 'each answer arrived rendered as a list, all of it, not as its text')
+    for (const outcome of rendered) {
+      assert.equal(outcome.status, 200, `a follower's render answered\nsaw: ${JSON.stringify(outcome).slice(0, 300)}`)
+      assert.match(String(outcome.body.html ?? ''), listed, 'and so did every follower\'s render')
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a session is Last updated by a person's latest prompt, not by the answer or the tool work written after it", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * R-developer-eight-20 (DSH parity C17), DSH's Last updated: a row is dated by the latest prompt or steer a person
+   * wrote. DSH's list takes lastPromptAt from a user-sourced user/message, as that event's own time
+   * (dsh-api-session-controller/lib/index.js:1872-1879), and dates the row max(createdAt, lastPromptAt) (index.js:2124-2125).
+   * heddle dated it by its last write, so the answer and the turn boundary re-dated it. The turn here runs one scripted
+   * bash call that sleeps, so everything written after the prompt is measurably later than the prompt itself.
+   */
+  const h = harness('last-prompt')
+  scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 0.4' } } }, { text: 'answered after the pause' }] })
+  try {
+    const first = await runCli([...h.args, '--turn', 'the prompt that dates this row'], { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `the turn ran\n${first.stdout}${first.stderr}`)
+    const id = sessionsUnder(join(h.home, 'sessions'))[0]
+    assert.ok(id, 'the turn left a session')
+    /** The prompt is a user message with no source: a message the harness wrote carries one. */
+    const lastPrompt = () =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user' && event.message?.source === undefined)
+        .at(-1)
+    const events = readTranscript(join(h.home, 'sessions', id))
+    const prompt = lastPrompt()
+    const answered = events.filter((event) => event.type === 'assistant/completed' || event.type === 'turn/completed').at(-1)
+    assert.ok(prompt !== undefined && answered !== undefined, `the log holds the prompt and the answer\nsaw: ${events.map((event) => event.type).join(', ')}`)
+    assert.ok(Date.parse(answered.at) - Date.parse(prompt.at) >= 300, `the answer was written well after the prompt\nprompt ${prompt.at}, answer ${answered.at}`)
+    const listed = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(listed?.updated, prompt.at, `the session is dated by its prompt, not by what was written after it\nsaw: ${JSON.stringify(listed)}`)
+
+    /** The next prompt moves it. */
+    const second = await runCli([...h.args, '--turn', 'a second prompt', '--resume', id], { env: h.env, cwd: h.work })
+    assert.equal(second.code, 0, `the resumed turn ran\n${second.stdout}${second.stderr}`)
+    const again = lastPrompt()
+    assert.notEqual(again?.at, prompt.at, 'the second prompt is a new event')
+    const relisted = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(relisted?.updated, again?.at, `the next prompt re-dates it\nsaw: ${JSON.stringify(relisted)}`)
+  } finally {
     removeDir(h.home)
     removeDir(h.work)
   }
