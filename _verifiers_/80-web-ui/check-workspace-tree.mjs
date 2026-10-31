@@ -284,8 +284,13 @@ test('the Session Intent hero picks the workspace for a blank session, by keyboa
       assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
       return added.body.record
     }
-    const alpha = await register(alphaDir)
+    /**
+     * Both stores list a newly added workspace first, as DSH does (TS src/workspace/service.ts:208, Rust heddle-workspace
+     * service.rs:232, DSH dsh-workspace lib/index.js:687), and the menu keeps that record order. Beta is registered
+     * first so that alpha, the blank session's workspace, is the top item.
+     */
     const beta = await register(betaDir)
+    const alpha = await register(alphaDir)
     const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: alpha.path }) })
     assert.equal(made.status, 200, `a blank session in the first workspace (${JSON.stringify(made.body)})`)
     const alphaBlank = made.body.session
