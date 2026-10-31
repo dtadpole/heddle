@@ -774,7 +774,7 @@ impl SessionStore {
                 })
                 .count() as u64
         };
-        self.touch_counting(handle, turns);
+        self.touch_counting(handle, turns, None);
         Ok(())
     }
 
@@ -914,8 +914,8 @@ impl SessionStore {
     /// A `Replace` op is validated first: the event must be surface-eligible; the range must be a span
     /// of current positions; a system prompt at the surface head may be rewritten only by a system
     /// message over exactly that node; a tool result may be rewritten by a tool message only for the
-    /// same call, over exactly that node. `turn/completed`, `assistant/completed` and `context/note`
-    /// also touch the meta record's `updated`.
+    /// same call, over exactly that node. No event appended here moves the meta record's `updated`: only
+    /// a person's prompt or steer does, through [`SessionStore::message`].
     pub fn append(
         &self,
         handle: &SessionHandle,
@@ -929,14 +929,8 @@ impl SessionStore {
             self.load_locked(&mut state, handle)?;
             self.append_locked(&mut state, handle, event, options)?
         };
-        // A turn boundary is activity: the row's age moves while an answer is produced, not only when a
-        // message is typed. This happens outside the lock, as the TypeScript build does.
-        if matches!(
-            written.kind.as_str(),
-            "turn/completed" | "assistant/completed" | "context/note"
-        ) {
-            self.touch(handle, false);
-        }
+        // No event here re-dates the row: DSH dates it by the latest prompt or steer only (see `message`),
+        // so an answer, a turn boundary or a harness note leaves `updated` (R-developer-eight-20).
         // After the write, never before: a listener that saw an event the file does not have would be a
         // second truth.
         if let Some(listener) = &self.listener {
@@ -1318,7 +1312,10 @@ impl SessionStore {
         self.derive_messages(handle)
     }
 
-    /// Record a `message` event, and in the same meta write move `updated` and count a user turn.
+    /// Record a `message` event. A user message counts a turn; one a person wrote (a prompt or a steer:
+    /// no `source`) also moves `updated` to the event's own time, in the same meta write — DSH's
+    /// `lastPromptAt` is the `event.time` of a user-sourced `user/message`
+    /// (dsh-api-session-controller/lib/index.js:1872-1879).
     pub fn message(
         &self,
         handle: &SessionHandle,
@@ -1332,8 +1329,10 @@ impl SessionStore {
             ),
             AppendOptions::default(),
         )?;
-        // One write for both facts: the age moved, and a user message is a turn.
-        self.touch(handle, message.role == Role::User);
+        if message.role == Role::User {
+            let prompted_at = message.source.is_none().then_some(event.at.as_str());
+            self.touch(handle, true, prompted_at);
+        }
         Ok(event)
     }
 
@@ -1413,16 +1412,20 @@ impl SessionStore {
         Ok(String::new())
     }
 
-    /// Record that the session was written to (`updated`), optionally counting a user turn in the same
-    /// write. A meta file that cannot be read or written is ignored: losing the count must never lose
-    /// the event that was just appended.
-    pub fn touch(&self, handle: &SessionHandle, bump_turns: bool) {
-        self.touch_counting(handle, u64::from(bump_turns));
+    /// Record a person's prompt time (`updated`, when `prompted_at` is given) and/or count a user turn, in
+    /// one meta write; a call with neither writes nothing. A meta file that cannot be read or written is
+    /// ignored: losing the count must never lose the event that was just appended.
+    pub fn touch(&self, handle: &SessionHandle, bump_turns: bool, prompted_at: Option<&str>) {
+        self.touch_counting(handle, u64::from(bump_turns), prompted_at);
     }
 
     /// [`SessionStore::touch`], counting `turns` user turns in the same write: a fork's seed counts every
-    /// inherited user message at once.
-    fn touch_counting(&self, handle: &SessionHandle, turns: u64) {
+    /// inherited user message at once and dates nothing, so a fork's row is dated by its creation until its
+    /// own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
+    fn touch_counting(&self, handle: &SessionHandle, turns: u64, prompted_at: Option<&str>) {
+        if turns == 0 && prompted_at.is_none() {
+            return;
+        }
         let _meta = self.meta_guard();
         let Ok(text) = std::fs::read_to_string(&handle.meta) else {
             return;
@@ -1433,7 +1436,9 @@ impl SessionStore {
         let Some(mut meta) = SessionMeta::from_value(value) else {
             return;
         };
-        meta.set("updated", Value::String(iso_now()));
+        if let Some(at) = prompted_at {
+            meta.set("updated", Value::String(at.to_string()));
+        }
         if turns > 0 {
             meta.set("turns", Value::from(meta.turns() + turns));
         }
@@ -2086,30 +2091,89 @@ mod tests {
     }
 
     #[test]
-    fn a_user_message_counts_a_turn_and_moves_the_age() {
+    fn a_persons_prompt_or_steer_dates_the_row_and_nothing_written_after_it_does() {
+        // DSH's Last updated (C17, R-developer-eight-20): `lastPromptAt` is the time of the latest
+        // user-sourced `user/message` (dsh-api-session-controller/lib/index.js:1872-1879), and the row is
+        // dated `max(createdAt, lastPromptAt)` (index.js:2124-2125). The TypeScript twin is in
+        // test/session-flags.test.ts.
         let (_dir, store) = store();
         let handle = store.create(CreateOptions::default()).unwrap();
-        assert_eq!(store.list()[0].turns(), 0);
-        store.message(&handle, user("one")).unwrap();
-        let meta = store.list().into_iter().next().unwrap();
-        assert_eq!(meta.turns(), 1);
-        assert!(meta.updated().is_some());
+        let meta = || store.list().into_iter().next().unwrap();
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        let text = |role: Role, words: &str, source: Option<Value>| Message {
+            role,
+            tool_call_id: (role == Role::Tool).then(|| "call-1".to_string()),
+            content: vec![crate::message::ContentPart::Text {
+                text: words.to_string(),
+            }],
+            source,
+        };
+        assert_eq!(meta().turns(), 0);
+        assert_eq!(
+            meta().updated(),
+            None,
+            "no prompt time before the first prompt"
+        );
 
-        // An assistant message moves the age but is not a user turn.
+        let prompt = store.message(&handle, user("a question")).unwrap();
+        assert_eq!(
+            meta().updated(),
+            Some(prompt.at.as_str()),
+            "the prompt event's own time"
+        );
+        assert_eq!(meta().turns(), 1);
+
+        pause();
+        store
+            .message(&handle, text(Role::Assistant, "an answer", None))
+            .unwrap();
+        store
+            .message(&handle, text(Role::Tool, "a tool result", None))
+            .unwrap();
+        for kind in ["assistant/completed", "turn/completed"] {
+            store
+                .append(&handle, NewEvent::new(kind), AppendOptions::default())
+                .unwrap();
+        }
+        store
+            .append(
+                &handle,
+                NewEvent::new("context/note").field(
+                    "message",
+                    json!({"role": "user", "content": [{"type": "text", "text": "a snapshot"}], "source": {"kind": "time-context"}}),
+                ),
+                AppendOptions::default(),
+            )
+            .unwrap();
         store
             .message(
                 &handle,
-                Message {
-                    role: Role::Assistant,
-                    tool_call_id: None,
-                    content: vec![crate::message::ContentPart::Text {
-                        text: "two".to_string(),
-                    }],
-                    source: None,
-                },
+                text(
+                    Role::User,
+                    "goal round",
+                    Some(json!({"kind": "goal", "goalId": "g", "revision": 1, "round": 1})),
+                ),
             )
             .unwrap();
-        assert_eq!(store.list()[0].turns(), 1);
+        assert_eq!(
+            meta().updated(),
+            Some(prompt.at.as_str()),
+            "an answer, a tool result, a note, a turn boundary and a harness-written round leave it"
+        );
+        assert_eq!(
+            meta().turns(),
+            2,
+            "a harness-written user message still counts a turn"
+        );
+
+        pause();
+        let steer = store.message(&handle, user("a steer")).unwrap();
+        assert_eq!(
+            meta().updated(),
+            Some(steer.at.as_str()),
+            "the next prompt or steer moves it"
+        );
+        assert_ne!(steer.at, prompt.at);
     }
 
     #[test]
