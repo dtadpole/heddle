@@ -99,6 +99,8 @@ function parseBlock(block: string): SseEvent | null {
 }
 
 import { titleCaseHeaders, wire, type WireResponse } from './http.ts'
+// The endpoint rules live beside the endpoint list, as `heddle-llm` reads them from `heddle-config`.
+import { isShippedFixture, unscriptedFixtureMessage } from '../endpoints.ts'
 
 /** What a call site passes to {@link post}; the transport is in `./http.ts`. */
 interface HttpOptions {
@@ -1182,7 +1184,13 @@ export function scriptedAdapter(
     try {
       script = JSON.parse(readFileSync(scriptPath, 'utf8')) as { steps?: unknown[] }
     } catch (error) {
-      throw new ModelError(`the script for '${endpoint.name}' could not be read at ${scriptPath}`, {
+      // The shipped fixture with no script is what a home that configured nothing runs on (issue #74): say how to
+      // configure a model rather than naming a test file.
+      const missing = (error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      const message = missing && isShippedFixture(endpoint)
+        ? unscriptedFixtureMessage()
+        : `the script for '${endpoint.name}' could not be read at ${scriptPath}`
+      throw new ModelError(message, {
         endpoint: endpoint.name,
         code: 'SCRIPT',
         cause: error,
