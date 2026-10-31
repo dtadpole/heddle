@@ -448,3 +448,42 @@ test('A50 promoted: a foreground bash that outlives its wall time moves to a bac
     await server.close()
   }
 })
+
+test('A51 spill: output that outgrew the ring is named by its spill file in job_output, and the file holds every byte', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * DSH's bash provider keeps each stream's complete output in a private spill file once it outgrows the in-memory
+   * tail (`dsh-subprocess-local` `OutputCollector`: a 64 000-byte tail, a 64 MiB spill cap). When the model's read
+   * fell behind the job's ring, `job_output`'s notice names that file:
+   * `[some output was dropped from memory; full output: <path>]` (`renderModelDelta`, dsh-tool-jobs). Before, the
+   * notice could only say `(unavailable)`.
+   */
+  const server = await startServer('spill')
+  try {
+    const folder = join(server.work, 'spill')
+    const session = await openSession(server, folder)
+    let mark = events(server, session).length
+    const command = "while [ ! -f go ]; do sleep 0.1; done; awk 'BEGIN { for (i = 0; i < 40000; i++) printf \"line %05d\\n\", i }'"
+    await turn(server, session, folder, [backgroundBash(command), { text: 'started' }])
+    const id = startedId(toolTexts(server, session, mark)[0])
+    mark = events(server, session).length
+    await turn(server, session, folder, [
+      { toolCall: { name: 'bash', arguments: { command: 'touch go' } } },
+      { toolCall: { name: 'job_output', arguments: { job_id: id, wait: true, timeout_ms: 20_000 } } },
+      { text: 'read it' },
+    ])
+    const read = toolTexts(server, session, mark)[1] ?? ''
+    const named = /\[some output was dropped from memory; full output: ([^\]\n]+)\]/.exec(read)
+    assert.ok(named, `the read names where the dropped output is\nsaw: ${JSON.stringify(read.slice(0, 300))}`)
+    const path = named[1]
+    assert.notEqual(path, '(unavailable)', 'a file, not "(unavailable)"')
+    assert.match(path, /heddle-jobs-\d+-\d+-[0-9a-f]{12}-stdout\.log$/, 'a private per-process spill file for stdout')
+    const full = readFileSync(path, 'utf8')
+    assert.equal(full.length, 440_000, 'the file holds the complete stream (40 000 lines of 11 bytes)')
+    assert.ok(full.startsWith('line 00000\nline 00001\n') && full.endsWith('line 39999\n'))
+    assert.match(read, /line 39999\n/, 'the read still shows the tail itself')
+    assert.match(read, /\[status: completed, exit code: 0\]$/)
+  } finally {
+    await server.close()
+  }
+})
