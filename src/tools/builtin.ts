@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { symbols } from '@deepseek-ai/cordis'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
-import { killProcessGroup } from '../sandbox/process-group.ts'
+import { killProcessGroup, trackGroup, untrackGroup } from '../sandbox/process-group.ts'
 import type { SandboxService } from '../sandbox/service.ts'
 import type { ToolDefinition, ToolResult, ToolRunContext } from './service.ts'
 
@@ -550,6 +550,7 @@ export function builtinTools(
           detached: true,
           stdio: ['ignore', 'pipe', 'pipe'],
         })
+        trackGroup(child.pid)
         let stdout = ''
         let stderr = ''
         let timedOut = false
@@ -580,10 +581,12 @@ export function builtinTools(
           { once: true },
         )
         child.on('error', (error) => {
+          untrackGroup(child.pid)
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
         })
         child.on('close', (code) => {
+          untrackGroup(child.pid)
           clearTimeout(timer)
           stdout += stdoutText.end()
           stderr += stderrText.end()

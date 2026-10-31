@@ -2454,3 +2454,28 @@ test('over-budget inline markdown is escaped promptly and the server keeps answe
     }
   } finally { await server.close() }
 })
+
+
+test('markdown null or primitive JSON is answered with validation, never left hanging', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('markdown-json-shape')
+  try {
+    const cookie = await cookieFor(server.url)
+    for (const path of ['/api/markdown', '/api/turn']) {
+    for (const body of ['null', '[]', 'true', '42', '"text"']) {
+      const response = await fetch(new URL(path, server.url), {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body,
+        signal: AbortSignal.timeout(2500),
+      })
+      assert.equal(response.status, 400, `Refs #71: ${path} ${body} gets a validation response`)
+      assert.ok((await response.text()).length > 0, 'validation has a reason')
+    }
+    }
+    const good = await fetch(new URL('/api/markdown', server.url), {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ text: '**valid**' }), signal: AbortSignal.timeout(2500),
+    })
+    assert.equal(good.status, 200, 'valid object still renders')
+    assert.match((await good.json()).html, /<strong>valid<\/strong>/)
+    assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2500) })).status, 200)
+  } finally { await server.close() }
+})
