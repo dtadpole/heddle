@@ -66,7 +66,7 @@ function flow(options: { before: string[]; after: string[]; front?: string; boot
     const directTurnsByQueue = new WeakMap()
     const queueTurnOut = new WeakSet()
     const stoppedQueues = new WeakSet()
-    const runningSessions = new Set(), runningSince = new Map(), pendingInteractions = new Map(), turnRounds = new Map()
+    const runningSessions = new Set(), runningSince = new Map(), pendingInteractions = new Map(), turnRounds = new Map(), turnsEnded = new Set()
     const stopButton = { disabled: true }
     const field = { value: '' }
     const log = { children: [], append(child) { this.children.push(child) }, replaceChildren() { this.children = [] } }

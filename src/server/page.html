@@ -7364,10 +7364,23 @@ function markRunning(id) {
 const turnRounds = new Map()
 
 /**
+ * Sessions whose turn this page's own `done` ended before the stream said so (`turn/completed`, `turn/failed`).
+ *
+ * The turn's response and the event stream are two connections, and `done` can be handled before the stream's last
+ * events of the same turn: on TS, check-composer saw the round's closing chunk land after `done` (test 9 read `0 steps`
+ * beside a rate, test 17 opened the time surface on "No statistics yet"). Those late events are the turn's own, already
+ * in the statistics `done` asks for, so they no longer move the live counters: a late `model/request` counts no round and
+ * a late chunk times no round and adds no usage. The stream's end of the turn, or this page starting another turn on the
+ * session, forgets it.
+ */
+const turnsEnded = new Set()
+
+/**
  * One `model/request` of `session`'s turn: another round of a turn that was running, else the first round of a new one.
  * The open session's dock counts it at once (`liveRounds`) and times the round from here (`liveRoundStartedAt`).
  */
 function noteRound(session, wasRunning) {
+  if (turnsEnded.has(session)) return
   const before = wasRunning ? turnRounds.get(session) : undefined
   const startedAt = performance.now()
   turnRounds.set(session, { rounds: (before?.rounds ?? 0) + 1, startedAt })
@@ -7919,6 +7932,7 @@ events.addEventListener('session', (message) => {
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
     turnRounds.delete(payload.session)
+    turnsEnded.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
     if (shown === null || payload.session === shown) {
@@ -7938,6 +7952,7 @@ events.addEventListener('session', (message) => {
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
     turnRounds.delete(payload.session)
+    turnsEnded.delete(payload.session)
     /** A turn that ended waits on nobody; the approval poll would say so within two seconds, the end says it now. */
     pendingInteractions.delete(payload.session)
     paintRunningMarks()
@@ -7999,12 +8014,14 @@ function drawSessionEvent(payload) {
    * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
    * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.
    */
-  if (event.type === 'assistant/chunk' && event.chunk.usage !== undefined) {
+  /** A chunk of a turn whose `done` this page already handled is in the statistics that `done` asked for (`turnsEnded`). */
+  const counted = !turnsEnded.has(payload.session)
+  if (event.type === 'assistant/chunk' && event.chunk.usage !== undefined && counted) {
     liveUsage = addUsage(liveUsage, event.chunk.usage)
     updateStatusBar()
   }
   if (event.type === 'assistant/chunk') {
-    if (event.chunk.type === 'done') {
+    if (event.chunk.type === 'done' && counted) {
       /**
        * A round's span closes at the frame that carries the provider's output tokens, which is what the durable
        * fold also uses once the turn ends. A round without reported tokens is not timed here either.
@@ -9309,6 +9326,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       throw new Error(NO_WORKSPACE_REFUSAL)
     }
   }
+  /** A new turn on the session: its rounds count again, even if the stream never said the last one ended. */
+  if (target !== null) turnsEnded.delete(target)
   liveTurns += 1
   updateStatusBar()
   const startedAt = performance.now()
@@ -9417,8 +9436,12 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * session with a turn of its own still running: its rounds stay (developer-ten's N1 on a5b90f28, where this
          * zeroed them and M's dock dropped to its fold mid-turn when this page's turn in N ended).
          */
-        if (typeof payload.session === 'string') turnRounds.delete(payload.session)
-        liveRounds = liveRoundsOf(current).rounds
+        if (typeof payload.session === 'string') {
+          turnRounds.delete(payload.session)
+          turnsEnded.add(payload.session)
+        }
+        /** Its open round too: a closing chunk the stream delivers after this times nothing (`turnsEnded`). */
+        ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(current))
         liveUsage = undefined
         updateStatusBar()
         void refreshSessionStats()

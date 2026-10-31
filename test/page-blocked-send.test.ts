@@ -59,6 +59,7 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     const stopButton = { disabled: true }
     const runningSessions = new Set(Object.keys(OPTIONS.running ?? {}))
     const turnRounds = new Map(Object.entries(OPTIONS.running ?? {}).map(([id, rounds]) => [id, { rounds, startedAt: 5 }]))
+    const turnsEnded = new Set()
     const runningSince = new Map(), pendingInteractions = new Map(), stoppedQueues = new Set()
     const cleared = []
     /** The log: rows the page drew, each a { kind, text, notices } with the DOM calls the done branch makes. */

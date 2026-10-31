@@ -156,7 +156,7 @@ test('the stream\'s blocked turn end for the open session lets it go: the gate o
     JSON.parse(
       runInNewContext(
         `${STATE}
-        const runningSessions = new Set([OPEN]), runningSince = new Map(), turnRounds = new Map()
+        const runningSessions = new Set([OPEN]), runningSince = new Map(), turnRounds = new Map(), turnsEnded = new Set()
         function paintRunningMarks() {}
         function drawTurnFailure() { calls.push('drawTurnFailure') }
         function settleChat() {}

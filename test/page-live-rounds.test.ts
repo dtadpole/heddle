@@ -61,6 +61,7 @@ function harness(options: { onRefresh?: (running: Set<string>, rounds: Map<strin
     const runningSessions = new Set();
     const runningSince = new Map();
     const turnRounds = new Map();
+    const turnsEnded = new Set();
     const schedState = { drawer: null };
     const unreadSessions = new Set();
     const sessionMetas = new Map();
