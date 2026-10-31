@@ -568,12 +568,13 @@ pub struct EndpointsView {
     pub default: Option<String>,
 }
 
-/// [`describe_endpoint`] over `endpoints`, with `nominated` kept only when the list holds it.
+/// [`describe_page_endpoint`] over `endpoints`, with `nominated` kept only when the list holds it: the list a
+/// signed-in page reads (`GET /api/endpoints`).
 pub fn describe_endpoints(endpoints: &[EndpointConfig], nominated: Option<&str>) -> EndpointsView {
     let present =
         nominated.is_some_and(|name| endpoints.iter().any(|endpoint| endpoint.name == name));
     EndpointsView {
-        endpoints: endpoints.iter().map(describe_endpoint).collect(),
+        endpoints: endpoints.iter().map(describe_page_endpoint).collect(),
         default: if present {
             nominated.map(str::to_string)
         } else {
@@ -582,11 +583,35 @@ pub fn describe_endpoints(endpoints: &[EndpointConfig], nominated: Option<&str>)
     }
 }
 
+/// The fields of [`describe_endpoint`] a page reads to list and pick models.
+pub const PAGE_ENDPOINT_FIELDS: [&str; 10] = [
+    "name",
+    "kind",
+    "model",
+    "models",
+    "reasoning",
+    "capabilities",
+    "inputModalities",
+    "contextWindow",
+    "contextWindowSource",
+    "credential",
+];
+
+/// [`describe_endpoint`] cut to [`PAGE_ENDPOINT_FIELDS`]: a browser is told what it needs to list and pick models,
+/// and not the gateway address, proxy, project, region or header names the operator's own CLI listing shows.
+pub fn describe_page_endpoint(endpoint: &EndpointConfig) -> Value {
+    let Value::Object(mut map) = describe_endpoint(endpoint) else {
+        return Value::Object(Map::new());
+    };
+    map.retain(|field, _| PAGE_ENDPOINT_FIELDS.contains(&field.as_str()));
+    Value::Object(map)
+}
+
 /// A credential-free summary of an endpoint, safe to log or print: `name`, `kind`, `baseUrl`, `model`,
 /// `models` (always present, each `{ id, name, reasoning?, contextWindow? }` with levels by id and name
 /// only), `reasoning`, `project`, `region`, `proxy`, `capabilities`, `inputModalities`,
-/// `contextWindow` with `contextWindowSource: "config"`, `credential: "set"` for a present key,
-/// `credentialFile` for a key file's path, and `headers` as names only. Absent fields are left out.
+/// `contextWindow` with `contextWindowSource: "config"`, `credential: "set"` for a present key or key file
+/// (never its path), and `headers` as names only. Absent fields are left out.
 pub fn describe_endpoint(endpoint: &EndpointConfig) -> Value {
     let mut map = Map::new();
     map.insert("name".into(), Value::String(endpoint.name.clone()));
@@ -636,11 +661,10 @@ pub fn describe_endpoint(endpoint: &EndpointConfig) -> Value {
         map.insert("contextWindow".into(), Value::Number(Number::from(window)));
         map.insert("contextWindowSource".into(), Value::String("config".into()));
     }
-    if endpoint.api_key.is_some() {
+    // Presence only, for a key and for a key file alike: a key file's path names the account that holds it, and
+    // DSH lets only declared credential metadata cross, never a path (`dsh-api-settings-controller`).
+    if endpoint.api_key.is_some() || endpoint.api_key_file.is_some() {
         map.insert("credential".into(), Value::String("set".into()));
-    }
-    if let Some(file) = &endpoint.api_key_file {
-        map.insert("credentialFile".into(), Value::String(file.clone()));
     }
     if let Some(headers) = &endpoint.headers {
         map.insert(
@@ -1043,6 +1067,53 @@ mod tests {
     }
 
     #[test]
+    fn the_page_listing_carries_only_what_a_page_needs_to_pick_a_model() {
+        let endpoint = EndpointConfig {
+            name: "gateway".into(),
+            kind: EndpointKind::OpenaiChat,
+            base_url: "http://gw.internal:8443/v1".into(),
+            model: Some("m".into()),
+            api_key_file: Some("/home/someone/.keys/gw".into()),
+            proxy: Some("http://proxy.internal:3128".into()),
+            project: Some("acct-project".into()),
+            headers: Some(BTreeMap::from([("X-Tenant".into(), "t".into())])),
+            context_window: Some(1000),
+            ..EndpointConfig::default()
+        };
+        let view = describe_endpoints(std::slice::from_ref(&endpoint), Some("gateway"));
+        let page = view.endpoints[0].as_object().unwrap();
+        let mut fields: Vec<&str> = page.keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "contextWindow",
+                "contextWindowSource",
+                "credential",
+                "kind",
+                "model",
+                "models",
+                "name"
+            ]
+        );
+        let text = view.endpoints[0].to_string();
+        for private in [
+            "gw.internal",
+            "/home/someone",
+            "proxy.internal",
+            "acct-project",
+            "X-Tenant",
+        ] {
+            assert!(!text.contains(private), "{private} does not reach a page");
+        }
+        assert_eq!(
+            describe_endpoint(&endpoint)["baseUrl"],
+            json!("http://gw.internal:8443/v1"),
+            "the operator's own CLI listing still names the gateway"
+        );
+    }
+
+    #[test]
     fn a_description_never_carries_a_secret() {
         let endpoint = EndpointConfig {
             name: "gateway".into(),
@@ -1058,10 +1129,22 @@ mod tests {
         let described = describe_endpoint(&endpoint);
         assert!(!described.to_string().contains("sk-secret"));
         assert_eq!(described["credential"], json!("set"));
-        assert_eq!(described["credentialFile"], json!("~/.keys/x"));
+        assert!(
+            !described.to_string().contains("~/.keys/x"),
+            "a key file's path names the account; only its presence crosses"
+        );
         assert_eq!(described["headers"], json!(["X-Tenant"]));
         assert_eq!(described["contextWindowSource"], json!("config"));
         assert_eq!(described["models"][0]["name"], json!("m"));
+        let file_only = describe_endpoint(&EndpointConfig {
+            api_key: None,
+            ..endpoint.clone()
+        });
+        assert_eq!(
+            file_only["credential"],
+            json!("set"),
+            "a key file alone is a credential"
+        );
 
         let view = describe_endpoints(&default_endpoints(), Some("nowhere"));
         assert_eq!(view.default, None);

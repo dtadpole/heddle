@@ -114,7 +114,7 @@ to confirm or move a row.
 | `POST /api/sessions/{id}/fork`, `/flags`, `/title`, `/permission`, `/steer`, `/stop` | heddle-server | |
 | `POST /api/sessions/{id}/model` | heddle-web-composer | the model switcher |
 | `POST /api/folders/session`, `POST /api/turn` | heddle-server | the turn streams its own session's events, runs to its end if its reader goes away, stops running when it returns, and sends its terminal frame when it ends, without waiting for the `/api/events` readers, as web.ts does |
-| `GET /api/tree`, `GET`/`POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}` | heddle-server | over `WorkspaceService`; `GET /api/workspaces` is `views` (each workspace's parent and sessions, for the page's workspace tree) |
+| `GET /api/tree`, `GET`/`POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}`, `POST /api/workspaces/insertBefore` | heddle-server | over `WorkspaceService`; `GET /api/workspaces` is `views` (each workspace's parent and sessions, for the page's workspace tree); `insertBefore` moves a workspace in the stored order (DSH's `workspace/insertBefore`) |
 | `POST /api/workspaces/pick` | heddle-web-files | the platform folder picker |
 | `GET /api/directories`, `POST /api/directories` | heddle-web-files | the page's own folder chooser (DSH's browse picker) |
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |

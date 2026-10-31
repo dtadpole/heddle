@@ -81,6 +81,15 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
         .get::<Arc<heddle_tools::ToolRegistry>>("tools")
         .ok_or("this profile does not load the tools plugin")?;
     let hooks = turn_hooks(services, &context);
+    // DSH's automatic session title (dsh-session-title with its first-prompt model provider): a session's first prompt
+    // is titled by the endpoint and model its turn's own request names, on the process runtime so the turn never waits
+    // (heddle_session::title; src/plugins/session.ts attaches the same in the TypeScript build).
+    sessions.attach_titles(Arc::new(heddle_session::LlmTitles::new(
+        Arc::clone(&models),
+        Arc::new(|task: heddle_session::TitleTask| {
+            drop(tokio().spawn(task));
+        }),
+    )));
     Ok(AgentRuntime {
         model: Arc::new(heddle_agent::adapters::LlmModel::new(models)),
         session: Arc::new(heddle_agent::adapters::Sessions::new(sessions)),
