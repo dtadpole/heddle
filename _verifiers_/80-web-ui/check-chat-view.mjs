@@ -1724,7 +1724,8 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
    * append points only, so the view sometimes sat above the bottom while the answer was still growing (the owner's
    * "sometimes it does not follow").
    */
-  const longText = Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n')
+  // Soft line breaks collapse in settled markdown. A fenced block guarantees the geometry this test needs.
+  const longText = '```text\n' + Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n') + '\n```'
   const steps = () => [
     ...Array.from({ length: 8 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } } })),
     { toolCall: { name: 'write_file', arguments: { path: join(fixtureDir('unused'), 'never.txt'), content: 'x\n' } } },
@@ -1757,7 +1758,8 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
     assert.ok(followed >= Math.ceil(observed * 0.8), `the transcript followed the floor as it grew (${followed}/${observed} samples at the bottom)`)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("line 40 of an answer")', 20_000), 'the long answer arrived')
     /** The settled document and the final layout land after the last append — still at the floor. */
-    await new Promise((resolve) => setTimeout(resolve, 1200))
+    await browser.waitFor('document.getElementById("send").hidden === false && document.querySelector("#log .turn.assistant[data-rendered]") !== null', 20_000)
+    await browser.waitFor('(() => { const log = document.getElementById("log"); return log.scrollHeight - log.clientHeight > 300 })()', 10_000)
     assert.ok((await distance()) <= 1, `the settled answer is still at the floor (${await distance()}px away)`)
 
     /**
@@ -1767,6 +1769,8 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
      */
     await sendMessage(browser, 'one more')
     assert.ok(await browser.waitFor('document.getElementById("send").hidden === true', 10_000), 'the second turn is running')
+    await browser.waitFor('Array.from(document.querySelectorAll("#log .turn.user")).some((row) => row.textContent.includes("one more"))', 10_000)
+    await browser.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     const markAway = await rows()
     await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = 0 })()')
     await new Promise((resolve) => setTimeout(resolve, 250))
@@ -1906,8 +1910,11 @@ test('the running clock survives navigating away and back', async (context) => {
      * because the row must leave the moment the panel shows a session that is not running.
      */
     await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(server.work)} }) })`)
-    const other = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)} }) }).then((r) => r.json()).then((body) => body.session?.id ?? body.id ?? null)`)
+    const other = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)}, new: true }) }).then((r) => r.json()).then((body) => body.session?.id ?? body.id ?? null)`)
     assert.ok(typeof other === 'string' && other.startsWith('session-'), `a second session exists (${other})`)
+    assert.notEqual(other, session, 'folder binding must not return the running session as the idle destination')
+    const idle = await browser.evaluate(`fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.id === ${JSON.stringify(other)})?.running ?? false)`)
+    assert.equal(idle, false, 'the navigation destination is idle')
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(other)})`)
     assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") === null', 15_000), 'the row leaves with the view')
     /**
