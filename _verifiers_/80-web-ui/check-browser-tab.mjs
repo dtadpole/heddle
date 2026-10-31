@@ -10,7 +10,7 @@ import { heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfi
 /**
  * The page's Browser tab (#86), after DSH's `ui-sidebar-browser` on Web.
  *
- * Four claims, each judged where it lives:
+ * Five claims, each judged where it lives:
  *
  * 1. **Opt-in.** DSH's Web profile ships its Browser disabled; here the operator enables it with `HEDDLE_WEB_BROWSER=1`.
  *    A default server's `/api/status` carries no `browser` key and its page shows no entry point.
@@ -22,6 +22,8 @@ import { heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfi
  *    unknown, with Back, Forward and Open in system browser disabled and Reload returning to the last known address.
  * 4. **The pane does not squeeze the conversation.** DSH's column budget holds beside any left-sidebar width and in any
  *    window: a 400-pixel conversation beside a track of at least 300, or a pane that covers the conversation column.
+ * 5. **DSH's Web chords.** Mod+Shift+B shows and hides the sidebar and Mod+Alt+T opens a tab (S38, S42), from the
+ *    composer and not behind a dialog; a default server, which has no sidebar, takes neither key and lists neither.
  *
  * The server never fetches or proxies a page, so the framed pages here come from a loopback double this check owns,
  * which also records every request it was sent — the evidence that a refused address loaded nothing and that no
@@ -457,5 +459,103 @@ test('at phone width the right sidebar covers the window instead of squeezing th
   } finally {
     await browser.close()
     server.close()
+  }
+})
+
+/**
+ * DSH's two Web chords for the right sidebar (S38, S42), pressed through `Input.dispatchKeyEvent` with the `key` Chrome
+ * delivers: `sidebar.right.toggle` is Mod+Shift+B (`B` on a Mac) and `browser.new` Mod+Alt+T (`†` on a Mac).
+ */
+const ALT = 1
+const CTRL = 2
+const META = 4
+const SHIFT = 8
+const CHORDS = {
+  toggle: { code: 'KeyB', macKey: 'B', key: 'B', keyCode: 66, modifiers: SHIFT },
+  tab: { code: 'KeyT', macKey: '†', key: 't', keyCode: 84, modifiers: ALT },
+  reference: { code: 'Slash', macKey: '/', key: '/', keyCode: 191, modifiers: 0 },
+}
+
+async function press(browser, chord, onMac) {
+  const modifiers = (onMac ? META : CTRL) | chord.modifiers
+  const base = { key: onMac ? chord.macKey : chord.key, code: chord.code, windowsVirtualKeyCode: chord.keyCode, nativeVirtualKeyCode: chord.keyCode, modifiers }
+  await browser.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...base })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+}
+
+const pause = (ms = 300) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
+
+/** The sidebar as a reader meets it: shown or not, its tabs, the selected one, the globe's state and the focus. */
+const SIDEBAR = `(() => {
+  const tabs = [...document.querySelectorAll('#rs-tabs [role="tab"]')]
+  const active = document.activeElement
+  return {
+    hidden: document.getElementById('right-sidebar').hidden,
+    tabs: tabs.length,
+    selected: tabs.findIndex((tab) => tab.getAttribute('aria-selected') === 'true'),
+    expanded: document.getElementById('browser-open').getAttribute('aria-expanded'),
+    focused: active?.dataset?.browser || active?.id || active?.tagName || null,
+  }
+})()`
+const REFERENCE = `[...document.querySelectorAll('#shortcut-reference .shortcut-row[data-action]')].map((row) => [row.querySelector('.label').textContent, row.querySelector('kbd').textContent])`
+
+test('DSH\'s Web chords drive the right sidebar: Mod+Shift+B shows and hides it, Mod+Alt+T opens a tab, and a default server binds neither', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const plain = await startServer('chords-off', false)
+  const enabled = await startServer('chords-on', true)
+  const browser = await openBrowser()
+  try {
+    // A default server has no right sidebar: both keys stay the browser's, and the reference does not list them.
+    await browser.goto(plain.url)
+    await browser.waitFor(`document.body.dataset.ready === 'true'`, 15_000)
+    const onMac = await browser.evaluate(`/darwin|mac|iphone|ipad/i.test(navigator.platform || '')`)
+    await browser.evaluate(`(() => {
+      window.__taken = []
+      window.addEventListener('keydown', (event) => { if (event.code === 'KeyB' || event.code === 'KeyT') window.__taken.push(event.defaultPrevented) })
+      document.querySelector('#prompt textarea').focus()
+    })()`)
+    await press(browser, CHORDS.toggle, onMac)
+    await press(browser, CHORDS.tab, onMac)
+    await pause()
+    const off = await browser.evaluate(`({ ...${SIDEBAR}, taken: window.__taken })`)
+    assert.deepEqual({ hidden: off.hidden, tabs: off.tabs, taken: off.taken }, { hidden: true, tabs: 0, taken: [false, false] }, `a default server takes neither chord ${JSON.stringify(off)}`)
+    await press(browser, CHORDS.reference, onMac)
+    await browser.waitFor(`document.getElementById('shortcut-reference').open === true`, 5_000)
+    const offRows = await browser.evaluate(REFERENCE)
+    assert.ok(!offRows.some(([label]) => label === 'Toggle right sidebar' || label === 'Browser'), `nor lists them ${JSON.stringify(offRows)}`)
+
+    // With the Browser on, from the composer.
+    await browser.goto(enabled.url)
+    await browser.waitFor(`document.body.dataset.ready === 'true'`, 15_000)
+    await browser.waitFor(`document.getElementById('browser-open').hidden === false`, 5_000)
+    await browser.evaluate(`document.querySelector('#prompt textarea').focus()`)
+    await press(browser, CHORDS.toggle, onMac)
+    await browser.waitFor(`document.getElementById('right-sidebar').hidden === false`, 5_000)
+    assert.deepEqual(await browser.evaluate(SIDEBAR), { hidden: false, tabs: 1, selected: 0, expanded: 'true', focused: 'address' }, 'Mod+Shift+B opens the sidebar with a first tab, the cursor in its address bar')
+    await press(browser, CHORDS.toggle, onMac)
+    await browser.waitFor(`document.getElementById('right-sidebar').hidden === true`, 5_000)
+    assert.deepEqual(await browser.evaluate(SIDEBAR), { hidden: true, tabs: 1, selected: 0, expanded: 'false', focused: 'browser-open' }, 'pressed again from inside, it hides the sidebar and hands the focus to the globe')
+    await press(browser, CHORDS.toggle, onMac)
+    await browser.waitFor(`document.getElementById('right-sidebar').hidden === false`, 5_000)
+    assert.deepEqual(await browser.evaluate(SIDEBAR), { hidden: false, tabs: 1, selected: 0, expanded: 'true', focused: 'address' }, 'a third press brings the same tab back, not a new one')
+    await press(browser, CHORDS.tab, onMac)
+    await browser.waitFor(`document.querySelectorAll('#rs-tabs [role="tab"]').length === 2`, 5_000)
+    assert.deepEqual(await browser.evaluate(SIDEBAR), { hidden: false, tabs: 2, selected: 1, expanded: 'true', focused: 'address' }, 'Mod+Alt+T opens a second tab and selects it')
+
+    await press(browser, CHORDS.reference, onMac)
+    await browser.waitFor(`document.getElementById('shortcut-reference').open === true`, 5_000)
+    const onRows = await browser.evaluate(REFERENCE)
+    assert.deepEqual(onRows.slice(-2), [['Toggle right sidebar', onMac ? '⇧⌘B' : 'Ctrl+Shift+B'], ['Browser', onMac ? '⌥⌘T' : 'Ctrl+Alt+T']], `the reference lists both last, in DSH's order ${JSON.stringify(onRows)}`)
+    // DSH's commands take no modal (`modals: []`): behind the open reference neither acts.
+    await press(browser, CHORDS.tab, onMac)
+    await press(browser, CHORDS.toggle, onMac)
+    await pause()
+    const behind = await browser.evaluate(SIDEBAR)
+    assert.deepEqual({ hidden: behind.hidden, tabs: behind.tabs }, { hidden: false, tabs: 2 }, `behind a dialog neither chord acts ${JSON.stringify(behind)}`)
+  } finally {
+    await browser.close()
+    plain.close()
+    enabled.close()
   }
 })

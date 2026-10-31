@@ -172,7 +172,7 @@ test('Mod+/ opens DSH\'s keyboard reference: every command in product order, the
   const rows = runInNewContext(`const SHORTCUTS_ON_MAC = true\n${source}\n({ all: shortcutReferenceRows('', true), byKey: shortcutReferenceRows('⌥⌘g', true), byAlias: shortcutReferenceRows('prefs', true), other: shortcutReferenceRows('', false) })`) as Record<'all' | 'byKey' | 'byAlias' | 'other', Array<{ label: string; keys: string; fixed: boolean; group: string }>>
   const plain = JSON.parse(JSON.stringify(rows)) as typeof rows
   /** DSH's `coreActionOrder` (`dsh-client-ui-shortcuts`), not the order the chords were added in. */
-  assert.deepEqual(plain.all.filter((row) => !row.fixed).map((row) => row.label), ['Keyboard shortcuts', 'New session', 'Toggle sidebar', 'Search sessions', 'Add workspace', 'Rename session', 'Fork session', 'Archive session', 'Open settings'])
+  assert.deepEqual(plain.all.filter((row) => !row.fixed).map((row) => row.label), ['Keyboard shortcuts', 'New session', 'Toggle sidebar', 'Search sessions', 'Add workspace', 'Rename session', 'Fork session', 'Archive session', 'Open settings', 'Toggle right sidebar', 'Browser'])
   assert.equal(plain.all.find((row) => row.label === 'New session')?.keys, '⌥⌘N')
   assert.equal(plain.all.find((row) => row.label === 'Fork session')?.keys, '⇧⌘F')
   assert.equal(plain.other.find((row) => row.label === 'Rename session')?.keys, 'Ctrl+Alt+G')
@@ -238,4 +238,57 @@ test('bindings a person records are kept as overrides, DSH\'s way (S41)', () => 
   assert.match(page, /const KEYBINDINGS_KEY = 'heddle\.keybindings\.v1'/, 'stored per origin, as DSH\'s dsh.keybindings.v1')
   assert.match(page, /window\.addEventListener\('storage', \(event\) => \{\n\s+if \(event\.key !== KEYBINDINGS_KEY\) return/, 'another tab\'s change applies here')
   assert.match(page, /if \(!keybindings\.readable\) \{\n\s+shortcutStatus\(unreadableNotice\(\)\)\n\s+return false/, 'an unreadable store is never overwritten')
+})
+
+test('Mod+Shift+B toggles the right sidebar and Mod+Alt+T opens a Browser tab, while the Browser is on (S38, S42)', () => {
+  /**
+   * DSH's Web defaults: `sidebar.right.toggle` is primary+shift+B (`dsh-client-ui-sidebar-right`) and `browser.new`
+   * primary+alt+T (`dsh-client-ui-sidebar-browser`). On a Mac Chrome delivers ⇧⌘B as `B` and ⌥⌘T as `†`.
+   */
+  assert.equal(shortcutFor(keydown({ code: 'KeyB', key: 'B', metaKey: true, shiftKey: true }), mac), 'right-sidebar', '⇧⌘B')
+  assert.equal(shortcutFor(keydown({ code: 'KeyB', key: '∫', metaKey: true, altKey: true }), mac), 'sidebar', '⌥⌘B is still the left sidebar')
+  assert.equal(shortcutFor(keydown({ code: 'KeyT', key: '†', metaKey: true, altKey: true }), mac), 'browser-new', '⌥⌘T')
+  assert.equal(shortcutFor(keydown({ code: 'KeyB', key: 'B', ctrlKey: true, shiftKey: true }), elsewhere), 'right-sidebar', 'Ctrl+Shift+B')
+  assert.equal(shortcutFor(keydown({ code: 'KeyT', key: 't', ctrlKey: true, altKey: true }), elsewhere), 'browser-new', 'Ctrl+Alt+T')
+  assert.equal(shortcutFor(keydown({ code: 'KeyT', key: 't', metaKey: true }), mac), null, '⌘T is left to the browser')
+
+  /** The right sidebar exists only with the Browser, so its commands are unbound and unlisted until the server says so. */
+  const cut = (pattern: RegExp) => {
+    const match = pattern.exec(page)
+    assert.ok(match, `${pattern} is in the page`)
+    return match[0]
+  }
+  const source = [
+    /const SESSION_SHORTCUTS = \[[\s\S]*?\n\]/,
+    /const SHORTCUT_LABELS = \{[\s\S]*?\n\}/,
+    /const PANEL_SHORTCUTS = [^\n]+/,
+    /const FIXED_INPUT_ACTIONS = \[[\s\S]*?\n\]/,
+    /function keyForCode\([^)]*\) \{[\s\S]*?\n\}/,
+    /function chordText\([^)]*\) \{[\s\S]*?\n\}/,
+    /function subsequenceMatch\([^)]*\) \{[\s\S]*?\n\}/,
+    /function shortcutReferenceRows\([^)]*\) \{[\s\S]*?\n\}/,
+    /function availableShortcuts\(\) \{[\s\S]*?\n\}/,
+  ]
+    .map(cut)
+    .join('\n')
+  const seen = JSON.parse(
+    runInNewContext(`const SHORTCUTS_ON_MAC = true
+let browserEnabled = false
+${source}
+const commands = (hidden) => shortcutReferenceRows('', true, availableShortcuts(), {}, hidden).filter((row) => !row.fixed).map((row) => [row.label, row.keys])
+const off = { table: availableShortcuts().map((entry) => entry.action), rows: commands(PANEL_SHORTCUTS) }
+browserEnabled = true
+JSON.stringify({ off, on: { table: availableShortcuts().map((entry) => entry.action), rows: commands([]) } })`) as string,
+  ) as Record<'off' | 'on', { table: string[]; rows: Array<[string, string]> }>
+  assert.ok(!seen.off.table.includes('right-sidebar') && !seen.off.table.includes('browser-new'), `Browser off: neither is bound (${seen.off.table.join(', ')})`)
+  assert.ok(seen.off.table.includes('sidebar'), 'and the left sidebar keeps its chord')
+  assert.deepEqual(seen.off.rows.map(([label]) => label).slice(-2), ['Archive session', 'Open settings'], 'nor listed')
+  assert.ok(seen.on.table.includes('right-sidebar') && seen.on.table.includes('browser-new'), 'Browser on: both are bound')
+  assert.deepEqual(seen.on.rows.slice(-2), [['Toggle right sidebar', '⇧⌘B'], ['Browser', '⌥⌘T']], 'and listed last, in DSH\'s order with its labels')
+
+  /** The wiring: the server's answer binds them, the chord is the globe's own action, and a dialog in front stops both. */
+  assert.match(page, /function applyBrowserFeature\(enabled\) \{\n\s+browserEnabled = enabled\n\s+browserOpen\.hidden = !enabled\n\s+refreshShortcuts\(\)/, 'the server\'s answer binds them')
+  assert.match(page, /browserOpen\.addEventListener\('click', \(\) => toggleRightSidebar\(\)\)/, 'the globe and the chord are one action')
+  assert.match(page, /if \(action === 'right-sidebar' \|\| action === 'browser-new'\) \{\n\s+if \(document\.querySelector\('dialog\[open\]'\) !== null\) return\n\s+if \(action === 'right-sidebar'\) toggleRightSidebar\(\)\n\s+else openBrowserTab\(\)/, 'nothing happens behind a dialog')
+  assert.match(page, /keybindings\.overrides, browserEnabled \? \[\] : PANEL_SHORTCUTS\)/, 'the reference leaves them out while the Browser is off')
 })

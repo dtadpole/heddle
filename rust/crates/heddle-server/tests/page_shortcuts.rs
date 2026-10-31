@@ -122,3 +122,24 @@ fn bindings_are_recorded_as_overrides() {
     ));
     assert!(PAGE_SOURCE.contains("<button type=\"button\" id=\"shortcut-restore-all\">"));
 }
+
+/// Mod+Shift+B toggles the right sidebar and Mod+Alt+T opens a Browser tab, DSH's Web chords, bound only while the
+/// server enables the Browser, since the right sidebar exists only then (DSH parity rows S38, S42). Executed by
+/// `test/page-shortcuts.test.ts` and judged in a browser by `_verifiers_/80-web-ui/check-browser-tab.mjs`.
+#[test]
+fn the_right_sidebar_chords_are_bound_with_the_browser() {
+    let source = shortcut_source();
+    assert!(source.contains("{ code: 'KeyB', key: 'b', shift: true, action: 'right-sidebar' }"));
+    assert!(source.contains("{ code: 'KeyT', key: 't', alt: true, action: 'browser-new' }"));
+    assert!(PAGE_SOURCE.contains("const PANEL_SHORTCUTS = ['right-sidebar', 'browser-new']"));
+    assert!(
+        PAGE_SOURCE.contains(
+            "SESSION_SHORTCUTS.filter((entry) => browserEnabled || !PANEL_SHORTCUTS.includes(entry.action))"
+        ),
+        "the two are left out while the Browser is off"
+    );
+    assert!(
+        PAGE_SOURCE.contains("browserOpen.hidden = !enabled\n  refreshShortcuts()"),
+        "and bound when the server says it is on"
+    );
+}

@@ -9456,7 +9456,9 @@ async function loadStatus() {
  *
  * Differences from DSH, stated rather than hidden: there is no per-tab switch that removes the sandbox; this
  * application's port under any loopback name counts as its own origin; the tabs belong to the page rather than to the
- * session and are not restored after a reload; no keyboard shortcut opens a tab.
+ * session and are not restored after a reload. DSH's Web chords are bound (Mod+Shift+B shows or hides the sidebar,
+ * Mod+Alt+T opens a tab), but where DSH refuses them without an open session ("Select a session first"), here they
+ * need none, since the tabs are the page's.
  */
 const BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox'
 const BROWSER_MAX_ADDRESS = 16384
@@ -9798,16 +9800,27 @@ function openBrowserTab(initialAddress) {
   return tab
 }
 
-/** Reveal the entry point once the server says the Browser is enabled; a default server never shows it. */
+/**
+ * Reveal the entry point once the server says the Browser is enabled; a default server never shows it. Its two chords
+ * are bound from the same moment (`availableShortcuts`).
+ */
 function applyBrowserFeature(enabled) {
   browserEnabled = enabled
   browserOpen.hidden = !enabled
+  refreshShortcuts()
 }
 
-browserOpen.addEventListener('click', () => {
+/**
+ * What the globe and DSH's `sidebar.right.toggle` (Mod+Shift+B on the Web) both do: hide the open sidebar, or show it
+ * with the cursor in its tab's address bar, opening a first tab when there is none. Hiding it from inside hands the
+ * focus to the globe, so the cursor does not fall to the page.
+ */
+function toggleRightSidebar() {
   if (!browserEnabled) return
   if (!rightSidebar.hidden) {
+    const inside = rightSidebar.contains(document.activeElement)
     showRightSidebar(false)
+    if (inside) browserOpen.focus()
     return
   }
   if (activeSidebarTab === null) {
@@ -9816,7 +9829,9 @@ browserOpen.addEventListener('click', () => {
   }
   showRightSidebar(true)
   activeSidebarTab.address.focus()
-})
+}
+
+browserOpen.addEventListener('click', () => toggleRightSidebar())
 document.getElementById('rs-new').addEventListener('click', () => openBrowserTab())
 document.getElementById('rs-close').addEventListener('click', () => {
   showRightSidebar(false)
@@ -12585,6 +12600,10 @@ const SESSION_SHORTCUTS = [
   { code: 'KeyO', key: 'o', alt: true, action: 'add-workspace' },
   /** DSH's keyboard reference (`dsh-client-ui-shortcuts`): Mod+/ opens it, and closes it when it is in front. */
   { code: 'Slash', key: '/', action: 'shortcuts-reference' },
+  /** DSH's `sidebar.right.toggle`, `KeyB` with primary+shift on the Web (dsh-client-ui-sidebar-right `client.js:198`). */
+  { code: 'KeyB', key: 'b', shift: true, action: 'right-sidebar' },
+  /** DSH's `browser.new`, `KeyT` with primary+alt on the Web (dsh-client-ui-sidebar-browser `client.js:1565`). */
+  { code: 'KeyT', key: 't', alt: true, action: 'browser-new' },
 ]
 
 /**
@@ -12673,6 +12692,16 @@ document.addEventListener('keydown', (event) => {
     toggleShortcutReference()
     return
   }
+  /**
+   * The right sidebar's two commands (S38, S42). They are in the table only while the server enables the Browser
+   * (`availableShortcuts`); like DSH's (`modals: []`), neither acts behind an open dialog.
+   */
+  if (action === 'right-sidebar' || action === 'browser-new') {
+    if (document.querySelector('dialog[open]') !== null) return
+    if (action === 'right-sidebar') toggleRightSidebar()
+    else openBrowserTab()
+    return
+  }
   if (action === 'settings') {
     /** While the reference is in front, the Settings command neither opens nor closes Settings (DSH). */
     if (shortcutReference.open) return
@@ -12713,7 +12742,8 @@ document.addEventListener('keydown', (event) => {
 const shortcutReference = document.getElementById('shortcut-reference')
 /**
  * The commands in DSH's reference order, its `coreActionOrder` (`dsh-client-ui-shortcuts` `client.js:505`): the
- * reference itself first, then New session, the left sidebar, Search, Add workspace, Rename, Fork, Archive, Settings.
+ * reference itself first, then New session, the left sidebar, Search, Add workspace, Rename, Fork, Archive, Settings,
+ * the right sidebar and the Browser. The last two carry DSH's labels and aliases.
  */
 const SHORTCUT_LABELS = {
   'shortcuts-reference': ['Keyboard shortcuts', 'keys help'],
@@ -12725,7 +12755,15 @@ const SHORTCUT_LABELS = {
   fork: ['Fork session', 'branch copy'],
   archive: ['Archive session', 'hide'],
   settings: ['Open settings', 'preferences'],
+  'right-sidebar': ['Toggle right sidebar', 'right panel'],
+  'browser-new': ['Browser', 'new browser tab'],
 }
+/**
+ * The commands that act on the right sidebar. It exists only while the server enables the Browser, its one kind of
+ * tab, so until `/api/status` says so they are unbound (the keys stay the browser's) and the reference omits them.
+ * DSH's sidebar always exists (Files, Terminal), so there the toggle is always bound.
+ */
+const PANEL_SHORTCUTS = ['right-sidebar', 'browser-new']
 const FIXED_INPUT_ACTIONS = [
   { label: 'Send message', alias: 'submit', keys: 'Enter' },
   { label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
@@ -12746,9 +12784,10 @@ function subsequenceMatch(text, query) {
   }
   return true
 }
-function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides = {}) {
+function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides = {}, hidden = []) {
   const rows = []
   for (const action of Object.keys(SHORTCUT_LABELS)) {
+    if (hidden.includes(action)) continue
     const shortcut = table.find((entry) => entry.action === action)
     const [label, alias] = SHORTCUT_LABELS[action]
     const keys = shortcut === undefined ? 'No shortcut' : chordText(shortcut, mac)
@@ -12762,7 +12801,7 @@ function renderShortcutReference() {
   const list = document.getElementById('shortcut-reference-list')
   list.replaceChildren()
   let group = null
-  const rows = shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC, activeShortcuts, keybindings.overrides)
+  const rows = shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC, activeShortcuts, keybindings.overrides, browserEnabled ? [] : PANEL_SHORTCUTS)
   for (const row of rows) {
     if (row.group !== group) {
       group = row.group
@@ -12898,7 +12937,19 @@ function readStoredKeybindings() {
   }
 }
 let keybindings = readStoredKeybindings()
-let activeShortcuts = effectiveShortcuts(SESSION_SHORTCUTS, keybindings.overrides)
+/**
+ * The defaults this page offers now: every chord, less the right sidebar's while it does not exist (`PANEL_SHORTCUTS`).
+ * A recorded chord for a command left out is kept in storage and applies again once the command is back.
+ */
+function availableShortcuts() {
+  return SESSION_SHORTCUTS.filter((entry) => browserEnabled || !PANEL_SHORTCUTS.includes(entry.action))
+}
+/** Rebuild the bindings in force after the stored overrides or the available commands change. */
+function refreshShortcuts() {
+  activeShortcuts = effectiveShortcuts(availableShortcuts(), keybindings.overrides)
+  if (shortcutReference.open) renderShortcutReference()
+}
+let activeShortcuts = effectiveShortcuts(availableShortcuts(), keybindings.overrides)
 let recordingAction = null
 let recordingError = null
 function shortcutStatus(text) {
@@ -12919,7 +12970,7 @@ function writeKeybindings(overrides, done) {
     return false
   }
   keybindings = { readable: true, overrides }
-  activeShortcuts = effectiveShortcuts(SESSION_SHORTCUTS, overrides)
+  activeShortcuts = effectiveShortcuts(availableShortcuts(), overrides)
   shortcutStatus(done)
   return true
 }
@@ -13030,8 +13081,7 @@ document.getElementById('shortcut-restore-ok').addEventListener('click', () => {
 window.addEventListener('storage', (event) => {
   if (event.key !== KEYBINDINGS_KEY) return
   keybindings = readStoredKeybindings()
-  activeShortcuts = effectiveShortcuts(SESSION_SHORTCUTS, keybindings.overrides)
-  if (shortcutReference.open) renderShortcutReference()
+  refreshShortcuts()
 })
 
 function toggleShortcutReference() {

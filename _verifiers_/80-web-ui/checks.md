@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T15:45:00Z
+modified: 2026-10-31T15:55:00Z
 level: L3
-version: 1.3.1
+version: 1.4.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -87,6 +87,9 @@ grounded_in:
   width. On a desktop it keeps DSH's column budget whatever the left sidebar's stored or dragged width and the
   window's: beside a track the conversation keeps 400 pixels and the track 300, a pane with no room for that covers the
   conversation column, and opening it below 1024 pixels returns a narrow opening of the left sidebar to its rail.
+  DSH's Web chords drive it (S38, S42): Mod+Shift+B shows and hides it, the same tab coming back, and Mod+Alt+T opens
+  another tab, from the composer and not behind a dialog; the keyboard reference lists both last; a default server
+  takes neither key and lists neither.
 - [`check-shortcut-keys.mjs`](check-shortcut-keys.mjs) — the session shortcuts pressed through
   `Input.dispatchKeyEvent` with the `key` values Chrome delivers (on a Mac, ⌥⌘A arrives as `å` and ⌥⌘N as a dead
   key), matched on the physical key with DSH's `Mod`, Command on a Mac and Control elsewhere (R-developer-seven-7):
