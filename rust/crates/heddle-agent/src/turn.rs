@@ -2147,12 +2147,14 @@ pub(crate) mod tests {
         )
         .await
         .unwrap_err();
+        // The folder by its last component, as the sentence names it; a path with none is named whole, never a panic.
+        let name = folder.file_name().map_or_else(
+            || folder.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
         assert_eq!(
             error.to_string(),
-            format!(
-                "This workspace's folder no longer exists: \"{}\"",
-                folder.file_name().unwrap().to_string_lossy()
-            )
+            format!("This workspace's folder no longer exists: \"{name}\"")
         );
         assert!(!*ran.lock().unwrap(), "no tool ran");
         assert!(!folder.exists(), "and the folder stays gone");
