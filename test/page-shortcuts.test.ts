@@ -171,7 +171,8 @@ test('Mod+/ opens DSH\'s keyboard reference: every command in product order, the
   const source = pieces.map(take).join('\n')
   const rows = runInNewContext(`const SHORTCUTS_ON_MAC = true\n${source}\n({ all: shortcutReferenceRows('', true), byKey: shortcutReferenceRows('⌥⌘g', true), byAlias: shortcutReferenceRows('prefs', true), other: shortcutReferenceRows('', false) })`) as Record<'all' | 'byKey' | 'byAlias' | 'other', Array<{ label: string; keys: string; fixed: boolean; group: string }>>
   const plain = JSON.parse(JSON.stringify(rows)) as typeof rows
-  assert.deepEqual(plain.all.filter((row) => !row.fixed).map((row) => row.label), ['New session', 'Search sessions', 'Add workspace', 'Rename session', 'Fork session', 'Archive session', 'Toggle sidebar', 'Open settings', 'Keyboard shortcuts'])
+  /** DSH's `coreActionOrder` (`dsh-client-ui-shortcuts`), not the order the chords were added in. */
+  assert.deepEqual(plain.all.filter((row) => !row.fixed).map((row) => row.label), ['Keyboard shortcuts', 'New session', 'Toggle sidebar', 'Search sessions', 'Add workspace', 'Rename session', 'Fork session', 'Archive session', 'Open settings'])
   assert.equal(plain.all.find((row) => row.label === 'New session')?.keys, '⌥⌘N')
   assert.equal(plain.all.find((row) => row.label === 'Fork session')?.keys, '⇧⌘F')
   assert.equal(plain.other.find((row) => row.label === 'Rename session')?.keys, 'Ctrl+Alt+G')

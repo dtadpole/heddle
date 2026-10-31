@@ -12254,16 +12254,20 @@ document.addEventListener('keydown', (event) => {
  * (DSH parity R-developer-seven-11, row S40).
  */
 const shortcutReference = document.getElementById('shortcut-reference')
+/**
+ * The commands in DSH's reference order, its `coreActionOrder` (`dsh-client-ui-shortcuts` `client.js:505`): the
+ * reference itself first, then New session, the left sidebar, Search, Add workspace, Rename, Fork, Archive, Settings.
+ */
 const SHORTCUT_LABELS = {
+  'shortcuts-reference': ['Keyboard shortcuts', 'keys help'],
   'new-session': ['New session', 'new chat'],
+  sidebar: ['Toggle sidebar', 'panel'],
   search: ['Search sessions', 'find'],
   'add-workspace': ['Add workspace', 'folder'],
   rename: ['Rename session', 'title'],
   fork: ['Fork session', 'branch copy'],
   archive: ['Archive session', 'hide'],
-  sidebar: ['Toggle sidebar', 'panel'],
   settings: ['Open settings', 'preferences'],
-  'shortcuts-reference': ['Keyboard shortcuts', 'keys help'],
 }
 const FIXED_INPUT_ACTIONS = [
   { label: 'Send message', alias: 'submit', keys: 'Enter' },
