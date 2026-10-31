@@ -43,6 +43,8 @@ import {
   authorize,
 } from './token.ts'
 import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
+import { TerminalRegistry, type TerminalEvent } from './terminals.ts'
+import { SandboxUnavailableError } from '../sandbox/backend.ts'
 
 /**
  * The Web UI.
@@ -166,6 +168,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const completedAt = new Map<string, number>()
   // Tracked so shutdown can reach a connection whose handler is still awaiting a turn.
   const sockets = new Set<import('node:net').Socket>()
+  /** The page's interactive terminals, per session (#85); closed on archive, when unattended and at shutdown. */
+  const terminals = new TerminalRegistry()
 
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
@@ -259,6 +263,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       controllers,
       runningSince,
       completedAt,
+      terminals,
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
@@ -322,9 +327,12 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      * leave `node --test` reporting "the event loop has already resolved" with a pending
      * promise. Ending the subscribers first, then destroying whatever sockets remain, is the
      * difference between closing and stopping.
+     *
+     * Terminals end first, and their processes with them, so a restart leaves no orphan shell (#85).
      */
-    close: () =>
-      new Promise<void>((resolvePromise) => {
+    close: async () => {
+      await terminals.closeAll()
+      await new Promise<void>((resolvePromise) => {
         clearInterval(heartbeat)
         detachApprovals?.()
         for (const client of subscribers) {
@@ -338,7 +346,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
         server.close(() => resolvePromise())
         server.closeAllConnections?.()
         for (const socket of sockets) socket.destroy()
-      }),
+      })
+    },
   }
 }
 
@@ -377,6 +386,8 @@ interface RequestState {
    * the composer grew a Stop.
    */
   readonly controllers: Map<string, Set<AbortController>>
+  /** Each session's interactive terminals (#85). */
+  readonly terminals: TerminalRegistry
   /**
    * Rounds an interactive turn may take before the loop stops it — `Infinity` by default, so the loop ends the way
    * DSH's does (the model stops calling tools), and only an explicit `--max-rounds` turns this into a limit.
@@ -526,6 +537,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       url.pathname.startsWith('/api') ? 'text/plain' : 'text/html; charset=utf-8',
       url.pathname.startsWith('/api') ? 'unauthorized\n' : tokenFormPage(),
     )
+    return
+  }
+
+  /**
+   * A session's interactive terminals (#85): list, create, stream, input, resize and close.
+   *
+   * After the Host/Origin fence and the credential, like every route here, so a terminal is never reachable by a
+   * request this server would refuse elsewhere.
+   */
+  if (TERMINAL_ROUTE.test(url.pathname)) {
+    await handleTerminalRoute(ctx, request, response, url, state)
     return
   }
 
@@ -1488,6 +1510,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
+    /** Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end with their owner (#85). */
+    if (archived === true) await state.terminals.closeSession(id)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -2548,6 +2572,183 @@ function subscribeSessionEvent(ctx: Context, forward: (payload: { session: strin
   return () => {
     if (typeof dispose === 'function') dispose()
   }
+}
+
+/** `/api/sessions/<session>/terminals[/<terminal>[/stream|/input|/resize]]`. */
+const TERMINAL_ROUTE = /^\/api\/sessions\/(session-[0-9a-f-]{36})\/terminals(?:\/(terminal-[0-9a-f-]{36})(?:\/(stream|input|resize))?)?$/i
+
+/**
+ * The terminal routes (#85, slice 1), with developer-ten's conditions for the server half:
+ * - A write must be `application/json`. A page sends JSON, and a form on another site cannot.
+ * - The session must be this server's (`404` otherwise), and its folder must sit under one of this server's
+ *   workspace roots (`403`).
+ * - An archived session gets no new terminal, input, resize or stream (`409`); listing and closing still work.
+ * - The shell runs under the session's sandbox mode, wrapped the way bash calls are wrapped, with the environment
+ *   bash sees. A session whose mode this host cannot confine gets no terminal (`503`), as bash refuses to run.
+ * - The caps: `maxTerminals` per session (`409`), the size range, input bytes per request (`413`) and the
+ *   replay bytes.
+ * - A terminal id is looked up only inside its own session, so another session's path answers `404`.
+ */
+async function handleTerminalRoute(ctx: Context, request: IncomingMessage, response: ServerResponse, url: URL, state: RequestState): Promise<void> {
+  const [, session = '', terminal, action] = TERMINAL_ROUTE.exec(url.pathname) ?? []
+  const method = request.method ?? 'GET'
+  const json = (status: number, body: unknown): void => respond(response, status, 'application/json', `${JSON.stringify(body)}\n`)
+  const route =
+    terminal === undefined
+      ? method === 'GET' ? 'list' : method === 'POST' ? 'create' : undefined
+      : action === undefined
+        ? method === 'DELETE' ? 'close' : undefined
+        : action === 'stream'
+          ? method === 'GET' ? 'stream' : undefined
+          : method === 'POST' ? action : undefined
+  if (route === undefined) {
+    json(405, { error: `${method} is not allowed on ${url.pathname}` })
+    return
+  }
+  if (method !== 'GET' && !/^application\/json\s*(;|$)/i.test(String(request.headers['content-type'] ?? ''))) {
+    json(415, { error: 'a terminal request must be sent as application/json' })
+    return
+  }
+  const meta = ctx.session.list().find((entry) => entry.id === session)
+  if (meta === undefined) {
+    json(404, { error: `no session ${session}` })
+    return
+  }
+  if (ctx.workspace !== undefined && ctx.workspace.owner(meta.cwd) === undefined) {
+    json(403, { error: `session ${session} is not under any workspace root of this server`, code: 'not-owned' })
+    return
+  }
+  if (meta.archived === true && route !== 'list' && route !== 'close') {
+    json(409, { error: `session ${session} is archived`, code: 'archived' })
+    return
+  }
+  const registry = state.terminals
+  if (route === 'list') {
+    json(200, { terminals: registry.list(session), limits: registry.limits })
+    return
+  }
+  if (route === 'close') {
+    const closed = await registry.close(session, terminal ?? '')
+    if (!closed) json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
+    else json(200, { closed: true, terminal })
+    return
+  }
+  if (route === 'stream') {
+    streamTerminal(request, response, registry, session, terminal ?? '')
+    return
+  }
+  const body = await readJson(request, response)
+  if (body === null) return
+  if (route === 'create') {
+    const cols = body.cols === undefined ? 80 : body.cols
+    const rows = body.rows === undefined ? 24 : body.rows
+    if (typeof cols !== 'number' || typeof rows !== 'number' || !registry.fits(cols, rows)) {
+      json(400, { error: `cols and rows must be whole numbers from 1 to ${registry.limits.maxCols} and ${registry.limits.maxRows}` })
+      return
+    }
+    const handle = ctx.session.store.open(session)
+    if (handle === null) {
+      json(404, { error: `no session ${session}` })
+      return
+    }
+    const mode = ctx.session.effectiveMode(handle, ctx.sandbox.mode)
+    const root = ctx.sandbox.rootFor(meta.cwd)
+    try {
+      if (!statSync(root).isDirectory()) throw new Error('not a directory')
+    } catch {
+      json(409, { error: `the session's folder ${root} is not an available directory`, code: 'cwd-missing' })
+      return
+    }
+    try {
+      const created = registry.create({
+        session,
+        cwd: root,
+        mode,
+        cols,
+        rows,
+        confine: (argv) => ctx.sandbox.confine(argv, mode, root).argv,
+        env: process.env,
+      })
+      if (created === 'limit') {
+        json(409, { error: `session ${session} already holds ${registry.limits.maxTerminals} terminals; close one first`, code: 'limit' })
+        return
+      }
+      json(201, { terminal: created })
+    } catch (error) {
+      if (error instanceof SandboxUnavailableError || (error instanceof Error && error.name === 'SandboxUnavailableError')) {
+        json(503, { error: (error as Error).message, code: 'sandbox-unavailable' })
+        return
+      }
+      throw error
+    }
+    return
+  }
+  if (route === 'input') {
+    if (typeof body.data !== 'string') {
+      json(400, { error: 'data must be a string' })
+      return
+    }
+    const result = registry.input(session, terminal ?? '', body.data)
+    if (result === 'ok') json(200, { ok: true })
+    else if (result === 'missing') json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
+    else if (result === 'exited') json(409, { error: 'the terminal has exited', code: 'exited' })
+    else json(413, { error: `input is limited to ${registry.limits.maxInputBytes} bytes per request` })
+    return
+  }
+  const cols = body.cols
+  const rows = body.rows
+  if (typeof cols !== 'number' || typeof rows !== 'number') {
+    json(400, { error: 'cols and rows are required numbers' })
+    return
+  }
+  const result = await registry.resize(session, terminal ?? '', cols, rows)
+  if (result === 'ok') json(200, { ok: true, cols, rows })
+  else if (result === 'missing') json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
+  else if (result === 'exited') json(409, { error: 'the terminal has exited', code: 'exited' })
+  else if (result === 'out-of-range') json(400, { error: `cols and rows must be whole numbers from 1 to ${registry.limits.maxCols} and ${registry.limits.maxRows}` })
+  else json(503, { error: 'the terminal could not be resized', code: 'unavailable' })
+}
+
+/**
+ * One terminal's output as an event stream: a `snapshot` of the retained tail first, then `output` frames and
+ * one `exit`.
+ *
+ * The listener is attached before the snapshot is written, so no output can fall between the two. A heartbeat
+ * comment keeps an idle stream open through proxies. The stream ends after `exit`.
+ */
+function streamTerminal(request: IncomingMessage, response: ServerResponse, registry: TerminalRegistry, session: string, terminal: string): void {
+  const frames: TerminalEvent[] = []
+  let ready = false
+  let beat: NodeJS.Timeout | undefined
+  const send = (event: TerminalEvent): void => {
+    if (response.writableEnded || response.destroyed) return
+    response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    if (event.type === 'exit') {
+      clearInterval(beat)
+      response.end()
+    }
+  }
+  const attached = registry.attach(session, terminal, (event) => (ready ? send(event) : frames.push(event)))
+  if (attached === undefined) {
+    respond(response, 404, 'application/json', `${JSON.stringify({ error: `no terminal ${terminal} in session ${session}` })}\n`)
+    return
+  }
+  respondSse(response)
+  request.on('close', () => {
+    clearInterval(beat)
+    attached.detach()
+  })
+  response.write(`event: snapshot\ndata: ${JSON.stringify(attached.snapshot)}\n\n`)
+  ready = true
+  for (const event of frames) send(event)
+  if (attached.snapshot.exited) {
+    send({ type: 'exit', code: attached.snapshot.exitCode })
+    return
+  }
+  beat = setInterval(() => {
+    if (!response.writableEnded && !response.destroyed) response.write(': heartbeat\n\n')
+  }, heartbeatInterval())
+  beat.unref()
 }
 
 function respondSse(response: ServerResponse): void {
