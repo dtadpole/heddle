@@ -66,7 +66,7 @@ function harness(deferredCommands = false) {
     const QUEUE_KEY_NONE = ''; let activeFolder = 'workspace', workspaceRoutes = 'present'; const firstTreeReady = Promise.resolve();
     let directTurnPending = 0, directPendingKey = null, stopRequested = false;
     ${['historyFailureText', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn'].map(source).join('\n')}
-    ${listener}
+    ${listener};
     ({ show: showSession, run: runTurn,
        state: () => ({ current, unavailable: unavailableSession, loading: sessionLoading !== null, selectedPath }),
        kept: () => sessionLoading?.events.length ?? 0,
@@ -94,7 +94,7 @@ for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as c
     state.handle(delta(90)); state.handle(delta(91)); state.prepare('S')
     state.handle({ session: 'S', event: { seq: 92, type: 'turn/completed' } })
     assert.equal(state.kept(), 3); const kept = state.buffer()
-    assert.deepEqual(state.rows, [], 'including completion, drawing waits for history')
+    assert.equal(state.rows.length, 0, 'including completion, drawing waits for history')
     assert.deepEqual(Array.from(state.lifecycle('S')), [false, false, false])
     if (failure === 'HTTP refusal') request.resolve({ ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ error: 'history unavailable' }) })
     else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
