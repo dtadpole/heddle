@@ -186,7 +186,7 @@ test('a tool call and its result fold into one turn, and the page draws them as 
       'and the person and the model still have their own turns',
     )
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelectorAll("#log .turn").length > 0', 20_000)
     const drawn = JSON.parse(
       await browser.evaluate(`JSON.stringify({
@@ -322,7 +322,7 @@ test('a completed turn branches into a new conversation that ends after it, and 
     const renamed = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}/title`, { method: 'POST', body: JSON.stringify({ title: 'Branch source' }) })
     assert.equal(renamed.status, 200, 'the source is named')
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     assert.ok(
       await browser.waitFor('document.querySelectorAll("#log .turn.assistant [data-action=branch]").length === 3', 20_000),
       `each of the three completed turns offers Branch\nDIAG ${await browser.evaluate('document.getElementById("log")?.innerText.slice(0, 300) ?? ""')}`,
@@ -404,7 +404,7 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelector("#log .turn.reasoning") !== null && document.querySelector("#log .turn.tool") !== null', 20_000)
 
     const diag = JSON.parse(
@@ -784,7 +784,7 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, opened.body.session?.id ?? opened.body.id)
     await browser.waitFor('document.querySelectorAll(".column-grip").length === 2', 20_000)
 
     const grips = JSON.parse(
@@ -979,7 +979,7 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
       await response.text()
     }
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, opened.body.session?.id ?? opened.body.id)
     await browser.waitFor('document.querySelectorAll("#log > .turn").length >= 24', 25_000)
     await browser.waitFor('document.getElementById("minimap") !== null && !document.getElementById("minimap").hidden', 10_000)
     await browser.waitFor('document.querySelectorAll("#minimap .mm-row").length > 0', 10_000)
@@ -1423,7 +1423,7 @@ test('a finished turn shows the edited files as one summary: single name, or a f
     })
     assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
     await turn.text()
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
     await new Promise((resolve) => setTimeout(resolve, 400))
   }
@@ -1557,7 +1557,7 @@ test('a long turn is not cut at eight rounds, and a turn the loop does stop says
     /** Ten rounds finish, because the interactive budget is 32 rather than the one-shot eight. */
     const done = await runTurn(long)
     assert.match(done.stream, /the long task finished/, 'a forty-round turn reaches its answer, because interactive turns are uncapped')
-    await browser.goto(long.url)
+    await browser.gotoSession(long.url, done.session)
     await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
     await browser.waitFor('document.getElementById("log").innerText.includes("the long task finished")', 10_000)
     const noticeOnLong = await browser.evaluate('document.querySelectorAll("#log .turn-notice").length')
@@ -1568,7 +1568,7 @@ test('a long turn is not cut at eight rounds, and a turn the loop does stop says
     const answer = stopped.turns.find((entry) => entry.kind === 'assistant')
     assert.ok(answer !== undefined, 'a row exists for the stopped turn')
     assert.ok(Array.isArray(answer.ended) && answer.ended.some((entry) => /round limit of 3/.test(entry)), `the transcript carries the reason (${JSON.stringify(answer && answer.ended)})`)
-    await browser.goto(short.url)
+    await browser.gotoSession(short.url, stopped.session)
     await browser.waitFor('document.querySelectorAll("#log .turn-notice").length >= 1', 25_000)
     const noticeText = await browser.evaluate('document.getElementById("log").innerText')
     assert.match(noticeText, /Stopped after the round limit of 3/, `the page says why (${noticeText.slice(-120)})`)

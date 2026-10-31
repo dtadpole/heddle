@@ -1465,6 +1465,13 @@ test('a folder opens and closes with the same control, including a leaf with not
       `[...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === '_tools_').click()`,
     )
     await browser.waitFor(`[...document.querySelectorAll('#tree .row')].some((entry) => entry.querySelector('.label').textContent === 'some-tool')`, 20_000)
+    /**
+     * The selection before the click: a first visit opens a fresh New session (#17, DSH's restoreSelection), whose row is
+     * the selected one, so "chooses nothing" is that the selection does not move.
+     */
+    const selectedBefore = JSON.parse(
+      await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tree li[aria-selected="true"] > .row')].map((entry) => entry.querySelector('.label').textContent))`),
+    )
     await browser.evaluate(
       `[...document.querySelectorAll('#tree .row')].find((entry) => entry.querySelector('.label').textContent === 'some-tool').click()`,
     )
@@ -1475,7 +1482,8 @@ test('a folder opens and closes with the same control, including a leaf with not
       })`),
     )
     assert.equal(openedInstance.open, 'true', 'opening an instance opens it')
-    assert.deepEqual(openedInstance.selected, [], 'and chooses nothing: a folder is navigation, not a selection')
+    assert.deepEqual(openedInstance.selected, selectedBefore, 'and chooses nothing: a folder is navigation, not a selection')
+    assert.ok(!openedInstance.selected.includes('some-tool'), 'the instance itself is not selected')
 
     // Closed again, because the assertions that follow drive the disclosure from a known state.
     await browser.evaluate(
@@ -2674,7 +2682,8 @@ test('the panel follows the selection: a session offers two views, a file one, a
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session these rules are about is the one it is told to open. */
+    await browser.gotoSession(live.url, parseJson(created.stdout).session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     /**
@@ -2850,7 +2859,8 @@ test('a session is renamed from its own menu, and the row and its definition fol
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, made.session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     const reading = JSON.parse(
@@ -4133,7 +4143,8 @@ test('the four session shortcuts act on the selected session, and say so when th
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, created.session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     const reading = JSON.parse(
@@ -4544,7 +4555,8 @@ test('a running session says so before its name, and a workspace row offers the 
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, created.session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     const reading = JSON.parse(
@@ -4709,7 +4721,8 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
     assert.equal((await flag(archivedId, { archived: true })).status, 200, 'the second is archived')
 
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, pinnedId)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     const reading = JSON.parse(
@@ -5347,7 +5360,8 @@ test('the menu forks a session from its row, and the child appears in the tree n
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, made.session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     /** Open the source row's menu through its own button, and take the item a person would take. */
@@ -5431,7 +5445,8 @@ test('a written session moves to the top of its folder, its age follows, and a r
     assert.ok(older !== undefined, `the older session is known\nsaw: ${JSON.stringify(before)}`)
 
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, made[1].session)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
     /** Expand to the session rows and read their order and their age stamps. */
     const readRows = async () =>
@@ -5744,8 +5759,9 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
   try {
     await conventionsFixture(h)
     const branch = join(h.work, '_tools_', 'some-tool')
+    let newest
     for (let index = 0; index < 3; index += 1) {
-      await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })
+      newest = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout).session
       await runCli(adminArgs(h, ['--turn', `conversation for the glide ${index + 1}`]), { env: h.env, cwd: branch })
       await new Promise((done) => setTimeout(done, 20))
     }
@@ -5754,7 +5770,8 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
       { ...h.env, HOME: h.home },
     )
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /** The page opens no session on its own (#17), so the session this check is about is opened by name. */
+    await browser.gotoSession(live.url, newest)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
 
     /**

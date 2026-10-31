@@ -1,7 +1,7 @@
 ---
 title: The library a check imports
 created: 2026-10-24T05:55:00Z
-modified: 2026-10-24T05:55:00Z
+modified: 2026-10-31T07:15:00Z
 level: L3
 version: 1.0.0
 description: The five rules lib.mjs carries for every check, the browser wrapper, and where runtime screenshots go.
@@ -34,7 +34,9 @@ instead of in every check. Five rules it carries are worth naming:
 
 `browser.mjs` is the one-page wrapper over [`browser-use`](../browser-use/INDEX.md): `goto`, `evaluate`, `waitFor`,
 `screenshot`, `close`, headless by default, with a temporary profile per call. It is not a second driver — it imports
-the tool and adds only the API the checks were written against.
+the tool and adds only the API the checks were written against. `gotoSession(url, id)` opens the Web UI with that
+session as the one it restores: the page opens no session on its own (a load with nothing saved starts a fresh one,
+#17), so a check that seeds a session and reads it on screen names it this way.
 
 **Runtime browser evidence.** `evidencePath(name)` allocates a distinct screenshot destination under
 `.heddle-tmp/verifier-evidence/<run>/<allocation>/`; the parent exists before capture, each allocation preserves

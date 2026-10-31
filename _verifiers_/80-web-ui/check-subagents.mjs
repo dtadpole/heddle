@@ -10,7 +10,8 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  *
  * The claim, in DSH's terms: a delegated child is reached from its parent, never from the sidebar — the tree, the flat
  * list and the search all leave it out (dsh-client-ui-workspace `sessionVisible`, `lib/client.js:964`); a reload reopens
- * the session that was open (`restoreSelection`, `:1605`) rather than the newest one, which can be that hidden child; and
+ * the session that was open (`restoreSelection`, `:1605`), and a first start opens a fresh one (`:1620`, `:1626`), rather
+ * than the newest one, which can be that hidden child; and
  * a one-shot child, opened, shows DSH's read-only record where the composer was (dsh-client-ui-subagent
  * `SubagentReadOnlyComposer`, `lib/client.js:678`), while any other session gets the composer back.
  *
@@ -162,11 +163,24 @@ test('a subagent\'s child stays out of the sidebar, a reload reopens the open se
     record: document.getElementById('subagent-readonly')?.hidden === false ? document.getElementById('subagent-readonly').textContent : null,
   })`
   try {
-    /** A first start, nothing saved: the newest session the sidebar shows opens — the parent, not its newer child. */
+    /**
+     * A first start, nothing saved: a fresh New session opens, as DSH's does (#17) — never the hidden child, which is the
+     * newest session in the store, and never the newest conversation either.
+     */
+    const seeded = (await api(fixture.url, fixture.cookie, '/api/sessions')).body.map((meta) => meta.id)
     await browser.goto(fixture.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
-    const first = await browser.evaluate(title)
-    assert.equal(first, PARENT_TITLE, `the page starts on the newest listed session, never on the hidden child\nsaw: ${first}`)
+    const first = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        title: ${title},
+        blank: document.getElementById('session-title').hidden,
+        saved: (() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })(),
+      })`),
+    )
+    assert.ok(
+      typeof first.saved === 'string' && !seeded.includes(first.saved) && first.blank === true,
+      `the page starts on a fresh New session, never on the hidden child or the newest conversation\nsaw: ${JSON.stringify(first)}`,
+    )
 
     /** The search finds titled sessions and never the child, whose title it is asked for. */
     const search = async (query) =>

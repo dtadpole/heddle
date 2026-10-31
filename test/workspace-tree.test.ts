@@ -56,7 +56,7 @@ interface Tree {
   selectionRecord: (id: string | null) => string
   savedSelection: (raw: unknown) => string | null
   recentWorkspace: (workspaces: unknown[], sessions: unknown[]) => { id: string; path: string } | undefined
-  restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'newest' | 'none'; id?: string; path?: string; forget?: boolean }
+  restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'none'; id?: string; path?: string; forget?: boolean }
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -496,12 +496,42 @@ test('a reload reopens the saved session, and with nothing saved never opens a h
   assert.deepEqual(tree.restoreChoice('s-alpha', workspaces, sessions), { kind: 'saved', id: 's-alpha' }, 'the saved session, though three are newer')
   assert.deepEqual(
     tree.restoreChoice(null, workspaces, sessions),
-    { kind: 'newest', id: 's-beta' },
-    'with nothing saved, the newest row: not the hidden child, not the archived session',
+    { kind: 'start', path: '/w' },
+    'with nothing saved, a fresh session in the workspace: not the hidden child, not the archived session, not the newest row (#17)',
   )
   assert.deepEqual(tree.restoreChoice('s-child', workspaces, sessions), { kind: 'saved', id: 's-child' }, 'a child the person opened is theirs to come back to (DSH restores a saved subagent view, :1607-1609)')
-  assert.deepEqual(tree.restoreChoice(null, workspaces, [sessions[0]]), { kind: 'none' }, 'a store holding only a child opens nothing')
-  assert.deepEqual(tree.restoreChoice(null, workspaces, []), { kind: 'none' })
+  assert.deepEqual(tree.restoreChoice(null, workspaces, [sessions[0]]), { kind: 'start', path: '/w' }, 'a store holding only a child opens none of it')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, []), { kind: 'start', path: '/w' })
+  assert.deepEqual(tree.restoreChoice(null, [], sessions), { kind: 'none' }, 'with no registered workspace to start in, nothing opens')
+})
+
+test('with nothing saved a load starts a fresh session in the most recently active workspace, and never opens one already there (#17)', () => {
+  /**
+   * DSH's restoreSelection with no saved session: no summary, so the target is recentWorkspace and connectWorkspace
+   * creates a fresh Session there (dsh-client-ui-workspace lib/client.js:1611-1613, :1620, :1626, :1406, :1694-1710). It
+   * never opens an existing session on its own. #17: on a shared server the page opened the newest session in the store,
+   * another person's, and a message sent without looking went into their conversation.
+   */
+  const workspaces = [
+    workspace('w-mine', '/mine', { sessionIds: ['s-mine'] }),
+    workspace('w-theirs', '/theirs', { sessionIds: ['s-theirs', 's-their-blank'] }),
+  ]
+  const sessions = [
+    session('s-their-blank', 50, { turns: 0 }),
+    session('s-theirs', 40, { title: 'their running work', running: true }),
+    session('s-mine', 10, { title: 'my notes' }),
+  ]
+  for (const saved of [null, '']) {
+    const choice = tree.restoreChoice(saved, workspaces, sessions)
+    assert.deepEqual(choice, { kind: 'start', path: '/theirs' }, `a first visit (${JSON.stringify(saved)}) starts a fresh session, as DSH's does`)
+    assert.equal(choice.id, undefined, 'and names no existing session to open: not the newest, not another client\'s blank')
+  }
+  assert.deepEqual(tree.restoreChoice('s-mine', workspaces, sessions), { kind: 'saved', id: 's-mine' }, 'a saved session is still reopened')
+  assert.deepEqual(
+    tree.restoreChoice('s-gone', workspaces, sessions),
+    { kind: 'start', path: '/theirs', forget: true },
+    'a saved one that is gone starts fresh the same way, and the stale entry is emptied',
+  )
 })
 
 test('a saved New session placeholder is reopened by its own id, never replaced by a fresh one', () => {
@@ -515,7 +545,7 @@ test('a saved session that is gone starts a fresh one in the most recently activ
   /**
    * DSH: no listed summary, so no workspace of its own; the target is recentWorkspace and connectWorkspace creates a
    * session there (lib/client.js:1620, :1626, :1406). An archived current is cleared at once (:1578, :1638-1650), which
-   * leaves the load with nothing saved.
+   * leaves the load with nothing saved, and that starts fresh too (#17).
    */
   const workspaces = [
     workspace('w-old', '/old', { sessionIds: ['s-old'] }),
@@ -524,11 +554,11 @@ test('a saved session that is gone starts a fresh one in the most recently activ
   ]
   const sessions = [session('s-recent', 30, { title: 'recent' }), session('s-old', 10, { title: 'old', archived: true })]
   assert.deepEqual(tree.restoreChoice('session-gone', workspaces, sessions), { kind: 'start', path: '/recent', forget: true })
-  assert.deepEqual(tree.restoreChoice('s-old', workspaces, sessions), { kind: 'newest', id: 's-recent', forget: true }, 'archived: forgotten, then as a load with nothing saved')
-  assert.deepEqual(tree.restoreChoice('session-gone', [], sessions), { kind: 'newest', id: 's-recent', forget: true }, 'no registered workspace to start in')
+  assert.deepEqual(tree.restoreChoice('s-old', workspaces, sessions), { kind: 'start', path: '/recent', forget: true }, 'archived: forgotten, then as a load with nothing saved')
+  assert.deepEqual(tree.restoreChoice('session-gone', [], sessions), { kind: 'none', forget: true }, 'no registered workspace to start in, and still no session opened on its own')
   assert.deepEqual(
     tree.restoreChoice('session-gone', [workspace('w-auto', '/auto', { origin: 'auto', sessionIds: ['s-recent'] })], sessions),
-    { kind: 'newest', id: 's-recent', forget: true },
+    { kind: 'none', forget: true },
     'an adopted root is not a place a session starts',
   )
 })

@@ -224,7 +224,7 @@ test('the chip is a menu control with the reference’s anatomy and a selected s
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
     const session = await startSession(server)
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     assert.ok(await browser.waitFor('document.getElementById("access-label")?.textContent !== "Access"', 20_000), 'the chip names a mode')
     assert.ok(await browser.waitFor('document.getElementById("access").disabled === false', 10_000), 'and is enabled once a session is open')
 
@@ -325,7 +325,7 @@ test('full access needs the risk gate, and the server refuses an unconfirmed esc
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
     const session = await startSession(server)
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.getElementById("access-label")?.textContent === "Workspace Write"', 20_000)
 
     const openDialog = async () => {
@@ -425,7 +425,7 @@ test('a refused write is visible on the closed row, and no UI action widens the 
     assert.equal(narrowed.status, 200, 'the session can be narrowed to read-only')
     await postTurn(server, { session, prompt: 'try the write' })
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     assert.ok(
       await browser.waitFor('document.querySelector(\'#log .turn.tool[data-state="error"]\') !== null', 20_000),
       'the refused call is a failed tool row',
@@ -460,8 +460,8 @@ test('the chip stays usable while a turn runs, and the mode is applied to the ne
   const server = await startServer('running', { holdOpenMs: 2500 })
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
-    await startSession(server)
-    await browser.goto(server.url)
+    const session = await startSession(server)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.getElementById("access").disabled === false', 20_000)
 
     /** A running turn is one whose Stop button has taken Send's place. */

@@ -5867,27 +5867,13 @@ async function refreshSessions() {
     }
   }
   /**
-   * The newest conversation is opened when nothing is open.
-   *
-   * Without this the page starts attached to nothing: the tree appears, the log stays empty even though
-   * sessions exist, and a prompt sent from that state creates a NEW session instead of continuing the one
-   * a person is looking at. Measured: asking a question produced a two-message live view while the session
-   * beside it held the whole transcript, because `current` was null and the click that followed selected
-   * the session the prompt had just created rather than the one holding history.
-   *
-   * The list itself is drawn from the tree — this walk only needs to know which session is newest, and it
-   * deliberately asks for **every** session rather than only the ad-hoc ones: a page that started with no
-   * selection because all its sessions happened to be registered would be the same bug again. Newest **row**, though:
-   * `restoreChoice` skips a subagent's child and an archived session, which the tree does not draw. It used to take
-   * `sessions[0]`, and a reload opened a hidden child that had just finished (C28). A load asks `restoreSelection`
-   * first, which reopens the session that was open.
+   * Nothing is opened here. This used to open the newest session in the store whenever nothing was open, and on a
+   * shared server the newest session is often another person's: a load showed their transcript, and the next message
+   * went into their conversation (#17). DSH opens a session only when a person picks one or when its startup restores
+   * the saved selection, else starts a fresh one (`restoreSelection`, `dsh-client-ui-workspace` `lib/client.js:1605-1628`),
+   * and so does this page: a load asks `restoreSelection`, which reopens the saved session or starts a fresh one in the
+   * most recently active workspace, and nothing else opens a session nobody picked.
    */
-  if (current !== null || !Array.isArray(sessions)) return
-  const choice = WorkspaceTree.restoreChoice(null, [], sessions)
-  if (choice.kind === 'newest') {
-    current = choice.id
-    await showSession(choice.id)
-  }
 }
 
 /** Keep the open session, or that nothing is open, where `restoreSelection` reads it back (`WorkspaceTree.SELECTION_KEY`). */
@@ -5903,10 +5889,12 @@ function rememberCurrent() {
  * Open what a page load should open: the session that was open before the reload, DSH's `restoreSelection`
  * (`dsh-client-ui-workspace` `lib/client.js:1574-1628`), decided by `WorkspaceTree.restoreChoice`.
  *
- * The saved session reopens, a saved New session placeholder included; a saved session that is gone starts a fresh
- * session in the most recently active workspace, without unfolding a workspace the person folded (a remembered collapse
- * survives the reload, C33); with nothing saved, the newest conversation opens, never a hidden subagent child. A list
- * that cannot be read decides nothing: it falls back to `refreshSessions`, so a failed request never starts a session.
+ * The saved session reopens, a saved New session placeholder included. With nothing to reopen — a first visit, a cleared
+ * entry, a saved session that is gone or archived — a fresh session starts in the most recently active workspace, as
+ * DSH's does (`:1620`, `:1626`), without unfolding a workspace the person folded (a remembered collapse survives the
+ * reload, C33). It never opens on its own a session nobody saved: that was the newest session in the store, on a shared
+ * server another person's (#17). A list that cannot be read decides nothing: it falls back to `refreshSessions`, so a
+ * failed request neither starts nor opens a session.
  */
 async function restoreSelection() {
   let saved = null
@@ -5931,12 +5919,12 @@ async function restoreSelection() {
   const workspaces = Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : []
   const choice = WorkspaceTree.restoreChoice(saved, workspaces, sessions)
   if (choice.forget === true) rememberCurrent()
-  if (choice.kind === 'saved' || choice.kind === 'newest') {
+  if (choice.kind === 'saved') {
     await showSession(choice.id)
     return
   }
   if (choice.kind === 'start') {
-    await startSessionAt({ path: choice.path, reveal: false })
+    await startSessionAt({ path: choice.path, reveal: false, boot: true })
     if (current !== null) return
   }
   await refreshSessions()
@@ -10651,7 +10639,11 @@ async function startSessionAt(node) {
   /** The new session's row is the selected one; the tree keys a session row by its id. */
   chooseSelected('session:' + body.session)
   await showSession(body.session)
-  await renderTree()
+  /**
+   * At boot (`restoreSelection` passes `boot: true`) the page draws the tree itself right after, so the start leaves the
+   * drawing to it: one first paint, which now follows every first visit (#17), rather than two racing redraws.
+   */
+  if (node.boot !== true) await renderTree()
 }
 
 /**
@@ -11465,8 +11457,8 @@ function workspaceDisplayTitle(title) {
  *   `Show {n} more sessions` and each click adds 5. The number lives with the page, never in storage, as DSH's
  *   watermark does.
  * - **Reload**: the open session is kept in storage and a load reopens it (`restoreChoice`, DSH's `restoreSelection`);
- *   a saved session that is gone starts a fresh one in the most recently active workspace, and nothing ever opens a
- *   hidden subagent child on its own.
+ *   with nothing to reopen (a first visit, a cleared entry, a saved session that is gone) a fresh one starts in the most
+ *   recently active workspace, and a load never opens on its own a session nobody saved (#17).
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -11705,36 +11697,30 @@ const WorkspaceTree = (() => {
   /**
    * What a page load opens: DSH's `restoreSelection` (`lib/client.js:1605-1628`) under heddle's rules. `saved` is the id
    * `savedSelection` read (or null), `workspaces` and `sessions` the answers of `/api/workspaces` and `/api/sessions`
-   * (newest first). The answer is `{ kind, id?, path?, forget? }`:
+   * (newest first). The answer is `{ kind, id?, path?, forget? }`, and it never names a session nobody saved:
    *
    * - `saved` — the saved session is listed and not archived, so it is reopened (`:1611-1616`). A saved New session
    *   placeholder is reopened too, by its own id and with its record read again, never replaced by a fresh one (DSH's
    *   `restoreBlank` reloads the blank's projections and reconnects the same id, `:1451-1458`, `:1619`). A subagent's
    *   child the person opened (search, `In one list`) is theirs to come back to, as DSH restores a saved subagent view
    *   (`:1607-1609`).
-   * - `start` with `path` — the saved session is gone, so a fresh session starts in the most recently active workspace
-   *   (`:1620`, then `connectWorkspace`, `:1626`, which creates one, `:1406`); `forget` empties the stale entry.
-   * - `newest` — nothing is saved (a first visit, or a cleared selection): the newest session that is a row, so never a
-   *   subagent's child, which the tree hides (`visible`), and never an archived one. DSH starts a fresh session here too;
-   *   this page keeps opening the newest conversation, because a page attached to nothing beside a tree of sessions was a
-   *   measured failure (`refreshSessions`). An archived saved session lands here with `forget`: DSH reopens it and its
-   *   `clearArchivedCurrent` at once empties the main view and the entry (`:1578`, `:1638-1650`), which is a load with
-   *   nothing saved.
-   * - `none` — nothing to open; with `forget`, the stale entry is emptied all the same.
+   * - `start` with `path` — nothing this page may reopen is saved, so a fresh session starts in the most recently active
+   *   registered workspace (`:1620`, then `connectWorkspace`, `:1626`, which creates one, `:1406`). That is a first visit
+   *   or a cleared entry, a saved session that is gone, and an archived saved one, which DSH reopens only for its
+   *   `clearArchivedCurrent` to empty the main view and the entry at once (`:1578`, `:1638-1650`). `forget` empties a
+   *   stale entry. #17: this page used to open the newest session in the store when nothing was saved, and on a shared
+   *   server that is often another person's, so their transcript was shown and the next message went into it.
+   * - `none` — no registered workspace to start in: nothing opens, and with `forget` the stale entry is emptied all the
+   *   same. The first-use default workspace is the page's `initializeDefaultWorkspace`, after the tree is drawn.
    */
   function restoreChoice(saved, workspaces, sessions) {
     const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
-    const newest = () => {
-      const row = metas.find((meta) => visible(meta, 'hide'))
-      return row === undefined ? { kind: 'none' } : { kind: 'newest', id: row.id }
-    }
-    if (typeof saved !== 'string' || saved.length === 0) return newest()
-    const meta = metas.find((entry) => entry.id === saved)
+    const named = typeof saved === 'string' && saved.length > 0
+    const meta = named ? metas.find((entry) => entry.id === saved) : undefined
     if (meta !== undefined && meta.archived !== true) return { kind: 'saved', id: saved }
-    if (meta !== undefined) return { ...newest(), forget: true }
     const target = recentWorkspace(workspaces, metas)
-    if (target !== undefined && typeof target.path === 'string') return { kind: 'start', path: target.path, forget: true }
-    return { ...newest(), forget: true }
+    const fresh = target !== undefined && typeof target.path === 'string' ? { kind: 'start', path: target.path } : { kind: 'none' }
+    return named ? { ...fresh, forget: true } : fresh
   }
 
   /**

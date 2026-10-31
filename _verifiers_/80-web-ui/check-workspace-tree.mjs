@@ -447,7 +447,8 @@ test('the Session Intent hero picks the workspace for a blank session, by keyboa
     const alphaBlank = made.body.session
 
     browser = await openBrowser()
-    await browser.goto(server.url)
+    /** The page opens no session on its own (#17), so the blank it is about is named. */
+    await browser.gotoSession(server.url, alphaBlank)
     await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
     await browser.waitFor(`document.getElementById('session-branch').textContent === ${JSON.stringify(alpha.path)}`, 15_000)
     const appeared = await browser.waitFor(`document.getElementById('hero-workspace')?.hidden === false`, 10_000).catch(() => false)
@@ -693,9 +694,16 @@ test('a reload reopens the session that was open, never a hidden subagent child,
       await until('document.body.dataset.ready === "true"', 'the page finishes loading')
     }
 
-    /** A first visit has nothing saved: the newest conversation opens, never the hidden child that is newer still. */
+    /**
+     * A first visit has nothing saved: a fresh New session opens, as DSH's does (#17), never the newest conversation nor the
+     * hidden child that is newer still.
+     */
+    const seeded = JSON.stringify(first.map((meta) => meta.id))
     await load()
-    await until(`${title} === 'beta notes'`, 'a first visit opens the newest conversation, not the hidden subagent child')
+    await until(
+      `(() => { const id = ${saved}; return typeof id === 'string' && !${seeded}.includes(id) && ${blankOpen} })()`,
+      'a first visit opens a fresh New session, not the newest conversation and not the hidden subagent child',
+    )
 
     /** Open alpha from its row, reload: alpha is open again and its row is the selected one. */
     await until(`document.querySelector('#tree li[data-session-id="${alpha.id}"] > .row') !== null`, 'alpha\'s row is drawn')
