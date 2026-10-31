@@ -3794,6 +3794,11 @@ let todoCollapsed = true
 /** The generation of the todo read: an older response must not paint over a newer list. */
 let todoGeneration = 0
 /**
+ * The generation of `showSession`. Only the latest open draws the conversation. An older open, even of the same session,
+ * stops at its next step and does not empty or append to the log.
+ */
+let showGeneration = 0
+/**
  * The header's background-jobs control's state (DSH's `JobListAction`, dsh-client-ui-jobs/lib/client.js:323-338),
  * declared up here with the other per-session views so `showSession` can reset it whenever it runs. The functions
  * that draw it sit with the header's other actions, after `#session-more` is filled.
@@ -6517,9 +6522,18 @@ function historyFailureText(status, statusText, failure) {
 
 /**
  * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
- * be loaded and the column shows DSH's failure line instead (#56).
+ * be loaded and the column shows DSH's failure line instead (#56). It also resolves false when a later open replaced
+ * this one before it drew; the later open draws instead.
+ *
+ * Opens can overlap. A reload runs `restoreSelection` and may also run a caller's open of the same session; a double
+ * click, or the stream's `reset` during a click's open, does the same. Each open empties the log and then awaits its
+ * reads. When two opens each appended their history, both drew. Measured in check-goal-command's reload: four Command
+ * input bubbles over eight `.hc-command` rows, four of them empty placeholders. An older session's history that landed
+ * late was appended under the newer session too. So every step after an await first checks that this is still the
+ * latest open (`showGeneration`).
  */
 async function showSession(id) {
+  const generation = ++showGeneration
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6562,8 +6576,11 @@ async function showSession(id) {
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
+  /** A later open started while the list was read. That open empties and fills the log, so this one must not touch it. */
+  if (generation !== showGeneration) return false
   syncSelectionToSession()
   if (view === 'trajectory') await showLedger(id)
+  if (generation !== showGeneration) return false
   /**
    * The log is cleared and refilled from the session's own history.
    *
@@ -6573,6 +6590,7 @@ async function showSession(id) {
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    if (generation !== showGeneration) return false
     if (!response.ok) {
       /**
        * A session that is no longer there is **not** the session being shown.
@@ -6594,6 +6612,7 @@ async function showSession(id) {
        */
       const failure = await response.json().catch(() => ({}))
       /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
+      if (generation !== showGeneration) return false
       if (current !== id) return false
       unavailableSession = id
       current = null
@@ -6619,6 +6638,8 @@ async function showSession(id) {
       return false
     }
     const body = await response.json()
+    /** The same check after the body is read: only the latest open appends its turns. */
+    if (generation !== showGeneration) return false
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6669,6 +6690,8 @@ async function showSession(id) {
     }
     followChatTail(true)
   } catch (error) {
+    /** An older open's failed read says nothing in the conversation a later open is drawing. */
+    if (generation !== showGeneration) return false
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
     note.className = 'turn denied'
@@ -6904,6 +6927,14 @@ async function restoreSelection() {
     }
   }
   const [workspaceBody, sessions] = await Promise.all([read('/api/workspaces'), read('/api/sessions')])
+  /**
+   * If a session was opened while the lists were read, that session stays shown. It may be a row a person picked, a turn
+   * that created a session, or a check that opens one by name. The boot does not reopen the saved session over it, or
+   * start a fresh one beside it. The boot before #17 kept this rule: `refreshSessions` opened a session only
+   * `if (current === null)`. Without it, a reload ran two opens of one session at once, and check-goal-command's reload
+   * drew the history twice. The open in flight reads the list itself.
+   */
+  if (current !== null) return
   if (!Array.isArray(sessions)) {
     await refreshSessions()
     return
@@ -7965,6 +7996,17 @@ function submitDraft(gesture) {
     void slashCommands.submit(text)
     return
   }
+  /**
+   * Nowhere to send (#134): no session and no workspace to start one in. The words stay in the composer, the refusal is
+   * DSH's `draft.workspaceRequired`, and the hero's picker opens, as DSH's inert composer opens it on Enter
+   * (`onRequestWorkspace`, `dsh-client-ui-conversation` `lib/client.js:18941-18947`); with no workspace to list, the picker
+   * goes straight to Add workspace. Before, the message went out with no folder and ran in the server's start folder.
+   */
+  if (composerAimless()) {
+    setNote(NO_WORKSPACE_REFUSAL)
+    if (!heroRow.hidden && heroMenu.hidden) void openHeroMenu()
+    return
+  }
   field.value = ''
   growComposer()
   updateSendDisabled()
@@ -8441,15 +8483,38 @@ async function sendTurn(body) {
 }
 
 async function runTurn(text, key, attachments = [], onAccepted) {
+  const target = key === QUEUE_KEY_NONE ? null : key
+  /**
+   * A message with no session starts one, and it starts it **where the page says** (#134): the workspace the hero chip
+   * and the note name (`newConversationTarget`), read after boot has drawn the tree and run first use, so a message sent
+   * the moment the page is up waits for the Default workspace rather than racing it. It is sent as `new`, because the
+   * route otherwise continues the newest session already in that folder, which on a shared server may be another
+   * person's (#17); "a new conversation in …" is what the note promises. With nowhere to start one nothing is sent:
+   * DSH's composer is inert without a workspace (`composerAimless`), and a message that reaches here anyway (queued
+   * before the state was known) is refused in DSH's words rather than run in the server's start folder, outside every
+   * workspace and out of the tree, which is what #134 measured after a reload. A server that serves no workspaces keeps
+   * the old request: its own folder is the only place there is.
+   */
+  let folder = activeFolder
+  let fresh = false
+  if (target === null) {
+    await firstTreeReady
+    const aim = newConversationTarget()
+    if (aim !== null) {
+      folder = aim.path
+      fresh = true
+      activeFolder = aim.path
+    } else if (workspaceRoutes !== 'absent') {
+      throw new Error(NO_WORKSPACE_REFUSAL)
+    }
+  }
   liveTurns += 1
   updateStatusBar()
   const startedAt = performance.now()
-  const target = key === QUEUE_KEY_NONE ? null : key
   const response = await sendTurn({
     /**
-     * The folder is named when a tree node is selected, and the server continues **that folder's**
-     * session. With no selection the request is what it always was — a session in the server's own
-     * working directory — so a window opened without touching the tree still works.
+     * A session's turn names it, and the server resumes that session wherever it lives. A turn with no session names the
+     * folder it starts in, above.
      *
      * The endpoint and model named here are the composer's own choice, which is what makes the model seat
      * more than a label: the turn asks the backend a person picked, and the server records it on the session
@@ -8458,7 +8523,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
-    folder: activeFolder,
+    folder,
+    ...(fresh ? { new: true } : {}),
     ...selectionForTurn(),
   })
   if (!response.ok) {
@@ -8616,8 +8682,11 @@ function growComposer() {
   field.style.height = `${Math.min(field.scrollHeight, COMPOSER_MAX_HEIGHT)}px`
 }
 function updateSendDisabled() {
-  /** While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. */
-  sendButton.disabled = unavailableSession !== null || (!anyRunning() && field.value.trim().length === 0)
+  /**
+   * While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. With nowhere
+   * to send (`composerAimless`) Send is disabled, as DSH's primary action is while its composer is inert (#134).
+   */
+  sendButton.disabled = unavailableSession !== null || composerAimless() || (!anyRunning() && field.value.trim().length === 0)
 }
 field.addEventListener('input', () => {
   growComposer()
@@ -8666,12 +8735,18 @@ function renderComposerState() {
    * chord would do — "Cmd/Ctrl+Enter steers all queued messages". That is `canSteerQueue` in its own words.
    */
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
-  /** DSH's `placeholder.unavailable` comes before the others: a disabled composer says why (`lib/client.js:18972`, #56). */
+  /**
+   * DSH's `placeholder.unavailable` comes before the others: a disabled composer says why (`lib/client.js:18972`, #56).
+   * Then its `placeholder.workspace`: with no session and no workspace to start one in, the composer says what to do
+   * first (`lib/client.js:17819-17828`, #134).
+   */
   field.placeholder = unavailableSession !== null
     ? 'Session unavailable'
-    : canSteerQueue
-      ? 'Cmd/Ctrl+Enter steers all queued messages'
-      : (placeholderOverride ?? 'Message or run a task, / commands')
+    : composerAimless()
+      ? NO_WORKSPACE_PLACEHOLDER
+      : canSteerQueue
+        ? 'Cmd/Ctrl+Enter steers all queued messages'
+        : (placeholderOverride ?? 'Message or run a task, / commands')
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
@@ -12210,39 +12285,70 @@ async function startSessionAt(node) {
 }
 
 /**
- * Which workspace a new session should start in.
- *
- * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
- * context exists: the workspace row the person opened or added since the open session was chosen (`chosenWorkspace`),
- * then the open session's workspace (DSH's `currentWorkspaceId`, `lib/client.js:1505-1508`), then the selected row's
- * workspace, then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers
- * to "where am I", and the first one that applies wins.
+ * Which workspace a new session should start in: `WorkspaceTree.newSessionWorkspace` over the rows the tree last drew and
+ * the reader's context — the workspace chosen beside the open session (`chosenWorkspace`), the open session's, the
+ * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws.
  */
 function newSessionWorkspace() {
-  /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
-  const owner = (path) =>
-    treeTops
-      .filter((node) => path === node.path || path.startsWith(node.path + '/'))
-      .sort((left, right) => right.path.length - left.path.length)[0] ?? null
-  /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
-  if (chosenWorkspace !== null && chosenWorkspace.during === current) {
-    const byChoice = treeTops.find((node) => node.path === chosenWorkspace.path)
-    if (byChoice !== undefined) return byChoice
-  }
-  /** Then the open session's own workspace: it is the group the reader is looking at. */
-  if (current !== null) {
-    const byCurrent = treeTops.find((node) => node.group !== undefined && WorkspaceTree.containsSession(node.group, current, false))
-    if (byCurrent !== undefined) return byCurrent
-  }
-  if (selectedPath !== null && !selectedPath.startsWith('session:')) {
-    const bySelection = owner(selectedPath)
-    if (bySelection !== null) return bySelection
-  }
-  if (activeFolder !== null) {
-    const byFolder = owner(activeFolder)
-    if (byFolder !== null) return byFolder
-  }
-  return treeTops[0] ?? null
+  return WorkspaceTree.newSessionWorkspace(treeTops, { chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder })
+}
+
+/**
+ * Where the composer's next message starts its conversation while no session is open, and what the page calls it
+ * (`WorkspaceTree.newConversationTarget`): the hero chip names it, the note under the tree names it, and the turn posts it
+ * as its folder (#134). Null when there is nowhere to start one, and then nothing is sent (`composerAimless`).
+ */
+function newConversationTarget() {
+  return WorkspaceTree.newConversationTarget(treeTops, { chosen: chosenWorkspace, selected: selectedPath, active: activeFolder })
+}
+
+/**
+ * Whether the workspace routes answered at all. A profile without the workspace plugin (503) or a server older than the
+ * tree (any other refusal) has no workspace to aim at, and there the server's own folder is still where a first message
+ * goes, as it always was; `unknown` until the tree is first read, and the flat list never reads it.
+ */
+let workspaceRoutes = 'unknown'
+
+/** Resolved once boot has drawn the tree and run first use, so a first message waits for the workspace it would start in. */
+let settleFirstTree = () => {}
+const firstTreeReady = new Promise((resolve) => {
+  settleFirstTree = resolve
+})
+let firstTreeSettled = false
+
+/**
+ * DSH's words for a composer with no workspace to start in: the placeholder `Choose a workspace to start`
+ * (`dsh-client-ui-conversation` `lib/client.js:16409`, shown while it is inert, `:17819-17828`) and the notice
+ * `Choose a workspace first.` (`draft.workspaceRequired`, `dsh-client-ui-workspace` `lib/client.js:4873`, raised by
+ * `startSession` when a draft has no workspace, `:1509-1515`).
+ */
+const NO_WORKSPACE_PLACEHOLDER = 'Choose a workspace to start'
+const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
+
+/**
+ * Whether the composer has nowhere to send: no session open, and no workspace a first message could start in. DSH's
+ * composer is inert then (`inert = sessionId === undefined || hero && chipTitle === undefined`, `lib/client.js:17819`);
+ * here a message sent in that state used to go out with no folder and run in the server's start folder, outside every
+ * workspace (#134). Judged only once boot has drawn the tree and run first use, so a load does not flash it; and not at
+ * all where the server serves no workspaces, since its own folder is then the only place there is.
+ */
+function composerAimless() {
+  if (!firstTreeSettled || workspaceRoutes === 'absent') return false
+  if (current !== null || composerKey !== QUEUE_KEY_NONE || unavailableSession !== null) return false
+  return newConversationTarget() === null
+}
+
+/**
+ * Repaint what names the new conversation's place after the tree changed: the hero chip, and the composer's inert state
+ * when it flipped.
+ */
+let aimlessPainted = false
+function paintConversationTarget() {
+  paintHeroWorkspace()
+  const aimless = composerAimless()
+  if (aimless === aimlessPainted) return
+  aimlessPainted = aimless
+  renderComposerState()
 }
 
 /**
@@ -12285,6 +12391,12 @@ const HeroPicker = (() => {
   /**
    * The workspaces the menu offers, in the record's order, as DSH lists its catalog. An adopted (`auto`) root is drawn
    * as Ungrouped rather than as a workspace, so it is not offered either.
+   *
+   * Each is labelled as the tree labels it, by `workspaceDisplayTitle`: the first-use workspace, stored as
+   * `default-workspace`, reads *Default workspace* in the chip and the menu as in the sidebar — DSH's README lists "the
+   * hero picker menu" among the places that label applies (`dsh-client-ui-workspace` README.md:82), and its chip shows
+   * `workspaceDisplayTitle(storedChipTitle, …)` (`dsh-client-ui-conversation` `lib/client.js:17784`). #134's P3: the
+   * page named it by its stored title, beside a tree that called it Default workspace.
    */
   function choices(workspaces) {
     if (!Array.isArray(workspaces)) return []
@@ -12293,7 +12405,7 @@ const HeroPicker = (() => {
       .map((entry) => ({
         id: entry.id,
         path: entry.path,
-        label: typeof entry.title === 'string' && entry.title.trim() !== '' ? entry.title : baseName(entry.path),
+        label: typeof entry.title === 'string' && entry.title.trim() !== '' ? workspaceDisplayTitle(entry.title) : baseName(entry.path),
         sessionIds: Array.isArray(entry.sessionIds) ? entry.sessionIds : [],
       }))
   }
@@ -12342,10 +12454,20 @@ const HeroPicker = (() => {
     if (state.current === null) return state.emptyShown === true
     return state.blank === true
   }
-  /** The chip's words: the workspace being moved to, else the open session's, else DSH's call to action. */
+  /**
+   * The chip's words: the workspace being moved to; else, with a session open, that session's workspace; else, with none
+   * open, the workspace the first message will start the session in (`target`, #134); else DSH's call to action.
+   *
+   * DSH's chip always names the workspace the new session uses — the picked one, else the session's
+   * (`pendingWorkspace?.title ?? sessionWorkspace?.title`, `dsh-client-ui-conversation` `lib/client.js:17783`) — because
+   * its startup has already made that session there (`dsh-client-ui-workspace` `lib/client.js:1620-1627`). heddle makes it
+   * with the first prompt, so with none open the chip names where that prompt will go; with nowhere to go it is the call
+   * to action, and the composer is inert, as DSH's is.
+   */
   function label(state) {
     if (typeof state.pending === 'string' && state.pending !== '') return state.pending
-    if (state.current !== null && typeof state.owner === 'string' && state.owner !== '') return state.owner
+    if (state.current !== null) return typeof state.owner === 'string' && state.owner !== '' ? state.owner : CHOOSE
+    if (typeof state.target === 'string' && state.target !== '') return state.target
     return CHOOSE
   }
   return { CHOOSE, choices, ownerOf, isBlank, reusable, step, shown, label }
@@ -12380,8 +12502,13 @@ function paintHeroWorkspace() {
   const shown = HeroPicker.shown({ view, current, hasContent, emptyShown, blank: known?.blank ?? null, pending: heroPending !== null })
   heroRow.hidden = !shown
   if (!shown) closeHeroMenu(false)
-  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null })
-  const chosen = heroPending !== null || (current !== null && typeof known?.label === 'string')
+  /**
+   * With no session open the chip names where the first message will start one (#134). Read once boot has drawn the
+   * tree, which is what knows the workspaces; this paint also runs while the page is still being built.
+   */
+  const target = current === null && firstTreeSettled ? (newConversationTarget()?.label ?? null) : null
+  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null, target })
+  const chosen = heroPending !== null || (current !== null && typeof known?.label === 'string') || (current === null && target !== null)
   const key = `${chosen}|${text}`
   if (heroChip.dataset.painted !== key) {
     heroChip.dataset.painted = key
@@ -12492,7 +12619,10 @@ async function openHeroMenu() {
     heroAddWorkspace()
     return
   }
-  const selected = heroPending?.id ?? (current !== null && heroKnown.id === current ? heroKnown.workspace : null)
+  /** The workspace the chip names is the one checked: the open session's, or with none open the first message's (#134). */
+  const aimed = current === null ? newConversationTarget() : null
+  const selected =
+    heroPending?.id ?? (current !== null ? (heroKnown.id === current ? heroKnown.workspace : null) : (choices.find((choice) => choice.path === aimed?.path)?.id ?? null))
   const items = choices.map((choice) => heroMenuItem('menuitemradio', choice.label, kindIcon('folder', false), choice.id === selected, () => void heroPick(choice)))
   const separator = document.createElement('div')
   separator.setAttribute('role', 'separator')
@@ -12520,6 +12650,8 @@ async function heroPick(choice) {
   closeHeroMenu(true)
   const owner = current !== null && heroKnown.id === current ? heroKnown : null
   if (owner !== null && owner.workspace === choice.id) return
+  /** With no session open, picking the workspace the first message already goes to moves nothing (#134). */
+  if (current === null && heroPending === null && newConversationTarget()?.path === choice.path) return
   const before = current
   heroPending = { id: choice.id, label: choice.label }
   heroChip.setAttribute('aria-busy', 'true')
@@ -13595,6 +13727,75 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * Which workspace a new session should start in, among the workspace rows the tree draws (`tops`, each
+   * `{ path, label, group }`, in drawing order).
+   *
+   * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
+   * context exists (`state` is `{ chosen, current, selected, active }`): the workspace row the person opened or added
+   * since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace (DSH's
+   * `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace, then
+   * the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where am
+   * I", and the first one that applies wins. Null when the tree draws no workspace.
+   */
+  function newSessionWorkspace(tops, state = {}) {
+    const list = Array.isArray(tops) ? tops.filter((node) => node !== null && typeof node === 'object' && typeof node.path === 'string') : []
+    const { chosen = null, current = null, selected = null, active = null } = state ?? {}
+    /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
+    const owner = (path) =>
+      list.filter((node) => path === node.path || path.startsWith(node.path + '/')).sort((left, right) => right.path.length - left.path.length)[0] ?? null
+    /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
+    if (chosen !== null && typeof chosen === 'object' && chosen.during === current) {
+      const byChoice = list.find((node) => node.path === chosen.path)
+      if (byChoice !== undefined) return byChoice
+    }
+    /** Then the open session's own workspace: it is the group the reader is looking at. */
+    if (current !== null) {
+      const byCurrent = list.find((node) => node.group !== undefined && containsSession(node.group, current, false))
+      if (byCurrent !== undefined) return byCurrent
+    }
+    if (typeof selected === 'string' && !selected.startsWith('session:')) {
+      const bySelection = owner(selected)
+      if (bySelection !== null) return bySelection
+    }
+    if (typeof active === 'string' && active !== '') {
+      const byFolder = owner(active)
+      if (byFolder !== null) return byFolder
+    }
+    return list[0] ?? null
+  }
+
+  /**
+   * Where a message sent with **no session open** starts its conversation, and the name the page gives that place:
+   * `{ path, label }`, or null when there is nowhere to start one.
+   *
+   * DSH never lets a prompt go out without a workspace: its composer is bound to a Session made in a workspace, its
+   * hero chip names that workspace (`workspaceDisplayTitle` of the session's or the picked workspace's title,
+   * `dsh-client-ui-conversation` `lib/client.js:17783-17784`), and with none the composer is inert, reading "Choose a
+   * workspace to start" (`:17819-17828`, `placeholder.workspace` at `:16409`). heddle starts the session with the first
+   * prompt instead (first use opens none, D-056), so the page has to know that workspace before the session exists:
+   * it is `newSessionWorkspace`'s answer with no session open — the workspace chosen, the selected row's, the one the
+   * prompt box was aimed at, else the first workspace the tree draws — and only with no workspace drawn at all, a folder
+   * the prompt box was aimed at outside every workspace. #134: after a reload this was nothing, the hero read "Choose
+   * workspace", and the first message went out with no folder, so the server ran it in its own start folder, outside
+   * every workspace and out of the tree. `label` is the tree's (a workspace's display title, *Default workspace* for the
+   * first-use one); a bare folder is named by its last segment.
+   */
+  function newConversationTarget(tops, state = {}) {
+    const { chosen = null, selected = null, active = null } = state ?? {}
+    const workspace = newSessionWorkspace(tops, { chosen, current: null, selected, active })
+    if (workspace !== null) return { path: workspace.path, label: typeof workspace.label === 'string' && workspace.label !== '' ? workspace.label : basename(workspace.path) }
+    if (typeof active === 'string' && active !== '') return { path: active, label: basename(active) }
+    return null
+  }
+
+  /** The name the page gives a folder: the display title of the workspace the tree draws at exactly that path, else its last segment. */
+  function folderLabel(tops, path) {
+    if (typeof path !== 'string' || path === '') return ''
+    const exact = (Array.isArray(tops) ? tops : []).find((node) => node !== null && typeof node === 'object' && node.path === path)
+    return typeof exact?.label === 'string' && exact.label !== '' ? exact.label : basename(path)
+  }
+
+  /**
    * What an empty session list says (#107). DSH's `EmptySessions` (`dsh-client-ui-workspace` `lib/client.js:3005-3021`) is
    * drawn when the tree has no group (`:3344`) or the flat list no row (`:3384`): a glyph over the text, "No sessions yet"
    * (`empty.none`), and under `Archived only` "No archived sessions yet" (`empty.noneArchived`) with a "View other
@@ -13906,6 +14107,9 @@ const WorkspaceTree = (() => {
     savedSelection,
     recentWorkspace,
     restoreChoice,
+    newSessionWorkspace,
+    newConversationTarget,
+    folderLabel,
     EMPTY_TEXT,
     emptyList,
     withOpenBlank,
@@ -15853,6 +16057,7 @@ async function renderFlatList() {
   /** DSH's empty list: "No sessions yet", or under `Archived only` its own emptiness and the way back (#107). */
   setNote('')
   paintEmptyList(WorkspaceTree.emptyList(archiveMode, 'list', visible.length))
+  paintConversationTarget()
   restoreTreeFocus(focus, true)
 }
 
@@ -15873,17 +16078,21 @@ async function renderTree() {
   try {
     const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
     if (workspaceResponse.status === 503) {
+      workspaceRoutes = 'absent'
       treeList.replaceChildren()
       rowIndex.clear()
       setNote('this profile does not load the workspace plugin')
+      paintConversationTarget()
       return
     }
     if (!workspaceResponse.ok) {
+      workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
       await renderFlatList()
       setNote('this server predates the workspace tree, so sessions are listed in one column')
       return
     }
+    workspaceRoutes = 'served'
     workspaces = (await workspaceResponse.json()).workspaces ?? []
     sessions = sessionResponse.ok ? await sessionResponse.json() : []
   } catch (error) {
@@ -15925,7 +16134,15 @@ async function renderTree() {
    */
   const empty = WorkspaceTree.emptyList(archiveMode, groupingMode, treeGroups.length)
   if (empty !== null) paintEmptyList(empty)
-  else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
+  else {
+    /**
+     * The note names the place as the tree does (#134's P3: it printed the folder's last segment, `default-workspace`,
+     * under a row reading *Default workspace*). With no session open it is where the first message will start one, so a
+     * reload, which forgets the folder the prompt box was aimed at, still names that workspace (#134).
+     */
+    const place = current === null ? (newConversationTarget()?.label ?? null) : activeFolder === null ? null : WorkspaceTree.folderLabel(treeTops, activeFolder)
+    setNote(place === null ? '' : 'a new conversation in ' + place)
+  }
 
   /**
    * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
@@ -15938,6 +16155,8 @@ async function renderTree() {
     await toggle(entry.node, entry.li)
   }
   if (selectedPath === null) syncSelectionToSession()
+  /** The rows just drawn are what the new conversation's place is read from (#134). */
+  paintConversationTarget()
   /** The schedule marks go on the drawn rows first; giving the keyboard its place back is the redraw's last act (#92). */
   paintScheduleMarks()
   markSelection()
@@ -16849,6 +17068,10 @@ async function showNewWorkspace(added, { openSession = false } = {}) {
  * default workspace, which it creates or reuses under heddle's home, and shows it as *Add workspace* would. Nothing is
  * sent; the composer is aimed at it, and the first prompt starts the session there (heddle starts none unasked, D-056).
  * An install that is not empty gets nothing and no error. A failure says so once and leaves the + to choose a folder.
+ *
+ * The aim is not kept in this page's memory alone: a reload before the first prompt finds the workspace in the tree and
+ * nothing else, and `newConversationTarget` names it from there (#134, where the reload left the composer aimed at
+ * nothing and the prompt ran in the server's start folder).
  */
 async function initializeDefaultWorkspace() {
   if (current !== null || activeFolder !== null || treeTops.length > 0 || treeGroups.length > 0 || listedSessions.size > 0) return
@@ -20117,9 +20340,19 @@ growComposer()
 await restoreSelection()
 void refreshApprovals()
 document.getElementById('session-search').addEventListener('input', applySearch)
-renderTree()
-  .then(() => initializeDefaultWorkspace())
-  .then(() => applySearch())
+const firstTree = renderTree().then(() => initializeDefaultWorkspace())
+/**
+ * From here the page knows where a first message would start its session (#134): the hero names it, the composer is
+ * inert when there is nowhere, and a message sent before this point, which waited, goes there.
+ */
+void firstTree
+  .catch(() => {})
+  .then(() => {
+    firstTreeSettled = true
+    settleFirstTree()
+    paintConversationTarget()
+  })
+firstTree.then(() => applySearch())
 renderQueue()
 renderComposerState()
 /** The panel's first word: a conversation, or an invitation to start one. */

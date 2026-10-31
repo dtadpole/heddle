@@ -158,12 +158,21 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')
   assert.match(page, /let treeTops = \[\]/, 'the tree keeps the workspace rows the action needs')
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
+  /**
+   * The order itself lives in the tree's pure block since #134 (`WorkspaceTree.newSessionWorkspace`), where
+   * test/workspace-tree.test.ts judges it case by case; the page hands it the reader's context.
+   */
   assert.match(
     page,
-    /if \(chosenWorkspace !== null && chosenWorkspace\.during === current\) \{[\s\S]*?const byChoice = treeTops\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/,
+    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{ chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder \}\)/,
+    'the page asks it with the rows the tree drew and the reader\'s context',
+  )
+  assert.match(
+    page,
+    /if \(chosen !== null && typeof chosen === 'object' && chosen\.during === current\) \{[\s\S]*?const byChoice = list\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = list\.find/,
     'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace',
   )
-  assert.match(page, /if \(selectedPath !== null && !selectedPath\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'then from the selected row\'s workspace')
+  assert.match(page, /if \(typeof selected === 'string' && !selected\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selected\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
   assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')

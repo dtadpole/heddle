@@ -105,7 +105,10 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       queueOf: () => [],
       // main's ui-stack: plan mode's placeholder, none here.
       placeholderOverride: null,
-      updateSendDisabled: run<() => void>('updateSendDisabled', { unavailableSession: unavailable, sendButton, anyRunning: () => false, field }),
+      // #134: a composer with nowhere to send has its own placeholder; not this one.
+      composerAimless: () => false,
+      NO_WORKSPACE_PLACEHOLDER: 'Choose a workspace to start',
+      updateSendDisabled: run<() => void>('updateSendDisabled', { unavailableSession: unavailable, sendButton, anyRunning: () => false, field, composerAimless: () => false }),
       refreshRunningStatus: () => {},
       updateStatusBar: () => {},
     })()
@@ -131,6 +134,8 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       stoppedQueues: new WeakSet(),
       // main's ui-stack: no slash command claims a plain message.
       slashCommands: null,
+      // #134: there is somewhere to send.
+      composerAimless: () => false,
       queueOf: () => [],
       resolveSubmitMode: () => 'queue',
       BUSY_ENTER: 'queue',
@@ -145,4 +150,76 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
   assert.equal(field.value, 'into a session that is gone', 'and the draft is left where it was')
   submit(null)
   assert.deepEqual(sent, ['into a session that is gone'], 'while an open session still sends')
+})
+
+test('with no session and no workspace to start one in, the composer is inert in DSH\'s words and Enter sends nothing (#134)', () => {
+  /**
+   * DSH's composer is inert while there is no Session and no workspace for one (`inert = sessionId === undefined || hero &&
+   * chipTitle === undefined`, `dsh-client-ui-conversation` `lib/client.js:17819`): Send is disabled, the placeholder is
+   * `Choose a workspace to start` (`:16409`), and Enter opens the workspace picker (`:18941-18947`). #134: a message sent
+   * with nowhere named went out with no folder and ran in the server's start folder, outside every workspace.
+   */
+  const field = { disabled: false, readOnly: false, value: 'hello', placeholder: '' }
+  const sendButton = { disabled: false, hidden: false, title: '', setAttribute: () => {} }
+  const scope = (aimless: boolean) => ({
+    unavailableSession: null,
+    anyRunning: () => false,
+    resolveSubmitMode: () => 'queue',
+    BUSY_ENTER: 'queue',
+    sendButton,
+    stopButton: { hidden: true },
+    field,
+    queueOf: () => [],
+    placeholderOverride: null,
+    composerAimless: () => aimless,
+    NO_WORKSPACE_PLACEHOLDER: 'Choose a workspace to start',
+    updateSendDisabled: run<() => void>('updateSendDisabled', { unavailableSession: null, sendButton, anyRunning: () => false, field, composerAimless: () => aimless }),
+    refreshRunningStatus: () => {},
+    updateStatusBar: () => {},
+  })
+  run<() => void>('renderComposerState', scope(true))()
+  assert.equal(field.placeholder, 'Choose a workspace to start', "DSH's placeholder.workspace")
+  assert.equal(sendButton.disabled, true, 'Send is disabled even with a draft')
+  run<() => void>('renderComposerState', scope(false))()
+  assert.equal(field.placeholder, 'Message or run a task, / commands')
+  assert.equal(sendButton.disabled, false, 'and enabled once there is a workspace to start in')
+
+  const sent: string[] = []
+  const notes: string[] = []
+  let picker = 0
+  const submit = (aimless: boolean) =>
+    run<(gesture: string) => void>('submitDraft', {
+      unavailableSession: null,
+      document: { body: { dataset: { composer: 'writable' } } },
+      field,
+      steerQueue: () => {},
+      growComposer: () => {},
+      updateSendDisabled: () => {},
+      takeAttachments: () => [],
+      stoppedQueues: new WeakSet(),
+      slashCommands: null,
+      composerAimless: () => aimless,
+      NO_WORKSPACE_REFUSAL: 'Choose a workspace first.',
+      setNote: (text: string) => notes.push(text),
+      heroRow: { hidden: false },
+      heroMenu: { hidden: true },
+      openHeroMenu: () => {
+        picker += 1
+      },
+      queueOf: () => [],
+      resolveSubmitMode: () => 'queue',
+      BUSY_ENTER: 'queue',
+      anyRunning: () => false,
+      deliverSteered: () => {},
+      sendNow: (text: string) => sent.push(text),
+      enqueue: () => {},
+    })('enter')
+  field.value = 'where does this go'
+  submit(true)
+  assert.deepEqual(sent, [], 'Enter sends nothing with nowhere to send')
+  assert.equal(field.value, 'where does this go', 'the words stay in the composer')
+  assert.deepEqual(notes, ['Choose a workspace first.'], "the refusal is DSH's draft.workspaceRequired")
+  assert.equal(picker, 1, "and the hero's workspace picker opens, as DSH's inert composer opens it on Enter")
+  submit(false)
+  assert.deepEqual(sent, ['where does this go'], 'with a workspace to start in, the message goes')
 })

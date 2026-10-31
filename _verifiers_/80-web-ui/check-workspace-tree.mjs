@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, renameSync } from 'node:fs'
+import { mkdirSync, realpathSync, renameSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 
@@ -18,7 +18,9 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
  * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
  * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
- * with the composer disabled, not to a blank page that takes a message (#56); and Archived only with nothing archived
+ * with the composer disabled, not to a blank page that takes a message (#56); first use's Default workspace stays the
+ * new conversation's place across a reload, named so by the hero and the note, and a message with no workspace to go
+ * to is refused rather than run in the server's start folder (#134); and Archived only with nothing archived
  * says DSH's "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
@@ -887,6 +889,192 @@ test('a first visit opens a fresh New session, never the newest session someone 
     browser.close()
     server.kill()
     for (const dir of [home, mine, theirs]) removeDir(dir)
+  }
+})
+
+test('after first use, a reload still aims the new conversation at Default workspace: the hero and the note name it, and the first message runs there and is in the tree (#134)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH: an empty install opens on its Default workspace with the composer aimed at it (`workspaces.initializeDefault`,
+   * dsh-client-ui-workspace README.md:80, lib/client.js:1620-1627), and the Session Intent hero's chip names the workspace
+   * the new session uses, by its display title (dsh-client-ui-conversation lib/client.js:17783-17784; the first-use title
+   * reads Default workspace in "the hero picker menu", dsh-client-ui-workspace README.md:82). #134 (developer-six, main
+   * 7bc2a4ab, both builds): after first use, a reload before the first message left the note empty and the chip reading
+   * "Choose workspace", and the message went out with no folder, so the server ran it in its own start folder — outside
+   * every workspace, missing from the tree, the header still "No session". The note also said "default-workspace" where
+   * the tree said "Default workspace" (P3).
+   *
+   * An empty home, a fresh browser profile: first load, then a reload before anything is sent, then one message.
+   */
+  const home = isolatedHome('tree-default-reload')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const chip = `(document.querySelector('#hero-workspace-chip .label')?.textContent ?? null)`
+    const note = `(document.getElementById('tree-note')?.hidden === false ? document.getElementById('tree-note').textContent : '')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        chip: ${chip},
+        heroShown: document.getElementById('hero-workspace')?.hidden === false,
+        note: ${note},
+        header: document.getElementById('session-title')?.hidden === false ? document.getElementById('session-title').textContent : null,
+        placeholder: document.querySelector('#prompt textarea')?.placeholder ?? null,
+        workspaces: [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].map((row) => [row.dataset.path, row.querySelector('.label')?.textContent ?? null]),
+        sessions: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId),
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    const load = async () => {
+      await browser.goto(server.url)
+      await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    }
+    const named = `${chip} === 'Default workspace' && ${note} === 'a new conversation in Default workspace'`
+
+    /** First load: first use registers <home>/default-workspace and aims the new conversation at it. */
+    await load()
+    let record = null
+    for (let attempt = 0; attempt < 60 && record === null; attempt += 1) {
+      record = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? [])[0] ?? null
+      if (record === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(record !== null, 'first use registered a workspace')
+    assert.equal(record.path, realpathSync(join(home, 'default-workspace')), 'the Default workspace, <home>/default-workspace')
+    await until(named, 'on the first load the hero chip and the note name Default workspace, as the tree does')
+
+    /** A reload before anything was sent: the page still knows where the new conversation goes. */
+    await load()
+    await until(
+      `${chip} === 'Default workspace'`,
+      'after a reload the hero chip still names Default workspace (it read "Choose workspace", #134)',
+    )
+    await until(`${note} === 'a new conversation in Default workspace'`, 'and so does the note (it was empty, #134)')
+
+    /** One message, sent the way a person sends it. */
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'where does this run'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await until(`document.getElementById('send').disabled === false`, 'Send is offered for the draft')
+    await browser.evaluate(`document.getElementById('send').click()`)
+    let ran = null
+    for (let attempt = 0; attempt < 60 && ran === null; attempt += 1) {
+      const listed = await api(server.url, cookie, '/api/sessions')
+      ran = (Array.isArray(listed.body) ? listed.body : []).find((meta) => (meta.turns ?? 0) > 0) ?? null
+      if (ran === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(ran !== null, `the message ran\nsaw: ${await state()}`)
+    assert.equal(ran.cwd, record.path, `in <home>/default-workspace, not in the server's start folder (${repoRoot})`)
+    const ranTurns = ((await api(server.url, cookie, '/api/sessions')).body ?? []).filter((meta) => (meta.turns ?? 0) > 0)
+    assert.equal(ranTurns.length, 1, 'one conversation ran')
+    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === record.id)
+    assert.ok(owner?.sessionIds?.includes(ran.id), `the session is the Default workspace's\nsaw: ${JSON.stringify(owner)}`)
+
+    /** In the tree, under Default workspace (opened if it was folded), and the header names it. */
+    const rowOf = `document.querySelector('#tree li[data-kind="session"][data-session-id="${ran.id}"]')`
+    await browser.evaluate(
+      `(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        for (let attempt = 0; attempt < 40 && ${rowOf} === null; attempt += 1) {
+          const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(record.path)})
+          if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+          await wait(250)
+        }
+        return true
+      })()`,
+      15_000,
+    )
+    await until(
+      `(() => {
+        const li = ${rowOf}
+        const group = li?.parentElement?.closest('li[data-kind="workspace"]')?.querySelector(':scope > .row')
+        return group !== null && group !== undefined && group.dataset.path === ${JSON.stringify(record.path)} && group.querySelector('.label')?.textContent === 'Default workspace'
+      })()`,
+      'the conversation has a row under Default workspace in the tree (it had none, #134)',
+    )
+    await until(
+      `document.getElementById('session-title')?.hidden === false && document.getElementById('session-title').textContent.trim() !== '' && document.getElementById('session-title').textContent !== 'No session'`,
+      'and the header names the conversation, not "No session"',
+    )
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+  }
+})
+
+test('with no workspace to start in, the composer says Choose a workspace to start and a message is refused, never run in the server\'s start folder (#134)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's composer is inert with no Session and no workspace for one (`inert = sessionId === undefined || hero && chipTitle
+   * === undefined`, dsh-client-ui-conversation lib/client.js:17819): Send disabled, the placeholder "Choose a workspace to
+   * start" (placeholder.workspace, :16409), and Enter opens the workspace picker (onRequestWorkspace, :18941-18947); its
+   * notice for a draft with no workspace is "Choose a workspace first." (draft.workspaceRequired, dsh-client-ui-workspace
+   * lib/client.js:4873, :1509-1515). #134: a message with nowhere named went out with no folder and ran in the server's
+   * start folder. The Default workspace is made and deleted first, so first use never gives it back (DSH's rule, 70's
+   * first-use check) and the page has no workspace at all. `HOME` is the fixture's own, because the picker opens there.
+   */
+  const home = isolatedHome('tree-no-workspace')
+  const account = fixtureDir('tree-no-workspace-account')
+  mkdirSync(account, { recursive: true })
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config, HOME: account },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const made = await api(server.url, cookie, '/api/workspaces/default', { method: 'POST' })
+    assert.equal(made.status, 200, `first use made the Default workspace (${JSON.stringify(made.body)})`)
+    const deleted = await api(server.url, cookie, `/api/workspaces/${encodeURIComponent(made.body.workspace.id)}`, { method: 'DELETE' })
+    assert.equal(deleted.status, 200, 'and it was deleted')
+    assert.deepEqual((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? [], [], 'no workspace is left')
+
+    const field = `document.querySelector('#prompt textarea')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        placeholder: ${field}?.placeholder ?? null,
+        send: document.getElementById('send')?.disabled ?? null,
+        chip: document.querySelector('#hero-workspace-chip .label')?.textContent ?? null,
+        note: document.getElementById('tree-note')?.textContent ?? null,
+        draft: ${field}?.value ?? null,
+        picker: document.getElementById('workspace-picker')?.open ?? null,
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`${field}.placeholder === 'Choose a workspace to start'`, "the composer says DSH's placeholder.workspace")
+    assert.equal(await browser.evaluate(`document.querySelector('#hero-workspace-chip .label')?.textContent`), 'Choose workspace', 'the hero chip is the call to action')
+
+    await browser.evaluate(`(() => { const box = ${field}; box.value = 'where does this run'; box.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    assert.equal(await browser.evaluate(`document.getElementById('send').disabled`), true, `Send stays disabled with a draft\nsaw: ${await state()}`)
+    await browser.evaluate(`${field}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`)
+    await until(`document.getElementById('tree-note').textContent === 'Choose a workspace first.'`, "Enter is refused in DSH's words")
+    await until(`document.getElementById('workspace-picker')?.open === true`, 'and opens the way to a workspace: with none to list, Add workspace')
+    assert.equal(await browser.evaluate(`${field}.value`), 'where does this run', 'the draft stays in the composer')
+    await new Promise((done) => setTimeout(done, 1_000))
+    assert.deepEqual((await api(server.url, cookie, '/api/sessions')).body, [], `nothing ran, in the server's start folder (${repoRoot}) or anywhere\nsaw: ${await state()}`)
+    await browser.evaluate(`document.getElementById('workspace-picker').close()`)
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(account)
   }
 })
 
