@@ -5888,7 +5888,20 @@ test('archiving a session with running work is refused with the work named, and 
     assert.equal(refused.status, 409, 'a running session is not archived quietly')
     const refusal = await refused.json()
     assert.equal(refusal.code, 'active', `and the refusal says why\n${JSON.stringify(refusal)}`)
-    assert.deepEqual(refusal.activity, [{ kind: 'turn' }], `and names the work, DSH's activity list\n${JSON.stringify(refusal)}`)
+    /**
+     * The foreground bash step is a background job from its start (DSH's promoteOnTimeout: every bash call registers
+     * an owned job, dsh-tool-bash lib/index.js:386-410), so DSH's list names the turn and then that job: each listener
+     * puts its family before the rest, and the turn's registered first (src/session/activity.ts).
+     */
+    assert.deepEqual(
+      (refusal.activity ?? []).map((entry) => [entry.kind, (entry.items ?? []).map((item) => item.label)]),
+      [
+        ['turn', []],
+        ['job', ['sleep 40']],
+      ],
+      `and names the work, DSH's activity list, in DSH's order\n${JSON.stringify(refusal)}`,
+    )
+    assert.deepEqual(refusal.jobs, refusal.activity[1].items, "the jobs row's own field lists the same job")
     const untouched = (await metas()).find((meta) => meta.id === running.id)
     assert.equal(untouched?.running, true, 'the refusal stops nothing')
     assert.notEqual(untouched?.archived, true, 'and archives nothing')
@@ -5938,15 +5951,17 @@ test('archiving a session with running work is refused with the work named, and 
   }
 })
 
-test('an active reminder keeps a session from a quiet archive: the refusal names it after the turn, and stop: true removes it', async (context) => {
+test('an active reminder keeps a session from a quiet archive: the refusal names it after the turn and the jobs, and stop: true removes it', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
    * R-developer-eight-13. DSH's schedule plugin is a `workspace/session-activity` provider too (`dsh-schedule`
    * lib/index.js:2043-2064): a session with an active reminder answers `{kind: 'schedule', items: [{id, label: title}]}`,
    * so even an idle session is refused a plain archive, and with `stopActivity` its `workspace/session-stop` listener
    * removes every active reminder of the session (`stopSessionTasks`, :2273-2292). The families come in DSH's listener
-   * order, which puts the turn before the reminders. Judged over HTTP alone: the scripted model creates the reminder with
-   * `schedule_create`, the reminder routes read it back, and the flags route is asked to archive.
+   * order — turn, job, subagent, schedule — so a running turn that has started a background job and set a reminder is
+   * refused with the turn, then its jobs, then the reminder, and stop: true kills the job with "session archived"
+   * (dsh-jobs lib/index.js:32-36) and removes the reminder. Judged over HTTP alone: the scripted model creates the work
+   * with schedule_create and bash, the reminder and job routes read it back, and the flags route is asked to archive.
    */
   const h = harness('archive-reminder')
   let live
@@ -5999,30 +6014,54 @@ test('an active reminder keeps a session from a quiet archive: the refusal names
     assert.deepEqual(await reminders(idle), [], "and its reminder is gone, as DSH's stopSessionTasks removes it")
 
     /**
-     * A running turn that has just set a reminder: the refusal lists the turn first, then the reminder. It runs in a
-     * folder of its own, because a folder holds one session and the first one is archived now.
+     * A running turn that has set a reminder and started a background job, and is still in a foreground bash step
+     * (itself a job from its start): the refusal lists the turn, then both jobs in the order they started, then the
+     * reminder. It runs in a folder of its own, because a folder holds one session and the first one is archived now.
      */
     const second = join(h.work, 'review')
     mkdirSync(second, { recursive: true })
-    setScript([remind('Review'), { toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } }, { text: 'slept' }])
-    pending.push(post('/api/turn', { prompt: 'set a review reminder, then wait', folder: second }).then((response) => response.text()))
+    setScript([
+      remind('Review'),
+      { toolCall: { name: 'bash', arguments: { command: 'sleep 60', run_in_background: true } } },
+      { toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } },
+      { text: 'slept' },
+    ])
+    pending.push(post('/api/turn', { prompt: 'set a review reminder, start a job, then wait', folder: second }).then((response) => response.text()))
+    const jobs = async (session) => (await get(`/api/jobs?session=${encodeURIComponent(session)}`)).jobs ?? []
     const busy = await until(async () => {
       const meta = (await metas()).find((one) => one.id !== idle && one.running === true)
-      return meta !== undefined && (await reminders(meta.id)).length === 1 ? meta : undefined
+      if (meta === undefined || (await reminders(meta.id)).length !== 1) return undefined
+      return (await jobs(meta.id)).filter((job) => job.status === 'running').length === 2 ? meta : undefined
     })
     const seen = async () =>
-      JSON.stringify(await Promise.all((await metas()).map(async (meta) => ({ id: meta.id, running: meta.running, archived: meta.archived, reminders: (await reminders(meta.id)).map((one) => one.title) }))))
-    assert.ok(busy, `a turn is running and has set its reminder\nsaw: ${await seen()}`)
+      JSON.stringify(
+        await Promise.all(
+          (await metas()).map(async (meta) => ({ id: meta.id, running: meta.running, archived: meta.archived, reminders: (await reminders(meta.id)).map((one) => one.title), jobs: (await jobs(meta.id)).map((job) => [job.label, job.status]) })),
+        ),
+      )
+    assert.ok(busy, `a turn is running, has set its reminder and has two jobs running\nsaw: ${await seen()}`)
     const [review] = await reminders(busy.id)
-    const both = await (await post(`/api/sessions/${busy.id}/flags`, { archived: true })).json()
+    const [background, foreground] = await jobs(busy.id)
+    assert.deepEqual([background.label, foreground.label], ['sleep 60', 'sleep 40'], 'the background job, then the foreground call')
+    const all = await (await post(`/api/sessions/${busy.id}/flags`, { archived: true })).json()
     assert.deepEqual(
-      both.activity,
-      [{ kind: 'turn' }, { kind: 'schedule', items: [{ id: review.id, label: 'Review' }] }],
-      `the turn comes before the reminder, DSH's listener order\n${JSON.stringify(both)}`,
+      all.activity,
+      [
+        { kind: 'turn' },
+        { kind: 'job', items: [{ id: background.id, label: 'sleep 60' }, { id: foreground.id, label: 'sleep 40' }] },
+        { kind: 'schedule', items: [{ id: review.id, label: 'Review' }] },
+      ],
+      `the turn, then the jobs, then the reminder: DSH's listener order\n${JSON.stringify(all)}`,
     )
-    const stopBoth = await post(`/api/sessions/${busy.id}/flags`, { archived: true, stop: true })
-    assert.equal(stopBoth.status, 200, 'stop: true archives the running session')
+    const stopAll = await post(`/api/sessions/${busy.id}/flags`, { archived: true, stop: true })
+    assert.equal(stopAll.status, 200, 'stop: true archives the running session')
     assert.deepEqual(await reminders(busy.id), [], 'and removes its reminder')
+    const killed = await until(async () => {
+      const job = (await jobs(busy.id)).find((one) => one.id === background.id)
+      return job?.status === 'killed' ? job : undefined
+    })
+    assert.ok(killed, `and kills its background job\nsaw: ${JSON.stringify(await jobs(busy.id))}`)
+    assert.match(String(killed.detail), /session archived$/, "with DSH's reason, session archived")
     const ended = await until(async () => (await metas()).find((meta) => meta.id === busy.id)?.running === false)
     assert.ok(ended, 'and stops its turn')
   } finally {
