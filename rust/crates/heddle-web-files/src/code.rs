@@ -17,6 +17,8 @@ pub enum RendererName {
     Markdown,
     /// A page: no markup here; the page fetches `GET /api/html` and shows it in a sandboxed frame.
     Html,
+    /// PNG bytes: fetched from the authenticated, workspace-authorized raw route.
+    Image,
     /// Source: highlighted by [`render_code`], with a gutter.
     Code,
     /// Anything else: shown verbatim by the page, with no markup produced for it.
@@ -94,7 +96,7 @@ pub fn language_for(path: &Path) -> Option<&'static str> {
 }
 
 /// What should be done with a file, from its extension: `.md`/`.markdown` → markdown, `.html`/`.htm` → html, a
-/// known source extension → code with its language, anything else → text.
+/// `.png` → image, a known source extension → code with its language, anything else → text.
 pub fn renderer_for(path: &Path) -> RendererDecision {
     let extension = crate::node_path::extname(&path.to_string_lossy()).to_lowercase();
     match extension.as_str() {
@@ -104,6 +106,10 @@ pub fn renderer_for(path: &Path) -> RendererDecision {
         },
         ".html" | ".htm" => RendererDecision {
             renderer: RendererName::Html,
+            language: None,
+        },
+        ".png" => RendererDecision {
+            renderer: RendererName::Image,
             language: None,
         },
         _ => match language_for(path) {
@@ -223,7 +229,7 @@ pub fn render_source(path: &Path, text: &str) -> Rendered {
             }
         }
         // A page has no markup here: the panel fetches `GET /api/html` and shows it in a sandboxed frame.
-        RendererName::Html | RendererName::Text => Rendered {
+        RendererName::Html | RendererName::Image | RendererName::Text => Rendered {
             renderer: decision.renderer,
             language: None,
             html: None,
@@ -266,6 +272,28 @@ mod tests {
             decide("/w/doc.mdx").language,
             Some("markdown"),
             ".mdx is highlighted source, not a rendered document"
+        );
+    }
+
+    #[test]
+    fn png_selects_image_without_widening_other_formats() {
+        assert_eq!(
+            renderer_for(Path::new("/w/pixel.PNG")).renderer,
+            RendererName::Image
+        );
+        assert_eq!(
+            render_source(Path::new("/w/pixel.png"), "").renderer,
+            RendererName::Image
+        );
+        for suffix in ["jpg", "jpeg", "gif", "webp", "bmp", "ico"] {
+            assert_eq!(
+                renderer_for(Path::new(&format!("/w/pixel.{suffix}"))).renderer,
+                RendererName::Text
+            );
+        }
+        assert_eq!(
+            renderer_for(Path::new("/w/icon.svg")).renderer,
+            RendererName::Code
         );
     }
 

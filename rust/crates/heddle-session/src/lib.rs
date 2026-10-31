@@ -55,11 +55,15 @@ pub mod unicode61;
 /// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
 pub mod title_text;
 
-pub use activity::{ActivityEntry, ActivityItem, LineageMeta, activity_sessions, session_activity};
+pub use activity::{
+    ActivityEntry, ActivityItem, LineageMeta, RowActivity, activity_sessions, refusal_sentence,
+    session_activity,
+};
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,
-    read_session_definition, session_name, update_session_definition, write_session_definition,
+    read_session_definition, require_folder, session_name, update_session_definition,
+    write_session_definition,
 };
 pub use error::{SessionError, SessionFlagError};
 pub use event::{

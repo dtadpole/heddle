@@ -18,7 +18,7 @@ import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
-import { renderSourceOffThread } from './code.ts'
+import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
@@ -33,16 +33,17 @@ import { type InventoryLoader, readPluginInventory } from '../config/plugin-inve
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
+import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
-import { activitySessions, sessionActivity } from '../session/activity.ts'
+import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
-import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
+import type { ScheduleService } from '../schedule/service.ts'
+import { handleJobsRoute } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -1041,7 +1042,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const reading = readFileText(wanted)
+      const path = canonicalPath(wanted)
+      if (rendererFor(path).renderer === 'image') {
+        let stats
+        try { stats = statSync(path) } catch { throw new Error(`${path} is not a file`) }
+        if (!stats.isFile()) throw new Error(`${path} is not a file`)
+        // Decide before the UTF-8 reader rejects PNG. No bytes or HTML in this metadata;
+        // /api/raw rechecks authentication and workspace ownership when the img loads.
+        respond(response, 200, 'application/json', `${JSON.stringify({
+          path, name: basename(path), bytes: stats.size, renderer: 'image',
+          image: { src: `/api/raw?path=${encodeURIComponent(path)}`, mediaType: 'image/png' },
+        })}\n`)
+        return
+      }
+      const reading = readFileText(path)
       /**
        * The reading and the **renderer's decision** travel together.
        *
@@ -1651,7 +1665,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    let forked
+    try {
+      forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    } catch (error) {
+      if (!isMissingFolder(error)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/folder-missing' })}\n`)
+      return
+    }
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
@@ -1711,52 +1732,49 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     /**
      * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
-     * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     * stop. Here the turn's stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
      *
      * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
-     * `details.activity`): the turn in progress and the running subagent descendants, which the page's stop-and-archive
-     * dialog lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn,
-     * a teammate's, a notice's), because a session the page did not start can still be working.
+     * `details.activity`): the turn in progress, the session's live background jobs, its running subagent descendants and
+     * its active reminders, in DSH's listener order (`src/session/activity.ts`), which the page's stop-and-archive dialog
+     * lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn, a
+     * teammate's, a notice's), because a session the page did not start can still be working. The jobs are also listed
+     * as `jobs`, the jobs row's own field (`sessionJobActivity`), which the page's older confirm reads.
+     *
+     * With `stop: true` every family is stopped only once the archive is written, which is DSH's order: the archive set
+     * first, then each `workspace/session-stop` listener, awaited (`dsh-workspace/lib/index.js:527-541`, `:621-628`).
+     * The turn and its running subagents are aborted with `session archived`, the jobs killed with the same reason and
+     * the reminders removed. A write that is refused (`409`), finds no session (`404`) or fails stops nothing, as a
+     * throwing `setState` in DSH never reaches `stopSessionActivity`.
      */
-    /**
-     * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
-     * they block the archive the same way, are listed in the refusal, and with `stop: true` are killed with
-     * `session archived` once the archive is written.
-     */
-    const jobs = ctx.get('jobs') as JobRegistry | undefined
-    const stopJobs = archived === true && body.stop === true
+    const rows = { jobs: ctx.get('jobs') as JobRegistry | undefined, schedule: ctx.get('schedule') as ScheduleService | undefined }
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    /** The sessions a successful write stops: the session and the subagents its activity named. Empty without stop: true. */
+    let stopSessions: string[] = []
     if (archived === true) {
-      const turns = ctx.get('turns') as TurnRegistry | undefined
       const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
-      /** The session's own turn and its running subagents (stack-2's archive), then its live jobs (main's jobs view). */
-      const activity = sessionActivity(id, ctx.session.list(), isRunning)
-      const liveJobs = sessionJobActivity(jobs, id)
-      if (activity.length > 0 || liveJobs.length > 0) {
+      const work = await rowActivity(rows, id)
+      const activity = sessionActivity(id, ctx.session.list(), isRunning, work)
+      if (activity.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
             `${JSON.stringify({
-              error:
-                activity.length > 0
-                  ? `session ${id} is running; pass stop: true to stop it and archive`
-                  : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
+              error: refusalSentence(id, activity),
               code: 'active',
               running: state.running.get(id) ?? 0,
-              /** DSH's list, every family: `dsh-jobs` prepends its `{ kind: 'job', items }` ahead of the rest (lib/index.js:19-31). */
-              activity: [...(liveJobs.length > 0 ? [{ kind: 'job', items: liveJobs }] : []), ...activity],
-              ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
+              activity,
+              ...(work.jobs.length > 0 ? { jobs: work.jobs } : {}),
             })}\n`,
           )
           return
         }
-        for (const sessionId of activitySessions(id, activity)) {
-          abortSession(state.controllers, sessionId)
-          turns?.abort(sessionId, 'session archived')
-        }
+        stopSessions = activitySessions(id, activity)
       }
     }
+    const stopRows = archived === true && body.stop === true
     let meta
     try {
       meta = ctx.session.flags(id, {
@@ -1780,7 +1798,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
-    if (stopJobs) stopSessionJobs(jobs, id)
+    for (const sessionId of stopSessions) {
+      abortSession(state.controllers, sessionId)
+      turns?.abort(sessionId, 'session archived')
+    }
+    if (stopRows) await stopRowActivity(rows, id, (message) => ctx.logger.warn(message))
     /** Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end with their owner (#85). */
     if (archived === true) await state.terminals.closeSession(id)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
@@ -3365,6 +3387,16 @@ export function push(state: Pick<RequestState, 'log' | 'subscribers'>, event: st
   }
 }
 
+/**
+ * A session's folder that is gone (#56): a refusal with its sentence and its code, answered `400 { error, code }` as the
+ * unwritable branch of #106 is. Recognised by code, class or name, as `SessionFlagError` is, so a second copy of the
+ * module still matches.
+ */
+function isMissingFolder(error: unknown): boolean {
+  if (error instanceof MissingFolderError) return true
+  return error instanceof Error && (error.name === 'MissingFolderError' || (error as { code?: unknown }).code === 'session/folder-missing')
+}
+
 function respondSse(response: ServerResponse): void {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -3803,9 +3835,13 @@ export function transcriptTurns(
       }
       /**
        * A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the same notice row
-       * a stopped turn uses, so a reload says what the live page said.
+       * a stopped turn uses, so a reload says what the live page said. A turn the archived-session gate blocked
+       * (`reason: { kind: 'blocked' }`) is no failure and adds nothing, not even to the previous answer: DSH's chat shows
+       * no failure for a `blocked` end (`endFailure`, dsh-client-ui-chat lib/client.js:10475-10487), and its input was
+       * discarded (#139).
        */
-      if (event.type === 'turn/failed') {
+      const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
+      if (event.type === 'turn/failed' && !blocked) {
         const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
         const last = turns[turns.length - 1]
         if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }

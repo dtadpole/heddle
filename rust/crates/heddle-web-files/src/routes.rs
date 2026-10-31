@@ -56,7 +56,7 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
-use crate::code::{Rendered, render_source};
+use crate::code::{Rendered, RendererName, render_source, renderer_for};
 use crate::host::{FileReading, FilesHost, WorkspaceAnswer};
 use crate::picker::{CommandRunner, PickerOutcome, Platform, SystemRunner, pick_folder};
 use crate::uploads::{MAX_UPLOAD_BYTES, save_upload, upload_directory};
@@ -207,6 +207,31 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
             );
         }
         WorkspaceAnswer::Owned => {}
+    }
+    if renderer_for(&wanted).renderer == RendererName::Image {
+        let metadata = match std::fs::metadata(&wanted) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => {
+                return json_error(
+                    StatusCode::NOT_FOUND,
+                    &format!("{} is not a file", wanted.display()),
+                );
+            }
+        };
+        // PNG never goes through the UTF-8 reader. The raw route independently rechecks
+        // the workspace and the enclosing server's authentication when these bytes load.
+        let path = wanted.to_string_lossy();
+        let answer = serde_json::json!({
+            "path": path,
+            "name": crate::node_path::basename(&path),
+            "bytes": metadata.len(),
+            "renderer": "image",
+            "image": {
+                "src": format!("/api/raw?path={}", crate::markdown::percent_encode(&path)),
+                "mediaType": "image/png",
+            },
+        });
+        return json(StatusCode::OK, &format!("{}\n", answer));
     }
     match files.host.read_file_text(&wanted) {
         Ok(reading) => {
@@ -887,6 +912,66 @@ mod tests {
             .to_bytes()
             .to_vec();
         (status, headers, bytes)
+    }
+
+    #[tokio::test]
+    async fn png_metadata_skips_text_reader_and_keeps_raw_workspace_boundary() {
+        let (base, host) = scratch("png-preview");
+        let path = host.root.join("pixel & 雪.PNG");
+        let png = [0x89, b'P', b'N', b'G', 13, 10, 26, 10];
+        std::fs::write(&path, png).unwrap();
+        let host = Arc::new(host);
+        let app = FilesRoutes::new(host.clone()).router();
+        let (status, _, bytes) =
+            call(app.clone(), "GET", &query(&path.to_string_lossy()), None).await;
+        assert_eq!(status, Status::OK);
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["renderer"], "image");
+        assert_eq!(answer["image"]["mediaType"], "image/png");
+        assert!(answer.get("text").is_none());
+        assert!(answer.get("lines").is_none());
+        assert!(
+            host.reads.lock().unwrap().is_empty(),
+            "PNG must not reach UTF-8 reader"
+        );
+        let source = answer["image"]["src"].as_str().unwrap();
+        let (status, headers, bytes) = call(app.clone(), "GET", source, None).await;
+        assert_eq!(status, Status::OK);
+        assert_eq!(headers["content-type"], "image/png");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(bytes, png);
+        let outside = base.join("outside.png");
+        std::fs::write(&outside, png).unwrap();
+        assert_eq!(
+            call(app.clone(), "GET", &query(&outside.to_string_lossy()), None)
+                .await
+                .0,
+            Status::BAD_REQUEST
+        );
+        let raw = format!(
+            "/api/raw?path={}",
+            crate::markdown::percent_encode(&outside.to_string_lossy())
+        );
+        assert_eq!(
+            call(app.clone(), "GET", &raw, None).await.0,
+            Status::NOT_FOUND
+        );
+        assert_eq!(
+            call(
+                app,
+                "GET",
+                &query(
+                    &canonical_path(&host.root)
+                        .join("missing.png")
+                        .to_string_lossy()
+                ),
+                None
+            )
+            .await
+            .0,
+            Status::NOT_FOUND
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     fn body_text(bytes: &[u8]) -> String {
