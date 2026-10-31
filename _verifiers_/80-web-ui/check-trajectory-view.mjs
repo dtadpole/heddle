@@ -634,3 +634,58 @@ test('an overview tick shows its clock and duration after a 500 ms hover, as DSH
     await server.close()
   }
 })
+
+test('an older ledger read that fails after a newer one drew leaves no error under the new ledger', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * showLedger draws only the newest read's success, but its failure path appended the error whatever read it was:
+   * an older read rejecting after a newer one had drawn left 'could not read the ledger' under a good ledger
+   * (developer-two's component run). The page's own fetch is wrapped so the older read fails on cue.
+   */
+  const server = await startServer('stale-error')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    /** The next ledger read is held, and fails when the check says so. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('view=ledger')) {
+          held = false
+          return new Promise((_, reject) => { window.__failOlderLedger = () => reject(new TypeError('simulated stale failure')) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    const view = (name) => browser.evaluate(`document.querySelector('#views button[data-view="${name}"]').click()`)
+    await view('trajectory')
+    assert.ok(await browser.waitFor('typeof window.__failOlderLedger === "function"', 10_000), 'the older read is in flight')
+    await view('chat')
+    await view('trajectory')
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the newer read drew the ledger')
+    await browser.evaluate('window.__failOlderLedger()')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const after = JSON.parse(await browser.evaluate(`JSON.stringify({ errors: [...document.querySelectorAll('#ledger .turn.denied')].map((note) => note.textContent), rows: document.querySelectorAll('#tr-table tbody tr').length })`))
+    assert.deepEqual(after.errors, [], `the older read's failure leaves no error (${after.errors.join(' | ')})`)
+    assert.ok(after.rows > 0, 'and the newer ledger is still drawn')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
