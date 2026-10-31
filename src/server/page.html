@@ -5389,6 +5389,8 @@ async function showSession(id) {
    * is current (`dsh-client-ui-workspace` `lib/client.js:964-966`); the tree is redrawn once, shortly, only in that case.
    */
   if (current !== null && current !== id && placeholderDrawn(current)) scheduleTreeRefresh()
+  /** Opening another session gives New session's target back to it (`chosenWorkspace`, #25), even a session opened before. */
+  if (current !== id) chooseWorkspace(null)
   current = id
   paintEmptyState()
   /** Opening a session is what reads its completion (DSH's `reconcileStatus`, `client.js:965`). */
@@ -6751,6 +6753,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          */
         if (target === null) {
           current = payload.session
+          chooseWorkspace(null)
           adoptSession(payload.session)
           /** The pending send belongs to the session it just created; the row follows it. */
           if (directTurnPending > 0) directPendingKey = payload.session
@@ -9001,7 +9004,8 @@ let activeFolder = null
  * is that act here too, because this page has no Session Intent picker that shows and changes the target before the first
  * prompt (DSH's README, "use the picker in the Session Intent hero to choose a Workspace"): without it a click on B followed
  * by New session started the session in A, and on a shared server A was another person's project (#25). The choice holds
- * only while the session it was made beside is still the open one; opening any session gives the decision back to it.
+ * only while the session it was made beside is still the open one: opening any session, even that one again, forgets it
+ * (`showSession`), and the decision goes back to the open session's workspace.
  */
 let chosenWorkspace = null
 
