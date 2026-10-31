@@ -1,6 +1,6 @@
 ---
 title: Jobs
-version: 1.0.4
+version: 1.1.1
 description: Background jobs a session starts and collects later - the in-memory registry and its output ring, the three job tools, background bash, the completion notice that wakes an idle session, and the page's job routes.
 grounded_in:
   - source: dsh-0.2.1-rc.2
@@ -23,6 +23,7 @@ own, the session is told with a completion notice, which starts a turn if the se
 | [`ring.ts`](ring.ts) | `OutputRing`: chunks at absolute UTF-8 byte offsets, the oldest whole chunks dropped past the cap, an oversized chunk cut to a UTF-8-safe tail marked `gapBefore`, non-consuming reads that answer `lossy` below `earliest`; channels `stdout`, `stderr`, `log` |
 | [`registry.ts`](registry.ts) | `JobRegistry`, the substrate: `JobView`, the five statuses, `<kind>-<16 hex>` ids re-rolled on collision, the producer spec (`run(handle) -> {cancel, done}`, pull sources), preflight in DSH's order, the per-owner cap, the pump (150 ms, then a final drain before settle), the one consuming `read` and the non-consuming `readAt`, `kill`, `wait`, `remove`, first-wins settle with the kill reason merged, ownership, the `job/registered` and `job/settled` session-log events, the event stream, teardown |
 | [`tools.ts`](tools.ts) | `job_output`, `job_list`, `job_kill`: DSH's descriptions, parameter schemas and renderings verbatim (status line, `(no new output)`, the `[stderr]` section, the dropped-output note, `(no background jobs)`, the kill answers) |
+| [`spill.ts`](spill.ts) | `StreamSpill`: a stream's complete output in a private spill file once it outgrows a 64 000-byte tail (64 MiB cap, removed past it), in a 0700 per-process directory under the OS tmpdir; `spillSources` reports each file to the job as a pull source with no text, so `job_output`'s dropped-output notice names it (DSH's `OutputCollector` spill) |
 | [`bash.ts`](bash.ts) | background `bash`: the producer (confined by the same sandbox path as a foreground call, detached in its own process group, SIGTERM then SIGKILL after 3000 ms through the sandbox's `killProcessGroup`, DSH's outcome mapping and sandbox notes), the runner the jobs row attaches to the `bash` tool, and `runForeground`: a foreground call run as a job, promoted to the background when it outlives its wall time (`renderPromoted`) |
 | [`notice.ts`](notice.ts) | the completion notice's text and source, and `NoticeDelivery`: who is told, wake or inject, per-session serialization, `quiet` delivery and the wake budget |
 | [`http.ts`](http.ts) | the person's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`); and the archive admission the flags route asks (`sessionJobActivity`, `stopSessionJobs`) |

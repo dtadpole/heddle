@@ -22,7 +22,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, sessionsUnder } from '../../_tools_/verify-runner/lib.mjs'
+import { heddleCommand, isolatedHome, isTitleRequest, readTranscript, refuseTitleRequest, removeDir, repoRoot, sessionsUnder } from '../../_tools_/verify-runner/lib.mjs'
 
 const binaryUnderTest = typeof process.env.HEDDLE_BIN === 'string' && process.env.HEDDLE_BIN.length > 0
 
@@ -94,8 +94,11 @@ createInterface({ input: process.stdin }).on('line', async (line) => {
 async function double(calls) {
   let requests = 0
   const server = createServer((request, response) => {
-    request.resume()
+    let body = ''
+    request.on('data', (chunk) => (body += chunk))
     request.on('end', () => {
+      /** A new session's title request is not one of the turn's rounds this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests += 1
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const send = (delta, finish) => response.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\n`)

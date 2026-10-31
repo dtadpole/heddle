@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The chat view: one element per tool **call**, carrying its result.
@@ -1442,6 +1442,88 @@ test('a finished turn shows the edited files as one summary: single name, or a f
   }
 })
 
+test('a write the sandbox refused is not shown as an edited file, whether by write_file or by bash', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH derives its changed-files card from the files' actual state, so a write that did not happen is not on it.
+   * Heddle derives the card from its log, and measured 2026-10-29 (DSH parity R-developer-twelve-11) it named every
+   * `write_file` the model *asked* for: with each write refused by the sandbox, the card still showed three files
+   * and their added lines while the disk was unchanged. Here the sandbox root is the work folder, so a write to a
+   * folder outside it is refused — once through `write_file`, once through `bash` — and one write inside succeeds.
+   *
+   * The refused target is under `/etc`, not beside the work folder. `workspace-write` also lets both builds write
+   * to `/tmp` and the OS temp directory (src/sandbox/policy.ts `writableRoots`), so a sibling of the work folder
+   * is writable whenever the checkout itself sits under a temp directory, as a gate's scratch checkout does: the
+   * precondition then failed on an integrator's TypeScript run (2026-10-29) though nothing in heddle had changed.
+   * `/etc` is outside every writable root on any machine, and not writable by an ordinary user either.
+   */
+  const outside = join('/etc', `heddle-check-refused-${process.pid}`)
+  const refusedPath = join(outside, 'refused.txt')
+  const shellPath = `${outside}-shell.txt`
+  const mixed = await startServer('edits-refused', (work) => [
+    { toolCall: { name: 'write_file', arguments: { path: refusedPath, content: 'one\ntwo\n' } }, reasoning: 'writing outside the root' },
+    { toolCall: { name: 'bash', arguments: { command: `printf 'x\\n' > '${shellPath}'` } }, reasoning: 'writing outside the root through the shell' },
+    { toolCall: { name: 'write_file', arguments: { path: join(work, 'kept.txt'), content: 'kept\n' } }, reasoning: 'writing inside the root' },
+    { text: 'one of three writes landed' },
+  ], { sandboxRoot: true })
+  const refused = await startServer('edits-all-refused', () => [
+    { toolCall: { name: 'write_file', arguments: { path: refusedPath, content: 'x\n' } }, reasoning: 'writing outside the root' },
+    { text: 'nothing landed' },
+  ], { sandboxRoot: true })
+  const browser = await openBrowser()
+  /** One turn through the API, then the page that draws it; answers the session's transcript. */
+  const runTurn = async (server, prompt) => {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt, folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
+    await turn.text()
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return (await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)).body
+  }
+  const answerOf = (transcript) => (transcript.turns ?? []).filter((turn) => turn.kind === 'assistant').at(-1)
+  const card = async () => JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+    const answer = Array.from(document.querySelectorAll('#log .turn.assistant')).at(-1)
+    const panel = answer ? answer.querySelector('[data-changed-files]') : null
+    return { hasCard: panel !== null, title: panel ? panel.querySelector('.changed-title').textContent : null, text: panel ? panel.textContent : '' }
+  })())`))
+  try {
+    const transcript = await runTurn(mixed, 'write three files')
+    assert.equal(existsSync(refusedPath), false, 'the sandbox really refused the write_file outside the root')
+    assert.equal(existsSync(shellPath), false, 'and the bash write outside the root')
+    const tools = (transcript.turns ?? []).filter((turn) => turn.kind === 'tool')
+    assert.deepEqual(tools.map((turn) => turn.state), ['error', 'error', 'ok'], 'the two refused calls read as errors, the third as done')
+    assert.deepEqual(
+      answerOf(transcript)?.files,
+      [{ path: join(mixed.work, 'kept.txt'), added: 1 }],
+      'the transcript lists only the write that landed',
+    )
+    const mixedCard = await card()
+    assert.equal(mixedCard.hasCard, true, 'the turn that wrote one file shows the card')
+    assert.equal(mixedCard.title, 'Edited kept.txt', `titled by the one file that changed (${mixedCard.title})`)
+    assert.ok(!/refused\.txt|shell\.txt/.test(mixedCard.text), `no refused file is on the card (${mixedCard.text})`)
+
+    const none = await runTurn(refused, 'write outside the root')
+    assert.equal(answerOf(none)?.files, undefined, 'a turn whose every write was refused lists no files')
+    assert.equal((await card()).hasCard, false, 'and shows no card')
+  } finally {
+    browser.close()
+    await mixed.close()
+    await refused.close()
+    // Nothing was created under /etc to remove: the writes were refused, which is what the test asserts.
+  }
+})
+
 test('a long turn is not cut at eight rounds, and a turn the loop does stop says why', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
@@ -1995,8 +2077,10 @@ test('a provider that streams blank lines between tokens still reads as prose', 
   const chunks = ['检', '\n\n\n', '测', '\n\n\n', '器', '\n\n\n', '抓', '\n\n\n', '到', '\n\n\n', '了', '。', '\n\n', '下一段。']
   const double = held(await new Promise((resolve) => {
     const server = createServer((request, response) => {
-      request.resume()
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
       request.on('end', () => {
+        if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
         response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
         for (const chunk of chunks) {
           response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`)
@@ -2091,8 +2175,10 @@ test('a tool call being written is drawn at its first fragment and grows in plac
   let requests = 0
   const double = held(await new Promise((resolve) => {
     const server = createServer((request, response) => {
-      request.resume()
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
       request.on('end', async () => {
+        if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no round (#68)
         /**
          * The page discovers the model list on load, so a double that counted every request spent its tool call
          * on `/models` and answered the real turn with text — the first version of this check did exactly that.

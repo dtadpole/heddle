@@ -1,9 +1,9 @@
 ---
 title: Load check report lines
 created: 2026-10-24T05:01:48Z
-modified: 2026-10-31T01:20:28Z
+modified: 2026-10-31T07:45:00Z
 level: L2
-version: 1.4.0
+version: 1.4.1
 description: A sample load-check report and what each of its lines shows.
 status: unverified
 grounded_in:
@@ -14,7 +14,7 @@ grounded_in:
 
 ```text
 load-check 2026-10-22T20:20:04-0700 (10 cores)
-disk     59.9 GB free of 228 GB on /System/Volumes/Data [ok] (warn < 26 GB, stop < 20 GB: D-064)
+disk     59.9 GB free of 228 GB on /System/Volumes/Data [ok] (warn < 26 GB, stop < 16 GB: D-067)
 load     14.31 14.06 11.24 = 1.43/core [context] (system warn >= 1.5/core, stop >= 2/core; verdict follows team)
 team     2.7 core(s) = 0.27/core [ok] (warn >= 1/core, stop >= 1.3/core; 46 process(es))
 other    Google Chrome Helper (Renderer) 51%, WindowServer 48%, Google Chrome Helper 39%, node 37%, Muse 14%

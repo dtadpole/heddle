@@ -318,6 +318,7 @@ pub fn start_row(row: JobsRow<'_>) -> Result<Arc<JobsPlugin>, String> {
                 kill_grace_ms: kill_grace_ms.map(|grace| grace.round() as u64),
                 on_spawn: None,
                 promote_on_timeout: config.promote_on_timeout,
+                ..BashBackgroundOptions::default()
             },
         )),
     );
@@ -616,6 +617,7 @@ mod tests {
             tools: Arc::new(tools),
             hooks: Arc::new(heddle_agent::NoTurnHooks),
             turns: turns.then(heddle_agent::TurnRegistry::new),
+            presets: None,
         });
         Fixture {
             sessions,
@@ -969,6 +971,87 @@ mod tests {
         plugin.dispose();
     }
 
+    /// A job whose output outgrew the ring names its spill file in the dropped-output notice, and the file holds every
+    /// byte (DSH's `OutputCollector` spill and `renderModelDelta`'s notice); a foreground call that answered in time
+    /// leaves no file behind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_job_that_outgrew_its_ring_names_its_spill_file_and_the_file_holds_every_byte() {
+        let fixture = fixture("spill", true);
+        let plugin = start(
+            &fixture,
+            json!({ "retainBytes": 4096, "settledRetainBytes": 1024 }),
+        );
+        let spill_dir = fixture.work.join("spill");
+        std::fs::create_dir_all(&spill_dir).unwrap();
+        let store = Arc::clone(fixture.sessions.store());
+        let detach = heddle_tools::attach_bash_background(
+            fixture.runtime.tools.sandbox(),
+            Arc::new(BashRunner::new(
+                plugin.registry.clone(),
+                BashBackgroundOptions {
+                    read_log: Some(Arc::new(move |handle| store.read(handle).ok())),
+                    spill: Some(crate::spill::SpillSettings {
+                        tail_bytes: Some(2048),
+                        dir: Some(spill_dir.clone()),
+                        ..crate::spill::SpillSettings::default()
+                    }),
+                    ..BashBackgroundOptions::default()
+                },
+            )),
+        );
+        let handle = session(&fixture);
+        let started = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({
+                "command": "awk 'BEGIN { for (i = 0; i < 40000; i++) printf \"line %05d\\n\", i }'",
+                "run_in_background": true
+            }),
+        )
+        .await;
+        let id = job_id(&started.output);
+        settled_in_log(&fixture, &handle, &id).await;
+        let view = plugin
+            .registry
+            .list(Some(&handle.id))
+            .into_iter()
+            .find(|job| job.id == id)
+            .expect("the job is listed");
+        let paths = view.output.spill_paths.clone().unwrap_or_default();
+        assert_eq!(paths.len(), 1, "stdout spilled, stderr did not: {paths:?}");
+        let path = paths[0].clone();
+        assert!(
+            path.starts_with(&spill_dir.display().to_string()) && path.ends_with("-stdout.log"),
+            "{path}"
+        );
+        let read = call(&fixture, &handle, "job_output", json!({ "job_id": id })).await;
+        assert!(
+            read.output.contains(&format!(
+                "[some output was dropped from memory; full output: {path}]"
+            )),
+            "{}",
+            &read.output[..read.output.len().min(400)]
+        );
+        let full = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(full.len(), 440_000, "the file holds the complete stream");
+        assert!(full.starts_with("line 00000\nline 00001\n") && full.ends_with("line 39999\n"));
+
+        // A foreground call that answered in time names no file, so none is left.
+        std::fs::remove_file(&path).unwrap();
+        let answered = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({ "command": "awk 'BEGIN { for (i = 0; i < 2000; i++) printf \"line %05d\\n\", i }'" }),
+        )
+        .await;
+        assert!(answered.error.is_none(), "{answered:?}");
+        assert_eq!(std::fs::read_dir(&spill_dir).unwrap().count(), 0);
+        detach.detach();
+        plugin.dispose();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sleep_30_in_the_background_is_killed_with_its_process_group() {
         let fixture = fixture("kill", true);
@@ -988,6 +1071,7 @@ mod tests {
                         lock(&seen).insert(id.to_owned(), pid);
                     })),
                     promote_on_timeout: None,
+                    ..BashBackgroundOptions::default()
                 },
             )),
         );
