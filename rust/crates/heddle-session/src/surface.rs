@@ -737,10 +737,16 @@ mod tests {
         let seeded = fork_seed(&source, 1);
         let lines: Vec<String> = seeded.iter().map(SessionEvent::to_line).collect();
         assert_eq!(lines, SEED_EXPECTED.to_vec());
-        let mut child = vec![SessionEvent::from_line(r#"{"seq":0,"at":"c","type":"session/created"}"#).unwrap()];
+        let mut child = vec![
+            SessionEvent::from_line(r#"{"seq":0,"at":"c","type":"session/created"}"#).unwrap(),
+        ];
         child.extend(seeded);
         let surface = fold_surface(&child).expect("the child's surface folds");
-        assert_eq!(surface.nodes, vec![8, 5], "the summary stands where the first turn stood");
+        assert_eq!(
+            surface.nodes,
+            vec![8, 5],
+            "the summary stands where the first turn stood"
+        );
     }
 
     #[test]

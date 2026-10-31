@@ -690,11 +690,10 @@ impl SessionStore {
                 .loaded
                 .get_mut(&handle.id)
                 .expect("the log was just loaded");
-            let records: Vec<Arc<SessionEvent>> =
-                fork_seed(inherited, loaded.events.len() as u64)
-                    .into_iter()
-                    .map(Arc::new)
-                    .collect();
+            let records: Vec<Arc<SessionEvent>> = fork_seed(inherited, loaded.events.len() as u64)
+                .into_iter()
+                .map(Arc::new)
+                .collect();
             if records.is_empty() {
                 return Ok(());
             }
@@ -2286,7 +2285,11 @@ mod tests {
             .iter()
             .filter(|event| event.kind == "context/note")
             .collect();
-        assert_eq!(notes.len(), 2, "the system prompt and the snapshot came across as notes");
+        assert_eq!(
+            notes.len(),
+            2,
+            "the system prompt and the snapshot came across as notes"
+        );
         assert_eq!(notes[1].get("origin"), Some(&json!("runtime-context")));
         assert_eq!(notes[1].get("identity"), Some(&json!(SNAPSHOT)));
         assert_eq!(
@@ -2727,18 +2730,48 @@ mod tests {
     }
 
     /// A turn as the loop records it: the prompt, the request, the streamed reasoning and answer, the end.
-    fn streamed_turn(store: &SessionStore, handle: &SessionHandle, prompt: &str, reasoning: &[&str], answer: &[&str]) {
+    fn streamed_turn(
+        store: &SessionStore,
+        handle: &SessionHandle,
+        prompt: &str,
+        reasoning: &[&str],
+        answer: &[&str],
+    ) {
         store.message(handle, user(prompt)).unwrap();
-        put(store, handle, json!({"type": "model/request", "endpoint": "scripted", "messages": 2, "tools": []}));
+        put(
+            store,
+            handle,
+            json!({"type": "model/request", "endpoint": "scripted", "messages": 2, "tools": []}),
+        );
         for text in reasoning {
-            put(store, handle, json!({"type": "assistant/chunk", "chunk": {"type": "reasoning-delta", "text": text}}));
+            put(
+                store,
+                handle,
+                json!({"type": "assistant/chunk", "chunk": {"type": "reasoning-delta", "text": text}}),
+            );
         }
         for text in answer {
-            put(store, handle, json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": text}}));
+            put(
+                store,
+                handle,
+                json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": text}}),
+            );
         }
-        put(store, handle, json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}));
-        put(store, handle, json!({"type": "assistant/completed", "text": answer.concat(), "finishReason": "stop", "rounds": 1}));
-        put(store, handle, json!({"type": "turn/completed", "rounds": 1}));
+        put(
+            store,
+            handle,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+        );
+        put(
+            store,
+            handle,
+            json!({"type": "assistant/completed", "text": answer.concat(), "finishReason": "stop", "rounds": 1}),
+        );
+        put(
+            store,
+            handle,
+            json!({"type": "turn/completed", "rounds": 1}),
+        );
     }
 
     /// A compaction as heddle-context records it: every surface node but the newest `keep` is shadowed.
@@ -2746,9 +2779,18 @@ mod tests {
         let nodes = store.surface(handle).unwrap().nodes.clone();
         let shadowed = nodes[..nodes.len() - keep].to_vec();
         let (from, through) = (shadowed[0], *shadowed.last().unwrap());
-        let start = put(store, handle, json!({"type": "compaction/start", "fromSeq": from, "throughSeq": through, "shadowedSeqs": shadowed}));
-        let text = "<compacted-summary>\nthe briefing: the code word is WALRUS-9\n</compacted-summary>";
-        let summary = put(store, handle, json!({"type": "compaction/summary", "fromSeq": from, "throughSeq": through, "summary": text, "shadowedSeqs": shadowed}));
+        let start = put(
+            store,
+            handle,
+            json!({"type": "compaction/start", "fromSeq": from, "throughSeq": through, "shadowedSeqs": shadowed}),
+        );
+        let text =
+            "<compacted-summary>\nthe briefing: the code word is WALRUS-9\n</compacted-summary>";
+        let summary = put(
+            store,
+            handle,
+            json!({"type": "compaction/summary", "fromSeq": from, "throughSeq": through, "summary": text, "shadowedSeqs": shadowed}),
+        );
         let mut sources = vec![start.seq, summary.seq];
         sources.extend(&shadowed);
         let replacement = put_with(
@@ -2756,11 +2798,18 @@ mod tests {
             handle,
             json!({"type": "context/note", "message": {"role": "user", "content": [{"type": "text", "text": text}]}, "origin": "compaction"}),
             AppendOptions {
-                surface_op: Some(SurfaceOp::Replace { start_seq: from, end_seq: through }),
+                surface_op: Some(SurfaceOp::Replace {
+                    start_seq: from,
+                    end_seq: through,
+                }),
                 source_event_seqs: Some(sources),
             },
         );
-        put(store, handle, json!({"type": "compaction/end", "fromSeq": from, "throughSeq": through, "summarySeq": summary.seq, "replacementSeq": replacement.seq}));
+        put(
+            store,
+            handle,
+            json!({"type": "compaction/end", "fromSeq": from, "throughSeq": through, "summarySeq": summary.seq, "replacementSeq": replacement.seq}),
+        );
     }
 
     fn fork_of(store: &SessionStore, source: &SessionHandle) -> SessionHandle {
@@ -2782,8 +2831,12 @@ mod tests {
             .filter(|event| event.kind == "message")
             .filter_map(|event| {
                 let message = event.get("message")?;
-                (message.get("role") == Some(&json!("user")))
-                    .then(|| message["content"][0]["text"].as_str().unwrap_or("").to_string())
+                (message.get("role") == Some(&json!("user"))).then(|| {
+                    message["content"][0]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string()
+                })
             })
             .collect()
     }
@@ -2795,33 +2848,77 @@ mod tests {
         // own events (dsh-session/lib/types/fork.js:18-27), chunks included.
         let (_dir, store) = store();
         let source = store.create(CreateOptions::default()).unwrap();
-        streamed_turn(&store, &source, "What is 17 times 23?", &["17", " × 23", " = 391."], &["39", "1"]);
+        streamed_turn(
+            &store,
+            &source,
+            "What is 17 times 23?",
+            &["17", " × 23", " = 391."],
+            &["39", "1"],
+        );
         store.message(&source, user("Use the bash tool.")).unwrap();
-        put(&store, &source, json!({"type": "assistant/chunk", "chunk": {"type": "tool-call", "id": "call-1", "name": "bash", "arguments": "{\"command\":\"echo FORKTOOL-77\"}"}}));
-        put(&store, &source, json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "tool_calls"}}));
-        put(&store, &source, json!({"type": "message", "message": {"role": "tool", "toolCallId": "call-1", "content": [{"type": "text", "text": "FORKTOOL-77\n"}]}}));
-        put(&store, &source, json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "done"}}));
-        put(&store, &source, json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}));
-        put(&store, &source, json!({"type": "turn/completed", "rounds": 2}));
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "tool-call", "id": "call-1", "name": "bash", "arguments": "{\"command\":\"echo FORKTOOL-77\"}"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "tool_calls"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "message", "message": {"role": "tool", "toolCallId": "call-1", "content": [{"type": "text", "text": "FORKTOOL-77\n"}]}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "done"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "turn/completed", "rounds": 2}),
+        );
 
         let fork = fork_of(&store, &source);
         let child = store.read(&fork).unwrap();
         let reasoning: String = child
             .iter()
-            .filter(|event| event.get("chunk").and_then(|chunk| chunk.get("type")) == Some(&json!("reasoning-delta")))
+            .filter(|event| {
+                event.get("chunk").and_then(|chunk| chunk.get("type"))
+                    == Some(&json!("reasoning-delta"))
+            })
             .map(|event| event.fields["chunk"]["text"].as_str().unwrap().to_string())
             .collect();
-        assert_eq!(reasoning, "17 × 23 = 391.", "the reasoning is still a reasoning block, not part of an answer");
+        assert_eq!(
+            reasoning, "17 × 23 = 391.",
+            "the reasoning is still a reasoning block, not part of an answer"
+        );
         assert!(
             !child.iter().any(|event| event.kind == "message"
-                && event.get("message").and_then(|message| message.get("role")) == Some(&json!("assistant"))),
+                && event.get("message").and_then(|message| message.get("role"))
+                    == Some(&json!("assistant"))),
             "and no answer was folded into an assistant message"
         );
         assert!(
-            child.iter().any(|event| event.get("chunk").and_then(|chunk| chunk.get("name")) == Some(&json!("bash"))),
+            child.iter().any(
+                |event| event.get("chunk").and_then(|chunk| chunk.get("name"))
+                    == Some(&json!("bash"))
+            ),
             "the call keeps its name and command"
         );
-        assert_eq!(store.messages(&fork).unwrap(), store.messages(&source).unwrap(), "the model reads what the source's read");
+        assert_eq!(
+            store.messages(&fork).unwrap(),
+            store.messages(&source).unwrap(),
+            "the model reads what the source's read"
+        );
     }
 
     #[test]
@@ -2831,29 +2928,80 @@ mod tests {
         // early ones in the model's context only.
         let (_dir, store) = store();
         let source = store.create(CreateOptions::default()).unwrap();
-        streamed_turn(&store, &source, "Remember the code word WALRUS-9.", &["Noting it."], &["noted."]);
-        streamed_turn(&store, &source, "Write about bridges, part 1", &["Part 1."], &["Bridges, part one."]);
-        store.message(&source, user("Write about bridges, part 2")).unwrap();
+        streamed_turn(
+            &store,
+            &source,
+            "Remember the code word WALRUS-9.",
+            &["Noting it."],
+            &["noted."],
+        );
+        streamed_turn(
+            &store,
+            &source,
+            "Write about bridges, part 1",
+            &["Part 1."],
+            &["Bridges, part one."],
+        );
+        store
+            .message(&source, user("Write about bridges, part 2"))
+            .unwrap();
         compact(&store, &source, 1);
-        put(&store, &source, json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "Bridges, part two."}}));
-        put(&store, &source, json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}));
-        put(&store, &source, json!({"type": "turn/completed", "rounds": 1}));
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "Bridges, part two."}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "assistant/chunk", "chunk": {"type": "done", "finishReason": "stop"}}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "turn/completed", "rounds": 1}),
+        );
 
         let fork = fork_of(&store, &source);
         let child = store.read(&fork).unwrap();
         assert_eq!(
             prompts_of(&child),
-            vec!["Remember the code word WALRUS-9.", "Write about bridges, part 1", "Write about bridges, part 2"],
+            vec![
+                "Remember the code word WALRUS-9.",
+                "Write about bridges, part 1",
+                "Write about bridges, part 2"
+            ],
             "the branch starts where its source started"
         );
         for record in ["compaction/start", "compaction/summary", "compaction/end"] {
-            assert!(child.iter().any(|event| event.kind == record), "the branch carries the source's {record}");
+            assert!(
+                child.iter().any(|event| event.kind == record),
+                "the branch carries the source's {record}"
+            );
         }
         let context = store.messages(&fork).unwrap();
-        assert!(crate::message::text_of(&context[0].content).contains("WALRUS-9"), "its model reads the summary first");
-        assert_eq!(context, store.messages(&source).unwrap(), "exactly as the source's model does");
-        let turns = |id: &str| store.list().into_iter().find(|meta| meta.id() == id).unwrap().turns();
-        assert_eq!(turns(&fork.id), turns(&source.id), "and it counts as many turns");
+        assert!(
+            crate::message::text_of(&context[0].content).contains("WALRUS-9"),
+            "its model reads the summary first"
+        );
+        assert_eq!(
+            context,
+            store.messages(&source).unwrap(),
+            "exactly as the source's model does"
+        );
+        let turns = |id: &str| {
+            store
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == id)
+                .unwrap()
+                .turns()
+        };
+        assert_eq!(
+            turns(&fork.id),
+            turns(&source.id),
+            "and it counts as many turns"
+        );
     }
 
     #[test]
@@ -2863,7 +3011,10 @@ mod tests {
         let heard: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
         let recorder = heard.clone();
         let listener: EventListener = Arc::new(move |handle, event| {
-            recorder.lock().unwrap().push((handle.id.clone(), event.kind.clone()));
+            recorder
+                .lock()
+                .unwrap()
+                .push((handle.id.clone(), event.kind.clone()));
         });
         let store = SessionStore::with_listener(&root, &Env::default(), listener);
         let source = store.create(CreateOptions::default()).unwrap();
@@ -2871,9 +3022,19 @@ mod tests {
 
         let fork = fork_of(&store, &source);
         let lines = |handle: &SessionHandle| -> Vec<String> {
-            store.read(handle).unwrap().iter().skip(1).map(|event| event.to_line()).collect()
+            store
+                .read(handle)
+                .unwrap()
+                .iter()
+                .skip(1)
+                .map(|event| event.to_line())
+                .collect()
         };
-        assert_eq!(lines(&fork), lines(&source), "every inherited event is the source line, seq and time included");
+        assert_eq!(
+            lines(&fork),
+            lines(&source),
+            "every inherited event is the source line, seq and time included"
+        );
         let published: Vec<String> = heard
             .lock()
             .unwrap()
@@ -2881,16 +3042,32 @@ mod tests {
             .filter(|(id, _)| *id == fork.id)
             .map(|(_, kind)| kind.clone())
             .collect();
-        assert_eq!(published, vec!["session/created"], "the seed is history, not a turn happening now");
+        assert_eq!(
+            published,
+            vec!["session/created"],
+            "the seed is history, not a turn happening now"
+        );
     }
 
     #[test]
     fn a_fork_leaves_the_source_records_behind_and_renumbers_what_names_a_seq() {
         let (_dir, store) = store();
         let source = store.create(CreateOptions::default()).unwrap();
-        put(&store, &source, json!({"type": "goal/change", "version": 1, "operation": "create"}));
-        put(&store, &source, json!({"type": "team/member", "version": 1, "teamId": source.id}));
-        put(&store, &source, json!({"type": "transcript/repaired", "droppedBytes": 3}));
+        put(
+            &store,
+            &source,
+            json!({"type": "goal/change", "version": 1, "operation": "create"}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "team/member", "version": 1, "teamId": source.id}),
+        );
+        put(
+            &store,
+            &source,
+            json!({"type": "transcript/repaired", "droppedBytes": 3}),
+        );
         streamed_turn(&store, &source, "first", &["one"], &["one."]);
         streamed_turn(&store, &source, "second", &["two"], &["two."]);
         store.message(&source, user("third")).unwrap();
@@ -2899,23 +3076,46 @@ mod tests {
 
         let fork = fork_of(&store, &source);
         let child = store.read(&fork).unwrap();
-        assert!(child.iter().enumerate().all(|(index, event)| event.seq == index as u64), "the seqs run on without a hole");
+        assert!(
+            child
+                .iter()
+                .enumerate()
+                .all(|(index, event)| event.seq == index as u64),
+            "the seqs run on without a hole"
+        );
         assert!(
             !child.iter().any(|event| event.kind == "goal/change"
                 || event.kind.starts_with("team/")
                 || event.kind == "transcript/repaired"),
             "none of the source's own records came along"
         );
-        let by_seq: HashMap<u64, &Arc<SessionEvent>> = child.iter().map(|event| (event.seq, event)).collect();
-        let end = child.iter().find(|event| event.kind == "compaction/end").unwrap();
+        let by_seq: HashMap<u64, &Arc<SessionEvent>> =
+            child.iter().map(|event| (event.seq, event)).collect();
+        let end = child
+            .iter()
+            .find(|event| event.kind == "compaction/end")
+            .unwrap();
         let named = |key: &str| by_seq[&end.fields[key].as_u64().unwrap()];
         assert_eq!(named("summarySeq").kind, "compaction/summary");
         let replacement = named("replacementSeq");
         assert_eq!(replacement.get("origin"), Some(&json!("compaction")));
-        assert_eq!(replacement.fields["surfaceOp"]["startSeq"], end.fields["fromSeq"]);
+        assert_eq!(
+            replacement.fields["surfaceOp"]["startSeq"],
+            end.fields["fromSeq"]
+        );
         let first = named("fromSeq");
-        assert_eq!(first.fields["message"]["content"][0]["text"], json!("first"), "the range starts at the child's first prompt");
-        assert_eq!(by_seq[&replacement.fields["sourceEventSeqs"][0].as_u64().unwrap()].kind, "compaction/start");
-        assert_eq!(store.messages(&fork).unwrap(), store.messages(&source).unwrap());
+        assert_eq!(
+            first.fields["message"]["content"][0]["text"],
+            json!("first"),
+            "the range starts at the child's first prompt"
+        );
+        assert_eq!(
+            by_seq[&replacement.fields["sourceEventSeqs"][0].as_u64().unwrap()].kind,
+            "compaction/start"
+        );
+        assert_eq!(
+            store.messages(&fork).unwrap(),
+            store.messages(&source).unwrap()
+        );
     }
 }
