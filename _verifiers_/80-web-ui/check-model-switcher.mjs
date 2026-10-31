@@ -806,7 +806,10 @@ test('a blank session from New session runs its first message on the seat’s ch
     assert.ok(await browser.waitFor(`document.getElementById('model-trigger') !== null`, 20_000), 'the composer is up')
     assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
 
-    // The seat's choice, made before any session exists.
+    // Let main's first-visit blank session finish opening before choosing a seat or testing New session.
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    const existing = new Set((await sessionsOf(server)).map((meta) => meta.id))
+    // The seat's choice, before the explicit New session being judged exists.
     await openMenu(browser)
     await drill(browser, 'Model')
     await choose(browser, 'Model Two')
@@ -816,7 +819,7 @@ test('a blank session from New session runs its first message on the seat’s ch
     await trustedClick(browser, `document.getElementById('new-session')`, 'New session')
     let listed = []
     for (let tries = 0; tries < 100 && listed.length === 0; tries += 1) {
-      listed = await sessionsOf(server)
+      listed = (await sessionsOf(server)).filter((meta) => !existing.has(meta.id))
       if (listed.length === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
     }
     assert.equal(listed.length, 1, 'New session made a session')
