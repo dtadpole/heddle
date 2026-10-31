@@ -95,6 +95,25 @@ interface ContextLike {
  * default — so a manual compaction is written in the same voice as an automatic one.
  */
 async function compactNow(ctx: Context, handle: SessionHandle): Promise<CompactionOutcome> {
+  /**
+   * DSH compacts by hand only an idle session: an open turn or another compaction answers `busy`
+   * (dsh-compaction-basic compactSurfaceRegion and compactNow). A compaction under a running turn would replace the
+   * history that turn is still writing, its own prompt included (#133).
+   */
+  const turns = ctx.get('turns') as { isRunning(sessionId: string): boolean } | undefined
+  if (turns?.isRunning(handle.id) === true || compacting.has(handle.id)) return { compacted: false, busy: true }
+  compacting.add(handle.id)
+  try {
+    return await compactIdle(ctx, handle)
+  } finally {
+    compacting.delete(handle.id)
+  }
+}
+
+/** Sessions with a manual compaction in flight in this process. */
+const compacting = new Set<string>()
+
+async function compactIdle(ctx: Context, handle: SessionHandle): Promise<CompactionOutcome> {
   const context = ctx.get('context') as ContextLike | undefined
   if (context === undefined) throw new Error('Compaction is unavailable because the context service is not loaded.')
   const meta = ctx.session.list().find((entry) => entry.id === handle.id)
@@ -102,13 +121,21 @@ async function compactNow(ctx: Context, handle: SessionHandle): Promise<Compacti
   const endpoint = meta?.endpoint ?? models?.defaultEndpoint?.()
   if (endpoint === undefined) throw new Error('Compaction is unavailable because no model endpoint is configured to summarise with.')
   const before = context.measure(handle)
+  const lastSeq = ctx.session.store.read(handle).at(-1)?.seq ?? 0
   const report = await context.prepare(handle, {
     cwd: meta?.cwd ?? handle.dir,
     endpoint,
     ...(meta?.model !== undefined ? { model: meta.model } : {}),
     force: true,
   })
-  if (!report.compacted) return { compacted: false }
+  if (!report.compacted) {
+    /** A summary the engine refused is recorded as `compaction/failed {refused: true}`; DSH reports it as an error (#132). */
+    const refusal = ctx.session.store
+      .read(handle)
+      .find((event) => event.seq > lastSeq && event.type === 'compaction/failed' && (event as { refused?: unknown }).refused === true)
+    if (refusal !== undefined) return { compacted: false, refused: String((refusal as { reason?: unknown }).reason ?? 'refused') }
+    return { compacted: false }
+  }
   const after = context.measure(handle)
   const events = ctx.session.store.read(handle)
   const summary = [...events].reverse().find((event) => event.type === 'compaction/summary')

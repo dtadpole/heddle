@@ -100,8 +100,17 @@ grounded_in:
   workspace to start*, Send disabled, Enter refused with *Choose a workspace first.* and opening Add workspace, and no
   session started; and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
   placeholder *No archived sessions yet* with its *View other sessions* action (not the no-roots note), the action
-  setting *Hide archived* back and drawing the rows again (#107). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  setting *Hide archived* back and drawing the rows again (#107); a session in the nested workspace named after
+  that workspace, not the root above it, in a search hit and in an `In one list` row (#57); and its search matching a
+  title or a workspace name, never a New session placeholder, twenty at most, revealing a chosen hit, and, while
+  `/api/sessions` fails, listing the rows the tree holds rather than "No matching sessions", then reading again on the
+  next search (#58). The page opens no session on its own, so a check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
+- [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
+  name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
+  four keystrokes, the session found only inside its answer joining the hits with its snippet, "No matching
+  sessions" only once the host has answered, and a content hit opening like any hit; a failed host request leaving
+  the name matches with no warning of their own, and the same query asking the host again (#58).
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
