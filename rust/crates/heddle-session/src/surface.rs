@@ -260,6 +260,90 @@ pub fn inherits_answer<E: Borrow<SessionEvent> + Clone>(
         .any(|event| E::borrow(event).kind == "assistant/completed"))
 }
 
+/// Whether a fork inherits an event of this type.
+///
+/// DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a
+/// child here inherits the same, except four kinds that belong to the **source** and that no fold here can tell
+/// apart as inherited (DSH hands every projection `inheritedEventCount`, dsh-session/lib/index.js:1418-1426):
+/// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file),
+/// `goal/change` (an active goal is armed whenever a process folds it, so an inherited one would run rounds in
+/// the branch, where DSH disarms it) and `team/*` (the journal names the source as its Lead, and the team fold
+/// refuses a foreign one). The TypeScript twin is `inheritedByFork` in `src/session/store.ts`.
+pub fn inherited_by_fork(kind: &str) -> bool {
+    kind != "session/created"
+        && kind != "transcript/repaired"
+        && kind != "goal/change"
+        && !kind.starts_with("team/")
+}
+
+/// The fields of a recorded event that name one other event by its seq (a compaction's own bookkeeping).
+const SEQ_FIELDS: [&str; 4] = ["fromSeq", "throughSeq", "summarySeq", "replacementSeq"];
+/// The fields that name several events by seq.
+const SEQ_LIST_FIELDS: [&str; 2] = ["sourceEventSeqs", "shadowedSeqs"];
+
+/// The events a fork's child is seeded with: the inherited ones, as recorded, numbered on from `first_seq`.
+///
+/// Each keeps its own `at` and its fields in written order, so the child's view, surface and model context are
+/// the source's (#52, #55). The child's `session/created` takes seq 0 as the source's did, so the seqs normally
+/// carry over and the events are copied unchanged. When an event is left out ([`inherited_by_fork`]) the later
+/// ones move down, and every field naming a seq moves with them, in place: a replacement's `surfaceOp` range,
+/// `sourceEventSeqs`, and the compaction records' `fromSeq`, `throughSeq`, `summarySeq`, `replacementSeq`,
+/// `shadowedSeqs` and `shadowedRange`. A seq naming no inherited event is left as written. The TypeScript twin is
+/// `forkSeed` in `src/session/store.ts`, and both write the same bytes.
+pub fn fork_seed<E: Borrow<SessionEvent>>(inherited: &[E], first_seq: u64) -> Vec<SessionEvent> {
+    let kept: Vec<&SessionEvent> = inherited
+        .iter()
+        .map(E::borrow)
+        .filter(|event| inherited_by_fork(&event.kind))
+        .collect();
+    let unchanged = kept
+        .iter()
+        .zip(first_seq..)
+        .all(|(event, seq)| event.seq == seq);
+    if unchanged {
+        return kept.into_iter().cloned().collect();
+    }
+    let renumbered: HashMap<u64, u64> = kept
+        .iter()
+        .zip(first_seq..)
+        .map(|(event, seq)| (event.seq, seq))
+        .collect();
+    let moved = |value: &mut Value| {
+        if let Some(seq) = value.as_u64().and_then(|old| renumbered.get(&old)) {
+            *value = Value::from(*seq);
+        }
+    };
+    let renumber = |object: &mut serde_json::Map<String, Value>, keys: &[&str]| {
+        for key in keys {
+            if let Some(value) = object.get_mut(*key) {
+                moved(value);
+            }
+        }
+    };
+    kept.into_iter()
+        .zip(first_seq..)
+        .map(|(event, seq)| {
+            let mut copy = event.clone();
+            copy.seq = seq;
+            renumber(&mut copy.fields, &SEQ_FIELDS);
+            for key in SEQ_LIST_FIELDS {
+                if let Some(Value::Array(list)) = copy.fields.get_mut(key) {
+                    list.iter_mut().for_each(&moved);
+                }
+            }
+            if let Some(Value::Object(op)) = copy.fields.get_mut("surfaceOp")
+                && op.get("op").and_then(Value::as_str) == Some("replace")
+            {
+                renumber(op, &["startSeq", "endSeq"]);
+            }
+            if let Some(Value::Object(range)) = copy.fields.get_mut("shadowedRange") {
+                renumber(range, &["start", "end"]);
+            }
+            copy
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +695,71 @@ mod tests {
 
         let unanswered = vec![message(0, "user")];
         assert!(!inherits_answer(&unanswered).unwrap());
+    }
+
+    /// The same source and the same expected seed as `test/session-fork-seed.test.ts`, so both builds write a
+    /// fork's log with the same bytes.
+    const SEED_SOURCE: [&str; 12] = [
+        r#"{"seq":0,"at":"t0","type":"session/created","cwd":"/w"}"#,
+        r#"{"seq":1,"at":"t1","type":"goal/change","version":1}"#,
+        r#"{"seq":2,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
+        r#"{"seq":3,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}"#,
+        r#"{"seq":4,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}"#,
+        r#"{"seq":5,"at":"t5","type":"turn/completed","rounds":1}"#,
+        r#"{"seq":6,"at":"t6","type":"message","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+        r#"{"seq":7,"at":"t7","type":"compaction/start","fromSeq":2,"throughSeq":3,"shadowedSeqs":[2,3]}"#,
+        r#"{"seq":8,"at":"t8","type":"compaction/summary","fromSeq":2,"throughSeq":3,"summary":"s","shadowedSeqs":[2,3]}"#,
+        r#"{"seq":9,"at":"t9","type":"context/note","message":{"role":"user","content":[{"type":"text","text":"s"}]},"origin":"compaction","surfaceOp":{"op":"replace","startSeq":2,"endSeq":3},"sourceEventSeqs":[7,8,2,3]}"#,
+        r#"{"seq":10,"at":"t10","type":"compaction/end","fromSeq":2,"throughSeq":3,"summarySeq":8,"replacementSeq":9}"#,
+        r#"{"seq":11,"at":"t11","type":"compaction/prune","shadowedRange":{"start":6,"end":6},"shadowedSeqs":[6]}"#,
+    ];
+    const SEED_EXPECTED: [&str; 10] = [
+        r#"{"seq":1,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
+        r#"{"seq":2,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}"#,
+        r#"{"seq":3,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}"#,
+        r#"{"seq":4,"at":"t5","type":"turn/completed","rounds":1}"#,
+        r#"{"seq":5,"at":"t6","type":"message","message":{"role":"user","content":[{"type":"text","text":"two"}]}}"#,
+        r#"{"seq":6,"at":"t7","type":"compaction/start","fromSeq":1,"throughSeq":2,"shadowedSeqs":[1,2]}"#,
+        r#"{"seq":7,"at":"t8","type":"compaction/summary","fromSeq":1,"throughSeq":2,"summary":"s","shadowedSeqs":[1,2]}"#,
+        r#"{"seq":8,"at":"t9","type":"context/note","message":{"role":"user","content":[{"type":"text","text":"s"}]},"origin":"compaction","surfaceOp":{"op":"replace","startSeq":1,"endSeq":2},"sourceEventSeqs":[6,7,1,2]}"#,
+        r#"{"seq":9,"at":"t10","type":"compaction/end","fromSeq":1,"throughSeq":2,"summarySeq":7,"replacementSeq":8}"#,
+        r#"{"seq":10,"at":"t11","type":"compaction/prune","shadowedRange":{"start":5,"end":5},"shadowedSeqs":[5]}"#,
+    ];
+
+    #[test]
+    fn a_fork_seed_renumbers_every_seq_after_an_event_it_leaves_behind() {
+        // #52, #55: the seed is the source's own log. A `goal/change` stays behind, so every later event moves
+        // down one, and so does every field that names a seq: the surface range, its sources, the records.
+        let source: Vec<SessionEvent> = SEED_SOURCE
+            .iter()
+            .map(|line| SessionEvent::from_line(line).unwrap())
+            .collect();
+        let seeded = fork_seed(&source, 1);
+        let lines: Vec<String> = seeded.iter().map(SessionEvent::to_line).collect();
+        assert_eq!(lines, SEED_EXPECTED.to_vec());
+        let mut child = vec![SessionEvent::from_line(r#"{"seq":0,"at":"c","type":"session/created"}"#).unwrap()];
+        child.extend(seeded);
+        let surface = fold_surface(&child).expect("the child's surface folds");
+        assert_eq!(surface.nodes, vec![8, 5], "the summary stands where the first turn stood");
+    }
+
+    #[test]
+    fn a_fork_seed_is_the_source_unchanged_when_nothing_stays_behind() {
+        // The child's own `session/created` is seq 0, as the source's is, so the seqs carry over.
+        let source = vec![
+            event(0, "session/created", &[]),
+            message(1, "user"),
+            chunk(2, json!({"type": "text-delta", "text": "a"})),
+            chunk(3, json!({"type": "done", "finishReason": "stop"})),
+            event(4, "permission/mode", &[("mode", json!("read-only"))]),
+            event(5, "turn/completed", &[]),
+        ];
+        assert_eq!(fork_seed(&source, 1), source[1..].to_vec());
+        assert!(!inherited_by_fork("session/created"));
+        assert!(!inherited_by_fork("team/member"));
+        assert!(!inherited_by_fork("transcript/repaired"));
+        assert!(!inherited_by_fork("goal/change"));
+        assert!(inherited_by_fork("permission/mode"));
     }
 
     #[test]
