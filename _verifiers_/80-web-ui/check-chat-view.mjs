@@ -2767,3 +2767,75 @@ test('a turn stopped from the page is marked as stopped where it ended, live', a
     await server.close()
   }
 })
+
+test('a turn that runs while its session is opening is drawn once, not live and again from history', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-eleven-1: opening a session clears the transcript and reads its history while the
+   * event stream keeps delivering. Measured on TS, a turn that ran during the read was drawn live and then again from
+   * history. The check holds the page's history read open (its own fetch, wrapped), runs a turn, then lets the read
+   * finish: the turn must read once. A turn after the session has opened must still be drawn live, once.
+   */
+  const server = await startServer('session-open', () => [{ text: 'an answer from the turn' }])
+  const browser = await openBrowser()
+  const count = (selector, text) => `[...document.querySelectorAll(${JSON.stringify(selector)})].filter((row) => row.textContent.includes(${JSON.stringify(text)})).length`
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    /** Hold the read of this session's history until the check lets it go. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let release
+      const held = new Promise((resolve) => { release = resolve })
+      window.__releaseHistory = () => release()
+      window.__historyReads = 0
+      window.fetch = async (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (new URL(address, location.href).pathname === '/api/sessions/' + ${JSON.stringify(session)}) {
+          window.__historyReads += 1
+          await held
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    assert.ok(await browser.waitFor('window.__historyReads > 0', 10_000), 'the page is reading the session history')
+
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'run while it opens', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    await browser.evaluate('window.__releaseHistory()')
+    assert.ok(await browser.waitFor(`${count('#log .turn.assistant', 'an answer from the turn')} >= 1`, 10_000), 'the answer is drawn')
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const once = JSON.parse(await browser.evaluate(`JSON.stringify({ users: ${count('#log .turn.user', 'run while it opens')}, answers: ${count('#log .turn.assistant', 'an answer from the turn')}, kinds: [...document.querySelectorAll('#log > .turn')].map((row) => row.dataset.kind).join(',') })`))
+    assert.equal(once.users, 1, `the person's message reads once (${once.kinds})`)
+    assert.equal(once.answers, 1, `and the answer once (${once.kinds})`)
+
+    /** With the session open, the stream draws a new turn live, once. */
+    const next = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'and after it opened', folder: server.work, session }),
+    })
+    await next.text()
+    assert.ok(await browser.waitFor(`${count('#log .turn.user', 'and after it opened')} === 1`, 10_000), 'a later turn is drawn live')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    assert.equal(Number(await browser.evaluate(count('#log .turn.assistant', 'an answer from the turn'))), 2, 'its answer once, beside the first')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
