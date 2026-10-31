@@ -471,3 +471,39 @@ test('Add workspace and New session say they failed when their request gets no a
     removeDir(place)
   }
 })
+
+test('⌥⌘O opens Add workspace\'s folder chooser, as DSH\'s workspace.add shortcut does', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH binds `workspace.add` to `KeyO` with primary+alt on the Web (dsh-client-ui-workspace `client.js:133`) and labels
+   * its control with `aria-keyshortcuts` (`client.js:3917`). A Mac sends ⌥⌘O as `key: 'ø'`, `code: 'KeyO'`, so the
+   * press is the physical key, as DSH's registry matches it. Phase A pressed ⌥⌘O on this page and nothing happened.
+   */
+  const place = fixtureDir('workspaces-shortcut')
+  const server = await startServer('shortcut', { home: place })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const press = (init) => `document.dispatchEvent(new KeyboardEvent('keydown', ${JSON.stringify({ bubbles: true, cancelable: true, ...init })}))`
+  try {
+    mkdirSync(join(place, 'picked'), { recursive: true })
+    const real = realpathSync(place)
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    assert.equal(await browser.evaluate(`document.getElementById('add-workspace').getAttribute('aria-keyshortcuts')`), 'Alt+Meta+O', 'the + names its chord')
+
+    await browser.evaluate(press({ key: 'o', code: 'KeyO', metaKey: true }))
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-picker').open`), false, '⌘O alone is not the chord')
+
+    await browser.evaluate(press({ key: 'ø', code: 'KeyO', metaKey: true, altKey: true }))
+    assert.ok(
+      await browser.waitFor(`document.getElementById('workspace-picker').open && Array.from(document.querySelectorAll('#workspace-picker-list button')).some((entry) => entry.dataset.path === ${JSON.stringify(join(real, 'picked'))})`, 10_000),
+      '⌥⌘O opens the folder chooser at the home folder',
+    )
+    await browser.evaluate(`document.querySelector('#workspace-picker [data-ws-close]').click()`)
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-picker').open`), false, 'and it closes as the + one does')
+  } finally {
+    browser.close()
+    await server.close()
+    removeDir(place)
+  }
+})
