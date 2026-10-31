@@ -4605,7 +4605,8 @@ test('a clipped session title crawls on hover and returns on leave', async (cont
         headers: { cookie, 'content-type': 'application/json' },
         body: JSON.stringify({ title: text, folder }),
       })
-    const longTitle = 'a session name long enough to overflow the sidebar and crawl while the pointer rests on its row'
+    /** 78 bytes: under DSH's 80-byte title cap (normalizeSessionTitle), which a longer title would be cut by, yet far wider than the sidebar. */
+    const longTitle = 'a session name long enough to overflow the sidebar and crawl under the pointer'
     /** Each session's definition folder comes from the CLI's own record, not from a guessed name. */
     assert.equal((await title(longId, longTitle, dirname(longRecord.definition))).status, 200, 'the long title is written')
     assert.equal((await title(shortId, 'short', dirname(shortRecord.definition))).status, 200, 'the short title is written')
