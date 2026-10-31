@@ -1,3 +1,5 @@
+import { missingPresetMessage, presetAllows, presetToolSpecs } from '../config/presets.ts'
+import type { PresetDefinition, PresetResolution } from '../config/presets.ts'
 import { mergeTokenUsage } from '../llm/usage.ts'
 import type { TokenUsage } from '../llm/usage.ts'
 import type { Context } from '@deepseek-ai/cordis'
@@ -209,6 +211,30 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
   }
 }
 
+/** The `presets` service as the loop reads it: optional, so a profile without the row runs every tool. */
+interface PresetRegistry {
+  defaultId(): string
+  resolve(id: string | undefined): PresetResolution
+}
+
+/**
+ * The agent preset a turn's session runs under (inventory A96), or undefined when the profile declares none.
+ *
+ * DSH's rules: a session keeps the preset it recorded, so a later change of the default does not move it; a session
+ * that recorded none (one from before presets, or created by a path that named none) records the current default now
+ * and keeps it from then on; and a recorded preset that is no longer declared is **rejected** rather than replaced, so
+ * the turn is refused with a sentence naming it before anything is written to the log.
+ */
+function sessionPreset(ctx: Context, session: SessionHandle): PresetDefinition | undefined {
+  const presets = ctx.get('presets') as PresetRegistry | undefined
+  if (presets === undefined) return undefined
+  let recorded = ctx.session.store.list().find((meta) => meta.id === session.id)?.preset
+  if (recorded === undefined) recorded = ctx.session.store.recordPreset(session.id, presets.defaultId())?.preset ?? presets.defaultId()
+  const resolution = presets.resolve(recorded)
+  if ('missing' in resolution) throw new Error(missingPresetMessage(resolution))
+  return resolution.preset
+}
+
 /** One turn's body; the exported `runTurn` adds the live-turn registration around it. */
 async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortSignal | undefined): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
@@ -224,6 +250,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
   const cwd = ctx.sandbox.rootFor(folder)
   // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
   const instructionCwd = folder ?? ctx.sandbox.workspaceRoot
+  /**
+   * The session's preset narrows what this turn offers: its tools, and the persona its system prompt is written from
+   * when the caller names none. Resolved before the prompt is written, so a refused preset leaves no dangling message.
+   */
+  const preset = sessionPreset(ctx, options.session)
+  const system = options.system ?? preset?.persona
 
   /**
    * Write what waits in the session's inbox into the conversation (src/session/inbox.ts).
@@ -246,7 +278,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
     )
   }
 
-  const tools = specsOf(ctx.tools)
+  const tools = preset === undefined ? specsOf(ctx.tools) : presetToolSpecs(preset, specsOf(ctx.tools))
   const denials: { tool: string; code: string; message: string }[] = []
   const toolCallRecords: { name: string; arguments: string; result: ToolResult }[] = []
   let text = ''
@@ -315,7 +347,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       endpoint: options.endpoint,
       ...(options.model !== undefined ? { model: options.model } : {}),
       tools,
-      ...(options.system !== undefined ? { system: options.system } : {}),
+      ...(system !== undefined ? { system } : {}),
     })
 
     /**
@@ -448,7 +480,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         const retried = ctx.context.assemble(options.session, {
           cwd: instructionCwd,
           tools,
-          ...(options.system !== undefined ? { system: options.system } : {}),
+          ...(system !== undefined ? { system } : {}),
           endpoint: options.endpoint,
           ...(options.model !== undefined ? { model: options.model } : {}),
         })
@@ -506,6 +538,17 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       const args = parseArguments(call.arguments)
       if (stoppedByCaller()) {
         return { output: '', error: { code: 'INTERRUPTED', message: 'the turn was stopped before this call ran' } }
+      }
+      /**
+       * A tool outside the session's preset does not exist for this agent, so the call gets the registry's own answer
+       * for an unknown tool, naming the tools the preset does offer. The model is never shown such a tool; this is
+       * the answer to one it names anyway.
+       */
+      if (preset !== undefined && !presetAllows(preset, call.name)) {
+        return {
+          output: '',
+          error: { code: 'UNKNOWN_TOOL', message: `no tool named '${call.name}'; known: ${tools.map((tool) => tool.name).join(', ') || '(none)'}` },
+        }
       }
       try {
         return await ctx.tools.call(call.name, args, {
