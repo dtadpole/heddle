@@ -108,6 +108,14 @@ test('key descriptions carry the protocol codes for named, letter, digit and pun
   assert.throws(() => keyDescription('NonsenseKey'), /does not know the key/)
 })
 
+/** A key's name is not always its DOM value: a button answers the space bar only for `key: ' '`. */
+test('the named Space key sends the DOM value a literal space, the same as pressing " "', () => {
+  assert.deepEqual(keyDescription('Space'), { key: ' ', code: 'Space', keyCode: 32, text: ' ' })
+  assert.deepEqual(keyDescription('Space'), keyDescription(' '), 'the name and the character are one key')
+  assert.deepEqual(parseKey('Shift+Space'), { key: 'Space', modifiers: 8 })
+  assert.equal(keyDescription(parseKey('Shift+Space').key).key, ' ', 'a chord keeps the DOM value')
+})
+
 /** The snapshot's text form: indentation, uid first, role rules, quoted values, collapsed text. */
 test('a snapshot prints the DevTools text form and collapses redundant text children', () => {
   const tree = {

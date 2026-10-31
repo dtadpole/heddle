@@ -1,9 +1,9 @@
 ---
 title: Browser slot queue
 created: 2026-10-29T13:08:51Z
-modified: 2026-10-31T06:55:00Z
+modified: 2026-10-31T07:45:00Z
 level: L2
-version: 1.4.0
+version: 1.5.0
 description: How browser-slot shares the team's browser slots fairly. It covers the slot count and the integrator reservation, the queue and tickets, the coordinator's priority turn, the memory gate, stale-holder recovery, working beside a hand-made mkdir lock, and the exit codes.
 status: unverified
 grounded_in:
@@ -11,6 +11,7 @@ grounded_in:
   - source: '[hd] build-and-resources.md, Browser lock bullet: mkdir browser.lock with an owner file, at most 10 minutes, browser.next for a P0 gate'
   - source: 'coordinator D-060, 2026-10-29: a slot count in browser-cap, a slot reserved for integrators (browser.lock2), and no new holder while memory is short'
   - source: 'coordinator report 2026-10-30 23:47: an integrator waited for the reserved slot while two shared slots were free; a reservation means integrators may take the reserved slot and any free shared one'
+  - source: 'coordinator D-067, 2026-10-31: the disk stop line for builds and browser holds moves from 20 GiB to 16 GiB; between 16 and 20 GiB the coordinator sweeps every pass'
 ---
 
 # Browser slot queue
@@ -49,10 +50,11 @@ already in use exits 78 with an instruction to sync `_tools_/local-build` from m
 ticket, so it expires after 5 minutes. `status` shows each waiter's last verdict, the reason it did not take a
 slot.
 
-**Memory and disk gate (D-064).** No new holder is admitted while `memory_pressure` reports under 25% free,
-or the volume of the slot folder has under 20 GiB free. Swap is no gate: macOS keeps stale pages there and grows
+**Memory and disk gate (D-064, D-067).** No new holder is admitted while `memory_pressure` reports under 25%
+free, or the volume of the slot folder has under 16 GiB free (D-067 moved the disk line from 20 GiB; between 16
+and 20 GiB the coordinator sweeps every pass instead). Swap is no gate: macOS keeps stale pages there and grows
 it on demand. The seat stays queued, and the exit-75 line says why. `browser-cap` may move the lines
-(`min-free=25 disk-min=20`); older swap keys in it are ignored.
+(`min-free=25 disk-min=16`); older swap keys in it are ignored.
 
 ## Holding and releasing
 

@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { isolatedHome, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The Settings dialog tells a failed read apart from an empty configuration (issue #60).
@@ -24,8 +24,10 @@ const CAPABILITY = 'the Settings dialog in the Web UI'
 async function plainDouble() {
   const { createServer } = await import('node:http')
   const server = createServer((request, response) => {
-    request.resume()
+    let body = ''
+    request.on('data', (chunk) => (body += chunk))
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ object: 'list', data: [{ id: 'model-one', object: 'model' }] }))

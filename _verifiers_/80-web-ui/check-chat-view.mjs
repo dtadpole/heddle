@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The chat view: one element per tool **call**, carrying its result.
@@ -2077,8 +2077,10 @@ test('a provider that streams blank lines between tokens still reads as prose', 
   const chunks = ['检', '\n\n\n', '测', '\n\n\n', '器', '\n\n\n', '抓', '\n\n\n', '到', '\n\n\n', '了', '。', '\n\n', '下一段。']
   const double = held(await new Promise((resolve) => {
     const server = createServer((request, response) => {
-      request.resume()
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
       request.on('end', () => {
+        if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
         response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
         for (const chunk of chunks) {
           response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk }, finish_reason: null }] })}\n\n`)
@@ -2173,8 +2175,10 @@ test('a tool call being written is drawn at its first fragment and grows in plac
   let requests = 0
   const double = held(await new Promise((resolve) => {
     const server = createServer((request, response) => {
-      request.resume()
+      let body = ''
+      request.on('data', (chunk) => (body += chunk))
       request.on('end', async () => {
+        if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no round (#68)
         /**
          * The page discovers the model list on load, so a double that counted every request spent its tool call
          * on `/models` and answered the real turn with text — the first version of this check did exactly that.

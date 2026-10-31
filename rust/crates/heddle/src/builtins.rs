@@ -63,6 +63,8 @@ pub enum Builtin {
     Team,
     /// `src/plugins/schedule.ts`.
     Schedule,
+    /// `src/plugins/jobs.ts`.
+    Jobs,
     /// `src/plugins/tools.ts`.
     Tools,
 }
@@ -260,6 +262,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         "heddle-schedule",
     ),
     spec(
+        Builtin::Jobs,
+        "plugins/jobs",
+        "jobs",
+        "jobs",
+        Some("jobs"),
+        &["session", "model", "tools", "sandbox", "context"],
+        "heddle-jobs",
+    ),
+    spec(
         Builtin::Tools,
         "plugins/tools",
         "tools",
@@ -455,6 +466,7 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::Schedule) => Some(Box::new(
                 crate::adapters::ScheduleComponent::new(self.env.clone()),
             )),
+            ComponentRef::Builtin(Builtin::Jobs) => Some(Box::new(crate::adapters::JobsComponent)),
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),

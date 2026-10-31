@@ -238,3 +238,35 @@ test('the routes answer as DSH settings calls do', async () => {
   assert.equal(await handleSettingsRequest(service, 'GET', '/api/status', ''), undefined)
   f.done()
 })
+
+test('with an applier a write is applied to the running tree at once and reported live', async () => {
+  const f = fixture('live')
+  const options: LayerOptions = { profile: 'dev' }
+  const layers = defaultLayers({ ...options, env: f.env })
+  const applied: [string, unknown][] = []
+  const service = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf, async (ns, config) => {
+    applied.push([ns, config])
+  })
+  assert.equal((await service.describe()).namespaces.find((entry) => entry.ns === 'tools')?.applies, 'live')
+  const entry = await service.write('tools', update({ bashTimeoutMs: 60000 }))
+  assert.deepEqual(applied, [['tools', { bashTimeoutMs: 60000, label: 'plain' }]], 'the composed config, as the next boot would give it')
+  assert.equal(entry.applyError, undefined)
+  await service.write('keys', update({ label: 'edited' }))
+  assert.deepEqual(applied[1], ['keys', { token: 'secret-value', label: 'edited' }], 'resolved, so the running entry gets the value, not the reference')
+  f.done()
+})
+
+test('a write the running tree refuses is still written and says so', async () => {
+  const f = fixture('live-refused')
+  const options: LayerOptions = { profile: 'dev' }
+  const layers = defaultLayers({ ...options, env: f.env })
+  const service = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf, async () => {
+    throw new Error('the entry could not be re-applied')
+  })
+  const entry = await service.write('tools', update({ bashTimeoutMs: 60000 }))
+  assert.equal(entry.applyError, 'the entry could not be re-applied')
+  assert.match(readFileSync(f.patchFile, 'utf8'), /"bashTimeoutMs": 60000/, 'the next boot still applies it')
+  const plain = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf)
+  assert.equal((await plain.describe()).namespaces.find((entry) => entry.ns === 'tools')?.applies, 'restart', 'without an applier the next boot applies a write')
+  f.done()
+})
