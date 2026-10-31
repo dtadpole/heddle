@@ -20,11 +20,11 @@
     - id: locale
       name: ./src/plugins/locale.ts
 
-    # Sessions: the event log a turn is recorded in.
+    # Sessions: the event log a turn is recorded in. The store lives under $HEDDLE_HOME/sessions
+    # (~/.heddle/sessions when HEDDLE_HOME is unset), the plugin's own default, so a run with its own home
+    # keeps its own sessions; a root written here would ignore HEDDLE_HOME (#74). --session-root restates it.
     - id: session
       name: ./src/plugins/session.ts
-      config:
-        root: ~/.heddle/sessions
 
     # The model service: a registry of endpoints, fed from the local file.
     - id: model

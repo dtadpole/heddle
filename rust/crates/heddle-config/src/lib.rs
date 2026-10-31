@@ -72,8 +72,8 @@ pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,
     PAGE_ENDPOINT_FIELDS, ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths,
     default_endpoints, describe_endpoint, describe_endpoints, describe_page_endpoint,
-    environment_override, materialize_key, merge_endpoint, read_key_file, resolve_endpoints,
-    selection_problem,
+    environment_override, is_shipped_fixture, materialize_key, merge_endpoint, read_key_file,
+    resolve_endpoints, selection_problem, unscripted_fixture_message,
 };
 pub use env::Env;
 pub use error::ConfigError;
