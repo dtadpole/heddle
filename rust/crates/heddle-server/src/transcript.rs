@@ -108,6 +108,10 @@ pub struct ChatTurn {
     pub result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<ToolState>,
+    /// On the answer that closes a completed turn: the seq of its `turn/completed`, which the page's Branch
+    /// action sends as the fork's `atSeq` (DSH's turn footer forks at the turn's end seq).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_seq: Option<u64>,
     /// An assistant turn's markdown rendered as a document; set by the session route, never by the fold.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
@@ -134,6 +138,7 @@ impl ChatTurn {
             tool_call_id: None,
             result: None,
             state: None,
+            fork_seq: None,
             html: None,
             steer_id: None,
         }
@@ -504,6 +509,17 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     }
                 }
             }
+            // A completed turn can be branched from its closing answer: DSH's turn footer offers "Branch into a
+            // new conversation" and forks with `atSeq` at the turn's end, and refuses when the last row is not an
+            // answer with text (dsh-client-ui-chat/lib/client.js:6963-7001, 11094-11115, 13266-13285).
+            if event_type == "turn/completed"
+                && let Some(seq) = event.get("seq").and_then(Value::as_u64)
+                && let Some(last) = turns.last_mut()
+                && last.kind == TurnKind::Assistant
+                && !last.text.trim().is_empty()
+            {
+                last.fork_seq = Some(seq);
+            }
             // A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the
             // notice row a stopped turn uses — web.ts's transcriptTurns does the same.
             if event_type == "turn/failed" {
@@ -692,6 +708,34 @@ mod tests {
         assert_eq!(turns[0].text, "hi");
         assert_eq!(turns[0].time.as_deref(), Some("2026-10-22T00:00:00.000Z"));
         assert_eq!(turns[1].text, "hello");
+    }
+
+    #[test]
+    fn the_answer_closing_a_completed_turn_carries_the_seq_a_branch_forks_at() {
+        // DSH's turn footer branches with `atSeq` at the turn's end, and only from an answer with text.
+        let events = vec![
+            json!({"seq": 1, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "one"}]}}),
+            json!({"seq": 2, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "first answer"}}),
+            json!({"seq": 3, "type": "assistant/completed", "text": "first answer"}),
+            json!({"seq": 4, "type": "turn/completed"}),
+            json!({"seq": 5, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "two"}]}}),
+            json!({"seq": 6, "type": "assistant/chunk", "chunk": {"type": "tool-call", "id": "c1", "name": "list_dir", "arguments": "{}"}}),
+            json!({"seq": 7, "type": "turn/completed"}),
+        ];
+        let turns = transcript_turns(&events);
+        let marked: Vec<(TurnKind, &str, u64)> = turns
+            .iter()
+            .filter_map(|turn| {
+                turn.fork_seq
+                    .map(|seq| (turn.kind, turn.text.as_str(), seq))
+            })
+            .collect();
+        assert_eq!(marked, vec![(TurnKind::Assistant, "first answer", 4)]);
+        assert_eq!(
+            serde_json::to_value(&turns[1]).unwrap()["forkSeq"],
+            json!(4),
+            "serialized with the TypeScript name"
+        );
     }
 
     #[test]

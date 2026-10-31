@@ -302,6 +302,21 @@ impl TurnRunner for Turns {
             })
         })
     }
+
+    /// The runtime's live-turn registry: a subagent's, a teammate's or a notice's turn the page never started.
+    fn is_live(&self, session: &str) -> bool {
+        self.runtime
+            .turns
+            .as_ref()
+            .is_some_and(|turns| turns.is_running(session))
+    }
+
+    fn interrupt(&self, session: &str) -> bool {
+        self.runtime
+            .turns
+            .as_ref()
+            .is_some_and(|turns| turns.abort(session, Some("session archived")))
+    }
 }
 
 /// What the page's feature routers read: the booted session store, the workspace roots and the tools.
