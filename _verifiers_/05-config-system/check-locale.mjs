@@ -79,6 +79,8 @@ test('with no stored choice, the page is in the first supported language the bro
     assert.equal(await servedLanguage(server, 'zh-CN,zh;q=0.9,en;q=0.8'), 'zh-CN', 'a Chinese browser gets Chinese, tagged as DSH tags it')
     assert.equal(await servedLanguage(server, 'en-US,en;q=0.9'), 'en')
     assert.equal(await servedLanguage(server, 'fr-FR,fr;q=0.9'), 'en', 'an unsupported language falls back to English')
+    // Only a shipped tag is ever written into the document; the header's own text never reaches it.
+    assert.equal(await servedLanguage(server, '"><script>alert(1)</script>'), 'en', 'a hostile header writes nothing of its own')
   } finally {
     server.close()
   }
