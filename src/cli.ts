@@ -14,6 +14,7 @@ import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
+import { declaredModuleNames } from './config/plugin-inventory.ts'
 import { resetProfileFromTemplate } from './config/profile-template.ts'
 import { ConfigError, heddleHome, profilesDir } from './config/schema.ts'
 
@@ -525,6 +526,8 @@ async function runWeb(args: Args): Promise<void> {
       // The endpoint the flag named becomes the server's default, so a turn posted without one
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
+      // The plugin inventory reports each row's module name as the layer wrote it, not as `boot` resolved it.
+      pluginModuleNames: declaredModuleNames(app),
     })
     /**
      * A restarted harness picks up the goals it finds still active.

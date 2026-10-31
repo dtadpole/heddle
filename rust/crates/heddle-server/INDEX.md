@@ -121,6 +121,7 @@ to confirm or move a row.
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |
 | `GET`, `POST /api/goal`, `GET /api/todo`, `GET /api/team` | heddle-server | over the goal, todo and team traits; a team log that refuses to fold answers `500 internal error: <message>`, as web.ts's catch-all does |
 | `GET /api/endpoints`, `GET /api/context` | heddle-web-composer | |
+| `GET /api/plugin-inventory` | heddle (`web.rs`) | DSH's read-only `pluginInventory/list`, from `heddle_config::plugin_inventory` over the booted rows and entries; the tree's phases are final once `load` returns, so it is read when the server is composed |
 | `GET /api/html`, `GET /vendor/purify.js` | heddle-server | `html.ts` is this crate's; the sanitiser is served as `text/javascript` so the preview page can run it |
 | `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`, `GET /api/file`, `POST /api/markdown` | heddle-web-files | use `respond::file_bytes` and `inline_content_type` |
 
