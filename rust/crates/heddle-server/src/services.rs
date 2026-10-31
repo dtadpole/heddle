@@ -475,6 +475,16 @@ pub trait TodoService: Send + Sync {
     fn get(&self, session: &str) -> Option<Value>;
 }
 
+/// Work a session holds besides its turns, which an archive is refused by unless the caller agrees to stop it: DSH's
+/// `workspace/session-activity` waterfall and `workspace/session-stop` (`dsh-workspace` archive,
+/// `lib/index.js:512-540`). The binary supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`).
+pub trait SessionActivity: Send + Sync {
+    /// The live background jobs that block archiving `session`, each `{ "id", "label" }`.
+    fn jobs(&self, session: &str) -> Vec<Value>;
+    /// Stop them, once the archive is written: each job is killed with `session archived`.
+    fn stop(&self, session: &str);
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -532,6 +542,8 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// Work besides turns that an archive stops or is refused by; `None`: turns are the only activity.
+    pub activity: Option<Arc<dyn SessionActivity>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
     /// `POST /api/sessions` creates one when no branch is named.
     pub cwd: PathBuf,
@@ -559,6 +571,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
             cwd,
         }
     }
@@ -603,6 +616,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
             cwd,
         }
     }
@@ -795,6 +809,11 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    pub fn activity(mut self, service: Arc<dyn SessionActivity>) -> Self {
+        self.harness.activity = Some(service);
         self
     }
 
