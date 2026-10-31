@@ -22,6 +22,8 @@ function harness() {
       accepted?.()
       await new Promise<void>((resolve) => pending.push(resolve))
     },
+    fetch: async () => ({ ok: true }),
+    stopButton: { disabled: false },
     setTimeout: () => 1, clearTimeout: () => {},
     renderQueue: () => {}, renderComposerState: () => {}, growComposer: () => {},
     add: () => {},
@@ -35,19 +37,21 @@ function harness() {
     let directTurnPending = 0;
     const directTurnsByQueue = new WeakMap();
     let directPendingSince = null, directPendingKey = null, pendingWatchdog = null;
-    const queueTurnOut = new WeakSet(), pumping = new WeakSet();
+    const queueTurnOut = new WeakSet(), pumping = new WeakSet(), stoppedQueues = new WeakSet();
+    let stopRequested = false;
     function sessionRunning() { return runningSessions.has(composerKey) }
-    ${['queueOf', 'directTurnsFor', 'keyOfQueue', 'turnInFlight', 'anyRunning', 'sendNow', 'pumpQueue'].map(source).join('\n')}
+    ${['queueOf', 'directTurnsFor', 'keyOfQueue', 'turnInFlight', 'anyRunning', 'sendNow', 'pumpQueue', 'stopTurn'].map(source).join('\n')}
     ({
       setKey(key) { composerKey = key },
       queue(key, text) { queueOf(key).push({ id: text, text, status: 'pending', attachments: [] }) },
-      anyRunning, sendNow, pumpQueue,
+      anyRunning, sendNow, pumpQueue, stopTurn,
+      resume() { stoppedQueues.delete(queueOf()) },
       calls, pending,
     })
   `, context) as {
     setKey(key: string): void; queue(key: string, text: string): void;
     anyRunning(): boolean; sendNow(text: string): Promise<void>;
-    pumpQueue(key: string): Promise<void>;
+    pumpQueue(key: string): Promise<void>; stopTurn(): Promise<void>; resume(): void;
     calls: Array<{ text: string; key: string }>; pending: Array<() => void>;
   }
 }
@@ -74,4 +78,21 @@ test('Refs #72: finishing a direct turn drains its own queued messages after swi
   assert.equal(state.calls[1]?.key, 'X', 'navigation must not redirect X messages to Y')
   state.pending.shift()!()
   await Promise.resolve()
+})
+
+
+test('Refs #75: Stop preserves queued rows until an explicit new submission wakes them', async () => {
+  const state = harness()
+  const sent = state.sendNow('FIRST-X')
+  state.queue('X', 'KEPT-X')
+  await state.stopTurn()
+  state.pending.shift()!()
+  await sent
+  await state.pumpQueue('X')
+  assert.equal(state.calls.length, 1, 'Stop must not automatically send the queued message')
+  state.resume()
+  const pumping = state.pumpQueue('X')
+  assert.equal(state.calls[1]?.text, 'KEPT-X', 'explicit wake-up retains the queued message')
+  state.pending.shift()!()
+  await pumping
 })

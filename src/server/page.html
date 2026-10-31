@@ -6212,6 +6212,8 @@ function keyOfQueue(queue, fallback) {
  * session cannot show Stop on this one; `adoptSession` moves the same array to the session a fresh panel's turn created.
  */
 const queueTurnOut = new WeakSet()
+/** Stop retains queued work without automatically starting another turn (Refs #75; DSH keepInbox:true). */
+const stoppedQueues = new WeakSet()
 
 function anyRunning() {
   return directTurnsFor() > 0 || queueTurnOut.has(queueOf()) || turnInFlight() || sessionRunning()
@@ -6254,6 +6256,7 @@ function submitDraft(gesture) {
   growComposer()
   updateSendDisabled()
   const attachments = takeAttachments()
+  stoppedQueues.delete(queueOf())
   const mode = resolveSubmitMode(BUSY_ENTER, anyRunning(), gesture)
   if (mode === 'steer') {
     void deliverSteered(text, attachments)
@@ -6584,6 +6587,7 @@ async function pumpQueue(key = composerKey) {
   pumping.add(queue)
   try {
     for (;;) {
+      if (stoppedQueues.has(queue)) break
       const item = queue.find((entry) => entry.status === 'pending')
       if (item === undefined) break
       /**
@@ -6818,6 +6822,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         await renderTree()
         await refreshSessions()
       } else if (name === 'cancelled') {
+        stoppedQueues.add(queueOf(typeof payload.session === 'string' ? payload.session : key))
         /**
          * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
          * sentence in the transcript for something the reader asked for.
@@ -7405,6 +7410,7 @@ let stopRequested = false
 
 /** Ask the server to end the turn that is running. A no-op when it already ended is not a failure. */
 async function stopTurn() {
+  stoppedQueues.add(queueOf())
   if (composerKey === QUEUE_KEY_NONE) {
     stopRequested = true
     return
