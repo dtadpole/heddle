@@ -45,6 +45,10 @@ pub const BASH_OUTPUT_LIMIT: usize = 20_000;
 /// minutes, `dsh-bash-local`).
 pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
 
+/// The longest delay one Node timer can hold (2^31-1 ms). The TypeScript build cannot wait longer, so neither does this
+/// one: the setting refuses a larger `bashMaxTimeoutMs` and the wall time is cut to it (developer-five's review of #13).
+pub const MAX_TIMER_DELAY_MS: u64 = 2_147_483_647;
+
 /// The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
 ///
 /// DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the
@@ -56,7 +60,7 @@ fn bash_wall_time(
     default_ms: u64,
     max_ms: u64,
 ) -> Result<u64, String> {
-    let cap = |milliseconds: u64| milliseconds.min(max_ms);
+    let cap = |milliseconds: u64| milliseconds.min(max_ms).min(MAX_TIMER_DELAY_MS);
     match requested {
         None | Some(serde_json::Value::Null) => Ok(cap(default_ms)),
         Some(value) => match value.as_f64() {
@@ -87,7 +91,7 @@ pub fn builtin_tools(sandbox: Arc<dyn SandboxGate>, options: BuiltinOptions) -> 
         bash_tool(
             sandbox,
             options.bash_timeout_ms,
-            options.bash_max_timeout_ms,
+            options.bash_max_timeout_ms.min(MAX_TIMER_DELAY_MS),
             options.bash_output_limit,
             escalation,
         ),
@@ -1022,6 +1026,11 @@ mod tests {
             "a default above the cap is cut too"
         );
         assert_eq!(BASH_MAX_TIMEOUT_MS, 600_000, "DSH's ten minutes");
+        // A cap beyond one Node timer still yields at most one timer, as the TypeScript build must.
+        assert_eq!(
+            bash_wall_time(Some(&json!(3_000_000_000_u64)), 30_000, 3_000_000_000),
+            Ok(MAX_TIMER_DELAY_MS)
+        );
     }
 
     #[tokio::test]
