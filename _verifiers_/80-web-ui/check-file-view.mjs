@@ -630,7 +630,13 @@ test('a file link in a chat answer opens the file in the preview, and does not l
     assert.equal(await browser.evaluate('location.href'), before)
 
     await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
-    await browser.waitFor('document.querySelector("#log .turn.assistant a[href^=\\"https:\\"]") !== null', 10_000)
+    /**
+     * Back in the chat, the transcript is redrawn from the session's history (showSession clears and refills it). A
+     * click dispatched while that redraw was in flight read as cancelled about one run in two on TS, so the probe waits
+     * for the redrawn answer to be the only one and settled.
+     */
+    await browser.waitFor('document.querySelectorAll("#log .turn.assistant a[href^=\\"https:\\"]").length === 1', 10_000)
+    await new Promise((resolve) => setTimeout(resolve, 600))
     const remote = await browser.evaluate(`(() => {
       const link = document.querySelector('#log .turn.assistant a[href^="https:"]')
       let prevented = null
