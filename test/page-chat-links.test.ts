@@ -12,7 +12,10 @@ const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page
 const begin = page.indexOf('/* chat-links:begin */')
 const end = page.indexOf('/* chat-links:end */')
 assert.ok(begin !== -1 && end > begin, 'page.html fences chatLinkPath with its markers')
-const chatLinkPath = new Function(`${page.slice(begin, end)}\nreturn chatLinkPath`)() as (href: string, folder: string | null) => string | null
+const { chatLinkPath, fragmentLine } = new Function(`${page.slice(begin, end)}\nreturn { chatLinkPath, fragmentLine }`)() as {
+  chatLinkPath: (href: string, folder: string | null) => string | null
+  fragmentLine: (fragment: string) => number | null
+}
 
 const folder = '/work/project'
 
@@ -44,4 +47,14 @@ test('a relative link without a session folder resolves to nothing, and a broken
   assert.equal(chatLinkPath('README.md', null), null)
   assert.equal(chatLinkPath('README.md', ''), null)
   assert.equal(chatLinkPath('bad%E0%A4%A.md', folder), null)
+})
+
+test('#L24 and #L24-L30 name the first line; any other fragment names no line', () => {
+  assert.equal(fragmentLine('L24'), 24)
+  assert.equal(fragmentLine('L24-L30'), 24, 'a range goes to its first line, as in DSH')
+  assert.equal(fragmentLine('L24-30'), 24, 'the second L is optional')
+  assert.equal(fragmentLine('L30-L24'), 30, 'the first line named, even when the range runs backwards')
+  for (const fragment of ['', 'install', 'L0', 'L', 'Lx', 'l24', 'L24x', 'section-L24']) {
+    assert.equal(fragmentLine(fragment), null, fragment)
+  }
 })
