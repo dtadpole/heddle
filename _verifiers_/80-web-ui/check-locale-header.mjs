@@ -67,7 +67,9 @@ function startServer(args, env) {
 const HEADER = `(() => {
   const row = [...document.querySelectorAll('#tree .menu-wrap')].find((wrap) => (wrap.querySelector('button')?.getAttribute('aria-label') ?? '').includes('locale-ws'))
   return {
-    title: document.getElementById('session-title').textContent,
+    // A first load opens a blank conversation (stack 11), whose heading is empty; the words for no open session or one
+    // that could not load are the painter's, read through the page's own tables.
+    title: [window.heddleLocale.t('header.noSession'), window.heddleLocale.t('header.unavailable')],
     views: document.getElementById('views').getAttribute('aria-label'),
     tabs: [document.getElementById('tab-chat').textContent, document.getElementById('tab-trajectory').textContent],
     more: document.querySelector('#session-more .menu-wrap > button').getAttribute('aria-label'),
@@ -115,7 +117,7 @@ test('the session header and the tree row menus follow the interface language', 
     const english = await browser.evaluate(HEADER)
     assert.deepEqual(
       { ...english, row: english.row.slice(0, 3) },
-      { title: 'No session', views: 'view', tabs: ['Chat', 'Trajectory'], more: 'More actions', moreItems: ['Download session log'], row: ['New session', 'Rename', 'Delete workspace'] },
+      { title: ['No session', 'Session unavailable'], views: 'view', tabs: ['Chat', 'Trajectory'], more: 'More actions', moreItems: ['Download session log'], row: ['New session', 'Rename', 'Delete workspace'] },
     )
 
     await chooseLanguage(browser, 'zh')
@@ -123,7 +125,7 @@ test('the session header and the tree row menus follow the interface language', 
     const chinese = await browser.evaluate(HEADER)
     assert.deepEqual(
       { ...chinese, row: chinese.row.slice(0, 3) },
-      { title: '无会话', views: '视图', tabs: ['对话', '轨迹'], more: '更多操作', moreItems: ['下载会话日志'], row: ['新会话', '重命名', '删除工作区'] },
+      { title: ['无会话', '会话不可用'], views: '视图', tabs: ['对话', '轨迹'], more: '更多操作', moreItems: ['下载会话日志'], row: ['新会话', '重命名', '删除工作区'] },
       'the header, its menu and the row menu are Chinese',
     )
 
