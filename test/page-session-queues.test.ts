@@ -15,8 +15,9 @@ function source(name: string): string {
 function harness() {
   const pending: Array<() => void> = []
   const calls: Array<{ text: string; key: string }> = []
+  const timers: Array<() => void> = []
   const context = {
-    calls, pending,
+    calls, pending, timers,
     runTurn: async (text: string, key: string, _attachments: unknown, accepted?: () => void) => {
       calls.push({ text, key })
       accepted?.()
@@ -24,7 +25,7 @@ function harness() {
     },
     fetch: async () => ({ ok: true }),
     stopButton: { disabled: false },
-    setTimeout: () => 1, clearTimeout: () => {},
+    setTimeout: (callback: () => void) => { timers.push(callback); return timers.length }, clearTimeout: () => {},
     renderQueue: () => {}, renderComposerState: () => {}, growComposer: () => {},
     add: () => {},
     field: { value: '' },
@@ -40,11 +41,12 @@ function harness() {
     const queueTurnOut = new WeakSet(), pumping = new WeakSet(), stoppedQueues = new WeakSet();
     let stopRequested = false;
     function sessionRunning() { return runningSessions.has(composerKey) }
-    ${['queueOf', 'directTurnsFor', 'keyOfQueue', 'turnInFlight', 'anyRunning', 'sendNow', 'pumpQueue', 'stopTurn'].map(source).join('\n')}
+    ${['queueOf', 'directTurnsFor', 'keyOfQueue', 'turnInFlight', 'anyRunning', 'sendNow', 'pumpQueue', 'stopTurn', 'adoptSession'].map(source).join('\n')}
     ({
       setKey(key) { composerKey = key },
       queue(key, text) { queueOf(key).push({ id: text, text, status: 'pending', attachments: [] }) },
-      anyRunning, sendNow, pumpQueue, stopTurn,
+      anyRunning, sendNow, pumpQueue, stopTurn, adoptSession,
+      expire() { timers[0]?.() },
       resume() { stoppedQueues.delete(queueOf()) },
       calls, pending,
     })
@@ -52,6 +54,7 @@ function harness() {
     setKey(key: string): void; queue(key: string, text: string): void;
     anyRunning(): boolean; sendNow(text: string): Promise<void>;
     pumpQueue(key: string): Promise<void>; stopTurn(): Promise<void>; resume(): void;
+    adoptSession(id: string): void; expire(): void;
     calls: Array<{ text: string; key: string }>; pending: Array<() => void>;
   }
 }
@@ -95,4 +98,34 @@ test('Refs #75: Stop preserves queued rows until an explicit new submission wake
   assert.equal(state.calls[1]?.text, 'KEPT-X', 'explicit wake-up retains the queued message')
   state.pending.shift()!()
   await pumping
+})
+
+
+test('adoption preserves in-flight queue identity when the destination queue was read early', async () => {
+  const state = harness()
+  state.setKey('')
+  const sent = state.sendNow('FIRST')
+  state.queue('NEW', 'EARLY')
+  state.adoptSession('NEW')
+  assert.equal(state.anyRunning(), true, 'first turn remains in flight after adopting pre-created queue')
+  assert.equal(state.calls.length, 1, 'adoption must not start a second turn alongside the first')
+  state.pending.shift()!()
+  await sent
+  assert.equal(state.calls[1]?.key, 'NEW')
+  assert.equal(state.calls[1]?.text, 'EARLY')
+  state.pending.shift()!()
+  await Promise.resolve()
+})
+
+test('global pending watchdog clears stale guards in every session queue', async () => {
+  const state = harness()
+  const x = state.sendNow('X')
+  state.setKey('Y')
+  const y = state.sendNow('Y')
+  state.expire()
+  assert.equal(state.anyRunning(), false, 'second queue must not remain stuck after global expiry')
+  state.setKey('X')
+  assert.equal(state.anyRunning(), false)
+  state.pending.shift()!(); state.pending.shift()!()
+  await Promise.all([x, y])
 })
