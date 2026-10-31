@@ -569,12 +569,23 @@ test('a session titled from its first message, then by the title model, is pushe
       for (const frame of [fallback, titled]) assert.match(frame.id ?? '', /^[0-9a-f]+-\d+$/, 'each rename is a numbered frame')
       assert.ok(Number(titled.id.split('-').at(-1)) > Number(fallback.id.split('-').at(-1)), "the model's title follows the first message's")
     }
-    /** A person's rename comes through the same one path, so it is pushed once, not once by the route and once by the store. */
-    const named = await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title: 'named by a person' })
-    assert.equal(named.status, 200, named.text)
-    await pages[0].next(renamed('named by a person'), 10_000)
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
-    assert.equal(pages[0].frames.filter(renamed('named by a person')).length, 1, "a person's rename is pushed once")
+    /**
+     * A person's rename comes through the same one path, so it is pushed once, not once by the route and once by the
+     * store. A later sentinel rename bounds the wait: once a page has it, every earlier push has arrived, so each title
+     * can be counted exactly.
+     */
+    const rename = async (title) => {
+      const answer = await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title })
+      assert.equal(answer.status, 200, answer.text)
+    }
+    await rename('named by a person')
+    await rename('sentinel')
+    for (const [index, page] of pages.entries()) {
+      await page.next(renamed('sentinel'), 10_000)
+      for (const title of [prompt, generated, 'named by a person']) {
+        assert.equal(page.frames.filter(renamed(title)).length, 1, `page ${index + 1} hears ${JSON.stringify(title)} once`)
+      }
+    }
   } finally {
     for (const page of pages) page.close()
     await server.close()
@@ -595,10 +606,10 @@ test("the open session's header follows its automatic title without a reload, as
     const session = created.json.session
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
-    assert.ok(await browser.waitFor(`document.querySelector('#tree li[data-session-id="${session}"]') !== null`, 10_000), 'the session is in the tree')
-    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
-    assert.ok(await browser.waitFor(`document.querySelector('#tree li[data-session-id="${session}"]')?.getAttribute('aria-selected') === 'true'`, 10_000), 'the session is open')
+    /** A blank session is a tree row only while it is open (stack 2, DSH's sessionVisible), so it is opened by id. */
+    assert.equal(await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`), true, 'the session is open')
     await browser.evaluate('window.__heddleNoReload = true')
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 10_000), 'the page says its stream is open')
 
     const turn = await runTurn(server, cookie, { session, prompt: 'Write the whole numbers from 1 to 3' })
     assert.equal(turn.status, 200, turn.text)
