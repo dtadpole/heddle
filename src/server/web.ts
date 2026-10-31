@@ -1970,10 +1970,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const preset = newSessionPreset(ctx, named.preset)
-    /**
-     * A branch heddle cannot write (#106), and a folder that is gone (#56), are `400` with their code and the session
-     * layer's sentence, not a raw `500`.
-     */
+    /** A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. */
     let created
     try {
       created = ctx.session.createAt(wanted, {
@@ -1981,9 +1978,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         ...(preset !== undefined ? { preset } : {}),
       })
     } catch (error) {
-      const code = (error as { code?: unknown }).code
-      if (code !== 'session/unwritable' && code !== 'session/folder-missing') throw error
-      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code })}\n`)
+      if ((error as { code?: unknown }).code !== 'session/unwritable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
       return
     }
     const { handle, definition } = created

@@ -150,17 +150,10 @@ export class SessionService extends Service {
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
     /**
-     * A folder that is gone is refused first (`MissingFolderError`, `session/folder-missing`, #56): nothing is created,
-     * on disk or in the store. This differs from DSH on purpose: its session create makes the project directory
-     * (`mkdir(cwd, { recursive: true })`, dsh-api-session-controller lib/index.js:511-516). heddle writes the session's
-     * committed definition (`_sessions_/<name>/`) into the folder, so a recreated folder is a decoy at the old path of a
-     * folder a person moved, and Add workspace already refuses a folder that does not exist.
-     *
-     * Then the branch is written **before** the store records anything (#106): a folder heddle cannot write is refused
-     * with `SessionUnwritableError` and leaves no session behind — measured, the old order recorded one, which then
-     * listed under a branch whose definition was never written.
+     * The branch is written **before** the store records anything (#106): a folder heddle cannot write is refused with
+     * `SessionUnwritableError` and leaves no session behind — measured, the old order recorded one, which then listed
+     * under a branch whose definition was never written.
      */
-    requireFolder(canonical)
     try {
       ensureSessionsFolder(canonical)
     } catch (error) {

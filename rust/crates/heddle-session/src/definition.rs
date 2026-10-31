@@ -216,30 +216,12 @@ pub fn require_folder(folder: impl AsRef<Path>) -> Result<(), SessionError> {
     }
 }
 
-/// Make one directory inside a parent that must already exist, accepting one that is there.
-///
-/// Deliberately **not** recursive: a recursive create under a branch that was deleted puts the branch back
-/// on disk (#56). A parent that vanished in the meantime is the same refusal as one that was gone to begin with.
-fn make_directory(dir: &Path, branch: &str) -> Result<(), SessionError> {
-    match std::fs::create_dir(dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(require_folder(branch)
-            .err()
-            .unwrap_or_else(|| SessionError::io(dir.to_string_lossy(), error))),
-    }
-}
-
 /// Create a branch's `_sessions_` folder and its `INDEX.md` when they are not there yet; answers with
-/// the folder. The branch itself must exist: one that was deleted or moved is refused
-/// ([`SessionError::MissingFolder`]) rather than recreated with a `_sessions_` drawer in it (#56).
+/// the folder.
 pub fn ensure_sessions_folder(branch: &str) -> Result<String, SessionError> {
-    let canonical = canonical_path(Path::new(branch))
-        .to_string_lossy()
-        .into_owned();
-    require_folder(&canonical)?;
-    let dir = Path::new(&canonical).join(SESSIONS_FOLDER);
-    make_directory(&dir, &canonical)?;
+    let dir = canonical_path(Path::new(branch)).join(SESSIONS_FOLDER);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| SessionError::io(dir.to_string_lossy(), error))?;
     let index = dir.join("INDEX.md");
     if !index.exists() {
         crate::fsio::write_atomic(&index, SESSIONS_INDEX)
@@ -261,7 +243,8 @@ pub fn write_session_definition(
     let created = parse_iso(&options.created_at).unwrap_or_else(chrono::Utc::now);
     let name = session_name(&created, &options.taken)?;
     let dir = PathBuf::from(ensure_sessions_folder(&canonical)?).join(&name);
-    make_directory(&dir, &canonical)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| SessionError::io(dir.to_string_lossy(), error))?;
 
     let mut fields = Map::new();
     fields.insert("id".to_string(), Value::String(handle.id.clone()));
@@ -509,27 +492,6 @@ mod tests {
         assert_eq!(fields.id(), "session-1");
         // An unknown folder answers false rather than failing.
         assert!(!update_session_definition("/tmp/no-such-definition-folder", Some("x")).unwrap());
-    }
-
-    /// #56: the definition writer never recreates a branch that is gone; it names it instead.
-    #[test]
-    fn a_definition_is_not_written_into_a_branch_that_is_gone() {
-        let parent = tempfile::tempdir().unwrap();
-        let gone = parent.path().join("gone");
-        let error = write_session_definition(
-            &handle("session-1", "/tmp/a.v2.jsonl.zstd"),
-            gone.to_str().unwrap(),
-            &DefinitionOptions {
-                created_at: "2026-10-22T18:17:41.123Z".to_string(),
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "This workspace's folder no longer exists: \"gone\""
-        );
-        assert!(!gone.exists(), "the branch is not recreated");
     }
 
     #[test]
