@@ -44,16 +44,27 @@ sending a partial message.
 
 ## Regressions and evidence
 
-**Browser mode — none.** Execute actual shared-page functions in Node's VM,
+**Unit browser mode — none.** Execute actual shared-page functions in Node's VM,
 actual TS HTTP upload route with scratch-only configuration, and Rust unit/router
-functions. No live settings or sessions are written.
+functions. No live settings or sessions are written. A separate **headless**
+`#42` picker check is authored in `check-composer.mjs` with a 60-second outer
+bound and bounded page waits, for parent execution on both built backends. It
+selects two ordinary files, an invalid empty PNG and an ordinary empty text file;
+asserts three retained cards, one correctly attributed refusal, and only three
+stored uploads including the verbatim zero-byte text file. Authored is not run.
 
 Regression-only checkpoint `ebacc72607c76aaa2122b5ec4366477c0ceacb82` preserves
 unfixed production sources. The TS baseline on that checkpoint was **13 tests,
 8 passed and 5 failed**, proving early loop termination, withheld successful
 cards, incorrect failure attribution, empty-raster admission and ordinary-empty
 HTTP rejection. The same targeted tests after implementation were **13 passed,
-0 failed**. `npm run check` also exited `0`.
+0 failed**. The first full TS suite exposed one obsolete removal-detector regex
+that hardcoded a batch append; it was updated to the required immediate per-file
+append, with the actual-function regressions retained. The final full TS suite
+was **1,295 tests, 1,294 passed, 0 failed and 1 skipped** (the opt-in installed
+DSH schedule comparison). `npm run check` and the authored browser verifier's
+`node --check` both exited `0`. Final full-suite preflight measured 41 percent
+free memory and 19,193,104 KiB available disk.
 
 Both runs used the existing `_tools_/local-build/run --ts` slot runner. Explicit
 preflight checked memory free percentage at least 25 and available disk at least

@@ -405,7 +405,7 @@ test('the + menu carries the computer-side File action and the input it drives',
   assert.match(page, /`\/api\/uploads\?name=\$\{encodeURIComponent\(file\.name\)\}`/, 'the bytes go to the upload route')
   assert.match(page, /id="attach-cards"/, 'the composer draws pending attachment cards')
   assert.match(page, /saved\.path, name: file\.name, bytes: saved\.bytes/, 'the stored reference waits as a pending attachment')
-  assert.match(page, /pendingAttachments = \[\.\.\.pendingAttachments, \.\.\.added\]/, 'and it is kept with the draft, not typed into it')
+  assert.match(page, /pendingAttachments = \[\.\.\.pendingAttachments, \{ path: saved\.path/, 'and each successful file is kept with the draft immediately, not typed into it')
 })
 
 test("a session is renamed in DSH's Rename session dialog, opened by the menu, the chord and a double-click on its title", () => {

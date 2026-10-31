@@ -34,7 +34,7 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
 ## Focused regression evidence
 
 - [Issue 42](issue-42.md) — partial picker success, ordinary empty upload policy,
-  actual-function TS regressions and authored Rust checks; no browser required.
+  actual-function TS regressions, Rust checks and an authored headless picker check.
 
 ## Read next
 
