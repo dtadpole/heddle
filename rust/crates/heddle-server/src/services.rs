@@ -483,6 +483,14 @@ pub trait TodoService: Send + Sync {
     fn get(&self, session: &str) -> Option<Value>;
 }
 
+/// The turns a session runs besides the server's own, which a Stop must reach as well (#93): a goal round, a
+/// reminder's turn and a background job's notice turn are started by their rows through the agent runtime, which
+/// registers each with its live-turn registry. The binary supplies it from that registry.
+pub trait TurnInterrupter: Send + Sync {
+    /// Stop every turn in flight for `session`; whether there was one to stop.
+    fn interrupt(&self, session: &str) -> bool;
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -543,6 +551,8 @@ pub struct Harness {
     /// The interface language the optional `locale` row stores (issue #80): the page is served with its
     /// `<html lang>`; `None` follows each browser's `Accept-Language`.
     pub locale: Option<heddle_config::LocalePreference>,
+    /// The live-turn registry a Stop also asks; `None`: the server's own runs are the only turns it stops.
+    pub interrupter: Option<Arc<dyn TurnInterrupter>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
     /// `POST /api/sessions` creates one when no branch is named.
     pub cwd: PathBuf,
@@ -571,6 +581,7 @@ impl Harness {
             markdown: None,
             stats: None,
             locale: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -616,6 +627,7 @@ impl Harness {
             markdown: None,
             stats: None,
             locale: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -814,6 +826,11 @@ impl HarnessBuilder {
     /// The interface language the profile's `locale` row stores (issue #80).
     pub fn locale(mut self, preference: heddle_config::LocalePreference) -> Self {
         self.harness.locale = Some(preference);
+        self
+    }
+
+    pub fn interrupter(mut self, service: Arc<dyn TurnInterrupter>) -> Self {
+        self.harness.interrupter = Some(service);
         self
     }
 
