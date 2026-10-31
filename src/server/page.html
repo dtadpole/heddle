@@ -5421,6 +5421,9 @@ async function showSession(id) {
      * session: the choice travels with the request and the server records it on the session it made.
      */
     applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+    /** A blank session has no recorded selection yet: its first turn carries the seat's choice (developer-ten, B1). */
+    if (typeof body.endpoint === 'string' && body.endpoint.length > 0) recordedSelections.add(id)
+    else recordedSelections.delete(id)
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
     updateStatusBar()
@@ -5566,8 +5569,9 @@ events.addEventListener('session', (message) => {
    * Another page (or this one) changed the shown session's model selection: the seat follows it, as every DSH
    * client follows the session's `modelSelection` (#46).
    */
-  if (event.type === 'model/selection' && payload.session === current && current !== null) {
-    applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
+  if (event.type === 'model/selection' && typeof payload.session === 'string') {
+    recordedSelections.add(payload.session)
+    if (payload.session === current && current !== null) applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
   }
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
@@ -6680,25 +6684,29 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   updateStatusBar()
   const startedAt = performance.now()
   const target = key === QUEUE_KEY_NONE ? null : key
+  if (selectionSave !== null) await selectionSave
+  const carrySeat = target === null || !recordedSelections.has(target)
   const response = await sendTurn({
     /**
      * The folder is named when a tree node is selected, and the server continues **that folder's**
      * session. With no selection the request is what it always was — a session in the server's own
      * working directory — so a window opened without touching the tree still works.
      *
-     * The endpoint and model are named only for a turn that **creates** its session, which is born with the
-     * composer's choice. A turn into an existing session names none and runs on the session's own selection:
-     * DSH's prompt carries no model, and the selection is session state every page follows (`model/selection`).
-     * Sending the seat with every turn let a second tab, still showing the model it opened with, silently switch
-     * the session back over another tab's choice (#46). A choice made here is recorded at once by
-     * `recordSelection`, so nothing is lost.
+     * The endpoint and model are named only for a session with no recorded selection: one this turn creates, or a
+     * blank one (New session, a folder) whose first turn must run on the seat's choice. A turn into a session that
+     * has a record names none and runs on the session's own selection: DSH's prompt carries no model, and the
+     * selection is session state every page follows (`model/selection`). Sending the seat with every turn let a
+     * second tab, still showing the model it opened with, silently switch the session back over another tab's
+     * choice (#46). A choice made here is recorded at once by `recordSelection`, so nothing is lost.
      */
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
     folder: activeFolder,
-    ...(target === null ? selectionForTurn() : {}),
+    ...(carrySeat ? selectionForTurn() : {}),
   })
+  /** The server records the selection a turn carried, so the session now has one. */
+  if (carrySeat && target !== null && response.ok) recordedSelections.add(target)
   if (!response.ok) {
     /**
      * The server's own sentence, not only its status.
@@ -8609,6 +8617,16 @@ function closeAfterSelection() {
 }
 
 /**
+ * Sessions whose model selection the server has recorded, as far as this page knows: from a session's view, a
+ * `model/selection` event, a successful record, or a turn that carried the seat. A turn into any other session (a
+ * blank one opened from New session or a folder) carries the seat's choice, which the server then records (#46,
+ * developer-ten's B1); a turn into a recorded session carries none and runs on the session's own selection.
+ */
+const recordedSelections = new Set()
+/** The record `recordSelection` has in flight, if any; a turn waits for it before it is sent. */
+let selectionSave = null
+
+/**
  * Record one selection on the session.
  *
  * The local state is updated first so the seat answers at once — a control that waits for a round trip reads as
@@ -8620,11 +8638,25 @@ function closeAfterSelection() {
  * is shown, and the person is still standing where they can undo the choice.
  */
 async function recordSelection(selection) {
+  const previous = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  /** A refused or failed record puts the seat back, so it never shows a selection the session does not have (S1). */
+  const restore = () => {
+    chosenEndpoint = previous.endpoint
+    chosenModel = previous.model
+    chosenEffort = previous.effort
+    renderModelSeat()
+  }
   chosenEndpoint = selection.endpoint
   chosenModel = selection.model ?? null
   chosenEffort = selection.reasoningEffort ?? null
   renderModelSeat()
   if (current === null) return true
+  const recording = current
+  let settle = () => {}
+  /** A message sent while this record is in flight waits for it, so it cannot reach the server first. */
+  selectionSave = new Promise((resolve) => {
+    settle = resolve
+  })
   modelPending = true
   modelTrigger.setAttribute('aria-busy', 'true')
   modelSpinner.hidden = false
@@ -8642,14 +8674,19 @@ async function recordSelection(selection) {
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
       setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      restore()
       return false
     }
     setNote('')
+    recordedSelections.add(recording)
     return true
   } catch (error) {
     setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    restore()
     return false
   } finally {
+    settle()
+    selectionSave = null
     modelPending = false
     modelTrigger.setAttribute('aria-busy', 'false')
     modelSpinner.hidden = true
