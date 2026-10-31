@@ -9,6 +9,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { runTurn } from '../src/agent/loop.ts'
 import { ApprovalService } from '../src/approvals/service.ts'
 import { ContextService } from '../src/context/service.ts'
+import { GoalService } from '../src/goal/service.ts'
+import * as GoalDriverPlugin from '../src/plugins/goal-driver.ts'
 import { ModelService } from '../src/llm/service.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
 import { INBOX_SPLICED, pendingInbox, queueSteer } from '../src/session/inbox.ts'
@@ -41,7 +43,8 @@ function harness(label: string, steps: unknown[], whileRunning: (session: Sessio
   const ctx = new Context()
   const work = join(scratch, `${label}-work`)
   mkdirSync(work, { recursive: true })
-  const sessions = new SessionService(ctx, { root: join(scratch, `${label}-sessions`) })
+  /** Every append reaches `session/event`, as the session plugin re-emits it, so the goal-driver plugin can follow it. */
+  const sessions = new SessionService(ctx, { root: join(scratch, `${label}-sessions`) }, { onEvent: (handle, event) => ctx.emit('session/event', { session: handle.id, event }) })
   const session = sessions.start({ cwd: work })
   const sandbox = new SandboxService(ctx, { workspaceRoot: work, backend: 'none' })
   const approvals = new ApprovalService(ctx, { mode: 'allow' })
@@ -166,4 +169,126 @@ test('a session archived during a turn is blocked at its next step, and the stee
   assert.equal(events.at(-1)?.type, 'turn/failed', 'the turn ends with the blocked record')
   assert.deepEqual(events.at(-1)?.reason, { kind: 'blocked' })
   assert.equal(of(events, 'turn/completed'), 0, 'not as a completed turn')
+})
+
+/**
+ * The turn's end and the goal driver (developer-five's review of cc4d7410, inbox 8b48).
+ *
+ * DSH's loop ends a turn whose step the gate rejects with `turn/end {kind:'blocked'}` at any step, replacing the end the
+ * previous step proposed (dsh-agent-loop lib/index.js:956-963, 1027-1032). Its goal driver is ready again whenever the
+ * agent is idle, which every turn end makes it (dsh-goal-round-driver lib/index.js:84-86, 223-241). heddle's driver
+ * reads "busy" from the log instead, so `turn/failed` has to end the busy span as `turn/completed` does; it starts no
+ * round by itself, because the turn that wrote it was refused and a round started from its end would be refused again.
+ */
+
+/** The harness with the goal service and the real goal-driver plugin, which follows the session's own events. */
+async function driven(label: string, steps: unknown[], whileRunning?: (session: SessionHandle) => void) {
+  const wired = harness(label, steps, whileRunning)
+  const goals = new GoalService(wired.ctx, wired.sessions.store)
+  await wired.ctx.plugin(GoalDriverPlugin)
+  assert.notEqual(wired.ctx.get('goalDriver'), undefined, 'the goal-driver plugin is loaded')
+  return { ...wired, goals }
+}
+
+async function until(condition: () => boolean, what: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (condition()) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.fail(`timed out waiting for ${what}`)
+}
+
+/** Time for any chain the events started to run: a round yields to the event loop between steps. */
+const settle = (ms = 200): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** The goal rounds the log admitted, by number. */
+const goalRounds = (events: readonly SessionEvent[]): number[] =>
+  events
+    .filter((event) => event.type === 'message' && (event.message as { source?: { kind?: string } }).source?.kind === 'goal')
+    .map((event) => (event.message as { source: { round: number } }).source.round)
+
+test('a step the gate rejects after the first ends the turn with the blocked finish reason, not the previous step\'s', async () => {
+  let archivedBy: SessionService | undefined
+  const { ctx, sessions, session } = harness('mid-turn-finish', [{ toolCall: { name: 'slow_tool', arguments: {} } }, { text: 'never asked' }], (handle) => {
+    archivedBy!.flags(handle.id, { archived: true })
+  })
+  archivedBy = sessions
+  const result = await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'run the slow tool', maxRounds: 4 })
+  assert.equal(result.finishReason, 'blocked', `the result says blocked, not the first step's tool_calls\nsaw: ${JSON.stringify(result)}`)
+  const completed = sessions.store.read(session).filter((event) => event.type === 'assistant/completed')
+  assert.equal(completed.length, 1)
+  assert.equal(completed[0]!.finishReason, 'blocked', 'and so does the turn\'s answer record')
+})
+
+test('a turn blocked at a later step leaves the goal driver at rest: a goal resumed after the unarchive starts a round', async () => {
+  let archiveOnce = true
+  let archivedBy: SessionService | undefined
+  const { ctx, sessions, session, goals } = await driven(
+    'driver-rest',
+    [{ toolCall: { name: 'slow_tool', arguments: {} } }, { text: 'answered' }],
+    (handle) => {
+      if (!archiveOnce) return
+      archiveOnce = false
+      archivedBy!.flags(handle.id, { archived: true })
+    },
+  )
+  archivedBy = sessions
+  const created = goals.create(session, { objective: 'finish the report', maxGoalRounds: 1 })
+  const paused = goals.pause(session, { id: created.id, revision: created.revision })
+  await settle()
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [], 'a paused goal runs no round')
+
+  /** A person's turn asks the model once; the session is archived while its tool runs, so the next step is refused. */
+  const blocked = await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'run the slow tool', maxRounds: 4 })
+  assert.ok(blocked.ended?.includes(BLOCKED), `the second step was refused\nsaw: ${JSON.stringify(blocked.ended)}`)
+  const ended = sessions.store.read(session).length
+  await settle()
+  assert.equal(sessions.store.read(session).length, ended, 'the blocked turn\'s end starts nothing by itself')
+
+  sessions.flags(session.id, { archived: false })
+  goals.resume(session, { id: paused.id, revision: paused.revision })
+  await until(() => goalRounds(sessions.store.read(session)).length > 0, 'the resumed goal\'s round (the driver stayed busy after turn/failed)')
+  await until(() => goals.get(session)?.phase === 'blocked', 'the round to settle at its cap')
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [1], 'the resume started round 1')
+})
+
+test('a goal round refused at a later step, then at its first, is not started again by itself; a change after the unarchive starts the next', async () => {
+  let archiveOnce = true
+  let archivedBy: SessionService | undefined
+  const { sessions, session, goals } = await driven(
+    'driver-refused',
+    [{ toolCall: { name: 'slow_tool', arguments: {} } }, { text: 'answered' }],
+    (handle) => {
+      if (!archiveOnce) return
+      archiveOnce = false
+      archivedBy!.flags(handle.id, { archived: true })
+    },
+  )
+  archivedBy = sessions
+  const created = goals.create(session, { objective: 'finish the report', maxGoalRounds: 3 })
+  /**
+   * Round 1 asks the model and is refused at its second step. The driver goes on to round 2, as DSH's does at the next
+   * idle, and the gate refuses that round's first step, so no message is admitted and the chain stops.
+   */
+  await until(() => of(sessions.store.read(session), 'turn/failed') >= 2, 'round 1 and round 2 to be refused')
+  await settle(300)
+  /** A count, not the array: the store answers its cached list, which later appends extend in place. */
+  const events = [...sessions.store.read(session)]
+  assert.equal(of(events, 'turn/failed'), 2, `two refused turns and no more: the refused round was not started again\nsaw: ${events.map((event) => event.type).join(', ')}`)
+  assert.equal(of(events, 'model/request'), 1, 'only round 1\'s first step asked the model')
+  assert.deepEqual(goalRounds(events), [1], 'round 2 was never admitted')
+  assert.equal(goals.get(session)?.phase, 'active', 'the goal is left as it was')
+
+  sessions.flags(session.id, { archived: false })
+  await settle()
+  assert.equal(sessions.store.read(session).length, events.length, 'unarchiving starts nothing by itself either')
+
+  const current = goals.get(session)!
+  const edited = goals.edit(session, { id: current.id, revision: current.revision }, { objective: 'finish the report, unarchived' })
+  assert.notEqual(edited.revision, created.revision)
+  await until(() => goalRounds(sessions.store.read(session)).length > 1, 'the edited goal\'s round (the driver stayed busy after turn/failed)')
+  await until(() => goals.get(session)?.phase === 'blocked', 'the rounds to settle at their cap')
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [1, 2, 3], 'the change started round 2, and round 3 followed it to the cap')
+  const completed = sessions.store.read(session).filter((event) => event.type === 'assistant/completed')
+  assert.equal(completed[0]!.finishReason, 'blocked', 'round 1, refused at its second step, ended blocked')
 })
