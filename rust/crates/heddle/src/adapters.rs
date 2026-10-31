@@ -48,6 +48,10 @@ impl ModelComponent {
 struct ModelConfig {
     endpoints: Vec<EndpointPatch>,
     default: Option<String>,
+    /// The model a new session starts with when it names none (checked when a session starts, not here).
+    default_model: Option<String>,
+    /// The reasoning effort a new session starts with when it names none.
+    default_effort: Option<String>,
     read_local_config: bool,
 }
 
@@ -56,6 +60,8 @@ impl Default for ModelConfig {
         Self {
             endpoints: Vec::new(),
             default: None,
+            default_model: None,
+            default_effort: None,
             // `readLocalConfig` defaults to true: the machine's file is where a real endpoint lives.
             read_local_config: true,
         }
@@ -70,6 +76,8 @@ fn model_schema() -> Option<heddle_config::Schema> {
         "properties": {
             "endpoints": { "type": "array" },
             "default": { "type": "string" },
+            "defaultModel": { "type": "string" },
+            "defaultEffort": { "type": "string" },
             "readLocalConfig": { "type": "boolean" },
         },
     }))
@@ -104,6 +112,8 @@ impl Component for ModelComponent {
             composed.nominated.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The model and effort a new session starts with when it names none (DSH parity A104).
+        service.set_defaults(config.default_model.clone(), config.default_effort.clone());
         // The machine's file and the row's own configuration apply to the next request without a restart, as
         // `plugins/model.ts` keeps them: the service asks before every read and call, and an edit that cannot be
         // read keeps the previous endpoints. The source is shared as `model-row`, so a settings write to this row

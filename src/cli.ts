@@ -1122,14 +1122,26 @@ async function main(): Promise<void> {
      * the session layer asks the model for the title (`session/title.ts`).
      */
     const folder = canonicalPath(process.cwd())
+    /**
+     * A new session that names neither an endpoint nor a model starts with the configured default selection (the
+     * model row's defaultModel and defaultEffort, checked against the default endpoint; DSH's default model
+     * selection). It is recorded when the session is created, so a later change of default leaves this session as
+     * it is, and a session that already exists keeps what it had.
+     */
+    const known = new Set(app.ctx.session.list().map((meta) => meta.id))
+    const defaults = args.endpoint === undefined && args.model === undefined && args.resume === undefined ? app.ctx.model.defaultSelection() : {}
     const handle =
       args.resume !== undefined
         ? app.ctx.session.start({ resume: args.resume })
         : app.ctx.session.openAt(folder, {
             fresh: args.fresh,
             endpoint,
-            ...(args.model !== undefined ? { model: args.model } : {}),
+            ...((args.model ?? defaults.model) !== undefined ? { model: args.model ?? defaults.model } : {}),
+            ...(defaults.reasoningEffort !== undefined ? { reasoningEffort: defaults.reasoningEffort } : {}),
           })
+    const created = !known.has(handle.id)
+    const startModel = args.model ?? (created ? defaults.model : undefined)
+    const startEffort = created ? defaults.reasoningEffort : undefined
 
     /**
      * A session always has a workspace — **when the profile has one at all**.
@@ -1150,7 +1162,8 @@ async function main(): Promise<void> {
       endpoint,
       prompt: args.turn,
       ...(args.system !== undefined ? { system: args.system } : {}),
-      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...(startModel !== undefined ? { model: startModel } : {}),
+      ...(startEffort !== undefined ? { reasoningEffort: startEffort } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
       ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
     })

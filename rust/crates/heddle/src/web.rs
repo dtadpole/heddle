@@ -560,7 +560,14 @@ impl heddle_web_composer::status::StatusHost for Composer {
 impl heddle_web_composer::model_switcher::ModelHost for Composer {
     fn describe_endpoints(&self) -> heddle_web_composer::model_switcher::EndpointListing {
         let nominated = self.nominated.clone().or_else(|| self.models.nominated());
-        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref());
+        // The default selection rides along, so a composer opening a fresh session shows and sends it (A104).
+        let selection = self.models.default_selection();
+        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref())
+            .with_selection(
+                selection.endpoint.as_deref(),
+                selection.model,
+                selection.reasoning_effort,
+            );
         heddle_web_composer::model_switcher::EndpointListing {
             endpoints: view
                 .endpoints
@@ -568,6 +575,8 @@ impl heddle_web_composer::model_switcher::ModelHost for Composer {
                 .filter_map(|endpoint| endpoint.as_object().cloned())
                 .collect(),
             default: view.default,
+            default_model: view.default_model,
+            default_effort: view.default_effort,
         }
     }
 

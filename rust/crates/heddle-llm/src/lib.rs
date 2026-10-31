@@ -61,7 +61,9 @@ pub use heddle_config::{
 };
 pub use model_info::InputModality;
 pub use printer::{StreamPrinter, StreamPrinterOptions, StreamSummary};
-pub use service::{Generated, ModelHooks, ModelService, ProbeOptions, ProbeResult, RefreshSource};
+pub use service::{
+    DefaultSelection, Generated, ModelHooks, ModelService, ProbeOptions, ProbeResult, RefreshSource,
+};
 pub use types::{
     Chunk, ContentPart, FilePart, GenerateRequest, ImageMediaType, ImagePart, Message, Role,
     ToolCall, ToolSpec,
