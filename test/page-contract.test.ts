@@ -556,3 +556,19 @@ test('a tree redraw gives the keyboard its place back: the same row and the same
   const read = pageFunction('function treeFocus() {')
   assert.match(read, /active\.matches\(':focus-visible'\)/, 'only the keyboard\'s focus is given back, never a pointer\'s')
 })
+
+test('a session is labelled through the tree block, never a top-level sessionLabel the page no longer has (#24)', () => {
+  /**
+   * page-polish (#24) moved the session label into the WorkspaceTree block (`WorkspaceTree.sessionLabel`: New Session,
+   * the title, else Untitled, never a folder name) and removed the top-level `sessionLabel`. Two later callers, the
+   * schedule detail's Linked session and the row hover card, still called the top-level one, so the merged page threw a
+   * ReferenceError in the schedule detail and the Automation tasks list never redrew after a rename (80's
+   * check-schedule-view, 3 of 3 runs on stack-2). Outside the block, every call goes through `WorkspaceTree.`.
+   */
+  const begin = page.indexOf('/* workspace-tree:begin */')
+  const end = page.indexOf('/* workspace-tree:end */')
+  assert.ok(begin > 0 && end > begin, 'the tree block is in the page')
+  const outside = page.slice(0, begin) + page.slice(end)
+  assert.deepEqual([...outside.matchAll(/(?<![.\w])sessionLabel\(/g)].map((match) => outside.slice(Math.max(0, match.index - 40), match.index + 20)), [], 'no bare sessionLabel( call outside the block')
+  assert.match(page.slice(begin, end), /function sessionLabel\(meta\)/, 'the block defines it')
+})

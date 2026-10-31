@@ -14304,7 +14304,7 @@ const rowHoverCard = (() => {
     const title = typeof session.title === 'string' ? session.title : ''
     const model = HoverCards.sessionCard(
       {
-        label: drawn !== null ? label : sessionLabel(session),
+        label: drawn !== null ? label : WorkspaceTree.sessionLabel(session),
         title,
         blank: (session.turns ?? 0) === 0 && title.trim() === '',
         stamp: session.updated ?? session.created,
@@ -18115,7 +18115,7 @@ function paintScheduleLinked() {
   const button = document.getElementById('schedule-detail-linked')
   if (detail === null || !(button instanceof HTMLButtonElement)) return
   const { meta, reason } = scheduleLinkedSession(detail.sessionId)
-  const name = meta !== undefined ? sessionLabel(meta) : String(detail.sessionId ?? '')
+  const name = meta !== undefined ? WorkspaceTree.sessionLabel(meta) : String(detail.sessionId ?? '')
   scheduleSetText(button.querySelector('.sched-linked-name'), name)
   button.disabled = reason !== ''
   button.title = reason !== '' ? reason : name
