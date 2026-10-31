@@ -3814,6 +3814,7 @@ mod tests {
                 ),
             ],
             events: HashMap::new(),
+            recorded: std::sync::Mutex::new(Vec::new()),
         };
         let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut harness = Harness::new(
