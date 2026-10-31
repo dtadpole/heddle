@@ -764,6 +764,15 @@ fn refusal(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new(error.to_string())
 }
 
+/// A workspace refusal with its code when it has one, so the route answers it: a folder the tree may not
+/// read is `workspace-file/unreadable`, a `400` (#106).
+fn coded_refusal(error: heddle_workspace::WorkspaceError) -> ServiceError {
+    match error.code() {
+        Some(code) => ServiceError::with_code(error.to_string(), code),
+        None => refusal(error),
+    }
+}
+
 impl heddle_server::services::WorkspaceService for Workspaces {
     fn owns(&self, path: &std::path::Path) -> bool {
         self.service.owner(&path_text(path)).is_some()
@@ -793,7 +802,8 @@ impl heddle_server::services::WorkspaceService for Workspaces {
             },
         };
         let path = path.map(path_text);
-        serde_json::to_value(heddle_workspace::tree(path.as_deref(), &input)).map_err(refusal)
+        let node = heddle_workspace::tree(path.as_deref(), &input).map_err(coded_refusal)?;
+        serde_json::to_value(node).map_err(refusal)
     }
 
     fn add(

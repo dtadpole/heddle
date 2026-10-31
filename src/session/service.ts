@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
-import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
+import { ensureSessionsFolder, existingSessionNames, unwritableIn, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 
@@ -148,17 +148,32 @@ export class SessionService extends Service {
     } = {},
   ): { readonly handle: SessionHandle; readonly definition: SessionDefinition } {
     const canonical = canonicalPath(branch)
+    /**
+     * The branch is written **before** the store records anything (#106): a folder heddle cannot write is refused with
+     * `SessionUnwritableError` and leaves no session behind — measured, the old order recorded one, which then listed
+     * under a branch whose definition was never written.
+     */
+    try {
+      ensureSessionsFolder(canonical)
+    } catch (error) {
+      throw unwritableIn(canonical, error)
+    }
     const taken = existingSessionNames(canonical)
     const handle = this.openAt(canonical, { fresh: true, ...options })
     const meta = this.list().find((entry) => entry.id === handle.id)
-    const definition = writeSessionDefinition(handle, canonical, {
-      createdAt: meta?.created ?? new Date().toISOString(),
-      taken,
-      ...(options.title !== undefined ? { title: options.title } : {}),
-      ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-    })
+    let definition: SessionDefinition
+    try {
+      definition = writeSessionDefinition(handle, canonical, {
+        createdAt: meta?.created ?? new Date().toISOString(),
+        taken,
+        ...(options.title !== undefined ? { title: options.title } : {}),
+        ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
+        ...(options.model !== undefined ? { model: options.model } : {}),
+        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
+      })
+    } catch (error) {
+      throw unwritableIn(canonical, error)
+    }
     return { handle, definition }
   }
 

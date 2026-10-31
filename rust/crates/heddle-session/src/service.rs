@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::clock::iso_now;
 use crate::definition::{
-    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+    CreatedDefinition, DefinitionOptions, ensure_sessions_folder, existing_session_names,
+    write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -272,6 +273,10 @@ impl SessionService {
         let canonical = canonical_path(Path::new(branch))
             .to_string_lossy()
             .into_owned();
+        // The branch is written **before** the store records anything (#106): a folder heddle cannot write
+        // is refused with `SessionError::Unwritable` and leaves no session behind — measured, the old order
+        // recorded one, which then listed under a branch whose definition was never written.
+        ensure_sessions_folder(&canonical).map_err(|error| error.unwritable_in(&canonical))?;
         let taken = existing_session_names(&canonical);
         let handle = self.open_at(
             &canonical,
@@ -301,7 +306,8 @@ impl SessionService {
                 reasoning_effort: options.reasoning_effort,
                 taken,
             },
-        )?;
+        )
+        .map_err(|error| error.unwritable_in(&canonical))?;
         Ok(CreatedDefinition { handle, definition })
     }
 
@@ -995,6 +1001,51 @@ mod tests {
         );
         // The session is in the store too, so a resume finds it.
         assert_eq!(service.list().len(), 1);
+    }
+
+    /// Issue #106: a branch heddle cannot write failed with the I/O error and the definition's absolute path,
+    /// after the store had already recorded the session. It is refused by code, in words, naming the folder by
+    /// its name, and before anything is recorded.
+    #[test]
+    fn create_at_in_a_branch_heddle_cannot_write_is_refused_by_code_without_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let mode = |bits: u32| {
+            std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(bits)).unwrap()
+        };
+        mode(0o000);
+        // File modes do not stop the superuser, so a run as root cannot judge this.
+        if std::fs::read_dir(folder.path()).is_ok() {
+            mode(0o755);
+            return;
+        }
+        let error = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap_err();
+        mode(0o755);
+        let name = folder.path().file_name().unwrap().to_string_lossy();
+        assert_eq!(error.code(), Some("session/unwritable"));
+        assert_eq!(
+            error.to_string(),
+            format!("cannot write to \"{name}\": permission denied")
+        );
+        assert!(
+            !error.to_string().contains(folder_path),
+            "no absolute path in the sentence"
+        );
+        assert!(
+            service.list().is_empty(),
+            "the store holds no session for the refused branch"
+        );
+        let created = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap();
+        assert!(
+            Path::new(&created.definition.file).exists(),
+            "once writable, the branch takes one"
+        );
     }
 
     #[test]

@@ -68,6 +68,23 @@ export interface TreeNode {
   readonly adHoc?: readonly TreeNode[]
 }
 
+/**
+ * A folder the tree was asked to list and may not read (issue #106).
+ *
+ * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:483-489): a listing
+ * that failed is a failure, and its file backend says `cannot list "<path>": permission denied` of a folder it may not
+ * read (dsh-fs-local lib/index.js:269). DSH has no code for that one, so this carries heddle's own in DSH's family,
+ * `workspace-file/unreadable`, and names the folder relative to its workspace (a root by its title), never by the
+ * absolute path. The caller decides what a refusal is: the CLI prints it, the route answers `400` with the code.
+ */
+export class WorkspaceFileError extends Error {
+  readonly code = 'workspace-file/unreadable'
+  constructor(name: string) {
+    super(`cannot list "${name}": permission denied`)
+    this.name = 'WorkspaceFileError'
+  }
+}
+
 /** A registered root, as the workspace record states it. */
 export interface TreeRoot {
   readonly path: string
@@ -160,6 +177,13 @@ function currentByFolder(sessions: readonly SessionMeta[]): Map<string, SessionM
   return map
 }
 
+/** One entry of a directory, with what its row needs. */
+interface Entry {
+  readonly name: string
+  readonly directory: boolean
+  readonly bytes: number
+}
+
 /**
  * One directory's entries worth showing: folders first, then files, each name-sorted.
  *
@@ -167,20 +191,48 @@ function currentByFolder(sessions: readonly SessionMeta[]): Map<string, SessionM
  * the top, and the leaves sit under it. Dot-entries and the two noise directories are not returned at
  * all, which is the same judgement the tree made when it showed folders only.
  */
-function entries(dir: string): { readonly name: string; readonly directory: boolean; readonly bytes: number }[] {
+function entries(dir: string): Entry[] {
   try {
-    return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => !entry.name.startsWith('.') && !PLUMBING.has(entry.name))
-      .map((entry) => ({
-        name: entry.name,
-        directory: entry.isDirectory(),
-        bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0,
-      }))
-      .sort((left, right) => (left.directory === right.directory ? collator.compare(left.name, right.name) : left.directory ? -1 : 1))
+    return listed(dir)
   } catch {
-    // A folder that cannot be read is a folder with nothing to show, not a failure of the tree.
+    // A folder *inside* a listing that cannot be read (a `_sessions_` drawer, say) has nothing to add to that listing.
     return []
   }
+}
+
+/** The entries of one directory, or the error that kept it from being read. */
+function listed(dir: string): Entry[] {
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => !entry.name.startsWith('.') && !PLUMBING.has(entry.name))
+    .map((entry) => ({
+      name: entry.name,
+      directory: entry.isDirectory(),
+      bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0,
+    }))
+    .sort((left, right) => (left.directory === right.directory ? collator.compare(left.name, right.name) : left.directory ? -1 : 1))
+}
+
+/**
+ * The entries of the folder the caller **asked for**: a folder it may not read is a `WorkspaceFileError`, not an empty
+ * list (#106) — "nothing inside" was false, and the page said it. Any other failure keeps the old answer, an empty level.
+ */
+function askedEntries(dir: string, context: Context): Entry[] {
+  try {
+    return listed(dir)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code === 'EACCES' || code === 'EPERM') throw new WorkspaceFileError(nameInWorkspace(dir, context))
+    return []
+  }
+}
+
+/** A folder as a person knows it: a root by its title, a folder by its path inside its root, else by its name. */
+function nameInWorkspace(dir: string, context: Context): string {
+  const root = context.byPath.get(dir)
+  if (root !== undefined) return root.title
+  const owner = context.ownerOf(dir)
+  if (owner === undefined) return basename(dir) || dir
+  return dir.slice(owner.path.length).split(sep).filter(Boolean).join('/')
 }
 
 /** A file's size, or 0 when it cannot be read — an unreadable file is still a row. */
@@ -375,7 +427,7 @@ function sessionOf(dir: string, context: Context): TreeNode['session'] {
 }
 
 /** The direct children of a folder: its subfolders, its files, or a registered root among them. */
-function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
+function childrenOf(dir: string, kind: NodeKind, context: Context, listing: readonly Entry[] = entries(dir)): TreeNode[] {
   const sessions: TreeNode[] = []
   const rest: TreeNode[] = []
   /**
@@ -385,7 +437,7 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
    */
   const parentIsSessions = basename(dir) === SESSIONS_FOLDER
 
-  for (const entry of entries(dir)) {
+  for (const entry of listing) {
     const path = canonicalPath(join(dir, entry.name))
 
     /**
@@ -559,10 +611,20 @@ export function tree(path: string | null, input: TreeInput): TreeNode {
 
   if (path === null || path === '') {
     const tops = context.roots.filter((root) => context.ownerOf(root.path) === undefined)
-    const asNode = (root: TreeRoot): TreeNode => ({
-      ...row(root.path, 'workspace', root.title, context),
-      children: childrenOf(root.path, 'workspace', context),
-    })
+    /**
+     * A root that cannot be read is still listed, with its children **not listed** (`null`) rather than an empty list
+     * (#106): asking for it by path answers why.
+     */
+    const asNode = (root: TreeRoot): TreeNode => {
+      let children: TreeNode[] | null
+      try {
+        children = childrenOf(root.path, 'workspace', context, askedEntries(root.path, context))
+      } catch (error) {
+        if (!(error instanceof WorkspaceFileError)) throw error
+        children = null
+      }
+      return { ...row(root.path, 'workspace', root.title, context), children }
+    }
     return {
       path: '',
       kind: 'roots',
@@ -583,5 +645,5 @@ export function tree(path: string | null, input: TreeInput): TreeNode {
   const root = context.byPath.get(canonical)
   const kind = root !== undefined ? 'workspace' : kindOf(canonical, input)
   const label = root !== undefined ? root.title : basename(canonical)
-  return { ...row(canonical, kind, label, context), children: childrenOf(canonical, kind, context) }
+  return { ...row(canonical, kind, label, context), children: childrenOf(canonical, kind, context, askedEntries(canonical, context)) }
 }

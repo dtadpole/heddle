@@ -204,7 +204,7 @@ fn one_folder_holds_one_session_and_new_starts_another() {
     );
 
     // The tree's instance node is the folder's current session, not its first prompt.
-    let node = tree(Some(&instance_path), &h.input());
+    let node = tree(Some(&instance_path), &h.input()).unwrap();
     assert_eq!(node.kind, NodeKind::Instance);
     assert_eq!(
         node.session.as_ref().map(|session| session.id.as_str()),
@@ -363,7 +363,7 @@ fn the_tree_hoists_a_branchs_sessions_and_only_an_instance_carries_one() {
     stamp(&second.handle, "2026-10-22T11:00:00.000Z");
 
     let input = h.input();
-    let tools = tree(Some(&work_path.join("_tools_").to_string_lossy()), &input);
+    let tools = tree(Some(&work_path.join("_tools_").to_string_lossy()), &input).unwrap();
     let some_tool = child(&tools, "some-tool").expect("the instance is listed");
     assert_eq!(some_tool.kind, NodeKind::Instance);
     assert_eq!(
@@ -377,7 +377,7 @@ fn the_tree_hoists_a_branchs_sessions_and_only_an_instance_carries_one() {
         "an instance carries the session started in it"
     );
 
-    let branch = tree(Some(&instance.to_string_lossy()), &input);
+    let branch = tree(Some(&instance.to_string_lossy()), &input).unwrap();
     let children = branch.children.as_ref().unwrap();
     let session_rows: Vec<&heddle_workspace::TreeNode> = children
         .iter()
@@ -405,7 +405,7 @@ fn the_tree_hoists_a_branchs_sessions_and_only_an_instance_carries_one() {
     );
 
     // A type folder and a plain folder carry no session; a file is a leaf; `dist` is declared generated.
-    let root = tree(Some(&work), &input);
+    let root = tree(Some(&work), &input).unwrap();
     assert_eq!(child(&root, "shared").unwrap().session, None);
     assert_eq!(child(&root, "_verifiers_").unwrap().kind, NodeKind::Type);
     let agents = child(&root, "AGENTS.md").unwrap();
@@ -413,7 +413,7 @@ fn the_tree_hoists_a_branchs_sessions_and_only_an_instance_carries_one() {
     assert_eq!(agents.children, Some(Vec::new()));
     assert_eq!(child(&root, "dist").unwrap().kind, NodeKind::Generated);
     assert!(child(&root, "node_modules").is_none());
-    let workspaces = tree(None, &input);
+    let workspaces = tree(None, &input).unwrap();
     assert_eq!(workspaces.kind, NodeKind::Roots);
     assert_eq!(
         workspaces.children.as_ref().unwrap().len(),
@@ -468,7 +468,7 @@ fn a_file_under_a_root_reads_and_a_path_outside_one_has_no_owner() {
 
     // A file under a root is a leaf node, while a folder under no root is classified a plain folder.
     let input = h.input();
-    let node = tree(Some(&work_path.join("AGENTS.md").to_string_lossy()), &input);
+    let node = tree(Some(&work_path.join("AGENTS.md").to_string_lossy()), &input).unwrap();
     assert_eq!(node.kind, NodeKind::File);
     assert_eq!(node.bytes, Some(14));
     assert_eq!(
