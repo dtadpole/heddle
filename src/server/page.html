@@ -10360,6 +10360,7 @@ async function selectSession(node) {
   if (view !== 'chat' && view !== 'trajectory') await showView('chat')
   renderRing('session')
   await showSession(node.session.id)
+  if (current !== node.session.id) return
   /**
    * The mark is put on the row that was **clicked**, and last, because `showSession` resynchronises the
    * selection to whichever row claims the session. Before the tree stopped showing a captured conversation
@@ -12146,6 +12147,7 @@ async function renderFlatList() {
        */
       row.onclick = async () => {
         await showSession(meta.id)
+        if (current !== meta.id) return
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }

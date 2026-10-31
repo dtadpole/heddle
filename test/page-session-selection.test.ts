@@ -7,6 +7,8 @@ import { test } from 'node:test'
 const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src/server/page.html'), 'utf8')
 const start = page.indexOf('async function showSession(id)')
 const source = page.slice(start, page.indexOf('\n}', start) + 2)
+const selectStart = page.indexOf('async function selectSession(node)')
+const selectSource = page.slice(selectStart, page.indexOf('\n}', selectStart) + 2)
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: Error) => void
@@ -37,12 +39,17 @@ function harness() {
   const api = runInNewContext(`
     let current = null, composerKey = '', view = 'chat', sessionViewGeneration = 0;
     let sessionStats, liveRounds, liveUsage, liveTurns, liveGenerationMs, liveDecodeTokens, liveRoundStartedAt;
-    let seat = '';
+    let seat = '', activeFolder = null, selected = null;
+    function setNote() {}
+    function renderRing() {}
+    function chooseSelected(path) { selected = path }
+    async function showView(next) { view = next }
     function adoptSession(id) { composerKey = id }
     function applySessionModel(endpoint) { seat = endpoint }
     ${source}
-    ({ showSession, state: () => ({ current, composerKey, seat }) })
-  `, context) as { showSession(id: string): Promise<void>; state(): { current: string; composerKey: string; seat: string } }
+    ${selectSource}
+    ({ showSession, selectSession, state: () => ({ current, composerKey, seat, selected }) })
+  `, context) as { showSession(id: string): Promise<void>; selectSession(node: {path:string;cwd:string;session:{id:string}}):Promise<void>; state(): { current: string; composerKey: string; seat: string; selected:string } }
   return { ...api, a, started, title, rows }
 }
 
@@ -62,3 +69,15 @@ for (const outcome of ['success', 'refused', 'failed'] as const) {
     assert.deepEqual(h.rows, ['B message'])
   })
 }
+
+
+test('a delayed tree-row open does not move the selected row away from B', async () => {
+  const h = harness()
+  const old = h.selectSession({ path: 'row-A', cwd: '/A', session: { id: 'A' } })
+  await h.started.promise
+  await h.selectSession({ path: 'row-B', cwd: '/B', session: { id: 'B' } })
+  h.a.resolve({ ok: true, json: async () => ({ title: 'A', turns: [] }) })
+  await old
+  assert.equal(h.state().current, 'B')
+  assert.equal(h.state().selected, 'row-B')
+})
