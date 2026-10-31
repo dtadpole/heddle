@@ -311,6 +311,61 @@ test('the session shortcuts fire on the physical key, with the key values the br
       assert.equal(await browser.evaluate(`localStorage.getItem('heddle.keybindings.v1')`), '{"version":1,"overrides":{}}', 'and leaves no override')
     })
 
+    await t.test('the keyboard stays on the row through a refused or taken chord, Remove and Restore default', async () => {
+      /**
+       * Every answer repaints the list, which replaces the rows. A repaint that drops the focused row leaves the focus
+       * on the page body, outside the dialog, so the dialog's key handler never sees the next key: the row keeps
+       * saying "Try another" and the retry is lost (developer-twelve's review of shortcuts-2, 31 Oct).
+       */
+      const retry = { code: 'KeyY', macKey: '¥', key: 'y', keyCode: 89, alt: true }
+      const focus = () =>
+        browser.evaluate(`(() => {
+          const active = document.activeElement
+          const row = active?.closest?.('#shortcut-reference .shortcut-row[data-action]') ?? null
+          return { row: row?.dataset.action ?? null, on: active === row ? 'row' : (active?.dataset?.bindingAction ?? active?.tagName?.toLowerCase() ?? null) }
+        })()`)
+      const status = () => browser.evaluate(`document.getElementById('shortcut-reference-status').textContent`)
+      const forkKeys = () => browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"] kbd').textContent`)
+      const tap = async (key, code, keyCode) => {
+        await browser.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode })
+        await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode })
+      }
+      await press(browser, CHORDS.reference, { onMac })
+      await settle(400)
+      await browser.evaluate(`document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"]').click()`)
+      await settle(200)
+      assert.deepEqual(await focus(), { row: 'fork', on: 'row' }, 'recording starts on the row')
+      await press(browser, CHORDS.search, { onMac })
+      await settle(200)
+      assert.match(await status(), /is already Search sessions/, 'the taken chord is refused')
+      assert.deepEqual(await focus(), { row: 'fork', on: 'row' }, 'the refused chord leaves the focus on the recording row')
+      await press(browser, retry, { onMac, primary: 0 })
+      await settle(200)
+      assert.match(await status(), onMac ? /starts with ⌘/ : /starts with Ctrl/, 'the next key still reaches the recorder')
+      assert.deepEqual(await focus(), { row: 'fork', on: 'row' }, 'and the focus stays on the row')
+      await press(browser, retry, { onMac })
+      await settle(300)
+      assert.equal(await forkKeys(), onMac ? '⌥⌘Y' : 'Ctrl+Alt+Y', 'the retry is recorded')
+      assert.deepEqual(await focus(), { row: 'fork', on: 'row' }, 'the recorded row keeps the focus')
+      await browser.evaluate(`(() => { const remove = document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"] button[data-binding-action="remove"]'); remove.focus(); remove.click(); return true })()`)
+      await settle(200)
+      assert.equal(await forkKeys(), 'No shortcut', 'Remove clears the binding')
+      assert.deepEqual(await focus(), { row: 'fork', on: 'row' }, 'Remove is gone from the row, so the focus goes to its row')
+      await browser.evaluate(`(() => { const restore = document.querySelector('#shortcut-reference .shortcut-row[data-action="fork"] button[data-binding-action="restore"]'); restore.focus(); restore.click(); return true })()`)
+      await settle(200)
+      assert.equal(await forkKeys(), onMac ? '⇧⌘F' : 'Ctrl+Shift+F', 'Restore default brings the default back')
+      assert.deepEqual(await focus(), { row: 'fork', on: 'row' }, 'Restore default is gone from the row, so the focus goes to its row')
+      await tap('Enter', 'Enter', 13)
+      await settle(200)
+      assert.equal(await forkKeys(), 'Press a shortcut…', 'Enter on the row starts recording again: the keyboard is still in the dialog')
+      await tap('Escape', 'Escape', 27)
+      await settle(200)
+      assert.equal(await forkKeys(), onMac ? '⇧⌘F' : 'Ctrl+Shift+F', 'Escape cancels the recording')
+      assert.equal(await browser.evaluate(`document.getElementById('shortcut-reference').open`), true, 'and leaves the dialog open')
+      await browser.evaluate(`document.querySelector('#shortcut-reference [data-ws-close]').click()`)
+      assert.equal(await browser.evaluate(`localStorage.getItem('heddle.keybindings.v1')`), '{"version":1,"overrides":{}}', 'no override is left behind')
+    })
+
     await t.test('two Escape presses within 500 ms stop the running turn; one press does not', async () => {
       const running = async () => (await sessions(browser)).find((s) => s.id === target)?.running === true
       const escape = async () => {

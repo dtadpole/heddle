@@ -122,3 +122,20 @@ fn bindings_are_recorded_as_overrides() {
     ));
     assert!(PAGE_SOURCE.contains("<button type=\"button\" id=\"shortcut-restore-all\">"));
 }
+
+/// A repaint of the reference puts the keyboard back on the row it replaced, so a refused or taken chord can be
+/// retried and Remove and Restore default leave the focus in the dialog; and the recorder leaves a key to an input
+/// method or AltGraph, as DSH's does. Judged in a browser by `check-shortcut-keys.mjs` (developer-twelve's review of
+/// shortcuts-2, 31 Oct).
+#[test]
+fn the_reference_keeps_the_keyboard_on_its_row() {
+    assert!(PAGE_SOURCE.contains("function renderShortcutReference(keep = null)"));
+    assert!(
+        PAGE_SOURCE.contains("renderShortcutReference({ action: recordingAction, control: null })")
+    );
+    assert!(
+        PAGE_SOURCE
+            .contains("renderShortcutReference({ action, control: button.dataset.bindingAction })")
+    );
+    assert!(PAGE_SOURCE.contains("return { pending: true, inputMethod: true }"));
+}

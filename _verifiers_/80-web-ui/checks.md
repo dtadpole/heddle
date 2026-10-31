@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T15:00:00Z
+modified: 2026-10-31T17:30:00Z
 level: L3
-version: 1.4.1
+version: 1.4.2
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -135,8 +135,9 @@ grounded_in:
   search, sidebar, settings, new session, rename, fork and archive each act (⌥⌘O, add workspace, is pressed in
   `check-workspaces.mjs`); a held repeat runs once; an extra Shift, or Control in place of Command on a Mac, does
   nothing. Mod+/ opens DSH's keyboard reference and its search narrows it (S40); a binding recorded there replaces
-  the default, survives a reload, and Restore default brings the default back (S41); two Escape presses within 500 ms
-  stop the running turn, one press does not, and a queued message stays queued (S43).
+  the default, survives a reload, and Restore default brings the default back (S41); a taken or refused chord leaves the
+  keyboard on the recording row, so the next chord is recorded, and Remove and Restore default leave it on their row;
+  two Escape presses within 500 ms stop the running turn, one press does not, and a queued message stays queued (S43).
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every

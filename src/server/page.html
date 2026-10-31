@@ -13169,8 +13169,17 @@ function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides 
   const wanted = String(query ?? '').trim()
   return wanted === '' ? rows : rows.filter((row) => [row.label, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
 }
-function renderShortcutReference() {
+/**
+ * Draw the list. A repaint replaces the rows, and a focused row that is removed takes the focus with it to the page
+ * body, outside the dialog, where the recorder's key handler never sees the next key: a refused chord's "Try another"
+ * could not be answered. So the keyboard goes back where it was, to the same control of the same row, or to the row
+ * when that control left with the binding (Remove, Restore default). `keep` names the place when the caller knows it
+ * (`{ action, control }`); otherwise it is read from the focus, so a repaint from another tab's change keeps it too.
+ */
+function renderShortcutReference(keep = null) {
   const list = document.getElementById('shortcut-reference-list')
+  const active = list.contains(document.activeElement) ? document.activeElement : null
+  const place = keep ?? (active === null ? null : { action: active.closest('.shortcut-row[data-action]')?.dataset.action ?? null, control: active.dataset.bindingAction ?? null })
   list.replaceChildren()
   let group = null
   const rows = shortcutReferenceRows(document.getElementById('shortcut-reference-search').value, SHORTCUTS_ON_MAC, activeShortcuts, keybindings.overrides)
@@ -13229,6 +13238,11 @@ function renderShortcutReference() {
   counter.textContent = `(${count})`
   counter.hidden = count === 0
   document.getElementById('shortcut-restore-all').disabled = count === 0 || !keybindings.readable
+  if (place === null || place.action === null) return
+  const row = list.querySelector(`.shortcut-row[data-action="${place.action}"]`)
+  const control = typeof place.control === 'string' ? row?.querySelector(`button[data-binding-action="${place.control}"]`) : null
+  const target = control ?? row
+  target?.focus()
 }
 /**
  * Bindings a person chose, DSH's way (`dsh-client-shortcuts`, `dsh-client-ui-shortcuts`): only overrides are kept, per
@@ -13287,6 +13301,13 @@ function effectiveShortcuts(defaults, overrides) {
 }
 /** What a key press means while a row records: still waiting, a refusal, or a chord. */
 function recordedChord(event, mac) {
+  /**
+   * An input method composing, or AltGraph held, owns the key: DSH's recorder (`dsh-client-ui-shortcuts`) neither takes
+   * nor records it, as dispatch fires nothing for it (`shortcutFor`).
+   */
+  if (event.isComposing || event.keyCode === 229 || (typeof event.getModifierState === 'function' && event.getModifierState('AltGraph'))) {
+    return { pending: true, inputMethod: true }
+  }
   if (['Meta', 'Control', 'Alt', 'Shift', 'AltGraph', 'CapsLock', 'OS'].includes(event.key)) return { pending: true }
   const primary = mac ? event.metaKey : event.ctrlKey
   const other = mac ? event.ctrlKey : event.metaKey
@@ -13342,16 +13363,14 @@ function startRecording(action) {
   recordingAction = action
   recordingError = null
   shortcutStatus(`Recording a shortcut for ${SHORTCUT_LABELS[action][0]}. Escape cancels.`)
-  renderShortcutReference()
-  shortcutReference.querySelector(`.shortcut-row[data-action="${action}"]`)?.focus()
+  renderShortcutReference({ action, control: null })
 }
 function stopRecording(message) {
   const action = recordingAction
   recordingAction = null
   recordingError = null
   if (message !== undefined) shortcutStatus(message)
-  renderShortcutReference()
-  if (action !== null) shortcutReference.querySelector(`.shortcut-row[data-action="${action}"]`)?.focus()
+  renderShortcutReference(action === null ? null : { action, control: null })
 }
 shortcutReference.addEventListener(
   'keydown',
@@ -13364,6 +13383,8 @@ shortcutReference.addEventListener(
       }
       return
     }
+    const result = recordedChord(event, SHORTCUTS_ON_MAC)
+    if (result.inputMethod) return
     if (event.key === 'Tab') {
       stopRecording('Recording cancelled.')
       return
@@ -13375,20 +13396,19 @@ shortcutReference.addEventListener(
       return
     }
     if (event.repeat) return
-    const result = recordedChord(event, SHORTCUTS_ON_MAC)
     if (result.pending) return
     const label = SHORTCUT_LABELS[recordingAction][0]
     if (result.error !== undefined) {
       recordingError = result.error
       shortcutStatus(result.error)
-      renderShortcutReference()
+      renderShortcutReference({ action: recordingAction, control: null })
       return
     }
     const holder = bindingConflict(result.chord, recordingAction, activeShortcuts)
     if (holder !== null) {
       recordingError = 'taken'
       shortcutStatus(`${chordText(result.chord, SHORTCUTS_ON_MAC)} is already ${SHORTCUT_LABELS[holder][0]}.`)
-      renderShortcutReference()
+      renderShortcutReference({ action: recordingAction, control: null })
       return
     }
     const overrides = { ...keybindings.overrides, [recordingAction]: result.chord }
@@ -13418,7 +13438,7 @@ document.getElementById('shortcut-reference-list').addEventListener('click', (ev
       delete overrides[action]
       writeKeybindings(overrides, `${label} is back to its default.`)
     }
-    renderShortcutReference()
+    renderShortcutReference({ action, control: button.dataset.bindingAction })
     return
   }
   if (recordingAction !== action) startRecording(action)
@@ -13462,7 +13482,7 @@ function toggleShortcutReference() {
   shortcutReference.showModal()
   search.focus()
 }
-document.getElementById('shortcut-reference-search').addEventListener('input', renderShortcutReference)
+document.getElementById('shortcut-reference-search').addEventListener('input', () => renderShortcutReference())
 shortcutReference.querySelector('[data-ws-close]').addEventListener('click', () => {
   recordingAction = null
   recordingError = null
