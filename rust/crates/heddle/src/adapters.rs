@@ -1087,6 +1087,33 @@ impl Component for TurnsComponent {
     }
 }
 
+/// `src/plugins/presets.ts`: the agent preset registry (inventory A96, DSH's dsh-agent-preset-registry).
+///
+/// Optional, like the live-turn registry: the turn and the server read it when the profile loads the row, and a
+/// profile without it runs every session with every tool and its own system prompt. The roster is validated when
+/// the row starts (`heddle_config::preset_roster`), so a duplicate id or a default nothing declares fails the row,
+/// and the run, at startup instead of at someone's first turn. The row's config reaches the roster as the loader
+/// hands it over: nothing fills in defaults, so a preset that names no `tools` keeps every tool.
+pub struct PresetsComponent;
+
+impl Component for PresetsComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // The roster's own sentences already name the row (`presets: …`).
+        let roster =
+            heddle_config::preset_roster(Some(config)).map_err(|error| error.to_string())?;
+        services.provide("presets", Arc::new(roster));
+        Ok(())
+    }
+}
+
 /// One shape to another through their shared serialization: the crates each declare the TypeScript
 /// message and request types, so a value crosses a crate boundary by its JSON.
 fn bridge<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, String> {

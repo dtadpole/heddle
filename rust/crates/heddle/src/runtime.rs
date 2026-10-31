@@ -99,14 +99,15 @@ pub fn agent_runtime(services: &Services) -> Result<AgentRuntime, String> {
         tools,
         hooks,
         turns: services.get::<heddle_agent::TurnRegistry>("turns"),
-        presets: None,
+        // The agent presets (inventory A96): optional, as the live-turn registry is.
+        presets: services.get::<Arc<heddle_config::PresetRoster>>("presets"),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtins::{BuiltinCatalog, Catalog, resolve_component};
+    use crate::builtins::{BuiltinCatalog, Catalog, Component, resolve_component};
     use serde_json::{Value, json};
     use std::path::PathBuf;
 
@@ -217,5 +218,197 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The tools each `model/request` in the session's log offered.
+    fn offered(
+        sessions: &heddle_session::SessionService,
+        handle: &heddle_session::SessionHandle,
+    ) -> Vec<Vec<String>> {
+        sessions
+            .events(handle)
+            .expect("the log reads")
+            .iter()
+            .filter(|event| event.kind == "model/request")
+            .map(|event| {
+                event.fields["tools"]
+                    .as_array()
+                    .expect("a tool list")
+                    .iter()
+                    .map(|name| name.as_str().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Inventory A96, end to end through the loader: a profile whose `presets` row is written in YAML, booted by the
+    /// binary's own catalog. A preset that names no `tools` reaches the roster without one (nothing fills in an empty
+    /// list), so a default session is offered every tool and records the default, and a session under `reader` is
+    /// offered only `read_file`.
+    #[test]
+    fn a_presets_row_from_the_loader_narrows_a_session_and_leaves_the_default_every_tool() {
+        let home = scratch("presets");
+        let script = home.join("script.json");
+        std::fs::write(
+            &script,
+            // The scripted endpoint answers each turn's first round with the first step.
+            json!({ "steps": [{ "text": "answered" }] }).to_string(),
+        )
+        .expect("the script");
+        let profile = home.join("profiles").join("dev");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join("cordis.yml"), "[]\n").expect("the base layer");
+        let patch = format!(
+            "- insert:
+    - id: model
+      name: model
+      config:
+        readLocalConfig: false
+        default: double
+        endpoints:
+          - name: double
+            kind: scripted
+            baseUrl: {script}
+            model: scripted
+    - id: session
+      name: session
+      config:
+        root: {sessions}
+    - id: sandbox
+      name: sandbox
+      config:
+        workspaceRoot: {home}
+    - id: approvals
+      name: approvals
+    - id: tools
+      name: tools
+    - id: context
+      name: context
+    - id: turns
+      name: turns
+    - id: presets
+      name: ./src/plugins/presets.ts
+      config:
+        default: standard
+        presets:
+          - id: standard
+            name: Standard
+          - id: reader
+            name: Reader
+            tools: [read_file]
+            persona: You are a careful reviewer who never edits.
+",
+            script = script.display(),
+            sessions = home.join("sessions").display(),
+            home = home.display(),
+        );
+        std::fs::write(profile.join("heddle.patch.yml"), patch).expect("the patch layer");
+        let env = heddle_config::Env::from_pairs([
+            ("HEDDLE_HOME", home.to_string_lossy().into_owned()),
+            ("HOME", home.to_string_lossy().into_owned()),
+        ]);
+        let boot = crate::boot::boot(
+            &crate::boot::BootOptions {
+                layers: heddle_config::LayerOptions {
+                    profile: Some("dev".to_owned()),
+                    ..heddle_config::LayerOptions::default()
+                },
+                overrides: Vec::new(),
+                target: "heddle".to_owned(),
+                env: env.clone(),
+            },
+            &BuiltinCatalog::new(env, home.clone()),
+        )
+        .expect("the profile composes");
+        let failed: Vec<_> = boot
+            .entries
+            .iter()
+            .filter(|entry| entry.error.is_some())
+            .map(|entry| (entry.id.clone(), entry.error.clone()))
+            .collect();
+        assert!(failed.is_empty(), "{failed:?}");
+
+        let roster = boot
+            .services
+            .get::<Arc<heddle_config::PresetRoster>>("presets")
+            .expect("the presets row provides its roster");
+        assert_eq!(roster.default, "standard");
+        assert_eq!(
+            roster.presets[0].tools, None,
+            "a preset that names no tools keeps none, not an empty list"
+        );
+        assert_eq!(roster.presets[1].tools, Some(vec!["read_file".to_owned()]));
+
+        let runtime = agent_runtime(&boot.services).expect("the runtime composes");
+        assert!(runtime.presets.is_some());
+        let sessions = boot
+            .services
+            .get::<Arc<heddle_session::SessionService>>("session")
+            .expect("the session service");
+        let block_on = |handle: &heddle_session::SessionHandle, prompt: &str| {
+            tokio::runtime::Runtime::new()
+                .expect("a runtime")
+                .block_on(heddle_agent::run_turn(
+                    &runtime,
+                    heddle_agent::RunTurnOptions::new(handle.clone(), "double", prompt),
+                ))
+                .expect("the turn completes")
+        };
+
+        let plain = sessions
+            .start(heddle_session::StartOptions {
+                cwd: Some(home.to_string_lossy().into_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .expect("a session");
+        assert_eq!(block_on(&plain, "hello").text, "answered");
+        let every = offered(&sessions, &plain);
+        assert_eq!(every.len(), 1);
+        assert!(
+            every[0].len() > 1 && every[0].iter().any(|name| name == "read_file"),
+            "a default session is offered every tool: {every:?}"
+        );
+        assert_eq!(
+            sessions
+                .meta(&plain.id)
+                .and_then(|meta| meta.preset().map(str::to_owned))
+                .as_deref(),
+            Some("standard"),
+            "and records the default"
+        );
+
+        let reader = sessions
+            .start(heddle_session::StartOptions {
+                cwd: Some(home.to_string_lossy().into_owned()),
+                preset: Some("reader".to_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .expect("a session under reader");
+        assert_eq!(block_on(&reader, "look").text, "answered");
+        assert_eq!(offered(&sessions, &reader), [["read_file"]]);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_presets_row_that_declares_an_id_twice_fails_naming_it() {
+        let mut services = Services::new();
+        let error = crate::adapters::PresetsComponent
+            .start(
+                &json!({ "presets": [{ "id": "a" }, { "id": "a" }] }),
+                &mut services,
+            )
+            .expect_err("a duplicate id fails the row");
+        assert_eq!(error, "presets: the preset 'a' is declared twice");
+        assert!(!services.provides("presets"));
+        crate::adapters::PresetsComponent
+            .start(&json!({}), &mut services)
+            .expect("an empty row is the implicit roster");
+        assert_eq!(
+            services
+                .get::<Arc<heddle_config::PresetRoster>>("presets")
+                .expect("the roster")
+                .ids(),
+            ["standard"]
+        );
     }
 }
