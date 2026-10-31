@@ -23,6 +23,8 @@ a display or a window.
 `check-bash-timeout.mjs` holds a bash call's own `timeoutMs` to DSH's rule: a value that is not a finite positive number
 is refused and the command does not run, a larger one is cut to the tools row's `bashMaxTimeoutMs` (DSH's `maxTimeoutMs`,
 ten minutes by default; live-testing issue #13).
+`check-read-errors.mjs` holds a failed `read_file` to DSH's sentences: a missing file is `FS_NOT_FOUND` and a directory
+`FS_NOT_REGULAR_FILE`, each naming the path (live-testing issue #4).
 `check-failed-output.mjs` holds a failed bash call to keeping what it printed: the error line first, then its stdout
 and stderr, as DSH's renderResult keeps the body of a non-zero exit (live-testing issue #82).
 

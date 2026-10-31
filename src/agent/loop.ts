@@ -208,15 +208,78 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
       : options.signal === undefined
         ? live.signal
         : AbortSignal.any([options.signal, live.signal])
+  const progress: TurnProgress = { text: '', reasoning: '', rounds: 0, denials: 0, completed: false }
   try {
-    return await runTurnBody(ctx, options, signal)
+    return await runTurnBody(ctx, options, signal, progress)
+  } catch (error) {
+    recordUnfinished(ctx, options.session, error, signal, progress)
+    throw error
   } finally {
     live?.settle()
   }
 }
 
+/**
+ * End a turn that threw, durably (#16, #29).
+ *
+ * A turn whose model call failed (a refused connection, a socket timeout, a provider error) or that a stop cut
+ * mid-stream threw out of the loop before its `assistant/completed` and `turn/completed`. The live stream showed the
+ * error, but the log kept only the prompt, so a reload, a second tab or a client whose stream dropped saw a message
+ * with no answer and no failure, and the next turn's model read two prompts in a row. DSH's loop appends `turn/end`
+ * with its reason (`{ kind: 'error', error }`) in a `finally`. Here the turn ends the way a stopped turn already
+ * does: `assistant/completed` names the reason in `ended`, which the transcript draws as the turn's notice, and
+ * `turn/completed` closes it. The error still reaches the caller.
+ */
+function recordUnfinished(
+  ctx: Context,
+  session: SessionHandle,
+  error: unknown,
+  signal: AbortSignal | undefined,
+  progress: TurnProgress,
+): void {
+  const stopped = signal?.aborted === true
+  const message = error instanceof Error ? error.message : String(error)
+  try {
+    /**
+     * The record keeps what the turn did before it failed: the answer of its earlier rounds, its reasoning, its round
+     * and denial counts (developer-five's review). A turn whose completion was already written (only the closing
+     * `turn/completed` failed) is not completed twice.
+     */
+    if (!progress.completed) {
+      ctx.session.store.append(session, {
+        type: 'assistant/completed',
+        text: progress.text,
+        reasoning: progress.reasoning,
+        finishReason: stopped ? 'aborted' : 'error',
+        rounds: progress.rounds,
+        denials: progress.denials,
+        ended: [stopped ? 'stopped by the caller' : `failed: ${message}`],
+        ...(stopped ? {} : { error: message }),
+      })
+    }
+    ctx.session.store.append(session, { type: 'turn/completed', rounds: progress.rounds, ...(stopped ? { stopped: true } : { error: message }) })
+  } catch {
+    // The log could not take the record either; the caller still gets the turn's own error.
+  }
+}
+
 /** One turn's body; the exported `runTurn` adds the live-turn registration around it. */
-async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortSignal | undefined): Promise<TurnResult> {
+/** What a turn has done so far, kept where `runTurn`'s catch can read it when the turn throws (#16, #29). */
+interface TurnProgress {
+  text: string
+  reasoning: string
+  rounds: number
+  denials: number
+  /** Whether the turn's `assistant/completed` is already in the log. */
+  completed: boolean
+}
+
+async function runTurnBody(
+  ctx: Context,
+  options: RunTurnOptions,
+  signal: AbortSignal | undefined,
+  progress: TurnProgress,
+): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
@@ -283,6 +346,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     claimSteered()
     rounds += 1
+    progress.rounds = rounds
 
     /**
      * What the person had already said when this round started.
@@ -368,7 +432,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
        * for one message. What the rule is about is a message that arrives *while the model is answering*.
        */
       inputBefore = userInputSeqs(ctx, options.session)
-      const request = {
+      const asked = {
         endpoint: options.endpoint,
         messages: prepared.messages,
         ...(options.model !== undefined ? { model: options.model } : {}),
@@ -379,13 +443,26 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         sessionId: options.session.id,
         round,
       }
+      /**
+       * The record names the request this step **sends**, not the one the turn started with (issue #14).
+       *
+       * The `model/request` waterfall is where a selection policy rewrites a call: the server's running-turn rule
+       * moves a step to the session's current endpoint, model and level, so a switch made mid-turn lands on the next
+       * step, as DSH's does. The record used to be written from the turn's options before that rewrite, so a step that
+       * went to the new model was logged under the old one, and the log read as if the switch had been ignored. DSH's
+       * request header names the provider, model and effort actually used. So the request is resolved here, **once**:
+       * the record (its endpoint, model, level, message and tool counts) and the call both take that answer, and the
+       * call goes out through `streamResolved`, which does not run the waterfall again. A listener may rewrite freely or
+       * have effects; running it twice could send something other than what was recorded.
+       */
+      const request = ctx.model.resolve(asked)
 
       ctx.session.store.modelRequest(options.session, {
-        endpoint: options.endpoint,
-        ...(options.model !== undefined ? { model: options.model } : {}),
-        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-        messages: prepared.messages.length,
-        tools: prepared.tools.map((tool) => tool.name),
+        endpoint: request.endpoint,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        messages: request.messages.length,
+        tools: (request.tools ?? []).map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,
         thresholdTokens: report.thresholdTokens,
         pruned: report.pruned,
@@ -395,12 +472,20 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       })
 
       try {
-        for await (const chunk of ctx.model.stream(request, signal)) {
+        for await (const chunk of ctx.model.streamResolved(request, signal)) {
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
-          if (chunk.type === 'text-delta') roundText += chunk.text
-          else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
+          if (chunk.type === 'text-delta') {
+            roundText += chunk.text
+            // The round's partial answer is the turn's answer so far (the last non-empty round, as above), should the
+            // stream fail or be stopped before the round ends; a round with no text yet leaves the previous answer.
+            progress.text = roundText
+          }
+          else if (chunk.type === 'reasoning-delta') {
+            reasoning += chunk.text
+            progress.reasoning = reasoning
+          }
           else if (chunk.type === 'tool-call') calls.push({ id: chunk.id, name: chunk.name, arguments: chunk.arguments })
           else if (chunk.type === 'done') {
             finishReason = chunk.finishReason
@@ -483,6 +568,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      * printed answer and a child's closing message (live-testing issue #9). The log keeps every round's own message.
      */
     if (roundText.length > 0) text = roundText
+    progress.text = text
 
     /**
      * A message that arrived while the model was answering is answered **by this turn**.
@@ -541,6 +627,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       toolCallRecords.push({ name: call.name, arguments: call.arguments, result })
       if (result.error) {
         denials.push({ tool: call.name, code: result.error.code, message: result.error.message })
+        progress.denials = denials.length
       }
       ctx.session.store.message(options.session, {
         role: 'tool',
@@ -578,6 +665,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     ...(ended.length > 0 ? { ended } : {}),
   })
+  progress.completed = true
   ctx.session.store.append(options.session, { type: 'turn/completed', rounds })
 
   return {
