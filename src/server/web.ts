@@ -189,6 +189,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const sockets = new Set<import('node:net').Socket>()
   /** The page's interactive terminals, per session (#85); closed on archive, when unattended and at shutdown. */
   const terminals = new TerminalRegistry()
+  /** Set when the shutdown begins; from then on a turn is refused rather than started (see `stopRunningTurns`). */
+  const lifecycle = { closing: false }
 
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
@@ -288,6 +290,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       runningSince,
       completedAt,
       terminals,
+      lifecycle,
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
@@ -360,6 +363,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     close: () =>
       new Promise<void>((resolvePromise) => {
         void stopRunningTurns()
+          .catch(() => {})
           .then(() => terminals.closeAll())
           .finally(() => closeNow(resolvePromise))
       }),
@@ -372,6 +376,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
    * agents at teardown (`dsh-bash-local` graceMs 3000).
    */
   async function stopRunningTurns(): Promise<void> {
+    // The listener stays open through the grace, so a turn asked for now would start a command nothing stops.
+    lifecycle.closing = true
     let stopping = 0
     for (const id of [...controllers.keys()]) stopping += abortSession(controllers, id)
     if (stopping === 0) return
@@ -441,6 +447,8 @@ interface RequestState {
   readonly controllers: Map<string, Set<AbortController>>
   /** Each session's interactive terminals (#85). */
   readonly terminals: TerminalRegistry
+  /** The server's shutdown state: `closing` once `close()` has begun stopping the turns. */
+  readonly lifecycle: { readonly closing: boolean }
   /**
    * Rounds an interactive turn may take before the loop stops it — `Infinity` by default, so the loop ends the way
    * DSH's does (the model stops calling tools), and only an explicit `--max-rounds` turns this into a limit.
@@ -2472,7 +2480,28 @@ export function sessionRequestSelection(
   }
 }
 
+/**
+ * The refusal for a turn that names a session this server does not hold, or `null` when it holds it (or when the
+ * turn names none and so starts one).
+ *
+ * The answer is DSH's (`session/not-found`, `dsh-api-session-controller`) in this server's shape for the other
+ * session routes (`404`, `{"error": "no session <id>"}`), and the Rust server answers the same. The route used to
+ * reach the resume, which threw and came back as a `500 internal error` naming the session root on disk (DSH parity
+ * R-developer-seven-2). A string that is not a session id names no session either: it is not echoed back, and it is
+ * never used as a path (`open` is asked only about a well-formed id, the same shape as the Rust `SessionId`).
+ */
+export function unknownTurnSession(
+  session: unknown,
+  open: (id: string) => unknown,
+): { error: string; code: 'session/not-found' } | null {
+  if (typeof session !== 'string' || session.length === 0) return null
+  const wellFormed = /^session-[0-9a-fA-F-]{36}$/.test(session)
+  if (wellFormed && open(session) !== null) return null
+  return { error: wellFormed ? `no session ${session}` : 'no session with that id', code: 'session/not-found' }
+}
+
 /** Run one turn and stream its session events back as they are written. */async function handleTurn(ctx: Context, request: IncomingMessage, response: ServerResponse, state: RequestState): Promise<void> {
+  if (refuseWhileClosing(response, state)) return
   let raw = ''
   for await (const chunk of request) {
     raw += chunk
@@ -2569,9 +2598,16 @@ export function sessionRequestSelection(
     ...(bornPreset !== undefined ? { preset: bornPreset } : {}),
   }
   /**
-   * A one-shot subagent's session takes no turn from here (`subagentTurnRefusal`), and the refusal comes before the session
-   * is opened, so a refused request writes nothing into the child's log.
+   * A turn for a session that does not exist is the client's mistake: `404` with DSH's `session/not-found`
+   * ([`unknownTurnSession`]), before anything is opened or written. A one-shot subagent's session takes no turn from
+   * here (`subagentTurnRefusal`), and that refusal also comes before the session is opened, so a refused request writes
+   * nothing into the child's log. The existence check goes first: a subagent refusal is about a session that is there.
    */
+  const unknown = unknownTurnSession(body.session, (id) => ctx.session.store.open(id))
+  if (unknown !== null) {
+    respond(response, 404, 'application/json', `${JSON.stringify(unknown)}\n`)
+    return
+  }
   if (typeof body.session === 'string' && body.session.length > 0) {
     const resumeId = body.session
     const resumed = ctx.session.list().find((entry) => entry.id === resumeId)
@@ -2695,6 +2731,8 @@ export function sessionRequestSelection(
    * turn begins on an idle session; a second concurrent turn on the same session does not reset the first one's
    * clock.
    */
+  // Checked again here, after the awaits above: the shutdown may have begun while the request was read.
+  if (refuseWhileClosing(response, state)) return
   const activeTurns = state.running.get(handle.id) ?? 0
   state.running.set(handle.id, activeTurns + 1)
   if (activeTurns === 0) state.runningSince.set(handle.id, Date.now())
@@ -3098,6 +3136,16 @@ export function inlineContentType(path: string): string | null {
     '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf', '.css': 'text/css; charset=utf-8',
   }
   return known[extension] ?? null
+}
+
+/**
+ * A turn asked for during the shutdown grace is refused: the running turns were already stopped, so one started now
+ * would run a command that nothing ends before the process goes (developer-nine's follow-up to issue #6).
+ */
+function refuseWhileClosing(response: ServerResponse, state: RequestState): boolean {
+  if (!state.lifecycle.closing) return false
+  respond(response, 503, 'application/json', `${JSON.stringify({ error: 'the server is shutting down', code: 'server/closing' })}\n`)
+  return true
 }
 
 function respond(
