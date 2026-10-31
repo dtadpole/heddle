@@ -315,6 +315,25 @@ test('a tab brought to the front takes the stream over, and the tab it took it f
   assert.equal(first.open()[0]?.url, '/api/events?cursor=e-2')
 })
 
+test('a tab that opens in front takes the stream with the leading tab\'s cursor, so the handover loses nothing', { timeout: 5000 }, async () => {
+  const world = { locks: new Locks(), bus: new Bus() }
+  const first = tab('first', { ...world, visible: true })
+  await settle()
+  const old = first.open()[0]!
+  old.emit('ready', ready('e-0'))
+  old.emit('session', { n: 1 }, 'e-1')
+  await settle()
+  const second = tab('second', { ...world, visible: true })
+  await settle()
+  assert.equal(second.body.dataset.feed, 'leader', 'the tab in front took the stream')
+  assert.equal(second.open()[0]?.url, '/api/events?cursor=e-1', 'from the cursor the leading tab gave it, so the gap is replayed')
+  assert.equal(first.open().length, 0)
+  second.open()[0]!.emit('ready', { ...ready('e-2'), resumed: true })
+  second.open()[0]!.emit('session', { n: 2 }, 'e-2')
+  await settle()
+  assert.deepEqual(Array.from(first.delivered), [1, 2], 'the old leader, now following, missed nothing')
+})
+
 test('without locks, or where the browser refuses them, a tab keeps a stream of its own', { timeout: 5000 }, async () => {
   const bus = new Bus()
   const bare = tab('bare', { locks: null, bus, visible: true })
@@ -479,10 +498,10 @@ function runTurnHarness(answer: string) {
     }
     ${block('turnVerdicts')};
     ${source('runTurn')}
-    ({ run: () => runTurn('hello', 'S', [], () => calls.push('accepted')), verdict: (data) => turnVerdicts.receive(data) })
+    ({ run: () => runTurn('hello', 'S', [], () => calls.push('accepted')), verdict: (data) => turnVerdicts.receive(data), idle: () => turnVerdicts.endIdle(new Map(), runningTick) })
     `,
     { sent, calls, performance: { now: () => 0 }, TextDecoder, chunks: CHUNKS },
-  ) as { run(): Promise<void>; verdict(data: unknown): void }
+  ) as { run(): Promise<void>; verdict(data: unknown): void; idle(): void }
   return { sent, calls, harness }
 }
 
@@ -528,4 +547,18 @@ test('a streamed turn from a server without detach is read frame by frame, each 
     ['denied:bash: no'],
     'the done frame was read once, whole',
   )
+})
+
+test('a turn a sessions read ended as lost still runs its tail when its verdict lands after', { timeout: 5000 }, async () => {
+  const { calls, harness } = runTurnHarness(
+    "{ ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session: 'S', turn: 't9' }) }",
+  )
+  const running = harness.run()
+  await settle()
+  harness.idle()
+  await running
+  assert.ok(!calls.some((call) => call.startsWith('denied:')), 'ended as lost: no tail yet')
+  harness.verdict({ turn: 't9', outcome: 'done', session: 'S', denials: [{ tool: 'bash', message: 'late' }] })
+  await settle()
+  assert.ok(calls.includes('denied:bash: late'), `the late verdict ran the done tail: ${JSON.stringify(calls)}`)
 })

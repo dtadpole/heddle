@@ -6232,9 +6232,17 @@ function markRunning(id) {
 const turnVerdicts = (() => {
   const waiting = new Map()
   const early = new Map()
+  /** Turns ended as `lost` whose verdict may still come: it then runs the tail they skipped (developer-ten's review). */
+  const late = new Map()
   return {
     receive(data) {
       if (data === null || typeof data !== 'object' || typeof data.turn !== 'string') return
+      const tail = late.get(data.turn)
+      if (tail !== undefined) {
+        late.delete(data.turn)
+        tail(data)
+        return
+      }
       const waiter = waiting.get(data.turn)
       if (waiter !== undefined) {
         waiting.delete(data.turn)
@@ -6252,6 +6260,11 @@ const turnVerdicts = (() => {
       }
       /** Its own tick, so a sessions read issued before the turn was accepted cannot end it. */
       return new Promise((resolve) => waiting.set(turn, { session, resolve, tick: ++runningTick }))
+    },
+    /** Run `tail` with the verdict of a turn ended as `lost`, if it still arrives; the newest few are kept. */
+    lateTail(turn, tail) {
+      late.set(turn, tail)
+      if (late.size > 64) late.delete(late.keys().next().value)
     },
     /** End every wait whose session a read issued at `readTick` found idle (`live` holds the running ones). */
     endIdle(live, readTick) {
@@ -6393,7 +6406,10 @@ async function refreshSessions() {
  * - When that tab closes, the browser hands the lock to a waiting tab, which reconnects from the newest id it was
  *   given, so the server replays the gap.
  * - A tab a person brings to the front takes the lock over: a background tab may be throttled or frozen, and the
- *   tab being read is the one whose stream must not stall.
+ *   tab being read is the one whose stream must not stall. A tab that opens in front first waits for the leading
+ *   tab's newest id (its answer to `hello`), so it connects with that cursor and the server replays what was
+ *   written between the old source closing and the new one opening (developer-ten's review: without it, a turn
+ *   streaming in the old tab lost those frames).
  * - The leading tab relays the server's heartbeat, and its own state on every connection attempt. A following tab
  *   that hears nothing for three heartbeats while the stream is open (30 s while it is connecting) takes the lock
  *   over: Chrome freezes background tabs, and a frozen one keeps its lock while relaying nothing (developer-ten).
@@ -6442,6 +6458,8 @@ const events = (() => {
   let candidate = false
   /** A following tab's watch on the leading one: armed by every relayed message, it takes the lock when it fires. */
   let watchdog = 0
+  /** A tab that opened in front takes the stream once the leading tab has told it where the stream stands. */
+  let frontOnJoin = false
   function post(message) {
     if (channel === null) return
     try {
@@ -6529,6 +6547,8 @@ const events = (() => {
   /** This tab owns the stream until the lock is taken from it; the promise is the lock, held while the page lives. */
   function lead() {
     leading = true
+    /** A tab that leads has nothing left to wait for before taking the stream. */
+    frontOnJoin = false
     clearTimeout(watchdog)
     attempt = 0
     document.body.dataset.feed = channel === null ? 'solo' : 'leader'
@@ -6594,6 +6614,10 @@ const events = (() => {
       if (typeof message.state === 'string') setState(message.state)
       /** In order with the frames, so it is never older than what was delivered here; a handover starts from it. */
       if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
+      if (frontOnJoin) {
+        frontOnJoin = false
+        if (document.visibilityState === 'visible') seize()
+      }
     } else if (message.kind === 'frame' && typeof message.name === 'string') {
       if (message.name === 'ready') {
         try {
@@ -6620,7 +6644,11 @@ const events = (() => {
     document.body.dataset.feed = 'follower'
     post({ kind: 'hello' })
     watch()
-    if (document.visibilityState === 'visible') seize()
+    /**
+     * Queued at once, which the first tab is granted at once. A tab that opens in front takes the stream from a leading
+     * tab only after its answer to `hello` gave it a cursor (`relayed`).
+     */
+    frontOnJoin = document.visibilityState === 'visible'
     stand()
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') seize()
@@ -8107,7 +8135,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     const accepted = await response.json()
     const session = typeof accepted.session === 'string' ? accepted.session : null
     if (session !== null) await verdict('session', { session })
-    const ended = await turnVerdicts.wait(String(accepted.turn ?? ''), session)
+    const turn = String(accepted.turn ?? '')
+    const ended = await turnVerdicts.wait(turn, session)
+    /**
+     * A turn ended as `lost` can still see its verdict: a sessions read can find the session idle a moment before the
+     * verdict lands (another turn's done re-reads the list). Its tail then runs when it does; repeating the settle
+     * steps is harmless.
+     */
+    if (ended.outcome === 'lost') turnVerdicts.lateTail(turn, (data) => void verdict(data.outcome, data))
     await verdict(ended.outcome, ended)
     return
   }
