@@ -71,7 +71,7 @@ function subsequence(query, value) {
  * ranked — prefixes of the name or label first, then any subsequence match.
  */
 export function candidates(catalog, trigger) {
-  const visible = catalog.filter((entry) => trigger.position === 'leading' || entry.input === undefined)
+  const visible = catalog.filter((entry) => offered(entry) && (trigger.position === 'leading' || entry.input === undefined))
   const query = trigger.query.toLowerCase()
   if (query.length === 0) {
     const rows = []
@@ -104,9 +104,29 @@ export function claims(catalog, text) {
   const match = COMMAND_LINE.exec(text)
   if (match === null) return false
   const entry = catalog.find((candidate) => candidate.name === match[1])
-  if (entry === undefined) return false
+  if (entry === undefined || !offered(entry)) return false
   if (entry.client === true) return text.trim() === `/${entry.name}`
   return true
+}
+
+/**
+ * Whether an entry is offered now. A page entry may say it is not, for the session on screen: DSH's `/model` is
+ * `available` only outside an addressed subagent's session (dsh-client-ui-model-selection). An entry that is not
+ * offered is neither listed nor claimed, so its line goes on as an ordinary message, as DSH's unregistered one does.
+ */
+function offered(entry) {
+  return typeof entry.available !== 'function' || entry.available() !== false
+}
+
+/**
+ * A page entry's words in the page's language, through the page's own tables (`window.heddleLocale`, issue #80), with
+ * the English as written here when the page has none. Read each time the menu draws, so a language chosen in Settings
+ * reaches the next menu.
+ */
+function pageWord(key, english) {
+  const locale = typeof window === 'undefined' ? undefined : window.heddleLocale
+  const text = typeof locale?.t === 'function' ? locale.t(key) : undefined
+  return typeof text === 'string' && text !== key ? text : english
 }
 
 /** The page entries DSH's composer adds beside the host's commands, offered only when the page can perform them. */
@@ -116,7 +136,20 @@ function clientEntries(api) {
     entries.push({ name: 'file', label: 'File', description: 'Attach a file to the message', section: 'add', client: true, run: api.openFilePicker })
   }
   if (typeof api.openModelMenu === 'function') {
-    entries.push({ name: 'model', label: 'Model', description: 'Select the model for this conversation', section: 'commands', client: true, run: api.openModelMenu })
+    entries.push({
+      name: 'model',
+      // DSH's words, 模型 / 选择本会话使用的模型 in Chinese (A103).
+      get label() {
+        return pageWord('commands.model.label', 'Model')
+      },
+      get description() {
+        return pageWord('commands.model.description', 'Select the model for this conversation')
+      },
+      section: 'commands',
+      client: true,
+      ...(typeof api.modelSelectable === 'function' ? { available: api.modelSelectable } : {}),
+      run: api.openModelMenu,
+    })
   }
   return entries
 }

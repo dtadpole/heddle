@@ -19,6 +19,7 @@ interface Entry {
   readonly section: 'add' | 'commands'
   readonly input?: { readonly hint: string }
   readonly client?: boolean
+  readonly available?: () => boolean
 }
 
 const catalog: readonly Entry[] = [
@@ -78,6 +79,19 @@ test('a registered command always belongs to the host; a page entry only bare; a
   assert.equal(claims(catalog, 'see /compact'), false)
   assert.equal(claims(catalog, '/Goal x'), false)
   assert.equal(claims([], '/goal x'), false, 'before the list has loaded, nothing is claimed')
+})
+
+test('a page entry that says it is not offered for the session on screen is neither listed nor claimed (A103)', () => {
+  // DSH's /model is available only outside an addressed subagent's session; its line then goes on as a message.
+  let selectable = true
+  const withModel = catalog.map((entry) => (entry.name === 'model' ? { ...entry, available: () => selectable } : entry))
+  const names = (rows: readonly Entry[]) => rows.map((row) => row.name)
+  assert.ok(names(candidates(withModel, { query: 'mo', position: 'leading' })).includes('model'))
+  assert.equal(claims(withModel, '/model'), true)
+  selectable = false
+  assert.ok(!names(candidates(withModel, { query: '', position: 'leading' })).includes('model'), 'not listed')
+  assert.ok(!names(candidates(withModel, { query: 'mo', position: 'leading' })).includes('model'), 'not found by a query')
+  assert.equal(claims(withModel, '/model'), false, 'and its line is not the command layer\'s')
 })
 
 test("a /goal run's Command input bubble shows /name and the recorded remainder, trailing whitespace removed", () => {
