@@ -3419,16 +3419,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sanitiser_is_javascript_or_a_plain_404() {
-        // Not installed: the TypeScript sentence, in plain text rather than a JSON error.
+    async fn the_sanitiser_is_javascript_whether_installed_or_not() {
+        // Not installed: the binary's own copy (live issue #39: this answered 404, and every HTML preview showed its
+        // source on a deployment without node_modules).
         let (router, _) = app("purify-missing");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
         let (status, headers, bytes) =
             call(&router, Method::GET, "/vendor/purify.js", Some(&cookie)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(headers["content-type"], "text/plain");
-        assert_eq!(body_text(&bytes), "the sanitiser is not installed\n");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert!(
+            body_text(&bytes).starts_with("/*! @license DOMPurify "),
+            "the sanitiser itself, not a refusal"
+        );
 
         // Installed under an asset root: served as a script a browser will run, not as a download.
         let root = std::env::temp_dir().join(format!(
