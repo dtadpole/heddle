@@ -57,6 +57,15 @@ test('the rendered markup gives the source back, exactly', () => {
   }
 })
 
+test('PNG selects an image renderer without widening support to other image formats', () => {
+  assert.deepEqual(rendererFor('/w/pixel.PNG'), { renderer: 'image' })
+  assert.deepEqual(renderSource('/w/pixel.png', ''), { renderer: 'image' })
+  for (const suffix of ['jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico']) {
+    assert.equal(rendererFor('/w/pixel.' + suffix).renderer, 'text')
+  }
+  assert.deepEqual(rendererFor('/w/icon.svg'), { renderer: 'code', language: 'xml' })
+})
+
 test('a file full of markup arrives as text and never as markup', () => {
   const hostile = '<script>alert(1)</script>\n<img src=x onerror=alert(2)>\n</code></span>'
   const html = renderCode(hostile, 'javascript')

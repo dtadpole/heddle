@@ -41,9 +41,9 @@ pub(crate) mod test_support;
 use std::sync::Arc;
 
 pub use builtins::{
-    AnonymousUser, CompactionHost, CompactionOutcome, FEEDBACK_CATEGORIES, FEEDBACK_EVENT,
-    PermissionHost, compact_command, export_command, feedback_command, permission_command,
-    record_feedback,
+    AnonymousUser, COMPACT_BUSY, COMPACT_REFUSED, CompactionHost, CompactionOutcome,
+    FEEDBACK_CATEGORIES, FEEDBACK_EVENT, PermissionHost, compact_command, export_command,
+    feedback_command, permission_command, record_feedback,
 };
 pub use goal::{
     GOAL_ATTACHMENTS_REFUSED, GOAL_ATTACHMENTS_TEXT, GOAL_INPUT_HINT, GOAL_STATE_ERROR, GOAL_USAGE,
@@ -60,7 +60,7 @@ pub use registry::{
 pub use routes::{MAX_COMMAND_LINE, MENU_PATH, MENU_SOURCE};
 pub use service::{
     CommandServices, Commands, NO_CONTEXT_SERVICE, NO_GOAL_SERVICE, NO_SUMMARY_ENDPOINT,
-    anonymous_user,
+    TurnRunning, anonymous_user,
 };
 
 /// Every `(method, path)` [`router`] mounts, in axum 0.8 path syntax. The session segment is named `{id}`, as
@@ -104,6 +104,7 @@ mod tests {
     async fn the_router_merges_into_a_callers_router_beside_its_session_routes() {
         let fixture = Fixture::new("lib-merge");
         let commands = Commands::new(CommandServices {
+            turn_running: None,
             sessions: Arc::new(SessionService::from_store(fixture.store.clone())),
             goals: None,
             context: None,
