@@ -261,6 +261,9 @@ struct PendingAssistant {
     reasoning: Vec<String>,
     started_at: Option<String>,
     first_token_at: Option<String>,
+    /// The step's request, when this is the step's first answer (#124): DSH measures an answer from its step's
+    /// start, so the record spans the wait for the first token and TTFT is that wait. Mirrors `requestAt` in ledger.ts.
+    request_at: Option<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
@@ -275,6 +278,7 @@ impl PendingAssistant {
             reasoning: Vec::new(),
             started_at: started_at.map(str::to_owned),
             first_token_at: None,
+            request_at: None,
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,
@@ -318,6 +322,8 @@ struct Projector {
     prologue: Vec<LedgerRecord>,
     step: Option<StepBuf>,
     pending: Option<PendingAssistant>,
+    /// How many answers the current step has opened; only its first is measured from the step's request (#124).
+    answers_in_step: u32,
     input: Option<u64>,
     output: Option<u64>,
     cache_read: Option<u64>,
@@ -334,6 +340,7 @@ impl Projector {
             prologue: Vec::new(),
             step: None,
             pending: None,
+            answers_in_step: 0,
             input: None,
             output: None,
             cache_read: None,
@@ -481,10 +488,21 @@ impl Projector {
         };
         let text = pending.parts.concat();
         let reasoning = pending.reasoning.concat();
-        let ttft = between(
-            pending.started_at.as_deref(),
-            pending.first_token_at.as_deref(),
-        );
+        // A settled answer spans its step's request to its completion (#124; before, both ends of TTFT were the first
+        // chunk, so it read 0). A running answer keeps its first chunk as its start, the newest point it knows, so the
+        // axis still reaches the stream; it has no duration, so it carries no split, only the TTFT it already knows.
+        let answer_start = if settled {
+            pending
+                .request_at
+                .as_deref()
+                .or(pending.started_at.as_deref())
+        } else {
+            pending.started_at.as_deref()
+        };
+        let ttft = match pending.request_at.as_deref() {
+            Some(request_at) => between(Some(request_at), pending.first_token_at.as_deref()),
+            None => None,
+        };
         if !reasoning.is_empty() {
             self.put(LedgerRecord::started(
                 LedgerKind::Reasoning,
@@ -495,14 +513,10 @@ impl Projector {
         }
         let has_usage = pending.input_tokens.is_some() || pending.output_tokens.is_some();
         if !text.is_empty() || has_usage {
-            let mut record = LedgerRecord::started(
-                LedgerKind::Assistant,
-                "assistant",
-                text,
-                pending.started_at.as_deref(),
-            );
+            let mut record =
+                LedgerRecord::started(LedgerKind::Assistant, "assistant", text, answer_start);
             if settled {
-                record.duration_ms = between(pending.started_at.as_deref(), at);
+                record.duration_ms = between(answer_start, at);
             }
             record.in_flight = !settled;
             record.ttft_ms = ttft;
@@ -628,6 +642,7 @@ impl Projector {
                 .map(str::to_owned),
             records: Vec::new(),
         });
+        self.answers_in_step = 0;
         let Some(estimated) = event.get("estimatedTokens").and_then(Value::as_u64) else {
             return;
         };
@@ -665,7 +680,12 @@ impl Projector {
             return;
         };
         if self.pending.is_none() {
-            self.pending = Some(PendingAssistant::new(at));
+            let mut pending = PendingAssistant::new(at);
+            if self.answers_in_step == 0 {
+                pending.request_at = self.step.as_ref().and_then(|step| step.started_at.clone());
+            }
+            self.answers_in_step += 1;
+            self.pending = Some(pending);
         }
         let pending = self
             .pending

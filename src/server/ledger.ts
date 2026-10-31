@@ -410,6 +410,11 @@ interface PendingAssistant {
   reasoning: string[]
   startedAt?: string
   firstTokenAt?: string
+  /**
+   * The step's request, when this is the step's first answer (#124). DSH measures an answer from its step's start: the
+   * record spans the wait for the first token, and TTFT is that wait. A later answer in the same step keeps its own start.
+   */
+  requestAt?: string
   inputTokens?: number
   outputTokens?: number
   cacheReadTokens?: number
@@ -436,6 +441,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
    */
   let prologue: LedgerRecord[] = []
   let step: { startedAt?: string; endedAt?: string; model?: string; records: LedgerRecord[] } | null = null
+  /** How many answers the current step has opened; only its first is measured from the step's request (#124). */
+  let answersInStep = 0
   let pending: PendingAssistant | null = null
 
   const tokens = {
@@ -539,7 +546,13 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     if (pending === null) return
     const text = pending.parts.join('')
     const reasoning = pending.reasoning.join('')
-    const ttft = between(pending.startedAt, pending.firstTokenAt)
+    /**
+     * A settled answer spans its step's request to its completion (#124; before, both ends of TTFT were the first chunk,
+     * so it read 0). A running answer keeps its first chunk as its start, the newest point it knows, so the axis still
+     * reaches the stream; it has no duration, so it carries no split, only the TTFT it already knows.
+     */
+    const answerStart = settled ? (pending.requestAt ?? pending.startedAt) : pending.startedAt
+    const ttft = pending.requestAt !== undefined ? between(pending.requestAt, pending.firstTokenAt) : undefined
     if (reasoning.length > 0) {
       put({ kind: 'reasoning', label: 'reasoning', text: reasoning, ...(pending.startedAt !== undefined ? { startedAt: pending.startedAt } : {}) })
     }
@@ -548,8 +561,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
         kind: 'assistant',
         label: 'assistant',
         text,
-        ...(pending.startedAt !== undefined ? { startedAt: pending.startedAt } : {}),
-        ...(settled && at !== undefined && between(pending.startedAt, at) !== undefined ? { durationMs: between(pending.startedAt, at) } : {}),
+        ...(answerStart !== undefined ? { startedAt: answerStart } : {}),
+        ...(settled && at !== undefined && between(answerStart, at) !== undefined ? { durationMs: between(answerStart, at) } : {}),
         ...(!settled ? { inFlight: true } : {}),
         ...(ttft !== undefined ? { ttftMs: ttft } : {}),
         /**
@@ -628,6 +641,7 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       /** The prompt waits for this step, which is the one it belongs to. */
       closeStep(event.at, true)
       step = { startedAt: event.at, records: [], ...(event.model !== undefined ? { model: event.model } : {}) }
+      answersInStep = 0
       if (event.estimatedTokens !== undefined) {
         tokens.estimated = (tokens.estimated ?? 0) + event.estimatedTokens
         put({
@@ -653,7 +667,11 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     if (event.type === 'assistant/chunk') {
       const chunk = event.chunk
       if (chunk === undefined) continue
-      pending ??= { parts: [], reasoning: [], ...(event.at !== undefined ? { startedAt: event.at } : {}), sawProviderUsage: false }
+      if (pending === null) {
+        const requestAt = answersInStep === 0 ? step?.startedAt : undefined
+        answersInStep += 1
+        pending = { parts: [], reasoning: [], ...(event.at !== undefined ? { startedAt: event.at } : {}), ...(requestAt !== undefined ? { requestAt } : {}), sawProviderUsage: false }
+      }
       /** The first token of the stream, which is what TTFT measures from the step start to. */
       pending.firstTokenAt ??= event.at
       if (chunk.type === 'text-delta' && chunk.text !== undefined) pending.parts.push(chunk.text)
