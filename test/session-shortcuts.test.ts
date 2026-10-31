@@ -26,11 +26,18 @@ interface Press {
 }
 
 const block = begin > 0 && end > begin ? page.slice(begin, end) : 'function shortcutFor() { return null }'
-const shortcutFor = new Function(`${block}\nreturn shortcutFor`)() as (event: Required<Omit<Press, 'code'>> & { code?: string }) => string | null
+const shortcutFor = new Function(`${block}\nreturn shortcutFor`)() as (
+  event: Required<Omit<Press, 'code'>> & { code?: string },
+  options?: { mac?: boolean },
+) => string | null
 
-/** A key press with every modifier stated, as a browser reports it. */
-function press(event: Press) {
-  return shortcutFor({ metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...event })
+/** The platform is stated, not read from the machine running the test: DSH's `Mod` is Command on a Mac only. */
+const mac = { mac: true }
+const elsewhere = { mac: false }
+
+/** A key press with every modifier stated, as a browser reports it; on a Mac unless another platform is named. */
+function press(event: Press, platform = mac) {
+  return shortcutFor({ metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...event }, platform)
 }
 
 test('the shortcut table is in the page, between its markers', () => {
@@ -54,7 +61,18 @@ test('a Mac\'s option characters still name the key: ⌥⌘O arrives as ø with 
   assert.equal(press({ key: 'å', code: 'KeyA', metaKey: true, altKey: true }), 'archive')
   assert.equal(press({ key: '˚', code: 'KeyK', metaKey: true, altKey: true }), 'search')
   assert.equal(press({ key: 'o', metaKey: true, altKey: true }), 'add-workspace', 'a synthetic press without a code reads its character')
-  assert.equal(press({ key: 'o', ctrlKey: true, altKey: true }), 'add-workspace', 'Control stands in for Meta')
+  assert.equal(press({ key: 'o', ctrlKey: true, altKey: true }, elsewhere), 'add-workspace', 'off a Mac, Control is Mod')
+})
+
+/**
+ * DSH expands `primary` to one modifier, `meta` on macOS and `control` elsewhere, and matches the whole modifier set
+ * exactly (dsh-client-shortcuts `normalizeBinding` and `bindingKey`), so the other of the two is never part of a chord.
+ */
+test('Mod is one key: Command on a Mac, Control elsewhere, never both', () => {
+  assert.equal(press({ key: 'ø', code: 'KeyO', ctrlKey: true, altKey: true }), null, '⌃⌥O on a Mac is not ⌥⌘O')
+  assert.equal(press({ key: 'ø', code: 'KeyO', metaKey: true, ctrlKey: true, altKey: true }), null, 'Control held as well')
+  assert.equal(press({ key: 'o', code: 'KeyO', metaKey: true, altKey: true }, elsewhere), null, 'Meta off a Mac')
+  assert.equal(press({ key: 'o', code: 'KeyO', ctrlKey: true, altKey: true }, elsewhere), 'add-workspace', 'Control+Alt+O off a Mac')
 })
 
 test('Add workspace needs exactly its modifiers', () => {
