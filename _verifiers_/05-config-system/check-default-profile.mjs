@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -15,8 +15,12 @@ import { heddleCommand, isolatedHome, removeDir } from '../../_tools_/verify-run
  * on a binary `web --session-root` did not start at all. Now such a run boots `$HEDDLE_HOME/profiles/default`, created
  * from the shipped template the first time, and says so. Every run here uses a fresh home and an empty folder.
  */
+/**
+ * `HOME` is the fresh home too, so a root written as `~/...` resolves inside it: a run that ignored HEDDLE_HOME then
+ * writes under `<home>/.heddle`, never into a real store.
+ */
 function run(home, cwd, args) {
-  const env = { ...process.env, NO_COLOR: '1', HEDDLE_HOME: home }
+  const env = { ...process.env, NO_COLOR: '1', HEDDLE_HOME: home, HOME: home }
   delete env.HEDDLE_CONFIG
   const [command, argv] = heddleCommand(args)
   const result = spawnSync(command, argv, { cwd, env, encoding: 'utf8', timeout: 60_000 })
@@ -69,6 +73,23 @@ test('web --session-root on a fresh home starts, with the session row from the d
     const planned = run(home, work, ['web', '--dry-run', '--session-root', join(home, 'sessions')])
     assert.equal(planned.code, 0, `${planned.stdout}\n${planned.stderr}`)
     assert.match(`${planned.stdout}${planned.stderr}`, /heddle web: would serve/, 'the server would start')
+  } finally {
+    removeDir(home)
+  }
+})
+
+test('a custom HEDDLE_HOME without --session-root keeps its sessions under that home', () => {
+  // The shipped session row named `root: ~/.heddle/sessions`, so every home shared one store (#74). The row now leaves
+  // the root to the session plugin's default, $HEDDLE_HOME/sessions.
+  const { home, work } = fresh('sessions')
+  // The shipped offline endpoint reads its script from the working folder.
+  writeFileSync(join(work, 'scripted.json'), JSON.stringify({ steps: [{ text: 'hello back' }] }))
+  try {
+    const turned = run(home, work, ['--turn', 'hello'])
+    assert.equal(turned.code, 0, `${turned.stdout}\n${turned.stderr}`)
+    const stores = existsSync(join(home, 'sessions')) ? readdirSync(join(home, 'sessions')) : []
+    assert.ok(stores.length > 0, `the session was written under $HEDDLE_HOME/sessions (found: ${stores.join(', ') || 'nothing'})`)
+    assert.equal(existsSync(join(home, '.heddle', 'sessions')), false, 'and not under ~/.heddle/sessions')
   } finally {
     removeDir(home)
   }
