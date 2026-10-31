@@ -3022,9 +3022,9 @@
   -->
   <section id="empty-state" hidden>
     <img src="/favicon.svg" alt="" width="28" height="28">
-    <h3>Start a conversation</h3>
-    <p>Pick a workspace in the left panel and start a session there, or press
-      <kbd>⌥⌘N</kbd> to begin one in the workspace you are looking at.</p>
+    <h3 data-i18n="empty.title">Start a conversation</h3>
+    <p><span data-i18n="empty.before">Pick a workspace in the left panel and start a session there, or press</span>
+      <kbd>⌥⌘N</kbd> <span data-i18n="empty.after">to begin one in the workspace you are looking at.</span></p>
   </section>
   <!--
     DSH's Automation tasks page (dsh-client-ui-schedule `TaskManagerPage`, main slot `schedules`): every retained
@@ -3213,15 +3213,15 @@
         clean — a path typed into the prompt is not an attachment, and a message with a file reads as one
         message, not as a file plus some text.
       -->
-      <div id="attach-cards" aria-label="Pending files" hidden></div>
-      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
+      <div id="attach-cards" aria-label="Pending attachments" data-i18n-aria-label="composer.pending" hidden></div>
+      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" data-i18n-placeholder="composer.placeholder" autofocus></textarea>
       <!--
         The control row, inside the card and in DSH's order: `+` and the access mode on the left, the model
         seat on the right, then the one action button. The button is Send when nothing runs and Stop while a
         turn does — one action at a time, in one place, which is DSH's own rule.
       -->
       <div id="prompt-tools">
-        <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" title="Add a file or insert a workspace path">+</button>
+        <button type="button" id="attach" aria-haspopup="menu" aria-expanded="false" aria-label="Add files or run commands" data-i18n-aria-label="composer.commands" title="Add a file or insert a workspace path" data-i18n-title="composer.attachHint">+</button>
         <!--
           The access mode this session runs under, and the control that changes it. DSH's permission select:
           a shield glyph, the mode's name and a chevron, opening a menu whose current entry carries a check.
@@ -3249,7 +3249,7 @@
           </button>
           <div id="model-menu" role="menu" aria-label="Model and reasoning effort" hidden></div>
         </div>
-        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating" hidden>
+        <button type="button" id="stop" aria-label="Stop generating" title="Stop generating" data-i18n-aria-label="composer.stop" data-i18n-title="composer.stop" hidden>
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/></svg>
         </button>
         <button id="send" type="submit" aria-label="Send message">
@@ -3458,6 +3458,20 @@ const MESSAGES = Object.freeze({
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
+    'empty.title': 'Start a conversation',
+    'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
+    'empty.after': 'to begin one in the workspace you are looking at.',
+    'composer.placeholder': 'Message or run a task, / commands, @ files or sessions',
+    'composer.placeholderSteerQueue': 'Cmd/Ctrl+Enter steers all queued messages',
+    'composer.send': 'Send message',
+    'composer.queue': 'Queue message',
+    'composer.steer': 'Steer message',
+    'composer.sendHint': '{label} — Enter · Shift+Enter for a new line',
+    'composer.queueHint': '{label} — Enter · Ctrl+Enter sends the queue',
+    'composer.stop': 'Stop generating',
+    'composer.commands': 'Add files or run commands',
+    'composer.attachHint': 'Add a file or insert a workspace path',
+    'composer.pending': 'Pending attachments',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3469,6 +3483,20 @@ const MESSAGES = Object.freeze({
     'settings.models': '模型',
     'settings.workspaces': '工作区',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
+    'empty.title': '开始对话',
+    'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
+    'empty.after': '在当前查看的工作区中开始一个会话。',
+    'composer.placeholder': '发消息或创建任务, / 调用指令, @ 文件或对话',
+    'composer.placeholderSteerQueue': 'Cmd/Ctrl+Enter 插话发送全部排队消息',
+    'composer.send': '发送消息',
+    'composer.queue': '排队发送',
+    'composer.steer': '插话发送',
+    'composer.sendHint': '{label} — Enter · Shift+Enter 换行',
+    'composer.queueHint': '{label} — Enter · Ctrl+Enter 发送排队消息',
+    'composer.stop': '停止生成',
+    'composer.commands': '添加文件或调用指令',
+    'composer.attachHint': '添加文件或插入工作区路径',
+    'composer.pending': '待发送附件',
   }),
 })
 
@@ -7825,9 +7853,9 @@ composer.addEventListener('submit', (submitEvent) => {
 function renderComposerState() {
   const running = anyRunning()
   const mode = resolveSubmitMode(BUSY_ENTER, running, 'enter')
-  const label = running ? (mode === 'steer' ? 'Steer message' : 'Queue message') : 'Send message'
+  const label = running ? (mode === 'steer' ? t('composer.steer') : t('composer.queue')) : t('composer.send')
   sendButton.setAttribute('aria-label', label)
-  sendButton.title = running ? `${label} — Enter · Ctrl+Enter sends the queue` : `${label} — Enter · Shift+Enter for a new line`
+  sendButton.title = running ? t('composer.queueHint', { label }) : t('composer.sendHint', { label })
   /**
    * One action at a time: while a turn runs, the button that can **end** it takes Send's place, which is
    * DSH's own pair. The send button stays in the DOM (hidden) so the form still submits on Enter — Enter
@@ -7840,13 +7868,13 @@ function renderComposerState() {
    * chord would do — "Cmd/Ctrl+Enter steers all queued messages". That is `canSteerQueue` in its own words.
    */
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
-  field.placeholder = canSteerQueue
-    ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : 'Message or run a task, / commands, @ files or sessions'
+  field.placeholder = canSteerQueue ? t('composer.placeholderSteerQueue') : t('composer.placeholder')
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
 }
+/** A language chosen in Settings redraws the composer's words at once (#80). */
+window.addEventListener('heddle:locale', renderComposerState)
 
 /**
  * The status line under the card: what this page can actually know.

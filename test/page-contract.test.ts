@@ -172,7 +172,7 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
    * than from a flag someone has to remember, and the conversation's column is put away beneath it.
    */
   assert.match(page, /<section id="empty-state" hidden>/, 'the invitation exists and starts hidden')
-  assert.match(page, /<h3>Start a conversation<\/h3>/, 'with a heading that says what to do')
+  assert.match(page, /<h3[^>]*>Start a conversation<\/h3>/, 'with a heading that says what to do')
   assert.match(page, /<kbd>⌥⌘N<\/kbd>/, 'and the chord that does it')
   assert.match(page, /function paintEmptyState\(\)/, 'one painter decides when it is shown')
   assert.match(page, /const nothingOpen = view === 'chat' && current === null/, 'from the panel\'s own state')
