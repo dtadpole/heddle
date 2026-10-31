@@ -301,6 +301,12 @@ Three reports from the owner, one root each.
 | The pin "did not appear to work" | the mechanism worked, but the row's **age span intercepted the press**: the age shares the right-hand grid slot with the controls and painted above them | the age is **decoration** (`pointer-events: none`) and the controls carry `position: relative; z-index: 1`, so the icon that is seen is the icon that is pressed |
 | Sessions were not ordered by what was done last | the comparator fell back to the **definition folder's clock name** | non-pinned sessions order by **`updated` descending**; pinned sessions still lead, and among pins the newest pin leads |
 
+Revised by DSH parity row C17 (R-developer-eight-20): `updated` now moves only on a person's **prompt or steer**, at
+that message's own time (DSH's `lastPromptAt`), so the age still moves the moment someone writes to a session but no
+longer moves with the answer or a turn boundary. **Last updated** orders each part (pinned, then the rest) by it alone,
+with pin time not counting, and View options adds DSH's **Manual**: a drag puts a row above or below another and selects
+Manual, and the sequence and the mode are kept in the browser across reloads.
+
 The second root is the same one as a fourth report — *the archive and pin icons blink while hovered*. A press dispatched at the icon's
 centre was delivered to the age span while `elementFromPoint` named the icon; the two disagreeing is exactly a box that paints but
 is not the one hit-testing reaches, and hovering puts the two in a loop. With the age out of the event layer the press reaches the

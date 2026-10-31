@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
+import { mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { isolatedHome, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
- * The Settings dialog tells a failed read apart from an empty configuration (issue #60).
+ * The Settings dialog tells a failed read apart from an empty configuration (issue #60), and lists every registered
+ * workspace, nested ones under their parent (issue #108).
  *
  * With the server unreachable, every route the dialog reads used to come back as "nothing", and the dialog stated as
  * facts that "no endpoint is configured in this profile" and "no workspace root is registered yet", about a
@@ -24,8 +26,10 @@ const CAPABILITY = 'the Settings dialog in the Web UI'
 async function plainDouble() {
   const { createServer } = await import('node:http')
   const server = createServer((request, response) => {
-    request.resume()
+    let body = ''
+    request.on('data', (chunk) => (body += chunk))
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ object: 'list', data: [{ id: 'model-one', object: 'model' }] }))
@@ -103,9 +107,7 @@ test('Settings says a section could not be read when the server is unreachable, 
   })
   const server = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double-one', '--session-root', join(home, 'sessions')],
-    /** The fixture's own HEDDLE_HOME: without it the server read and wrote the operator's workspace registry, and a first
-     * visit, which starts a fresh session in the most recently active workspace (#17), started it in a real folder. */
-    { env: { HEDDLE_CONFIG: config, HEDDLE_HOME: home } },
+    { env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config } },
   )
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
@@ -136,6 +138,61 @@ test('Settings says a section could not be read when the server is unreachable, 
     server.kill()
     await double.close()
     listeners.delete(double)
+    removeDir(home)
+  }
+})
+
+test('Settings lists every registered workspace, each nested one indented under its parent', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const home = isolatedHome('settings-workspaces')
+  /** Registered in this order: a root, a workspace inside it, one inside that, and a second root. */
+  const folders = ['proj-w', 'proj-w/ws-01', 'proj-w/ws-01/deep', 'proj-v'].map((relative) => {
+    mkdirSync(join(home, relative), { recursive: true })
+    return realpathSync(join(home, relative))
+  })
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
+    env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: join(home, 'heddle.json') },
+  })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`document.getElementById('settings-open') !== null`, 20_000), 'the page is up')
+    const registered = await browser.evaluate(`(async () => {
+      for (const path of ${JSON.stringify(folders)}) {
+        const response = await fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path }) })
+        if (!response.ok) return path + ': ' + response.status + ' ' + (await response.text())
+      }
+      return (await (await fetch('/api/workspaces')).json()).workspaces.length
+    })()`)
+    assert.equal(typeof registered, 'number', `the four folders register as workspaces\n${registered}`)
+
+    const text = await openSettings(browser)
+    const rows = await browser.evaluate(`[...document.querySelectorAll('#settings-workspaces .settings-workspace')].map((item) => ({
+      path: item.querySelector('.path').textContent,
+      depth: Number(item.dataset.depth),
+      left: item.getBoundingClientRect().left,
+    }))`)
+    assert.equal(rows.length, registered, `Settings lists every workspace the server has registered (${registered})\n${text}`)
+    const at = (path) => rows.findIndex((row) => row.path === path)
+    const [w, nested, deep, v] = folders.map((path) => rows[at(path)])
+    assert.ok(w && nested && deep && v, `all four registered folders are listed\n${text}`)
+    /** The roots keep the server's record order; what is judged is that a nested workspace follows its parent. */
+    assert.deepEqual(
+      [at(folders[1]) - at(folders[0]), at(folders[2]) - at(folders[0])],
+      [1, 2],
+      `each nested workspace follows its parent directly\n${text}`,
+    )
+    assert.deepEqual(
+      [nested.depth - w.depth, deep.depth - w.depth, v.depth - w.depth],
+      [1, 2, 0],
+      `one level deeper per nesting, and the second root at the first one's level\n${JSON.stringify(rows)}`,
+    )
+    assert.ok(w.left < nested.left && nested.left < deep.left, `a nested workspace is drawn indented under its parent\n${JSON.stringify(rows)}`)
+    assert.equal(v.left, w.left, 'the second root is drawn at the first one\'s level')
+  } finally {
+    browser.close()
+    server.kill()
     removeDir(home)
   }
 })

@@ -19,7 +19,7 @@ use heddle_server::services::{
 };
 use serde_json::Value;
 
-use crate::boot::Boot;
+use crate::boot::{Boot, FiberState};
 use crate::cli::Args;
 use crate::output::Output;
 use crate::{Exit, Invocation};
@@ -141,6 +141,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.approvals = Some(Arc::new(Approvals { service }));
     }
+    if let Some(preference) = boot
+        .services
+        .get::<Arc<heddle_config::LocalePreference>>("locale")
+    {
+        harness.locale = Some(*preference);
+    }
     harness
 }
 
@@ -181,7 +187,10 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
         harness: &harness,
         // The hub the session store was given its listener over at boot.
         events: boot.services.get::<heddle_server::EventHub>("event-hub"),
-        routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref()),
+        routers: page_routers(&boot, &invocation.env, args.endpoint.as_deref())
+            .into_iter()
+            .chain(settings_router(args, invocation))
+            .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
@@ -334,13 +343,16 @@ fn page_routers(
     env: &heddle_config::Env,
     nominated: Option<&str>,
 ) -> Vec<axum::Router> {
+    // The plugin inventory describes the tree itself, so it answers whether or not a session store loaded.
+    let mut routers = vec![plugin_inventory_router(boot)];
     let Some(host) = page_host(boot, env) else {
-        return Vec::new();
+        return routers;
     };
-    let mut routers = vec![
-        heddle_web_files::routes::mount(axum::Router::new(), host.clone()),
-        heddle_web_trajectory::routes::router(host.clone()),
-    ];
+    routers.push(heddle_web_files::routes::mount(
+        axum::Router::new(),
+        host.clone(),
+    ));
+    routers.push(heddle_web_trajectory::routes::router(host.clone()));
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
@@ -350,7 +362,108 @@ fn page_routers(
             .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
             .map(|schedule| Arc::clone(&schedule.service)),
     ));
+    // The background-job routes: DSH's job controller (list, follow, kill); 503 when the profile has no jobs row.
+    routers.push(heddle_jobs::http::router(
+        boot.services
+            .get::<Arc<heddle_jobs::JobsPlugin>>("jobs")
+            .map(|jobs| jobs.registry.clone()),
+    ));
     routers
+}
+
+/// `GET /api/plugin-inventory`: DSH's read-only `pluginInventory/list` over the booted tree, built by
+/// `heddle_config::plugin_inventory` from the composed rows and the loader's entries.
+///
+/// Read once, when the server is composed, and that is the live answer: this loader starts every row
+/// synchronously and reloads none, and `web` refuses a tree with an entry still pending, so the phases
+/// [`crate::boot::load`] left are the phases for the server's whole life. They change only at
+/// [`Boot::dispose`], after the server has stopped. (The TypeScript build reads its Cordis loader on every
+/// request, because a Cordis fiber can change phase while the server runs.)
+fn plugin_inventory_router(boot: &Boot) -> axum::Router {
+    let snapshot = Arc::new(plugin_inventory_of(boot));
+    axum::Router::new().route(
+        "/api/plugin-inventory",
+        axum::routing::get(move || {
+            let snapshot = Arc::clone(&snapshot);
+            async move { heddle_server::respond::json(axum::http::StatusCode::OK, &*snapshot) }
+        }),
+    )
+}
+
+/// The inventory of a booted tree: its composed rows, paired with the loader's entries and their states.
+fn plugin_inventory_of(boot: &Boot) -> heddle_config::PluginInventorySnapshot {
+    let loaded: Vec<_> = boot
+        .entries
+        .iter()
+        .map(|entry| (entry.id.clone(), fiber_phase(entry.state)))
+        .collect();
+    heddle_config::plugin_inventory(&boot.rows, &loaded)
+}
+
+/// A loader state as the inventory spells it: DSH's `FIBER_PHASE`, where a disposed entry has no phase.
+fn fiber_phase(state: FiberState) -> Option<heddle_config::PluginFiberPhase> {
+    use heddle_config::PluginFiberPhase as Phase;
+    match state {
+        FiberState::Pending => Some(Phase::Pending),
+        FiberState::Loading => Some(Phase::Loading),
+        FiberState::Active => Some(Phase::Active),
+        FiberState::Failed => Some(Phase::Failed),
+        FiberState::Disposed => None,
+        FiberState::Unloading => Some(Phase::Unloading),
+    }
+}
+
+/// `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`: the active profile's patch
+/// as a writable surface, as DSH's settings controller offers it. Every answer is `heddle-config`'s
+/// ([`heddle_config::handle_settings_request`]); the service is built from the same layer options, in-memory
+/// layers and catalog the boot used, and it is mounted behind the door like the other feature routers.
+fn settings_router(args: &Args, invocation: &Invocation) -> Option<axum::Router> {
+    let options = crate::cli::layer_options(args, &invocation.cwd, &invocation.env);
+    let overrides: Vec<heddle_config::NamedLayer> =
+        crate::cli::root_overrides(args, &invocation.cwd)
+            .into_iter()
+            .collect();
+    let catalog =
+        crate::builtins::BuiltinCatalog::new(invocation.env.clone(), invocation.cwd.clone());
+    let service = heddle_config::SettingsService::new(
+        &options,
+        &overrides,
+        invocation.env.clone(),
+        Box::new(catalog),
+    )
+    .ok()?;
+    Some(
+        axum::Router::new()
+            .route("/api/settings", axum::routing::any(settings_answer))
+            .route("/api/settings/{ns}", axum::routing::any(settings_answer))
+            .with_state(Arc::new(service)),
+    )
+}
+
+/// One settings request, answered off the async runtime because it reads and writes the profile patch.
+async fn settings_answer(
+    axum::extract::State(service): axum::extract::State<Arc<heddle_config::SettingsService>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = uri.path().to_owned();
+    let answer = tokio::task::spawn_blocking(move || {
+        heddle_config::handle_settings_request(&service, method.as_str(), &path, &body)
+    })
+    .await
+    .ok()
+    .flatten();
+    match answer {
+        Some(response) => (
+            axum::http::StatusCode::from_u16(response.status)
+                .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+            axum::Json(response.body),
+        )
+            .into_response(),
+        None => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// What the composer's routes read: the booted session store, the model service and the sandbox.
@@ -939,6 +1052,15 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         }
         schedule.start_delivery();
     }
+    // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+    if let (Some(jobs), Some(hub)) = (
+        boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs"),
+        boot.services.get::<heddle_server::EventHub>("event-hub"),
+    ) {
+        jobs.on_change(move || {
+            hub.publish(heddle_server::SseFrame::new("jobs", &serde_json::json!({})));
+        });
+    }
     notes
 }
 
@@ -1270,9 +1392,91 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            4,
-            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
+            6,
+            "the plugin inventory, files, trajectory, the composer, the reminder routes and the job routes (each 503 without its row)"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_settings_routes_write_the_active_profiles_patch() {
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let profile = root.join("home/profiles/dev");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("cordis.yml"),
+            "- insert:\n    - id: tools\n      name: ./src/plugins/tools.ts\n      config: {bashTimeoutMs: 30000}\n",
+        )
+        .unwrap();
+        let invocation = Invocation {
+            argv: Vec::new(),
+            env: heddle_config::Env::default()
+                .with("HEDDLE_HOME", root.join("home").to_string_lossy())
+                .with("HOME", root.to_string_lossy()),
+            cwd: root.clone(),
+        };
+        let args = Args {
+            profile: Some("dev".into()),
+            ..Args::default()
+        };
+        let router = settings_router(&args, &invocation).expect("a settings router");
+        drop(router);
+        let options = crate::cli::layer_options(&args, &invocation.cwd, &invocation.env);
+        let service = Arc::new(
+            heddle_config::SettingsService::new(
+                &options,
+                &[],
+                invocation.env.clone(),
+                Box::new(crate::builtins::BuiltinCatalog::new(
+                    invocation.env.clone(),
+                    invocation.cwd.clone(),
+                )),
+            )
+            .unwrap(),
+        );
+        let call = |method: axum::http::Method, path: &str, body: &str| {
+            let service = Arc::clone(&service);
+            let response = crate::runtime::tokio().block_on(settings_answer(
+                axum::extract::State(service),
+                method,
+                path.parse().unwrap(),
+                axum::body::Bytes::from(body.to_owned()),
+            ));
+            let status = response.status().as_u16();
+            let bytes = crate::runtime::tokio()
+                .block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
+        };
+        let (status, view) = call(axum::http::Method::GET, "/api/settings", "");
+        assert_eq!(status, 200, "{view}");
+        assert_eq!(view["writable"], true);
+        let (status, entry) = call(
+            axum::http::Method::POST,
+            "/api/settings/tools",
+            r#"{"update": {"bashTimeoutMs": 60000}, "expectedRevision": 1}"#,
+        );
+        assert_eq!(status, 200, "{entry}");
+        assert_eq!(entry["value"]["bashTimeoutMs"], 60000);
+        let written = std::fs::read_to_string(profile.join("heddle.patch.yml")).unwrap();
+        assert!(written.contains(heddle_config::SETTINGS_BEGIN), "{written}");
+        let (status, stale) = call(
+            axum::http::Method::POST,
+            "/api/settings/tools",
+            r#"{"update": {"bashTimeoutMs": 1}, "expectedRevision": 1}"#,
+        );
+        assert_eq!(status, 409, "{stale}");
+        assert_eq!(stale["code"], "settings-conflict");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1443,6 +1647,67 @@ mod tests {
         // A nominated default that exists wins.
         service.nominate_default("second");
         assert_eq!(models.default_endpoint().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn the_plugin_inventory_lists_each_row_with_the_state_the_loader_left_it_in() {
+        use crate::builtins::ComponentRef;
+        let composed = |id: &str, name: &str, disabled: bool| heddle_config::ComposedRow {
+            row: heddle_config::EntryRow {
+                id: Some(id.to_owned()),
+                name: name.to_owned(),
+                disabled: disabled.then_some(true),
+                ..heddle_config::EntryRow::default()
+            },
+            position: 0,
+            fields: Vec::new(),
+        };
+        let entry = |id: &str, name: &str, state: FiberState| crate::boot::Entry {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            component: ComponentRef::Unresolved(name.to_owned()),
+            requires: Vec::new(),
+            state,
+            error: None,
+        };
+        let mut boot = empty_boot();
+        boot.rows = vec![
+            composed("session", "./src/plugins/session.ts", false),
+            composed("goal-tool", "./src/plugins/goal-tool.ts", true),
+            composed("todo-tool", "./src/plugins/todo-tool.ts", false),
+            composed("gone", "./gone.ts", false),
+        ];
+        boot.entries = vec![
+            entry("session", "./src/plugins/session.ts", FiberState::Active),
+            entry(
+                "todo-tool",
+                "./src/plugins/todo-tool.ts",
+                FiberState::Failed,
+            ),
+            entry("gone", "./gone.ts", FiberState::Disposed),
+        ];
+        assert_eq!(
+            serde_json::to_value(plugin_inventory_of(&boot)).unwrap(),
+            json!({"entries": [
+                {"entryId": "session", "moduleName": "./src/plugins/session.ts", "enabled": true, "fiberPhase": "active"},
+                {"entryId": "goal-tool", "moduleName": "./src/plugins/goal-tool.ts", "enabled": false, "fiberPhase": null},
+                {"entryId": "todo-tool", "moduleName": "./src/plugins/todo-tool.ts", "enabled": true, "fiberPhase": "failed"},
+                {"entryId": "gone", "moduleName": "./gone.ts", "enabled": true, "fiberPhase": null},
+            ]}),
+            "the disabled row the loader gave no entry is listed disabled, and a disposed entry has no phase"
+        );
+        assert_eq!(
+            fiber_phase(FiberState::Pending),
+            Some(heddle_config::PluginFiberPhase::Pending)
+        );
+        assert_eq!(
+            fiber_phase(FiberState::Loading),
+            Some(heddle_config::PluginFiberPhase::Loading)
+        );
+        assert_eq!(
+            fiber_phase(FiberState::Unloading),
+            Some(heddle_config::PluginFiberPhase::Unloading)
+        );
     }
 
     fn empty_boot() -> Boot {

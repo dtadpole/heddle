@@ -28,6 +28,7 @@ use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, Ses
 use crate::mode::{
     MODE_EVENT, effective_mode as fold_effective_mode, recorded_mode as fold_recorded_mode,
 };
+use crate::repair::interrupted_turn_closers;
 use crate::store::{EventListener, SessionStore, default_session_root};
 use crate::surface::{SurfaceState, inherits_answer};
 
@@ -498,9 +499,22 @@ impl SessionService {
         self.store.derive_node(handle, seq)
     }
 
-    /// Every event so far.
+    /// Every event so far, for a caller that wants to show it.
+    ///
+    /// A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the
+    /// closers the next write-open will append ([`crate::repair`]), and nothing is written — DSH's cold read
+    /// (`readColdSessionLog`, dsh-session-query lib/index.js:26-52). So a call cut by a restart reads as
+    /// interrupted at once, not as running until somebody writes the session (issue #5). The model's view is
+    /// [`SessionService::messages`], which reads the log itself.
     pub fn events(&self, handle: &SessionHandle) -> Result<Events, SessionError> {
-        self.store.read(handle)
+        let events = self.store.read(handle)?;
+        let closers = interrupted_turn_closers(&events);
+        if closers.is_empty() || self.store.writer_held(handle) {
+            return Ok(events);
+        }
+        let mut balanced = events.as_ref().clone();
+        balanced.extend(closers.into_iter().map(Arc::new));
+        Ok(Arc::new(balanced))
     }
 
     /// Every session, newest first.

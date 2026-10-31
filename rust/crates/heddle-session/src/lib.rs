@@ -43,6 +43,7 @@ pub mod layout;
 pub mod message;
 pub mod meta;
 pub mod mode;
+pub mod repair;
 pub mod search;
 pub mod service;
 pub mod store;
@@ -73,6 +74,7 @@ pub use meta::{
     CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta, SessionOrigin,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
+pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
 pub use search::{
     SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
     SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,
