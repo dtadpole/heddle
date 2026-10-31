@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T06:07:00Z
+modified: 2026-10-31T07:20:00Z
 level: L3
 version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -89,6 +89,9 @@ grounded_in:
   conversations*, carries DSH's "Archived sessions cannot be opened. Unarchive it to view." as its accessible
   description, and clicking it says so and opens nothing, while a live row still opens (`dsh-client-ui-workspace`
   `guardedOpen`).
+- [`check-tree-keyboard.mjs`](check-tree-keyboard.mjs) — the session tree from the keyboard, with the browser's own key
+  events: Enter or Space on a row's `Pin session`, `Archive session`, `…` or `New session in` acts on that control and
+  never opens the row (#98).
 
 ## What it deliberately does not judge
 

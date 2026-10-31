@@ -11928,6 +11928,18 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * Whether a key pressed in a tree row opens the row (#98): Enter or Space whose target is the row itself. A key on a
+   * control inside the row (the `…`, Archive, Pin, New session in, an item of the row's menu) belongs to that control,
+   * which the browser activates as the button it is. DSH's row controls are plain `<button>`s with no key handler above
+   * them: its rows carry an `onClick` only (`dsh-client-ui-workspace` lib/client.js:1965-1970, :2273-2282), and each
+   * control stops its own click there (`:2015-2017`, `:2033-2035`, `:2323-2327`). The row here also takes the keys,
+   * because it is focusable, and it took them from every control inside it: Archive opened the session.
+   */
+  function rowKeyOpens(event, row) {
+    return event !== null && typeof event === 'object' && event.target === row && (event.key === 'Enter' || event.key === ' ')
+  }
+
+  /**
    * A session row's primary status, DSH's `sessionStatuses` (dsh-client-ui-workspace `client.js:2068-2117`): a pending
    * interaction outranks running, which outranks an unread completion; otherwise idle. A pending one's `trailingLabel`
    * takes the time's place on the row. `{ pending: 'approval' | 'plan-review' | 'question' | undefined, running, completed }`.
@@ -11986,6 +11998,7 @@ const WorkspaceTree = (() => {
     completionUnread,
     ARCHIVED_NOT_OPENABLE,
     opensOnClick,
+    rowKeyOpens,
     selectionRecord,
     savedSelection,
     recentWorkspace,
@@ -12629,11 +12642,11 @@ function nodeRow(node, depth = 0) {
     }
     await toggle(node, li)
   }
+  /** Enter and Space open the row only when the row itself has focus; a control inside it keeps its own keys (#98). */
   row.onkeydown = (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      row.onclick()
-    }
+    if (!WorkspaceTree.rowKeyOpens(event, row)) return
+    event.preventDefault()
+    row.onclick()
   }
   /**
    * A clipped title reveals itself on the pointer arriving, and returns on the pointer leaving — the same two moments DSH's

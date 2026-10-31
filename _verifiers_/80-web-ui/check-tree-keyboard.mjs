@@ -1,0 +1,283 @@
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { join } from 'node:path'
+import { after, test } from 'node:test'
+
+import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+
+/**
+ * The session tree from the keyboard, driven with the browser's own key events (#98, #92, #95).
+ *
+ * DSH's tree rows are `role="treeitem"` elements with an `onClick` and no key handler (dsh-client-ui-workspace
+ * lib/client.js:1965-1970, :2273-2282), its row controls plain `<button>`s that stop their own click (:2015-2017,
+ * :2033-2035, :2323-2327), its `Show {n} more sessions` a `<button aria-expanded>` (:3309-3326), and its row and View
+ * options menus the shared `Menu` primitive, whose keyboard is arrows, Home and End, Tab and Escape with focus back on
+ * the trigger (dsh-web-frontend dist/assets/index-CN7NIWNw.js:129, `Menu` exported as `k_` at :188). Heddle's rows are
+ * focusable, which DSH's are not, so these checks judge that each key reaches what it is pressed on.
+ *
+ * One server and one browser serve every test here, on one workspace of eight titled sessions.
+ */
+
+const CAPABILITY = 'the Web UI'
+
+/** Spawn `heddle web` on a free port and resolve with its URL once it prints one. */
+function startCli(args, env) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(...heddleCommand(args), {
+      cwd: repoRoot,
+      env: { ...process.env, NO_COLOR: '1', ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let output = ''
+    let settled = false
+    const onData = (chunk) => {
+      output += chunk.toString()
+      const match = /heddle web: (http:\/\/\S+)/.exec(output)
+      if (match && !settled) {
+        settled = true
+        resolvePromise({ url: match[1], kill: () => child.kill('SIGKILL') })
+      }
+    }
+    child.stdout.on('data', onData)
+    child.stderr.on('data', onData)
+    child.on('exit', (code) => {
+      if (!settled) {
+        settled = true
+        reject(new Error(`the server exited ${code} before printing a URL\n${output}`))
+      }
+    })
+    setTimeout(() => {
+      if (!settled) {
+        settled = true
+        child.kill('SIGKILL')
+        reject(new Error(`the server printed no URL within 15s\n${output}`))
+      }
+    }, 15_000).unref()
+  })
+}
+
+async function api(url, cookie, path, init = {}) {
+  const response = await fetch(new URL(path, url), { ...init, headers: { cookie, 'content-type': 'application/json', ...(init.headers ?? {}) } })
+  const text = await response.text()
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    body = text
+  }
+  return { status: response.status, body }
+}
+
+/** The shared fixture: a server, a browser, a registered workspace and its sessions `tk 1` to `tk 8`, made once. */
+let shared = null
+function fixture() {
+  shared ??= (async () => {
+    const home = isolatedHome('tree-keyboard')
+    const root = fixtureDir('tree-keyboard-repo')
+    const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+    const server = await startCli(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+      { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+    )
+    let browser = null
+    const close = async () => {
+      if (browser !== null) await browser.close()
+      server.kill()
+      removeDir(home)
+      removeDir(root)
+    }
+    try {
+      browser = await openBrowser()
+      const handshake = await fetch(server.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+      assert.equal(added.status, 200, `the workspace is registered (${JSON.stringify(added.body)})`)
+      const ids = {}
+      for (let index = 1; index <= 8; index += 1) {
+        const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root, title: `tk ${index}` }) })
+        assert.equal(made.status, 200, `session tk ${index} is made`)
+        ids[`tk ${index}`] = made.body.session
+        /** Apart in time, so newest-first is tk 8 down to tk 1 whatever the clock's resolution. */
+        await new Promise((done) => setTimeout(done, 20))
+      }
+      const listed = await api(server.url, cookie, '/api/workspaces')
+      const entry = (Array.isArray(listed.body) ? listed.body : listed.body.workspaces ?? []).find((each) => each.path === root)
+      const label = entry?.title ?? root.split('/').pop()
+      return {
+        home,
+        root,
+        server,
+        browser,
+        cookie,
+        ids,
+        label,
+        api: (path, init) => api(server.url, cookie, path, init),
+        close,
+      }
+    } catch (error) {
+      /** A fixture that fails half-made still stops its server and browser, so the run can end. */
+      await close()
+      throw error
+    }
+  })()
+  return shared
+}
+after(async () => {
+  if (shared !== null) await (await shared.catch(() => ({ close: async () => {} }))).close()
+})
+
+/** Load the page afresh and wait until the workspace's session rows are drawn. */
+async function load(f) {
+  await f.browser.goto(f.server.url)
+  await f.browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+  await f.browser.waitFor(`document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="session"]').length >= 3`, 15_000)
+  await quiet(f.browser)
+}
+
+/** One key the way a keyboard sends it — the protocol's key events, as check-workspace-tree.mjs's `press` does. */
+async function press(browser, key, modifiers = {}) {
+  const keys = {
+    Enter: { code: 'Enter', keyCode: 13, text: '\r' },
+    ' ': { code: 'Space', keyCode: 32, text: ' ' },
+    Escape: { code: 'Escape', keyCode: 27 },
+    Tab: { code: 'Tab', keyCode: 9 },
+    ArrowDown: { code: 'ArrowDown', keyCode: 40 },
+    ArrowUp: { code: 'ArrowUp', keyCode: 38 },
+    Home: { code: 'Home', keyCode: 36 },
+    End: { code: 'End', keyCode: 35 },
+  }
+  const description = keys[key]
+  const common = {
+    key,
+    code: description.code,
+    windowsVirtualKeyCode: description.keyCode,
+    nativeVirtualKeyCode: description.keyCode,
+    modifiers: modifiers.shift === true ? 8 : 0,
+  }
+  await browser.send('Input.dispatchKeyEvent', {
+    type: description.text === undefined ? 'rawKeyDown' : 'keyDown',
+    ...common,
+    ...(description.text === undefined ? {} : { text: description.text, unmodifiedText: description.text }),
+  })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', ...common })
+  await new Promise((done) => setTimeout(done, 60))
+}
+
+/** Wait for an expression, answering false instead of throwing when it never holds. */
+async function settle(browser, expression, timeoutMs) {
+  try {
+    return await browser.waitFor(expression, timeoutMs)
+  } catch {
+    return false
+  }
+}
+
+/** Wait until the tree has drawn nothing new for 400 ms (at most 4 s), so a key is never pressed into a redraw. */
+async function quiet(browser) {
+  await browser.evaluate(`new Promise((done) => {
+    const tree = document.getElementById('tree')
+    let timer = 0
+    const finish = () => {
+      observer.disconnect()
+      clearTimeout(timer)
+      clearTimeout(cap)
+      done(true)
+    }
+    const observer = new MutationObserver(() => {
+      clearTimeout(timer)
+      timer = setTimeout(finish, 400)
+    })
+    const cap = setTimeout(finish, 4000)
+    timer = setTimeout(finish, 400)
+    observer.observe(tree, { childList: true, subtree: true })
+  })`)
+}
+
+/** The tree item of the session row labelled `label`, as a page expression. */
+const rowOf = (label) => `[...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li.querySelector(':scope > .row > .label')?.textContent === ${JSON.stringify(label)})`
+
+/**
+ * Focus a control of a row, the way Tab reaches it: the row first, which draws its controls (`:focus-within`), then the
+ * control named `name` inside it. Answers what holds focus.
+ */
+async function focusControl(browser, li, name) {
+  return browser.evaluate(`(() => {
+    const li = ${li}
+    if (li === undefined || li === null) return 'no row'
+    li.querySelector(':scope > .row').focus()
+    const control = [...li.querySelectorAll(':scope > .row button')].find((button) => button.getAttribute('aria-label') === ${JSON.stringify(name)} || button.getAttribute('aria-label')?.startsWith(${JSON.stringify(name)}))
+    if (control === undefined) return 'no control'
+    control.focus()
+    return document.activeElement === control ? 'focused' : 'not focused: ' + (document.activeElement?.outerHTML ?? '').slice(0, 80)
+  })()`)
+}
+
+const openTitle = `document.getElementById('session-title').textContent`
+const selectedLabels = `JSON.stringify([...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.querySelector(':scope > .row > .label')?.textContent ?? ''))`
+
+test('Enter or Space on a row control acts on the control and never opens the row (#98)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const f = await fixture()
+  const { browser } = f
+  await load(f)
+  /** tk 8 open, so every row the keys are pressed on is a row that is not open. */
+  await browser.evaluate(`${rowOf('tk 8')}.querySelector(':scope > .row').click()`)
+  await browser.waitFor(`${openTitle}.includes('tk 8')`, 10_000)
+  await quiet(browser)
+  const sessions = async () => (await f.api('/api/sessions')).body
+  const flags = async (label) => (await sessions()).find((meta) => meta.id === f.ids[label]) ?? {}
+
+  /** Enter on `Pin session` pins that row; the open session stays the one it was. */
+  assert.equal(await focusControl(browser, rowOf('tk 5'), 'Pin session'), 'focused', 'the keyboard reaches tk 5\'s Pin session')
+  await press(browser, 'Enter')
+  await settle(browser, `${rowOf('tk 5')}?.dataset.pinned === 'true' || ${openTitle}.includes('tk 5')`, 5_000)
+  await quiet(browser)
+  const afterEnter = { title: await browser.evaluate(openTitle), selected: JSON.parse(await browser.evaluate(selectedLabels)), pinned: (await flags('tk 5')).pinned === true }
+  assert.ok(!afterEnter.title.includes('tk 5') && !afterEnter.selected.includes('tk 5'), `Enter on Pin does not open the row\nsaw: ${JSON.stringify(afterEnter)}`)
+  assert.equal(afterEnter.pinned, true, `Enter on Pin pins the session\nsaw: ${JSON.stringify(afterEnter)}`)
+
+  /** Space on `Pin session` does the same. */
+  assert.equal(await focusControl(browser, rowOf('tk 6'), 'Pin session'), 'focused', 'the keyboard reaches tk 6\'s Pin session')
+  await press(browser, ' ')
+  await settle(browser, `${rowOf('tk 6')}?.dataset.pinned === 'true' || ${openTitle}.includes('tk 6')`, 5_000)
+  await quiet(browser)
+  const afterSpace = { title: await browser.evaluate(openTitle), selected: JSON.parse(await browser.evaluate(selectedLabels)), pinned: (await flags('tk 6')).pinned === true }
+  assert.ok(!afterSpace.title.includes('tk 6') && !afterSpace.selected.includes('tk 6'), `Space on Pin does not open the row\nsaw: ${JSON.stringify(afterSpace)}`)
+  assert.equal(afterSpace.pinned, true, `Space on Pin pins the session\nsaw: ${JSON.stringify(afterSpace)}`)
+
+  /** Space on the `…` opens the row's menu, not the session. */
+  assert.equal(await focusControl(browser, rowOf('tk 7'), 'actions for'), 'focused', 'the keyboard reaches tk 7\'s actions button')
+  await press(browser, ' ')
+  await settle(browser, `${rowOf('tk 7')}.querySelector('.menu-wrap > .menu:not([hidden])') !== null || ${openTitle}.includes('tk 7')`, 5_000)
+  const menu = JSON.parse(
+    await browser.evaluate(`JSON.stringify({
+      open: ${rowOf('tk 7')}.querySelector('.menu-wrap > .menu:not([hidden])') !== null,
+      expanded: ${rowOf('tk 7')}.querySelector('.menu-wrap > button').getAttribute('aria-expanded'),
+      title: ${openTitle},
+    })`),
+  )
+  assert.deepEqual({ open: menu.open, expanded: menu.expanded, opened: menu.title.includes('tk 7') }, { open: true, expanded: 'true', opened: false }, `Space on the … opens its menu and not the session\nsaw: ${JSON.stringify(menu)}`)
+  await browser.evaluate(`document.body.click()`)
+  await quiet(browser)
+
+  /** Enter on `Archive session` archives that row. */
+  assert.equal(await focusControl(browser, rowOf('tk 4'), 'Archive session'), 'focused', 'the keyboard reaches tk 4\'s Archive session')
+  await press(browser, 'Enter')
+  await settle(browser, `${rowOf('tk 4')} === undefined || ${openTitle}.includes('tk 4')`, 5_000)
+  await quiet(browser)
+  const archived = { title: await browser.evaluate(openTitle), archived: (await flags('tk 4')).archived === true }
+  assert.ok(!archived.title.includes('tk 4'), `Enter on Archive does not open the row\nsaw: ${JSON.stringify(archived)}`)
+  assert.equal(archived.archived, true, `Enter on Archive archives the session\nsaw: ${JSON.stringify(archived)}`)
+
+  /** Enter on `New session in <workspace>` starts a session there, and leaves the workspace open. */
+  const before = (await sessions()).length
+  const workspaceRow = `document.querySelector('#tree > li[data-kind="workspace"]')`
+  assert.equal(await focusControl(browser, workspaceRow, 'New session in'), 'focused', 'the keyboard reaches New session in the workspace')
+  await press(browser, 'Enter')
+  for (let waited = 0; waited < 5_000 && (await sessions()).length === before; waited += 250) await new Promise((done) => setTimeout(done, 250))
+  await quiet(browser)
+  const started = { count: (await sessions()).length, expanded: await browser.evaluate(`${workspaceRow}.getAttribute('aria-expanded')`) }
+  assert.deepEqual(started, { count: before + 1, expanded: 'true' }, 'Enter on New session in starts a session and does not fold the workspace')
+})

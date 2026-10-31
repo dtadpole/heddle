@@ -473,3 +473,22 @@ test('a Rename or Delete of a workspace another tab removed says so in words and
     assert.doesNotMatch(text, /body\.error \?\?/, `${name} no longer prints the server's raw text`)
   }
 })
+
+/** The body of one top-level function of the page, from its first line to its closing brace. */
+function pageFunction(start: string) {
+  const from = page.indexOf(start)
+  assert.ok(from > 0, `${start} is in the page`)
+  return page.slice(from, page.indexOf('\n}\n', from))
+}
+
+test('a key on a tree row\'s control is the control\'s: the row opens only on a key pressed on the row itself (#98)', () => {
+  /**
+   * DSH's row controls are plain buttons with no key handler above them (dsh-client-ui-workspace lib/client.js:1965-1970,
+   * :2273-2282, :2015-2017, :2033-2035, :2323-2327). The page's row took Enter and Space from every control inside it, so
+   * Archive, Pin, the `…` and New session in opened the session or folded the workspace. The rule is judged in
+   * test/workspace-tree.test.ts and the keys in 80's check-tree-keyboard.mjs; this detects the row taking them back.
+   */
+  const build = pageFunction('function nodeRow(node, depth = 0) {')
+  assert.match(build, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'the row asks the rule before it takes a key')
+  assert.doesNotMatch(build, /onkeydown = \(event\) => \{\s*if \(event\.key === 'Enter'/, 'and no handler in the row takes Enter whatever its target')
+})
