@@ -3300,7 +3300,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.menuChrome.position, 'fixed', `a menu floats in viewport coordinates\nsaw: ${JSON.stringify(reading.menuChrome)}`)
     assert.equal(reading.menuChrome.insideViewport, true, 'and is entirely on screen')
     assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
-    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
+    /**
+     * Eight items since C17 added DSH's `Manual` (dsh-client-ui-workspace/lib/client.js:2914-2918, with its chevrons
+     * glyph): Workspace Tree, Workspace, In one list, Manual, Last updated, and the archive trio.
+     */
+    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
 
     /** **A session's glyph is a conversation**, not a folder: the reference's bubble artwork, distinct from the folder path. */
     const glyphs = JSON.parse(
