@@ -140,6 +140,9 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     'kindIcon',
     'current',
     'showSession',
+    'orderState',
+    'shownOrders',
+    'wireSessionDrag',
     `${body}\nreturn { applySearch, renderFlatList }`,
   )(
     document,
@@ -163,6 +166,10 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     () => new FakeElement(registry),
     null,
     async () => undefined,
+    /** The one-column list draws in the chosen order (C17, order-modes): Last updated here; a row drag is not judged. */
+    { orderBy: 'updated', orders: {} },
+    {},
+    () => undefined,
   ) as { applySearch: () => Promise<void>; renderFlatList: () => Promise<void> }
 
   /** Type a query, then let every pending answer and debounce run, as a person waiting a moment would. */
@@ -370,14 +377,23 @@ const nested = {
     sessionAt('s-scratch', 4, 'Heron scratch', '/code/team/nest/scratch'),
     /** Listed under `nest` by the server, which compares canonical paths; its own `cwd` is the link's. */
     sessionAt('s-link', 5, 'Heron link', '/links/nest'),
-    /** A subagent's session: never a hit or a tree row, but the one-column list draws it, and membership skips it. */
+    /**
+     * A subagent's session: never a hit, a tree row or a row of the one-column list, which since order-modes (C17) draws
+     * the tree's rows (`WorkspaceTree.flatRows`).
+     */
     sessionAt('s-child', 6, 'Heron child', '/code/team/nest/src', { origin: 'subagent' }),
   ],
 }
 
-function nestedServer(workspaces: () => Reply): Route {
+/**
+ * A session `/api/workspaces` does not list (one made between the page's two reads, say): no membership, so the
+ * one-column list names it by the longest registered path that holds its folder.
+ */
+const unlisted = sessionAt('s-unlisted', 0, 'Heron unlisted', '/code/team/nest/src')
+
+function nestedServer(workspaces: () => Reply, sessions: unknown[] = nested.sessions): Route {
   return (url) => {
-    if (url === '/api/sessions') return answer(nested.sessions)
+    if (url === '/api/sessions') return answer(sessions)
     /** The roots the tree draws at the top: `team` only, as `/api/tree` lists them. */
     if (url === '/api/tree') return answer({ children: [{ path: '/code/team', label: 'team' }] })
     if (url === '/api/workspaces') return workspaces()
@@ -399,12 +415,10 @@ test('a search hit for a session in a nested registered workspace names that wor
 })
 
 test('a row of the one-column list names the nearest registered workspace that holds its session, not the top-level root (#57)', async () => {
-  const view = loadPage({ treeGroups: [], grouping: 'list', route: nestedServer(() => answer({ workspaces: nested.workspaces })) })
+  const view = loadPage({ treeGroups: [], grouping: 'list', route: nestedServer(() => answer({ workspaces: nested.workspaces }), [...nested.sessions, unlisted]) })
   assert.deepEqual(
     await view.flatRows(),
     [
-      /** No membership (a subagent's session is not a tree row), so the longest registered path that holds its folder. */
-      'Heron child | Nest desk',
       /** Membership: the server filed it under nest, though its own path is the link's. */
       'Heron link | Nest desk',
       /** Filed under the automatic workspace, which the tree climbs past to nest. */
@@ -412,16 +426,18 @@ test('a row of the one-column list names the nearest registered workspace that h
       'Heron deep | Nest desk',
       'Heron draft | Nest desk',
       'Heron top | team',
+      /** No membership, so the longest registered path that holds its folder. */
+      'Heron unlisted | Nest desk',
     ],
     'each row names the workspace the tree files it under, by its title',
   )
 })
 
 test('with no workspace list, a row of the one-column list falls back to the top-level root that holds it (#57)', async () => {
-  const view = loadPage({ treeGroups: [], grouping: 'list', route: nestedServer(() => answer({ error: 'unavailable' }, 503)) })
+  const view = loadPage({ treeGroups: [], grouping: 'list', route: nestedServer(() => answer({ error: 'unavailable' }, 503), [...nested.sessions, unlisted]) })
   assert.deepEqual(
     await view.flatRows(),
-    ['Heron child | team', 'Heron link | ', 'Heron scratch | team', 'Heron deep | team', 'Heron draft | team', 'Heron top | team'],
+    ['Heron link | ', 'Heron scratch | team', 'Heron deep | team', 'Heron draft | team', 'Heron top | team', 'Heron unlisted | team'],
     'the root, the last resort, names what it holds, and a folder nothing holds names no workspace',
   )
 })
