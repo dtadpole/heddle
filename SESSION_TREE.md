@@ -1,7 +1,7 @@
 ---
 title: Heddle Session Tree
 level: L2
-version: 1.2.0
+version: 1.2.1
 description: How a workspace names a target folder, how a session is bound to a folder, and how that becomes a recursive tree in the Web UI's left column.
 status: unverified
 grounded_in:
@@ -142,7 +142,7 @@ What the two menus say about a session, and where each fact lives:
 |---|---|---|
 | its **name** | the store's `title`, and the definition's `session.json` | a name is content: the committed record should call the session what its reader calls it |
 | its **pin** and its **archive** | the store's meta only | reading state rather than facts about the run: in the definition, the tree and the store disagreed and sessions vanished |
-| its **age** and turn count | the row (`6min`), the tooltip (the count) | DSH's list reads `context-mgmt 4d`; the age is what tells a reader which conversations are live |
+| its **age** | the row (`6min`) and its hover card (`6min ago`) | DSH's list reads `context-mgmt 4d`; the age is what tells a reader which conversations are live |
 
 A session **names itself from its first message** when nothing has named it — one line, shortened at a word —
 because a list of clock names is a list nobody can scan. A title a person typed afterwards wins, because this
@@ -152,8 +152,10 @@ sessions are.
 
 **A session's own `…` holds its name.** The owner's request of 2026-10-17: a session row offers
 `Rename…`, which sets the session's **title** — the label a person reads — and the row then shows that
-title instead of the folder it lives in. The folder stays the identity, and stays reachable as the row's
-tooltip, because the conventions require an instance name and a person is not expected to type one. One
+title instead of the folder it lives in. The folder stays the identity, because the conventions require an
+instance name and a person is not expected to type one, but the row keeps it in `data-definition`, never in its
+tooltip: it is an internal path with the home directory in it, and a focusable row's tooltip is read aloud; the
+tooltip is the title (#109). One
 rename writes **both** halves: the store's meta record, which this UI and a listing read, and the session's
 `session.json`, which is the record a reader of the repository reads — a rename that stopped at the store
 would leave the committed definition calling the session something else.
@@ -299,7 +301,7 @@ not need a browser.
 | `POST /api/workspaces` `{path, name?}` | register an existing absolute folder; `created: false` when it already is one; `400` for a missing, relative, absent or file path |
 | `PATCH /api/workspaces/<id\|path>` `{title}` | retitle a root; `400` on an empty name, `409 workspace/name-conflict` on another workspace's name, a no-op on its own |
 | `DELETE /api/workspaces/<id\|path>` | remove the registration only; its sessions move to the root above (`adoptedBy`) or to Ungrouped; `404` when unknown (the CLI's `workspace remove` still refuses that case without `--force`) |
-| `POST /api/workspaces/default` | first use, DSH's `workspace/initializeDefault`: `{workspace}`, the record of `$HEDDLE_HOME/default-workspace` (made when missing, reused when present) while no workspace and no session exist, else `null`; once deleted it is never given back. The page asks once at startup when it has nothing to show, labels the workspace *Default workspace*, and aims the composer at it; no session is started (D-056). `500 workspace/default-failed` when the folder cannot be made |
+| `POST /api/workspaces/default` | first use, DSH's `workspace/initializeDefault`: `{workspace}`, the record of `$HEDDLE_HOME/default-workspace` (made when missing, reused when present) while no workspace and no session exist, else `null`; once deleted it is never given back. The page asks once at startup when it has nothing to show, labels the workspace *Default workspace*, and aims the composer at it; no session is started (D-056). The aim is not page memory: with no session open the page re-derives it on every load as the first workspace the tree draws, the hero chip and the note name it by its display title, and the first message posts it as `folder` with `new: true`; with no workspace at all the composer is inert in DSH's words and nothing is sent (#134). `500 workspace/default-failed` when the folder cannot be made |
 | `GET /api/directories?path=<abs>`, `POST /api/directories` `{parent, name}` | the page's folder chooser: one level of folders (the home when no path), one new child folder; DSH's browse picker |
 | `POST /api/sessions/<id>/title` `{title}` | retitle a conversation; the log is untouched |
 | `GET /api/sessions`, `/api/sessions/<id>`, `/api/events`, `/api/turn` | unchanged |
