@@ -1247,6 +1247,22 @@ mod tests {
     mod pty {
         use super::*;
 
+        /// The PTY tests take turns. Each finds its terminal's tty and jobs in the whole process table (`ps -A`), and six
+        /// of them at once beside the crate's other tests on a loaded runner (load average about 20, some 1,280
+        /// processes) let `ps` outlast its 5 s helper timeout: the table came back empty, a resize answered Unavailable
+        /// and an escaped job was not found to end. One at a time they pass on the same runner.
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        /// Whether `pid` is gone within a few seconds. A job ended by the terminal's close is reaped by init, which on
+        /// a loaded runner takes longer than a fixed pause allowed.
+        async fn ends_soon(pid: u32) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while signals::alive(pid) && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            !signals::alive(pid)
+        }
+
         fn scratch(label: &str) -> PathBuf {
             let root =
                 std::env::temp_dir().join(format!("heddle-terminal-{label}-{}", new_terminal_id()));
@@ -1309,6 +1325,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_terminal_takes_input_a_resize_and_closes_with_its_jobs() {
+            let _turn = SERIAL.lock().await;
             let cwd = scratch("io");
             let registry = TerminalRegistry::default();
             let info = spawn(&registry, "a", &cwd);
@@ -1356,14 +1373,14 @@ mod tests {
             );
             assert!(registry.attach("b", &info.id).is_none());
             assert!(registry.close("a", &info.id).await);
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            assert!(!signals::alive(job), "the job ended with its terminal");
+            assert!(ends_soon(job).await, "the job ended with its terminal");
             assert!(registry.list("a").is_empty());
             let _ = std::fs::remove_dir_all(cwd);
         }
 
         #[tokio::test]
         async fn a_job_that_left_the_tree_still_ends_with_its_terminal() {
+            let _turn = SERIAL.lock().await;
             // developer-ten's review, E: `(sleep 300 &)` is reparented to init but keeps the PTY's tty.
             let cwd = scratch("escaped");
             let registry = TerminalRegistry::default();
@@ -1391,9 +1408,8 @@ mod tests {
             let job = job.expect("the escaped job's pid");
             assert!(signals::alive(job));
             assert!(registry.close("a", &info.id).await);
-            tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(
-                !signals::alive(job),
+                ends_soon(job).await,
                 "the escaped job ended with its terminal"
             );
             let _ = std::fs::remove_dir_all(cwd);
@@ -1401,6 +1417,7 @@ mod tests {
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
         async fn concurrent_creates_cannot_pass_the_cap_and_none_start_after_shutdown() {
+            let _turn = SERIAL.lock().await;
             let cwd = scratch("race");
             let registry = TerminalRegistry::default();
             let creates: Vec<_> = (0..16)
@@ -1455,6 +1472,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_pty_that_cannot_start_is_an_exited_terminal_saying_why() {
+            let _turn = SERIAL.lock().await;
             let registry = TerminalRegistry::default();
             let gone =
                 std::env::temp_dir().join(format!("heddle-terminal-gone-{}", new_terminal_id()));
@@ -1479,6 +1497,7 @@ mod tests {
 
         #[tokio::test]
         async fn the_cap_holds_and_an_exit_is_reported() {
+            let _turn = SERIAL.lock().await;
             let cwd = scratch("cap");
             let registry = TerminalRegistry::new(
                 TerminalLimits {
@@ -1527,6 +1546,7 @@ mod tests {
 
         #[tokio::test]
         async fn the_replay_is_bounded_and_unattended_terminals_are_reclaimed() {
+            let _turn = SERIAL.lock().await;
             let cwd = scratch("replay");
             let registry = TerminalRegistry::new(
                 TerminalLimits {

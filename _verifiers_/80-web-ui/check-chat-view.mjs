@@ -2005,6 +2005,117 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
   }
 })
 
+test('a reader who scrolled back finds the same place after visiting another session', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH restores a transcript's scroll position on return (C74 in the parity inventory): a reader who scrolled back,
+   * opened another session and came back finds the same place, and one who was following the tail is still at it.
+   * Measured before this test: opening a session always jumped to its tail.
+   */
+  const longText = Array.from({ length: 80 }, (_, index) => `line ${index + 1} of a long answer to read back through`).join('\n')
+  /** The script's steps restart with each turn, so both sessions get the long answer; their prompts tell them apart. */
+  const server = await startServer('scroll-memory', () => [{ text: longText }])
+  const browser = await openBrowser({ width: 1100, height: 700 })
+  const metrics = () =>
+    browser.evaluate('JSON.stringify((() => { const log = document.getElementById("log"); return { top: Math.round(log.scrollTop), away: Math.round(log.scrollHeight - log.scrollTop - log.clientHeight), following: log.dataset.following } })())').then(JSON.parse)
+  try {
+    const cookie = await cookieFor(server.url)
+    /** Two sessions in a registered workspace, so each has the tree row a person clicks. */
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const sessions = []
+    for (const prompt of ['the first session', 'the second session']) {
+      const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+      const session = opened.body.session?.id ?? opened.body.id
+      const response = await fetch(new URL('/api/turn', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ prompt, folder: server.work, session }) })
+      await response.text()
+      sessions.push(session)
+    }
+    const [first, second] = sessions
+    assert.ok(first !== undefined && second !== undefined, 'two sessions were made')
+    const open = async (id, marker) => {
+      await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]') !== null`, 10_000)
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"] > .row').click()`)
+      await browser.waitFor(`document.getElementById("log").innerText.includes(${JSON.stringify(marker)})`, 10_000)
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    }
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await open(first, 'the first session')
+    assert.ok((await metrics()).away <= 1, 'a session opened for the first time shows its tail')
+
+    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = 300 })()')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    const left = await metrics()
+    assert.ok(left.away > 100 && left.following === 'false', `the reader scrolled back (${JSON.stringify(left)})`)
+
+    await open(second, 'the second session')
+    await open(first, 'the first session')
+    const back = await metrics()
+    assert.ok(Math.abs(back.top - left.top) <= 2, `the reader is back where they were (${back.top} vs ${left.top})`)
+    assert.equal(back.following, 'false', 'and is still reading back, not following')
+
+    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    await open(second, 'the second session')
+    await open(first, 'the first session')
+    assert.ok((await metrics()).away <= 1, 'a reader who was following the tail is at the tail again')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a code block names its language and is coloured the same whichever server drew it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * C60 in the parity inventory: DSH labels a fenced block with its language, and one highlighter colours it. heddle's
+   * two servers highlight on their own and were measured disagreeing on the same tokens (`x` was hljs-attr from the
+   * TypeScript server and hljs-variable from the Rust one), so the page re-highlights a fence with the highlight.js
+   * both servers serve. The expected markup is highlight.js's own for this line - the TypeScript server's colours -
+   * and it must come out the same, live and after a reload, on either build.
+   */
+  const answer = 'Here:\n\n```ts\nconst x: number = 1 // one\n```\n\nand plain:\n\n```\nno language\n```'
+  const expected = '<span class="hljs-keyword">const</span> <span class="hljs-attr">x</span>: <span class="hljs-built_in">number</span> = <span class="hljs-number">1</span> <span class="hljs-comment">// one</span>'
+  const server = await startServer('code-blocks', () => [{ text: answer }])
+  const browser = await openBrowser({ width: 1100, height: 800 })
+  const read = () =>
+    browser.evaluate(`JSON.stringify((() => {
+      const row = [...document.querySelectorAll('#log .turn.assistant')].at(-1)
+      const blocks = [...row.querySelectorAll('pre')]
+      return {
+        labels: blocks.map((pre) => pre.dataset.lang ?? null),
+        drawn: blocks.map((pre) => getComputedStyle(pre, '::before').content),
+        highlighted: blocks.map((pre) => pre.querySelector('code').dataset.highlighted ?? null),
+        first: blocks[0].querySelector('code').innerHTML.trim(),
+        copy: row.dataset.copyText ?? '',
+      }
+    })())`).then(JSON.parse)
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await sendMessage(browser, 'show me code')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant pre code[data-highlighted]") !== null', 20_000), 'the settled fence is coloured by the page')
+    const live = await read()
+    assert.deepEqual(live.labels, ['ts', null], 'the fence names its language, a bare fence names none')
+    assert.equal(live.drawn[0], '"ts"', 'and the label is drawn')
+    assert.deepEqual(live.highlighted, ['typescript', null], 'the alias resolves as the server resolves it, and a bare fence is left as drawn')
+    assert.equal(live.first, expected, 'coloured exactly as highlight.js colours it')
+    assert.ok(!/^ts\b/m.test(live.copy) && live.copy.includes('const x: number = 1 // one'), 'the label is not part of what Copy yields')
+
+    // A reload reopens the session the page remembers, and draws the answer from the transcript.
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant pre code[data-highlighted]") !== null', 15_000), 'a reload colours it again')
+    const reloaded = await read()
+    assert.deepEqual([reloaded.labels, reloaded.first], [live.labels, live.first], 'the same label and the same colours after a reload')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a turn this page did not start still says Weaving', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
@@ -2556,4 +2667,303 @@ test('markdown null or primitive JSON is answered with validation, never left ha
     assert.match((await good.json()).html, /<strong>valid<\/strong>/)
     assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2500) })).status, 200)
   } finally { await server.close() }
+})
+
+test('only a turn that edited files shows the Edited files card, under its own answer, live and after a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-five-8: after one write, every later answer showed that write's card, and a new copy
+   * was added under each new answer, because the live path pinned every edited turn's card to the last answers counted
+   * from the end. DSH's ChangedFiles card belongs to the turn that changed the files. The first turn writes a file;
+   * the script is then rewritten (both builds read it per round) so the next two turns only answer.
+   *
+   * The write names a path relative to the folder its turn runs in. This page sends its first message from an empty
+   * install, which now opens on its Default workspace with the composer aimed at it (DSH's startup,
+   * dsh-client-ui-workspace lib/client.js:1620-1631, initializeDefaultWorkspace), so the turn runs in
+   * <home>/default-workspace. Measured on both builds: a write to the server's own working folder is then outside the
+   * session's folder and fails, and a failed write rightly shows no card, so an absolute path there judged nothing.
+   */
+  const server = await startServer('edits-live', () => [
+    { toolCall: { name: 'write_file', arguments: { path: 'a.txt', content: 'one\n' } }, reasoning: 'writing a.txt' },
+    { text: 'wrote a.txt' },
+  ])
+  const browser = await openBrowser()
+  const cards = `JSON.stringify([...document.querySelectorAll('#log .turn.assistant')].map((row) => ({
+    text: [...row.childNodes].filter((node) => !(node instanceof Element && node.matches('[data-changed-files], .actions, .turn-usage, .turn-notice'))).map((node) => node.textContent).join('').trim(),
+    cards: row.querySelectorAll('[data-changed-files]').length,
+  })))`
+  const settled = (text, count) => `[...document.querySelectorAll('#log .turn.assistant')].filter((row) => row.dataset.rendered === 'true' && row.textContent.includes(${JSON.stringify(text)})).length === ${count}`
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    /**
+     * The page creates the session from its first message. (A session made by /api/folders/session and opened from the
+     * tree draws each live turn twice on TS, a separate defect, live-testing draft developer-eleven-1; this check judges
+     * the card.)
+     */
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await sendMessage(browser, 'write a.txt')
+    assert.ok(await browser.waitFor(settled('wrote a.txt', 1), 25_000), 'the writing turn finishes')
+    assert.ok(await browser.waitFor(`document.querySelectorAll('#log [data-changed-files]').length === 1`, 10_000), 'and shows its card')
+    writeFileSync(join(server.home, 'script.json'), JSON.stringify({ steps: [{ text: 'only an answer' }] }))
+    await sendMessage(browser, 'read it back')
+    assert.ok(await browser.waitFor(settled('only an answer', 1), 25_000), 'the second turn finishes')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await sendMessage(browser, 'and once more')
+    assert.ok(await browser.waitFor(settled('only an answer', 2), 25_000), 'the third turn finishes')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+
+    const judge = (rows, when) => {
+      assert.equal(rows.reduce((sum, row) => sum + row.cards, 0), 1, `one card in all, ${when} (${JSON.stringify(rows)})`)
+      const carded = rows.find((row) => row.cards === 1)
+      assert.equal(carded?.text, 'wrote a.txt', `under the answer of the turn that wrote, ${when}`)
+      for (const row of rows.filter((entry) => entry.text.includes('only an answer'))) {
+        assert.equal(row.cards, 0, `a turn that edited nothing shows none, ${when}`)
+      }
+      assert.ok(rows.every((row) => !row.text.includes('Edited')), `no card's words are drawn into an answer, ${when}`)
+    }
+    judge(JSON.parse(await browser.evaluate(cards)), 'live')
+
+    const listed = await api(server.url, cookie, '/api/sessions')
+    const session = (Array.isArray(listed.body) ? listed.body : listed.body.sessions ?? [])[0]?.id
+    assert.ok(typeof session === 'string', 'the page created the session')
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    if (!(await browser.waitFor(settled('only an answer', 2), 5_000).catch(() => false))) {
+      await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    }
+    assert.ok(await browser.waitFor(settled('only an answer', 2), 10_000), 'the reloaded session draws its answers')
+    judge(JSON.parse(await browser.evaluate(cards)), 'after a reload')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a settled subagent\'s notice reads as its blocks, a paragraph each, live, in the transcript and after a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-five-10: the notice a settled child sends its parent is three text blocks (DSH's
+   * `createSettlementMessage`: the summary, `Its closing message:`, the child's text), and both the transcript route and
+   * the page's live path joined them with nothing, so the page read one run-on line. The page is open on the parent
+   * session while the turn runs, so the notice arrives live first and is then read back from the transcript.
+   */
+  const server = await startServer('notice-blocks', () => [
+    { toolCall: { name: 'delegate', arguments: { prompt: 'child task' } } },
+    { text: 'parent started the child' },
+    { purpose: 'subagent', text: 'pong' },
+    { purpose: 'subagent-notice', text: 'parent read the notice' },
+  ])
+  const browser = await openBrowser()
+  const blocks = /^Background subagent \S+ finished\. It cannot receive follow-up messages\.\n\nIts closing message:\n\npong$/
+  const noticeText = 'document.querySelector("#log .trigger-notice .trigger-text")?.textContent ?? null'
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    /**
+     * A blank session is a tree row only while it is open (DSH's sessionVisible, stack 2), and its header shows no raw id
+     * (#24), so it is opened by id: the open resolves true once its history is drawn.
+     */
+    const shown = await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
+
+    /** The session has opened (its history drawn) before anything is sent into it: a send while it is still opening races the page's own redraw. */
+    assert.equal(shown, true, 'the session opens')
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'delegate it', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the parent turn ran (${turn.status})`)
+    await turn.text()
+
+    assert.ok(await browser.waitFor(`${noticeText} !== null`, 30_000), 'the notice arrives in the open page')
+    assert.match(String(await browser.evaluate(noticeText)), blocks, 'live, each block of the notice is its own paragraph')
+
+    let notice
+    for (let attempt = 0; attempt < 60 && notice === undefined; attempt += 1) {
+      const record = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+      notice = (record.body.turns ?? []).find((entry) => entry.kind === 'user' && entry.trigger?.kind === 'subagent-settled')
+      if (notice === undefined) await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    assert.ok(notice !== undefined, 'the transcript records the notice')
+    assert.match(notice.text, blocks, 'the transcript route folds the notice a paragraph per block')
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    if (!(await browser.waitFor(`${noticeText} !== null`, 5_000).catch(() => false))) {
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    }
+    assert.ok(await browser.waitFor(`${noticeText} !== null`, 10_000), 'the reloaded session draws the notice')
+    assert.match(String(await browser.evaluate(noticeText)), blocks, 'and after a reload it reads the same')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a turn stopped from the page is marked as stopped where it ended, live', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-ten-8 (issue #34): the turn's stream ends `cancelled` with no reason, so the live page
+   * drew nothing and a stopped answer read like a finished one, while a reload showed "Stopped by the caller" from the
+   * transcript. The live page now draws the same notice. (A reload on TS cannot show it until the TS server records the
+   * stop, developer-ten-2; this check judges the live marker on both builds.)
+   */
+  const server = await startServer('stopped-mark', () => [
+    { toolCall: { name: 'bash', arguments: { command: 'sleep 6; echo slow' } } },
+    { text: 'never reached' },
+  ], { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    /**
+     * A blank session is a tree row only while it is open (DSH's sessionVisible, stack 2), and its header shows no raw id
+     * (#24), so it is opened by id: the open resolves true once its history is drawn.
+     */
+    const shown = await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
+
+    /** The session has opened (its history drawn) before anything is sent into it: a send while it is still opening races the page's own redraw. */
+    assert.equal(shown, true, 'the session opens')
+    await sendMessage(browser, 'run the slow command')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.tool") !== null', 20_000), 'the slow call starts')
+    await browser.evaluate('document.getElementById("stop").click()')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 10_000), 'Stop ends the turn')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const notices = JSON.parse(await browser.evaluate('JSON.stringify([...document.querySelectorAll("#log .turn-notice")].map((notice) => notice.textContent))'))
+    assert.deepEqual(notices, ['Stopped by the caller'], `the stopped turn says so, once, as a reload draws it (${JSON.stringify(notices)})`)
+    assert.ok(!(await browser.evaluate('document.getElementById("log").innerText.includes("never reached")')), 'and nothing after the stop was drawn')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a turn that runs while its session is opening is drawn once, not live and again from history', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-eleven-1: opening a session clears the transcript and reads its history while the
+   * event stream keeps delivering. Measured on TS, a turn that ran during the read was drawn live and then again from
+   * history. The check holds the page's history read open (its own fetch, wrapped), runs a turn, then lets the read
+   * finish: the turn must read once. A turn after the session has opened must still be drawn live, once.
+   */
+  const server = await startServer('session-open', () => [{ text: 'an answer from the turn' }])
+  const browser = await openBrowser()
+  const count = (selector, text) => `[...document.querySelectorAll(${JSON.stringify(selector)})].filter((row) => row.textContent.includes(${JSON.stringify(text)})).length`
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    /** Hold the read of this session's history until the check lets it go. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let release
+      const held = new Promise((resolve) => { release = resolve })
+      window.__releaseHistory = () => release()
+      window.__historyReads = 0
+      window.fetch = async (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (new URL(address, location.href).pathname === '/api/sessions/' + ${JSON.stringify(session)}) {
+          window.__historyReads += 1
+          await held
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    /** A blank session is a tree row only while it is open (DSH's sessionVisible, stack 2), so it is opened by id. */
+    await browser.evaluate(`(() => { void showSession(${JSON.stringify(session)}); return true })()`)
+    assert.ok(await browser.waitFor('window.__historyReads > 0', 10_000), 'the page is reading the session history')
+
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'run while it opens', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    await browser.evaluate('window.__releaseHistory()')
+    assert.ok(await browser.waitFor(`${count('#log .turn.assistant', 'an answer from the turn')} >= 1`, 10_000), 'the answer is drawn')
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const once = JSON.parse(await browser.evaluate(`JSON.stringify({ users: ${count('#log .turn.user', 'run while it opens')}, answers: ${count('#log .turn.assistant', 'an answer from the turn')}, kinds: [...document.querySelectorAll('#log > .turn')].map((row) => row.dataset.kind).join(',') })`))
+    assert.equal(once.users, 1, `the person's message reads once (${once.kinds})`)
+    assert.equal(once.answers, 1, `and the answer once (${once.kinds})`)
+
+    /** With the session open, the stream draws a new turn live, once. */
+    const next = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'and after it opened', folder: server.work, session }),
+    })
+    await next.text()
+    assert.ok(await browser.waitFor(`${count('#log .turn.user', 'and after it opened')} === 1`, 10_000), 'a later turn is drawn live')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    assert.equal(Number(await browser.evaluate(count('#log .turn.assistant', 'an answer from the turn'))), 2, 'its answer once, beside the first')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a turn that creates its session reads the session record a handful of times, not at every event', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The composer adopted the session a new turn creates on every `session` event the turn stream relayed, and each
+   * adoption re-read the whole session for its permission mode. Measured: 52 reads of /api/sessions/{id} in one
+   * test's two messages, about five per model round. A turn's legitimate reads are a few at its end (stats, usage,
+   * the edited-files card, the access record), so five rounds must stay within a small bound.
+   */
+  const steps = () => [
+    ...Array.from({ length: 4 }, (_, index) => ({ reasoning: `round ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'true' } } })),
+    { text: 'done after five rounds' },
+  ]
+  const server = await startServer('session-reads', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await browser.evaluate(`(() => {
+      window.__sessionReads = 0
+      const original = window.fetch
+      window.fetch = (input, init) => {
+        const address = new URL(typeof input === 'string' ? input : input.url, location.href)
+        const parts = address.pathname.split('/')
+        if (parts.length === 4 && parts[1] === 'api' && parts[2] === 'sessions' && !address.search && (init?.method ?? 'GET') === 'GET') window.__sessionReads += 1
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await sendMessage(browser, 'five rounds please')
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("done after five rounds")', 30_000), 'the turn finished')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 10_000), 'the composer is idle again')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const reads = Number(await browser.evaluate('window.__sessionReads'))
+    assert.ok(reads <= 8, `the session record was read ${reads} times for one five-round turn (a handful at its end, not one per event)`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
 })
