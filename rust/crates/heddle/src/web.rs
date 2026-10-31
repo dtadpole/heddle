@@ -1069,10 +1069,14 @@ struct JobActivity {
 }
 
 impl heddle_server::services::SessionActivity for JobActivity {
-    fn jobs(&self, session: &str) -> Vec<Value> {
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
         heddle_jobs::http::session_job_activity(&self.jobs, session)
             .into_iter()
-            .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
+            .map(|(id, label)| heddle_server::services::ActivityItem {
+                kind: heddle_server::services::ActivityKind::Job,
+                id,
+                label,
+            })
             .collect()
     }
 

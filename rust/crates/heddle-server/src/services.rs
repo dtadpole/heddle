@@ -215,6 +215,14 @@ pub trait SessionService: Send + Sync {
 
     /// The folder the session belongs to, if it has one.
     fn folder(&self, id: &str) -> Option<PathBuf>;
+
+    /// Content search (`GET /api/sessions/search`): the sessions whose user or assistant messages hold the query
+    /// as a phrase, ranked, at most 20, with snippets (`heddle_session::SessionSearchIndex`). The route has already
+    /// refused a query DSH refuses; `Err` is a failure it answers `500`. A store without search says so.
+    fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+        let _ = query;
+        Err(ServiceError::new("session search is unavailable"))
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -479,10 +487,26 @@ pub trait TodoService: Send + Sync {
 /// `workspace/session-activity` waterfall and `workspace/session-stop` (`dsh-workspace` archive,
 /// `lib/index.js:512-540`). The binary supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`).
 pub trait SessionActivity: Send + Sync {
-    /// The live background jobs that block archiving `session`, each `{ "id", "label" }`.
-    fn jobs(&self, session: &str) -> Vec<Value>;
-    /// Stop them, once the archive is written: each job is killed with `session archived`.
+    /// The live work that blocks archiving `session`, in provider order (DSH's activity entries).
+    fn active(&self, session: &str) -> Vec<ActivityItem>;
+    /// Stop it, once the archive is written: a background job is killed with `session archived`.
     fn stop(&self, session: &str);
+}
+
+/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`. Turns are counted by the server itself today;
+/// the kind lets them come through the same port later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Turn,
+    Job,
+}
+
+/// One piece of live work an archive is refused by (DSH's activity item: `{ id, label }` under a `kind`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    pub kind: ActivityKind,
+    pub id: String,
+    pub label: String,
 }
 
 /// One Lead session's team as the view shows it — the same state the tools see.
