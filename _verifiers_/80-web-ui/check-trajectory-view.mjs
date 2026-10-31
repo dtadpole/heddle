@@ -818,3 +818,88 @@ test('a slash command between two turns is drawn where it ran, in its own Betwee
     await server.close()
   }
 })
+
+test('the overview zooms with the wheel, pans with a right-button drag, and a right click clears the window, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH's overview "wheel gestures zoom the time domain; a right-button click clears the
+   * selected interval, and a right-button drag pans an already zoomed viewport" (dsh-client-ui-trajectory README). The
+   * strip had drag-to-focus only: a wheel scrolled the page, and the right button opened the browser's menu.
+   */
+  const server = await startServer('overview-zoom')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew its bars')
+    const read = () => browser.evaluate(`JSON.stringify((() => {
+      const strip = document.getElementById('timeline').getBoundingClientRect()
+      const track = document.querySelector('#timeline .tr-lane-track').getBoundingClientRect()
+      const focus = document.querySelector('#timeline .tr-focus')
+      return {
+        zoomed: document.querySelector('#timeline .tr-lanes').dataset.zoomed,
+        trackLeft: track.left - strip.left,
+        trackWidth: track.width,
+        stripWidth: strip.width,
+        stripLeft: strip.left,
+        stripY: strip.top + strip.height / 2,
+        focus: focus === null ? 'none' : getComputedStyle(focus).display,
+        dimmed: document.querySelectorAll('#tr-table tbody tr[data-focus="outside"]').length,
+      }
+    })())`).then((text) => JSON.parse(text))
+    const fire = (type, init) => browser.evaluate(`(() => {
+      const strip = document.getElementById('timeline')
+      const event = ${type === 'wheel' ? 'new WheelEvent' : type === 'contextmenu' ? 'new MouseEvent' : 'new PointerEvent'}(${JSON.stringify(type)}, { bubbles: true, cancelable: true, pointerId: 31, ...${JSON.stringify(init)} })
+      return strip.dispatchEvent(event)
+    })()`)
+    const before = await read()
+    assert.equal(before.zoomed, 'false', 'the strip starts with the whole domain')
+    const middle = before.stripLeft + before.stripWidth / 2
+
+    assert.equal(await fire('wheel', { deltaY: -600, clientX: middle, clientY: before.stripY }), false, 'the strip takes the wheel, so the page does not scroll')
+    const zoomed = await read()
+    assert.equal(zoomed.zoomed, 'true', 'a wheel up zooms in')
+    assert.ok(zoomed.trackWidth > before.trackWidth * 2, `the lanes are drawn wider than the strip (${before.trackWidth} to ${zoomed.trackWidth})`)
+    assert.ok(Math.abs(zoomed.trackLeft + (zoomed.trackWidth - before.stripWidth) / 2) < 2, `about the pointer at the middle, the track stays centred (left ${zoomed.trackLeft})`)
+
+    await fire('pointerdown', { button: 2, buttons: 2, clientX: middle, clientY: before.stripY })
+    await fire('pointermove', { button: 2, buttons: 2, clientX: middle + 120, clientY: before.stripY })
+    await fire('pointerup', { button: 2, clientX: middle + 120, clientY: before.stripY })
+    const panned = await read()
+    assert.ok(Math.abs(panned.trackLeft - (zoomed.trackLeft + 120)) < 2, `a right-button drag pans the zoomed lanes with the pointer (${zoomed.trackLeft} to ${panned.trackLeft})`)
+    assert.equal(panned.trackWidth, zoomed.trackWidth, 'and keeps the zoom')
+
+    const third = before.stripWidth / 3
+    await fire('pointerdown', { button: 0, buttons: 1, clientX: before.stripLeft + third, clientY: before.stripY })
+    await fire('pointermove', { button: 0, buttons: 1, clientX: before.stripLeft + 2 * third, clientY: before.stripY })
+    await fire('pointerup', { button: 0, clientX: before.stripLeft + 2 * third, clientY: before.stripY })
+    assert.equal((await read()).focus, 'block', 'a left-button drag focuses a window, as before')
+    await fire('pointerdown', { button: 2, buttons: 2, clientX: middle, clientY: before.stripY })
+    await fire('pointerup', { button: 2, clientX: middle, clientY: before.stripY })
+    const cleared = await read()
+    assert.deepEqual([cleared.focus, cleared.dimmed], ['none', 0], 'a right click clears the window and undims every row')
+    assert.equal(cleared.trackLeft, panned.trackLeft, 'and leaves the zoom where it was')
+    assert.equal(await fire('contextmenu', { clientX: middle, clientY: before.stripY }), false, "the browser's menu stays shut over the strip")
+
+    await fire('wheel', { deltaY: 5000, clientX: middle, clientY: before.stripY })
+    const whole = await read()
+    assert.equal(whole.zoomed, 'false', 'a wheel down back past the whole domain shows the whole again')
+    assert.ok(Math.abs(whole.trackWidth - before.trackWidth) < 1 && Math.abs(whole.trackLeft - before.trackLeft) < 1, 'with the lanes as they were')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
