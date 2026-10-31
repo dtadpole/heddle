@@ -1,6 +1,6 @@
 ---
 title: Session actions — pin, archive and fork
-version: 1.0.0
+version: 1.1.0
 description: What the reference implementation means by pinning, archiving and forking a session — read from the installed DSH packages — and how this project's backend and UI implement the same three, row by row.
 grounded_in:
   - source: human-authored reading of the installed DSH packages on 2026-10-17
@@ -72,6 +72,7 @@ Implemented from the gaps table above, backend and UI together:
 - **Archive of a running session.** The route refuses with **409 `code: 'active'`** and the number of running turns unless
   the caller passes `stop: true`, in which case it aborts the turn through the same handle the Stop button uses and then
   archives. The page asks first — a native confirm naming what will happen to the work — and only then sends `stop: true`.
+  (Superseded on 29 Oct by the refusal's `activity` list and DSH's own dialog; see *DSH parity, 29 Oct* below.)
 - **Fork rules.** A fork is refused with **409 `code: 'unavailable'`** when the source has no completed turn, and the
   child records `parentSession` — the provenance DSH's header keeps. The title stays `<title> (n)` (kept difference, above).
 - **UI.** Pin is absent from an archived row's menu and quick controls; an archived row carries `data-archived`; a pinned
@@ -203,3 +204,27 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
 | our fork is titled `<title> (n)` | **kept**: this UI lists sessions by title, and two rows called the same thing cannot be told apart; the reference relies on the first prompt to name its child |
 | DSH's pin indicator in the row's rest state | **fix**: a pin mark on a pinned row, at the right where the hover button lands |
 | Pin hidden on archived rows | **fix**: no pin control on an archived row |
+
+## DSH parity, 29 Oct — the work named, the dialog, unarchive from search (R-developer-eight-13, -14)
+
+- **The refusal names the work.** `409 code: 'active'` now carries DSH's `activity` (`dsh-workspace` `archiveSession`,
+  `workspace/session-active`): `{kind: 'turn'}` for the session's own running turn and `{kind: 'subagent', items}` for its
+  running subagent descendants, found by lineage (`src/session/activity.ts`, `heddle_session::session_activity`). A session
+  whose own turn has ended but whose subagent still works is refused too; `stop: true` stops the turn and each listed child
+  (the Web server's handles and the live-turn registry). DSH's two other families: background jobs have no runtime
+  here; scheduled reminders landed on main (`src/schedule/`, `heddle-schedule`) after this fix, with DSH's
+  `list({sessionId})` and `stopSessionTasks`, and reporting them is a follow-up. The page already words both families.
+- **The dialog.** The page sends the plain archive first and opens the stop-and-archive dialog only when the server
+  refuses: DSH's title, its description naming the session and the restore path, the work one family per line, Cancel and
+  Stop and archive. A quiet archive asks nothing and, like a stop-and-archive, shows DSH's notice with `undo` (and
+  `filter archived sessions` while archived rows are hidden); undo does not resume stopped work.
+- **Unarchive from search.** An archived search result carries `Unarchive session`; choosing the result says "Archived
+  sessions cannot be opened. Unarchive it to view." and keeps the query.
+- **The row menu reachable.** An archived row's dimming moved from the item to its words (the item's opacity made it a
+  stacking context), and an open menu's slot rises to the menus' layer, so no part of the menu lies under the conversation
+  panel. Not changed: a stopped subagent's settlement notice, which can still start a turn on the archived parent where
+  DSH's pre-step gate blocks it.
+- **An archived row does not open** (live-testing draft developer-six-7): clicking an archived row in the tree says
+  "Archived sessions cannot be opened. Unarchive it to view." in the archive notice and opens nothing, and the row
+  carries that sentence as its `aria-description` (`dsh-client-ui-workspace` `guardedOpen`, `lib/client.js:3532-3538`,
+  `:2279`).

@@ -251,7 +251,7 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
   assert.ok(page.includes("document.body.dataset.ready = 'true'\n</script>"), 'and boot ends by announcing that it finished')
   assert.match(page, /paintEmptyState\(\)\n\/\*\*[\s\S]*?document\.body\.dataset\.ready/, 'which happens after the invitation is painted')
   /** A session that no longer exists must not keep the invitation hidden. */
-  assert.ok(page.includes('current = null\n      const title'), 'a vanished session releases the pointer')
+  assert.ok(page.includes('current = null\n      paintSessionHeading()'), 'a vanished session releases the pointer, and the header says No session again')
 })
 
 test('the navigation panel is a fixed column, and only its workspaces region scrolls', () => {
@@ -412,4 +412,175 @@ test("a session is renamed in DSH's Rename session dialog, opened by the menu, t
   assert.match(page, /items\.push\(\{ label: 'Rename', glyph: 'rename', run: \(\) => renameSession\(node\) \}\)/, 'and so does the menu item')
   assert.match(page, /else if \(action === 'rename'\) renameSession\(node\)/, 'and the chord')
   assert.doesNotMatch(page, /window\.prompt\('Rename this session'/, 'the native prompt is gone')
+})
+
+test('a session is labelled and headed by DSH\'s words and its title, never its folder name or raw id (#24)', () => {
+  /**
+   * DSH's row reads `New Session` for the open blank and `Untitled` without a stored title (dsh-client-ui-workspace
+   * lib/client.js:1801-1804, README.md:32); its header hides the title while blank and then reads the live list
+   * (dsh-client-ui-conversation lib/client.js:17897-17908, :17990-17994), and its window title is `<title> — <product>`
+   * (dsh-client-ui-layout lib/client.js:57-68). The rules are judged in test/workspace-tree.test.ts and the gestures in
+   * 80's check-workspace-tree.mjs; this detects the page no longer calling them.
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  assert.match(body('function sessionNode(meta) {'), /label: WorkspaceTree\.sessionLabel\(meta\)/, 'a tree row takes DSH\'s label')
+  assert.doesNotMatch(body('function learnDefinition(id, folder) {'), /textContent|\.label =/, 'learning a definition folder does not set the label')
+  assert.match(body('async function renderFlatList() {'), /label\.textContent = WorkspaceTree\.sessionLabel\(meta\)/, 'and so does a flat row')
+  assert.match(page, /title\.textContent = WorkspaceTree\.storedTitle\(meta\) \?\? 'Untitled'/, 'a search hit reads its title, else Untitled')
+  const show = body('async function showSession(id) {')
+  assert.doesNotMatch(show, /: id\n/, 'the header never falls back to the raw id')
+  assert.match(show, /paintSessionHeading\(\{ \.\.\.listed,/, 'it is painted from the session\'s listed entry and its own answer')
+  const paint = body('function paintSessionHeading(')
+  assert.match(paint, /WorkspaceTree\.headerTitle\(meta\)/, 'the header asks DSH\'s rule')
+  assert.match(paint, /document\.title = WorkspaceTree\.documentTitle\(meta\)/, 'and so does the window title')
+  for (const reader of ['async function renderTree() {', 'async function refreshSessions() {', 'async function loadSearchIndex() {']) {
+    assert.match(body(reader), /noteSessions\((sessions|searchIndex\.sessions)\)/, `${reader} repaints the header from the list it read`)
+  }
+})
+
+test('a tree row never shows or reads aloud a session\'s definition folder: its tooltip is its title, the folder is data (#109)', () => {
+  /**
+   * The session row's `title` was its definition folder (`<home>/…/_sessions_/session-<date>-<time>`), else its working
+   * folder. The hover card takes the tooltip from a pointer user, but the row is focusable, so a keyboard or screen-reader
+   * user still heard the internal path. DSH's rows carry no `title` (dsh-client-ui-workspace lib/client.js:2273-2280,
+   * :1965-1971). The rule is judged in test/workspace-tree.test.ts and the page in 80's check-hover-cards.mjs; this detects
+   * the row going back to a path.
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const learn = body('function learnDefinition(id, folder) {')
+  assert.match(learn, /row\.dataset\.definition = folder/, 'a definition folder the listing reveals goes to the row\'s data-definition')
+  assert.doesNotMatch(learn, /\.title\b|setAttribute\(/, 'and to no tooltip and no accessible text')
+  const build = body('function nodeRow(node, depth = 0) {')
+  assert.match(build, /const tooltip = WorkspaceTree\.rowTooltip\(node\)/, 'a row asks the rule for its tooltip')
+  assert.deepEqual([...build.matchAll(/\brow\.title = ([^\n]+)/g)].map((match) => match[1]), ['tooltip'], 'and the rule is the only source of the row\'s title')
+  assert.match(build, /row\.dataset\.definition = definitionOf\.get\(node\.session\.id\)/, 'the definition folder rides in data-definition')
+  assert.doesNotMatch(build, /setAttribute\('(title|aria-label|aria-description)', [^)]*(definitionOf|node\.cwd|node\.path)/, 'and in no accessible attribute')
+})
+
+test('a Rename or Delete of a workspace another tab removed says so in words and redraws the tree (#49)', () => {
+  /**
+   * Both servers answer `404 {"error":"no workspace <absolute path>"}` for a workspace that is no longer registered; the
+   * dialogs printed it and kept the stale row. The words are judged in test/workspace-tree.test.ts and the gesture in 80's
+   * check-workspaces.mjs; this detects either dialog going back to the raw text.
+   */
+  const rename = page.slice(page.indexOf('async function confirmRename() {'))
+  const renameBody = rename.slice(0, rename.indexOf('\n}\n'))
+  const del = page.slice(page.indexOf("document.getElementById('workspace-delete-confirm').addEventListener('click'"))
+  const delBody = del.slice(0, del.indexOf('\n})\n'))
+  for (const [name, text] of [['Rename', renameBody], ['Delete', delBody]] as const) {
+    assert.match(text, /WorkspaceTree\.workspaceRefusal\(response\.status, body, /, `${name} reads the refusal through the rule`)
+    assert.match(text, /if \(refusal\.gone\) \{[\s\S]*?await renderTree\(\)\s*return\s*\}/, `${name} redraws the tree when the workspace is gone`)
+    assert.doesNotMatch(text, /body\.error \?\?/, `${name} no longer prints the server's raw text`)
+  }
+})
+
+/** The body of one top-level function of the page, from its first line to its closing brace. */
+function pageFunction(start: string) {
+  const from = page.indexOf(start)
+  assert.ok(from > 0, `${start} is in the page`)
+  return page.slice(from, page.indexOf('\n}\n', from))
+}
+
+test('a key on a tree row\'s control is the control\'s: the row opens only on a key pressed on the row itself (#98)', () => {
+  /**
+   * DSH's row controls are plain buttons with no key handler above them (dsh-client-ui-workspace lib/client.js:1965-1970,
+   * :2273-2282, :2015-2017, :2033-2035, :2323-2327). The page's row took Enter and Space from every control inside it, so
+   * Archive, Pin, the `…` and New session in opened the session or folded the workspace. The rule is judged in
+   * test/workspace-tree.test.ts and the keys in 80's check-tree-keyboard.mjs; this detects the row taking them back.
+   */
+  const build = pageFunction('function nodeRow(node, depth = 0) {')
+  assert.match(build, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'the row asks the rule before it takes a key')
+  assert.doesNotMatch(build, /onkeydown = \(event\) => \{\s*if \(event\.key === 'Enter'/, 'and no handler in the row takes Enter whatever its target')
+})
+
+test('a tree row is one Tab stop that opens on Enter, and Show more is a button with an expanded state (#92)', () => {
+  /**
+   * Each row was two stops, the list item (which ignored Enter) and the `.row` inside it, so a session row cost five Tab
+   * presses; Show more was a `div[role=button]` with no `aria-expanded`. DSH's rows have no `tabIndex` and its tree no
+   * arrow keys (dsh-client-ui-workspace lib/client.js:1965-1970, :2273-2282, :2526-2537); its Show more is a `<button>`
+   * with `aria-expanded` (:3309-3326). The stops are judged in 80's check-tree-keyboard.mjs; this detects their return.
+   */
+  const build = pageFunction('function nodeRow(node, depth = 0) {')
+  assert.doesNotMatch(build, /\bli\.tabIndex\b|li\.setAttribute\('tabindex'/, 'the list item is no Tab stop')
+  assert.match(build, /row\.tabIndex = 0/, 'the row is the one stop')
+  const more = pageFunction('function paintSessionRows(list, group, depth) {')
+  assert.match(more, /const row = document\.createElement\('button'\)\s*row\.type = 'button'/, 'Show more is a button')
+  assert.match(more, /row\.setAttribute\('aria-expanded', String\(mode === 'less'\)\)/, 'whose aria-expanded says the group shows every session')
+  assert.doesNotMatch(more, /setAttribute\('role', 'button'\)|row\.onkeydown/, 'with no stand-in role and no key handler of its own')
+  const flat = pageFunction('async function renderFlatList() {')
+  assert.match(flat, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'a flat list row opens on Enter too')
+})
+
+test('every menu menuButton makes has DSH\'s menu keyboard: arrows, Home and End, Tab, and Escape back to the trigger (#95)', () => {
+  /**
+   * The tree's row menus, the workspace menus and View options are built by `menuButton`, which had no keyboard: arrows
+   * did not enter the menu and Escape neither closed it nor gave focus back. DSH's `Menu` (dsh-web-frontend
+   * dist/assets/index-CN7NIWNw.js:129, exported at :188) does both. The keys are judged in 80's check-tree-keyboard.mjs;
+   * this detects the handlers going away.
+   */
+  const from = page.indexOf("document.addEventListener('click', closeMenus)")
+  assert.ok(from > 0, 'the menus close on a click elsewhere')
+  const keys = page.slice(from, page.indexOf('The page\'s **seam for the verifiers**', from))
+  assert.match(keys, /keyEvent\.key !== 'Escape' \|\| keyEvent\.shiftKey[\s\S]*?closeMenus\(\)\s*if \(inside && open\.trigger !== null\) open\.trigger\.focus\(\)\s*\},\s*true,\s*\)/, 'Escape closes the open menu in the capture phase and gives focus back to its trigger')
+  assert.match(keys, /HeroPicker\.step\(keyEvent\.key, items\.indexOf\(active\), items\.length\)/, 'the arrows, Home and End rove with DSH\'s arithmetic')
+  assert.match(keys, /if \(keyEvent\.key === 'Tab'\) \{\s*if \(keyEvent\.shiftKey\) \{\s*keyEvent\.preventDefault\(\)\s*closeMenus\(\)\s*open\.trigger\.focus\(\)/, 'Shift+Tab closes the menu onto its trigger')
+  const builder = pageFunction('function menuButton(node, items, options = {}) {')
+  assert.match(builder, /if \(event\.detail === 0\) \{\s*queueMicrotask\(/, 'a choice from the keyboard gives focus back to the trigger')
+})
+
+test('a tree redraw gives the keyboard its place back: the same row and the same control (#92)', () => {
+  /**
+   * DSH's tree is React, so a refresh keeps the focused row element (dsh-client-ui-workspace lib/client.js:2526-2543).
+   * This page replaces its rows on every redraw (a turn ending, leaving the New session placeholder, a pin), which dropped
+   * keyboard focus to the top of the page mid-walk (found by 80's check-tree-keyboard.mjs on its first run). Judged in
+   * that check; this detects a redraw that stops asking where focus was or stops giving it back.
+   */
+  const render = pageFunction('async function renderTree() {')
+  assert.match(render, /^async function renderTree\(\) \{\s*\/\*\*[^]*?\*\/\s*const focus = treeFocus\(\)/, 'renderTree reads the keyboard\'s place before it reads anything else')
+  assert.match(render, /heldTreeFocus = focus\s*treeList\.replaceChildren\(/, 'and holds it while it replaces the rows')
+  assert.match(render, /markSelection\(\)\s*restoreTreeFocus\(focus, true\)\s*$/, 'and gives it back once the rows are drawn')
+  const flat = pageFunction('async function renderFlatList() {')
+  assert.match(flat, /const focus = treeFocus\(\)\s*heldTreeFocus = focus\s*treeList\.replaceChildren\(\)/, 'the flat list does the same')
+  assert.match(flat, /restoreTreeFocus\(focus, true\)\s*$/)
+  const rows = pageFunction('function paintSessionRows(list, group, depth) {')
+  assert.match(rows, /^function paintSessionRows\(list, group, depth\) \{\s*const focus = treeFocus\(\)/, 'so does a group\'s session rows')
+  assert.match(rows, /restoreTreeFocus\(focus\)\s*paintRunningMarks\(\)/)
+  const read = pageFunction('function treeFocus() {')
+  assert.match(read, /active\.matches\(':focus-visible'\)/, 'only the keyboard\'s focus is given back, never a pointer\'s')
+})
+
+test('a session is labelled through the tree block, never a top-level sessionLabel the page no longer has (#24)', () => {
+  /**
+   * page-polish (#24) moved the session label into the WorkspaceTree block (`WorkspaceTree.sessionLabel`: New Session,
+   * the title, else Untitled, never a folder name) and removed the top-level `sessionLabel`. Two later callers, the
+   * schedule detail's Linked session and the row hover card, still called the top-level one, so the merged page threw a
+   * ReferenceError in the schedule detail and the Automation tasks list never redrew after a rename (80's
+   * check-schedule-view, 3 of 3 runs on stack-2). Outside the block, every call goes through `WorkspaceTree.`.
+   */
+  const begin = page.indexOf('/* workspace-tree:begin */')
+  const end = page.indexOf('/* workspace-tree:end */')
+  assert.ok(begin > 0 && end > begin, 'the tree block is in the page')
+  const outside = page.slice(0, begin) + page.slice(end)
+  assert.deepEqual([...outside.matchAll(/(?<![.\w])sessionLabel\(/g)].map((match) => outside.slice(Math.max(0, match.index - 40), match.index + 20)), [], 'no bare sessionLabel( call outside the block')
+  assert.match(page.slice(begin, end), /function sessionLabel\(meta\)/, 'the block defines it')
+})
+
+test('the pin marker is named "Pinned", as DSH names its PinnedIndicator (#109)', () => {
+  /**
+   * DSH's pinned row carries `PinnedIndicator`, labelled with the en string `row.pinned`, "Pinned" (dsh-client-ui-workspace
+   * client.js:2126-2134, :4933). The page named it "pinned" (developer-six, #109). The row has no title= of its own, so
+   * the tree item's accessible name is its content, and this word is part of it.
+   */
+  const row = pageFunction('function nodeRow(node, depth = 0) {')
+  assert.match(row, /pinSlot\.setAttribute\('aria-label', 'Pinned'\)/, 'the marker\'s accessible name')
+  assert.match(row, /pinSlot\.title = 'Pinned'/, 'and its tooltip')
+  assert.doesNotMatch(row, /'pinned'\)|= 'pinned'/, 'no lower-case name is left')
 })

@@ -1,7 +1,7 @@
 ---
 title: Heddle Session Tree
 level: L2
-version: 1.2.0
+version: 1.2.1
 description: How a workspace names a target folder, how a session is bound to a folder, and how that becomes a recursive tree in the Web UI's left column.
 status: unverified
 grounded_in:
@@ -142,7 +142,7 @@ What the two menus say about a session, and where each fact lives:
 |---|---|---|
 | its **name** | the store's `title`, and the definition's `session.json` | a name is content: the committed record should call the session what its reader calls it |
 | its **pin** and its **archive** | the store's meta only | reading state rather than facts about the run: in the definition, the tree and the store disagreed and sessions vanished |
-| its **age** and turn count | the row (`6min`), the tooltip (the count) | DSH's list reads `context-mgmt 4d`; the age is what tells a reader which conversations are live |
+| its **age** | the row (`6min`) and its hover card (`6min ago`) | DSH's list reads `context-mgmt 4d`; the age is what tells a reader which conversations are live |
 
 A session **names itself from its first message** when nothing has named it — one line, shortened at a word —
 because a list of clock names is a list nobody can scan. A title a person typed afterwards wins, because this
@@ -152,8 +152,10 @@ sessions are.
 
 **A session's own `…` holds its name.** The owner's request of 2026-10-17: a session row offers
 `Rename…`, which sets the session's **title** — the label a person reads — and the row then shows that
-title instead of the folder it lives in. The folder stays the identity, and stays reachable as the row's
-tooltip, because the conventions require an instance name and a person is not expected to type one. One
+title instead of the folder it lives in. The folder stays the identity, because the conventions require an
+instance name and a person is not expected to type one, but the row keeps it in `data-definition`, never in its
+tooltip: it is an internal path with the home directory in it, and a focusable row's tooltip is read aloud; the
+tooltip is the title (#109). One
 rename writes **both** halves: the store's meta record, which this UI and a listing read, and the session's
 `session.json`, which is the record a reader of the repository reads — a rename that stopped at the store
 would leave the committed definition calling the session something else.
