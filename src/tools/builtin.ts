@@ -50,6 +50,23 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
 /** The default for `bashOutputLimit`: characters of a command's combined output kept for the model. */
 export const BASH_OUTPUT_LIMIT = 20_000
 
+/**
+ * The process groups of commands still running, ended when the process exits so a restart cannot leave them behind
+ * (live-testing issue #6: the server's own shutdown stops its turns first; this is the backstop for any other exit).
+ */
+const liveGroups = new Set<number>()
+let exitHookArmed = false
+
+function trackGroup(leader: number | undefined): void {
+  if (leader === undefined) return
+  liveGroups.add(leader)
+  if (exitHookArmed) return
+  exitHookArmed = true
+  process.once('exit', () => {
+    for (const group of liveGroups) killProcessGroup(group)
+  })
+}
+
 /** The default for `bashMaxTimeoutMs`: the most wall time a call may ask for, DSH's `maxTimeoutMs` (ten minutes). */
 export const BASH_MAX_TIMEOUT_MS = 600_000
 
@@ -213,6 +230,7 @@ export function builtinTools(
          * waited for them because they still held the output pipes (live-testing draft developer-five-5).
          */
         const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' }, detached: true })
+        trackGroup(child.pid)
         let stdout = ''
         let stderr = ''
         let timedOut = false
@@ -239,10 +257,12 @@ export function builtinTools(
           { once: true },
         )
         child.on('error', (error) => {
+          if (child.pid !== undefined) liveGroups.delete(child.pid)
           clearTimeout(timer)
           resolve({ output: '', error: { code: 'TOOL_FAILED', message: error.message } })
         })
         child.on('close', (code) => {
+          if (child.pid !== undefined) liveGroups.delete(child.pid)
           clearTimeout(timer)
           const combined = stdout + stderr
           const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined

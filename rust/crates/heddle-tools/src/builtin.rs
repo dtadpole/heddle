@@ -446,6 +446,25 @@ fn bash_tool(
     )
 }
 
+/// Ends a command's process group when its call is dropped before it settles, as when the runtime shuts down
+/// under a running turn: live-testing issue #6 found a restart leaving the command running orphaned, because only
+/// a Stop or the wall time reached the group. A call that settled, or killed the group itself, disarms it.
+struct GroupGuard(Option<u32>);
+
+impl GroupGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if let Some(leader) = self.0.take() {
+            let _ = heddle_sandbox::kill_process_group(leader);
+        }
+    }
+}
+
 /// Spawn one argv, enforce its wall time and the call's Stop, and classify what it did.
 ///
 /// The working directory is the call's folder (`context.cwd`), not the launch directory; the confinement,
@@ -475,6 +494,7 @@ async fn run_command(
     process.process_group(0);
     let child = process.spawn()?;
     let leader = child.id();
+    let mut guard = GroupGuard(leader);
 
     let facts = || match confined {
         None => sandbox_facts(mode, false),
@@ -512,6 +532,7 @@ async fn run_command(
             if let Some(Err(error)) = leader.map(heddle_sandbox::kill_process_group) {
                 tracing::warn!(%error, ?leader, "the command's process group could not be stopped");
             }
+            guard.disarm();
             let stopped = context.is_cancelled();
             let message = if stopped {
                 "the command was stopped before it finished".to_owned()
@@ -527,6 +548,7 @@ async fn run_command(
             Ok(ToolResult::refused(code, message).with_data(data))
         }
         Some(output) => {
+            guard.disarm();
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let trimmed = truncate_output_at(&format!("{stdout}{stderr}"), output_limit);
@@ -951,6 +973,38 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "stopped at the cap"
         );
+    }
+
+    #[tokio::test]
+    async fn a_call_dropped_mid_run_still_ends_the_command_group() {
+        // Issue #6: a restart drops the running turn's future; the command and what it started must not outlive it.
+        let root = tempdir();
+        let pid_file = root.path().join("child.pid");
+        let bash = tool("bash", sandbox(root.path()));
+        let command = format!("sleep 41 & echo $! > '{}'; wait", pid_file.display());
+        let running = tokio::spawn(bash.run(
+            args(json!({ "command": command })),
+            context_in(root.path(), SandboxMode::DangerFullAccess),
+        ));
+        let started = std::time::Instant::now();
+        let child: i32 = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse() {
+                    break pid;
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "the command wrote its child pid");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let alive = |pid: i32| std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|status| status.success());
+        assert!(alive(child), "the background command runs");
+        running.abort();
+        let _ = running.await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while alive(child) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(child), "dropping the call ended the command's group");
     }
 
     #[tokio::test]
