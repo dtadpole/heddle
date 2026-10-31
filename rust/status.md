@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-31T05:01:00Z
+modified: 2026-10-31T05:25:00Z
 level: L3
-version: 1.23.0
+version: 1.24.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-30, in `~/heddle--int-backend`, on `main` at `2dbe2dcb` (every turn ends in the log, a failed or stopped one included; an Anthropic route caches the prompt; the compaction summary is a structured checkpoint; the Web API's tree lists only what is under a workspace root; before them, on `1a49107d`, a prompt sent to a busy session waits for the running turn, on `cb69f420`, a turn's answer is its last non-empty round; a Chat Completions stream asks for its usage; a Stop or the bash wall time kills the command's whole process group, and timeoutMs follows DSH's rule, capped; before them, on `170d773d`, a whitespace-only prompt is refused, on `0f0e9db0` a mid-step message is placed when the step closes and content search, on `5e257430` the summary budget, and on `24d250f3` six backend merges; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
+**Run 2026-10-30, in `~/heddle--int-backend`, on `main` at `820c9d31` (a fork is seeded with its source's log; the Rust preview carries its HTML sanitiser; a model or effort switch made during a turn reaches its next request, with the request hooks run once; before them, on `2dbe2dcb`, every turn ends in the log, a failed or stopped one included; an Anthropic route caches the prompt; the compaction summary is a structured checkpoint; the Web API's tree lists only what is under a workspace root; before them, on `1a49107d`, a prompt sent to a busy session waits for the running turn, on `cb69f420`, a turn's answer is its last non-empty round; a Chat Completions stream asks for its usage; a Stop or the bash wall time kills the command's whole process group, and timeoutMs follows DSH's rule, capped; before them, on `170d773d`, a whitespace-only prompt is refused, on `0f0e9db0` a mid-step message is placed when the step closes and content search, on `5e257430` the summary budget, and on `24d250f3` six backend merges; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -26,9 +26,10 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**185 checks: 184 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 1
-gained `check-prompt-cache.mjs` (two checks), part 3 `check-compaction-directive.mjs`, part 5 `check-turn-end.mjs` (two),
-and part 70 a check that the Web API's tree lists only what is under a workspace root. On `1a49107d` part 5 gained
+**187 checks: 186 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 70
+gained two fork checks (a fork of a reasoning turn and of a compacted session shows its source's rows). On `2dbe2dcb`
+part 1 gained `check-prompt-cache.mjs` (two checks), part 3 `check-compaction-directive.mjs`, part 5
+`check-turn-end.mjs` (two), and part 70 the Web API tree check. On `1a49107d` part 5 gained
 `check-turn-queue.mjs`. On `cb69f420`, part 1
 gained `check-chat-usage.mjs` (two checks), part 4 `check-bash-timeout.mjs` (four), part 5 `check-final-text.mjs` (two), and
 part 8 `check-stop-kills-group.mjs` (seven). Part 5's `check-goal-tool.mjs` failed once under load and passed on its re-run
@@ -38,7 +39,7 @@ and three runs alone. Earlier today part 5 gained `check-blank-prompt.mjs` and `
 **Failing:** none in the backend lane. Part 98 reads the machine's recorded validation, so it judges the configuration:
 every configured model now passes it. For the Claude models that means several text deltas, not arrival as they are
 generated: the local gateway sends them in one burst at the end, which heddle does not cause (a chat-completions
-turn through the same server arrives over time). Part 80 as the lane selects it, run on `170d773d`'s binary (this run's changes touch no web code), passes 83 of 84 (the TypeScript build's part 80, 84 of 84); its one failure, the default-port
+turn through the same server arrives over time). Part 80 as the lane selects it, run on the same binary, passes 86 of 87 (the TypeScript build's part 80, 85 of 85); the tail-follow check failed once and passed on its re-run; its one failure, the default-port
 check, also fails on the previous `main`'s binary, because the live server holds that port ([`status-notes.md`](status-notes.md)).
 
 **Unjudged:** part 1's publisher-route live check needs a publisher-route endpoint, which the machine's file does not
@@ -53,7 +54,7 @@ list.
 | 4 tools | `40-pluggable-tools` | **passes** — 14 of 14 |
 | 5 agentic loop | `50-agentic-loop` | **passes** — 34 of 34 |
 | 6 hooks | `60-hooks` | **passes** — 6 of 6 |
-| 7 workspaces and sessions | `70-workspaces-sessions` | **passes** — 57 of 57 |
+| 7 workspaces and sessions | `70-workspaces-sessions` | **passes** — 59 of 59 |
 | 8 sandbox | `75-permission-sandbox` | **passes** — 24 of 24 |
 | 9 Web UI | `80-web-ui`, `85`, `87`, `88` | **met** by the ui lane on `33407a4`: 80 passes 75 of 75 twice, 85, 87, 88 in full |
 | 10 token | `90-web-ui-token` | **passes** — 9 of 9 |

@@ -481,6 +481,68 @@ export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
   return inherited.some((event) => event.type === 'assistant/completed')
 }
 
+/**
+ * Whether a fork inherits an event of this type.
+ *
+ * DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a child
+ * here inherits the same — with four exceptions, each an event that belongs to the **source** rather than to the
+ * conversation, and that this store has no inherited-prefix mark to neutralise (DSH passes `inheritedEventCount` to every
+ * projection, dsh-session/lib/index.js:1418-1426; heddle's folds read the whole log):
+ *
+ * - `session/created`: the child writes its own, with its own clock.
+ * - `transcript/repaired`: it reports bytes cut from the source's file, not the child's.
+ * - `goal/change`: heddle arms an active goal whenever a process folds one (src/goal/service.ts, `activationOf`), so an
+ *   inherited goal would start spending rounds in the branch; DSH disarms it after a fork.
+ * - `team/*`: the team journal names the source as its Lead (`teamId`), and `foldTeam` refuses a foreign one, so a
+ *   copied journal would break the child's team tools.
+ */
+export function inheritedByFork(type: string): boolean {
+  return type !== 'session/created' && type !== 'transcript/repaired' && type !== 'goal/change' && !type.startsWith('team/')
+}
+
+/** A recorded field that names one other event by its seq, in a log-only record (a compaction's own bookkeeping). */
+const SEQ_FIELDS = ['fromSeq', 'throughSeq', 'summarySeq', 'replacementSeq'] as const
+/** A recorded field that names several events by seq. */
+const SEQ_LIST_FIELDS = ['sourceEventSeqs', 'shadowedSeqs'] as const
+
+/**
+ * The events a fork's child is seeded with: the inherited ones, as they were recorded, numbered on from `firstSeq`.
+ *
+ * Each event keeps its own time and every field in its written order, so the child's view, its surface and its
+ * model context are the source's: a streamed answer stays chunks (its reasoning a reasoning block, a call a named call),
+ * and a compaction stays a summary standing in for turns the child still shows (#52, #55). The child's own
+ * `session/created` takes seq 0 and so does the source's, so the seqs normally carry over unchanged and the
+ * events are copied byte for byte. When an event is left out (see {@link inheritedByFork}) the ones after it move
+ * down, and every field that names a seq is renumbered with them — the surface's `surfaceOp` range above all, which
+ * the fold resolves by position, plus the compaction records' `fromSeq`, `throughSeq`, `summarySeq`,
+ * `replacementSeq`, `shadowedSeqs`, `shadowedRange` and a replacement's `sourceEventSeqs`. A seq that names no
+ * inherited event is left as written. The Rust twin is `fork_seed` in heddle-session `surface.rs`.
+ */
+export function forkSeed(inherited: readonly SessionEvent[], firstSeq: number): readonly SessionEvent[] {
+  const kept = inherited.filter((event) => inheritedByFork(event.type))
+  if (kept.every((event, index) => event.seq === firstSeq + index)) return kept
+  const renumbered = new Map<number, number>()
+  kept.forEach((event, index) => renumbered.set(event.seq, firstSeq + index))
+  const moved = (seq: unknown): unknown => (typeof seq === 'number' ? (renumbered.get(seq) ?? seq) : seq)
+  /** Renumber the named fields that are present, in place in a copy, so no field moves and none is added. */
+  const renumber = (record: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> => {
+    const copy = { ...record }
+    for (const key of keys) if (key in copy) copy[key] = moved(copy[key])
+    return copy
+  }
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+  return kept.map((event, index) => {
+    const copy = renumber({ ...event, seq: firstSeq + index }, SEQ_FIELDS)
+    for (const key of SEQ_LIST_FIELDS) {
+      const list = copy[key]
+      if (Array.isArray(list)) copy[key] = list.map(moved)
+    }
+    if (isRecord(copy.surfaceOp) && copy.surfaceOp.op === 'replace') copy.surfaceOp = renumber(copy.surfaceOp, ['startSeq', 'endSeq'])
+    if (isRecord(copy.shadowedRange)) copy.shadowedRange = renumber(copy.shadowedRange, ['start', 'end'])
+    return copy as SessionEvent
+  })
+}
+
 /** Index a log by seq, which every derivation over it wants. */
 export function indexBySeq(events: readonly SessionEvent[]): ReadonlyMap<number, SessionEvent> {
   const bySeq = new Map<number, SessionEvent>()
@@ -834,13 +896,17 @@ export class SessionStore {
   }
 
   /**
-   * Copy a session's **projected** messages into a new one, and answer with the new session.
+   * Seed a new session with a session's **log** up to its last completed turn, and answer with the new session.
    *
-   * A fork is a new conversation that starts where another one stood, which is why it copies the
-   * projection (`deriveMessages` — what the model would have seen, with compaction already folded) rather
-   * than the raw events: replaying another log's shadowing ranges into a fresh log would mean remapping
-   * sequence numbers, and a fork that replayed them wrongly would be worse than no fork at all. The system
-   * message is **not** copied: the new session assembles its own, and two of them would be one too many.
+   * A fork is a new conversation that starts where another one stood, and it starts there by replaying the source's
+   * events, as DSH's does: `session/fork` cuts at `latestCompletedPrefixBoundary` and seeds the child with that exact
+   * prefix (dsh-api-session-controller/lib/index.js:724-733 and 870-872, `buildForkSeed` in
+   * dsh-session/lib/types/fork.js:18-27). This copied the **projection** instead — one `message` per surface node — and
+   * the child read differently from its source on both builds: a streamed answer became one assistant message whose
+   * reasoning the chat drew glued in front of the answer, a tool call lost its name and command (#52), and a compacted
+   * source handed over its summary and live turns only, so the branch started mid-conversation (#55). The seed is
+   * {@link forkSeed}; the system prompt, the instruction baseline and a runtime-context snapshot come along as the notes
+   * they were, at the positions they held, so the child's next round finds them and writes no second copy.
    */
   fork(
     source: SessionId,
@@ -869,31 +935,37 @@ export class SessionStore {
       ...(attribution.id !== undefined ? { id: attribution.id } : {}),
     })
     /**
-     * The fork inherits what the source had **finished**: the projection of the log cut at its last completed turn. A
-     * dangling user message — one whose answer never arrived — is not carried over.
+     * The fork inherits what the source had **finished**: its log cut at the last completed turn. A dangling user
+     * message — one whose answer never arrived — is not carried over.
      */
     const events = completedPrefix(this.read(from))
-    const bySeq = indexBySeq(events)
-    for (const seq of foldSurface(events).nodes) {
-      const message = deriveMessage(bySeq, seq)
-      if (message === null || message.role === 'system') continue
-      const node = bySeq.get(seq)
-      if (node?.type === 'context/note') {
-        /**
-         * A note the harness wrote stays a **note**: DSH's fork seeds the child with the source's own events
-         * (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), so a runtime-context snapshot or an instruction baseline
-         * arrives as what it was. Re-appending it as a `message` made the child's chat draw the snapshot as a user bubble
-         * and count one turn too many (R-developer-eight-15). Its origin and identity come along, so the child's next
-         * round sees the same retained snapshot and does not write another; the source's surface positions do not,
-         * because they name seqs of a log the child does not have.
-         */
-        const { seq: _seq, at: _at, surfaceOp: _surfaceOp, sourceEventSeqs: _sourceEventSeqs, ...note } = node
-        this.append(handle, note)
-        continue
-      }
-      this.message(handle, message)
-    }
+    this.seed(handle, events)
     return handle
+  }
+
+  /**
+   * Write a fork's inherited events into its new log ({@link forkSeed}), after the child's own `session/created`.
+   *
+   * Written as one append and **not published**: the seed is history the child starts from, not activity, so neither
+   * the live stream, nor the goal and reminder drivers, nor the title coordinator hear its `model/request` and
+   * `turn/completed` events as a turn happening now. DSH's seeded session does the same: its constructor pushes each
+   * seed event into the log after checking it against the surface, and its live events start after them
+   * (dsh-session/lib/index.js:1399-1411). The result is folded here before anything is written, because a seed whose
+   * replacements did not land on the child's surface would leave a log nothing can read. The meta counts the inherited
+   * user messages as turns, as `message()` counted them in the source.
+   */
+  private seed(handle: SessionHandle, inherited: readonly SessionEvent[]): void {
+    this.claim(handle)
+    const log = this.load(handle)
+    const records = forkSeed(inherited, log.events.length)
+    if (records.length === 0) return
+    foldSurface([...log.events, ...records])
+    const lines = records.map((record) => `${JSON.stringify(record)}\n`)
+    appendFileSync(handle.transcript, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    /** One push per event: a long source's seed is far more events than a spread may pass as arguments. */
+    for (const record of records) log.events.push(record)
+    const turns = records.filter((record) => record.type === 'message' && (record.message as RecordedMessage | undefined)?.role === 'user').length
+    this.touch(handle, { addTurns: turns })
   }
 
   /**
@@ -1413,14 +1485,16 @@ export class SessionStore {
    * The meta is a convenience beside the log: failing to write it must never lose the event that was just appended, which is
    * why the catch swallows. `updated` is what a row's age reads, and `turns` what its tooltip counts.
    */
-  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean } = {}): void {
+  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean; readonly addTurns?: number } = {}): void {
     const path = handle.meta
+    /** `addTurns` is a fork's seed, which counts every inherited user message in one write. */
+    const added = (options.bumpTurns === true ? 1 : 0) + (options.addTurns ?? 0)
     try {
       const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
       const updated: SessionMeta = {
         ...meta,
         updated: new Date().toISOString(),
-        ...(options.bumpTurns === true ? { turns: (meta.turns ?? 0) + 1 } : {}),
+        ...(added > 0 ? { turns: (meta.turns ?? 0) + added } : {}),
       }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)
     } catch {
