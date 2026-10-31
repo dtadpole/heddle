@@ -44,6 +44,19 @@ node --test check-markdown-image-paths.mjs
 HEDDLE_BIN=/path/to/heddle node --test check-markdown-image-paths.mjs
 ```
 
+## PNG regression
+
+The standalone PNG check in [`check.mjs`](check.mjs) drives offline HTTP and a headless browser against
+both builds (default TypeScript CLI, or `HEDDLE_BIN` for Rust). It asserts actual image decoding,
+accessible alt and decode-error text, `no-referrer`, and unchanged token/workspace refusals for the
+metadata and raw-byte routes. This is PNG-only coverage, not an all-format or zoom claim.
+
+```bash
+_tools_/local-build/run --ts -- node --test --test-name-pattern='standalone PNG' _verifiers_/88-file-preview/check.mjs
+```
+
+Run from the repository root; build the selected CLI through its corresponding resource gate first.
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.

@@ -18,7 +18,7 @@ import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
-import { renderSourceOffThread } from './code.ts'
+import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
@@ -33,7 +33,7 @@ import { type InventoryLoader, readPluginInventory } from '../config/plugin-inve
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
+import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
@@ -1034,7 +1034,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const reading = readFileText(wanted)
+      const path = canonicalPath(wanted)
+      if (rendererFor(path).renderer === 'image') {
+        let stats
+        try { stats = statSync(path) } catch { throw new Error(`${path} is not a file`) }
+        if (!stats.isFile()) throw new Error(`${path} is not a file`)
+        // Decide before the UTF-8 reader rejects PNG. No bytes or HTML in this metadata;
+        // /api/raw rechecks authentication and workspace ownership when the img loads.
+        respond(response, 200, 'application/json', `${JSON.stringify({
+          path, name: basename(path), bytes: stats.size, renderer: 'image',
+          image: { src: `/api/raw?path=${encodeURIComponent(path)}`, mediaType: 'image/png' },
+        })}\n`)
+        return
+      }
+      const reading = readFileText(path)
       /**
        * The reading and the **renderer's decision** travel together.
        *
@@ -1644,7 +1657,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    let forked
+    try {
+      forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    } catch (error) {
+      if (!isMissingFolder(error)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/folder-missing' })}\n`)
+      return
+    }
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
@@ -3356,6 +3376,16 @@ export function push(state: Pick<RequestState, 'log' | 'subscribers'>, event: st
       // a client that is already gone leaves through its close listener
     }
   }
+}
+
+/**
+ * A session's folder that is gone (#56): a refusal with its sentence and its code, answered `400 { error, code }` as the
+ * unwritable branch of #106 is. Recognised by code, class or name, as `SessionFlagError` is, so a second copy of the
+ * module still matches.
+ */
+function isMissingFolder(error: unknown): boolean {
+  if (error instanceof MissingFolderError) return true
+  return error instanceof Error && (error.name === 'MissingFolderError' || (error as { code?: unknown }).code === 'session/folder-missing')
 }
 
 function respondSse(response: ServerResponse): void {
