@@ -222,6 +222,13 @@ impl SessionService for StoreSessions {
             .map(meta_of)
     }
 
+    /// The store announces every title it writes (#33): the rename route's own, the first message's fallback, a fork's
+    /// name and the title model's answer.
+    fn on_renamed(&self, listener: crate::services::TitleListener) -> bool {
+        self.service.store().on_renamed(listener);
+        true
+    }
+
     fn definition_id(&self, folder: &Path) -> Option<String> {
         heddle_session::read_session_definition(&path_text(folder))
             .map(|definition| definition.id().to_owned())

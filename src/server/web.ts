@@ -216,6 +216,13 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     }
   })
 
+  /**
+   * A session's title was written, so every page retitles it (#33). DSH records each title change and every view of the
+   * session follows (inventory-shell S16). That covers a person's rename, the first message's fallback and the title
+   * model's answer, so the push comes from the store's one rename path, not from the rename route alone.
+   */
+  ctx.on('session/renamed', ({ session, title }) => push({ log, subscribers }, 'sessions', { type: 'session/renamed', session, title }))
+
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
     // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
@@ -1832,7 +1839,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
     if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
-    push(state, 'sessions', { type: 'session/renamed', session: id, title: meta.title ?? body.title })
+    /** The store's rename announced it, and `session/renamed` pushed it to every page (#33). */
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }

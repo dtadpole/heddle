@@ -256,6 +256,9 @@ struct Shared {
     port: u16,
     /// The page's interactive terminals, per session (#85).
     terminals: TerminalRegistry,
+    /// Whether the session service announces every title it writes, which this server pushes as `session/renamed`
+    /// (#33). When it does not, the rename route pushes its own rename.
+    renames_announced: bool,
 }
 
 impl AppState {
@@ -385,6 +388,21 @@ impl ServerBuilder {
             .token
             .clone()
             .unwrap_or_else(token::create_launch_token);
+        // Every title the session store writes reaches every page as `session/renamed` (#33). DSH records each title
+        // change and every view of the session follows (inventory-shell S16). That covers a person's rename, the first
+        // message's fallback and the title model's answer, so the push comes from the store, as `web.ts` hears its
+        // `session/renamed` event, not from the rename route alone.
+        let renames_announced = {
+            let hub = self.events.clone();
+            self.harness
+                .sessions
+                .on_renamed(Arc::new(move |session: &str, title: &str| {
+                    hub.push(
+                        "sessions",
+                        &json!({"type": "session/renamed", "session": session, "title": title}),
+                    );
+                }))
+        };
         let state = AppState {
             inner: Arc::new(Shared {
                 harness: self.harness,
@@ -396,6 +414,7 @@ impl ServerBuilder {
                 secret,
                 port,
                 terminals: TerminalRegistry::default(),
+                renames_announced,
             }),
         };
 
@@ -1525,10 +1544,13 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
-            state.events().push(
-                "sessions",
-                &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
-            );
+            // A store that announces its titles has pushed this one already (#33).
+            if !state.inner.renames_announced {
+                state.events().push(
+                    "sessions",
+                    &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
+                );
+            }
             respond::json(StatusCode::OK, &meta)
         }
     }

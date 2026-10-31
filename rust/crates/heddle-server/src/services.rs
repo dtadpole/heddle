@@ -39,6 +39,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::selection::SessionSelection;
 
+/// Told about a title the session store wrote: `(session id, title now stored)` ([`SessionService::on_renamed`]). The
+/// same shape as `heddle_session::RenameListener`, so a store's listener is this one.
+pub type TitleListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// A failure a service reports, with an optional stable code a route maps to a status.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -222,6 +226,14 @@ pub trait SessionService: Send + Sync {
 
     /// Retitle; the empty string clears the title. `None` is an unknown session.
     fn rename(&self, id: &str, title: &str) -> Option<SessionMeta>;
+
+    /// Announce every title the store writes from now on to `listener`, with the session id and the title now stored
+    /// (`""` when cleared): a person's rename, the first message's fallback, a fork's name and the title model's answer
+    /// alike (#33). Answers whether this service announces titles at all. One that does not (the default) leaves the
+    /// rename route to push its own rename, which is then the only title the pages hear.
+    fn on_renamed(&self, _listener: TitleListener) -> bool {
+        false
+    }
 
     /// The id of the session whose definition lives in `folder`, if any.
     fn definition_id(&self, folder: &Path) -> Option<String>;
