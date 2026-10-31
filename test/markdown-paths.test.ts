@@ -75,6 +75,30 @@ test('shared local link resolution decodes paths once while retaining encoded an
   assert.ok(renderMarkdown('[note](note%2520one.md)', { base: '/work' }).includes('data-heddle-path="/work/note%20one.md"'))
 })
 
+test('malformed local links retain literal filenames while images and decoded schemes stay refused', () => {
+  for (const destination of ['100%.md#part%20one', 'bad%GG.md', 'bad%20%GG.md', 'bad%FF.md']) {
+    const [path, fragment] = destination.split('#')
+    const expected = `/api/raw?path=${encodeURIComponent(`/work/${path}`)}${fragment === undefined ? '' : `#${fragment}`}`
+    for (const source of [`[note](${destination})`, `<a href="${destination}">note</a>`]) {
+      const html = renderMarkdown(source, { base: '/work' })
+      assert.ok(html.includes(`href="${expected}"`), `${destination} keeps its literal filename: ${html}`)
+    }
+    const html = renderMarkdown(`[note](${destination})`, { base: '/work' })
+    assert.ok(html.includes(`data-heddle-path="/work/${path}"`), html)
+  }
+  for (const destination of ['100%.png', 'bad%GG.png', 'http%3A%2F%2Fexample.png', 'javascript%3Aalert(1)']) {
+    for (const source of [`![image](<${destination}>)`, `<img src="${destination}">`]) {
+      assert.ok(!/<img[^>]*\bsrc=/.test(renderMarkdown(source, { base: '/work', remoteImages: true })), source)
+    }
+  }
+  for (const destination of ['http%3A%2F%2Fexample.md', 'javascript%3Aalert(1)', 'file%3A%2F%2F%2Fwork%2Fnote.md']) {
+    for (const source of [`[note](<${destination}>)`, `<a href="${destination}">note</a>`]) {
+      const html = renderMarkdown(source, { base: '/work' })
+      assert.ok(!html.includes('/api/raw?') && !html.includes('data-heddle-path='), html)
+    }
+  }
+})
+
 test('remote image URL identity and refused schemes remain unchanged', () => {
   for (const source of ['https://example.invalid/shot%20one.png#part', '//example.invalid/shot%2520one.png']) {
     const html = renderMarkdown(`![image](${source})`, { base: '/work', remoteImages: true })

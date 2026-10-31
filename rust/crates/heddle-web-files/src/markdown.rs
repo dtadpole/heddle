@@ -697,6 +697,63 @@ mod tests {
     }
 
     #[test]
+    fn malformed_local_links_keep_literal_paths_without_relaxing_image_or_scheme_rejection() {
+        for destination in [
+            "100%.md#part%20one",
+            "bad%GG.md",
+            "bad%20%GG.md",
+            "bad%FF.md",
+        ] {
+            let (path, fragment) = destination.split_once('#').unwrap_or((destination, ""));
+            let expected = raw_url(&Subresource {
+                path: format!("/w/{path}"),
+                fragment: fragment.to_string(),
+            });
+            for source in [
+                format!("[note]({destination})"),
+                format!("<a href=\"{destination}\">note</a>"),
+            ] {
+                let html = render_at("/w/notes.md", &source);
+                assert!(html.contains(&format!("href=\"{expected}\"")), "{html}");
+                assert!(
+                    html.contains(&format!("data-heddle-path=\"/w/{path}\"")),
+                    "{html}"
+                );
+            }
+        }
+        for destination in [
+            "100%.png",
+            "bad%GG.png",
+            "http%3A%2F%2Fexample.png",
+            "javascript%3Aalert(1)",
+        ] {
+            for source in [
+                format!("![image](<{destination}>)"),
+                format!("<img src=\"{destination}\">"),
+            ] {
+                let html = render_at("/w/notes.md", &source);
+                assert!(followed(&html).is_empty(), "{html}");
+            }
+        }
+        for destination in [
+            "http%3A%2F%2Fexample.md",
+            "javascript%3Aalert(1)",
+            "file%3A%2F%2F%2Fw%2Fnote.md",
+        ] {
+            for source in [
+                format!("[note](<{destination}>)"),
+                format!("<a href=\"{destination}\">note</a>"),
+            ] {
+                let html = render_at("/w/notes.md", &source);
+                assert!(
+                    !html.contains("/api/raw?") && !html.contains("data-heddle-path="),
+                    "{html}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_raw_html_image_is_resolved_by_the_allow_lists_policy() {
         // Raw HTML goes around the renderer, so the sanitiser's policy is the one that resolves it.
         let html = render_at(
@@ -1235,7 +1292,7 @@ fn rewrite_destinations<'a>(
                 image_source(&target, base, remote_images).unwrap_or_else(|| REFUSED.to_string());
             continue;
         }
-        if let Some(resolved) = resolve_subresource(&target, base) {
+        if let Some(resolved) = resolve_subresource(&target, base, true) {
             link.url = raw_url(&resolved);
         } else {
             link.url = target;
@@ -1637,7 +1694,11 @@ struct Subresource {
 }
 
 /// The file a relative reference names, or `None` for a remote URL, a `data:` payload, a fragment, or no base.
-fn resolve_subresource(href: &str, base: Option<&Path>) -> Option<Subresource> {
+fn resolve_subresource(
+    href: &str,
+    base: Option<&Path>,
+    literal_on_malformed: bool,
+) -> Option<Subresource> {
     let trimmed = href.trim();
     if trimmed.is_empty() {
         return None;
@@ -1660,7 +1721,7 @@ fn resolve_subresource(href: &str, base: Option<&Path>) -> Option<Subresource> {
         Some((target, fragment)) => (target, fragment),
         None => (trimmed, ""),
     };
-    let target = decode_local_path(target)?;
+    let target = decode_local_path_with_policy(target, literal_on_malformed)?;
     let path = if target.starts_with('/') {
         target
     } else {
@@ -1718,9 +1779,25 @@ pub(crate) fn percent_encode(value: &str) -> String {
 }
 
 /// Decode an authored local path exactly once before joining and raw_url's transport encoding (#131).
-/// Match DSH sidebar-documentpreview markdownImageUrl: malformed escapes, invalid UTF-8 and decoded schemes are
-/// refused, never partially decoded or recursively interpreted. Fragments stay separate.
+/// Match DSH sidebar-documentpreview markdownImageUrl: images reject malformed escapes and invalid UTF-8.
+/// Links may retain the whole literal filename on decoding failure; successfully decoded schemes are always
+/// refused, never retried as literal paths. Nothing is partially or recursively decoded; fragments stay separate.
 fn decode_local_path(value: &str) -> Option<String> {
+    decode_local_path_with_policy(value, false)
+}
+
+fn decode_local_path_with_policy(value: &str, literal_on_malformed: bool) -> Option<String> {
+    let decoded = match decode_path_bytes(value) {
+        Some(decoded) => decoded,
+        None => return literal_on_malformed.then(|| value.to_string()),
+    };
+    if scheme_of(&decoded).is_some() {
+        return None;
+    }
+    Some(decoded)
+}
+
+fn decode_path_bytes(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
@@ -1737,11 +1814,7 @@ fn decode_local_path(value: &str) -> Option<String> {
             index += 1;
         }
     }
-    let decoded = String::from_utf8(out).ok()?;
-    if scheme_of(&decoded).is_some() {
-        return None;
-    }
-    Some(decoded)
+    String::from_utf8(out).ok()
 }
 
 /// Decode a transport path already emitted by raw_url; existing tolerant handling is not authored-path policy.
@@ -1779,7 +1852,7 @@ fn image_source(target: &str, base: Option<&Path>, remote_images: bool) -> Optio
     if target.starts_with("/api/raw?") {
         return Some(target.to_string());
     }
-    if let Some(resolved) = resolve_subresource(target, base) {
+    if let Some(resolved) = resolve_subresource(target, base, false) {
         return Some(raw_url(&resolved));
     }
     // Validate authored local paths even when no base exists; remote addresses remain exactly as written.
@@ -1809,7 +1882,7 @@ fn url_for(value: &str, base: Option<&Path>) -> Option<String> {
     if !relative {
         return Some(safe.to_string());
     }
-    match resolve_subresource(safe, base) {
+    match resolve_subresource(safe, base, true) {
         Some(resolved) => Some(raw_url(&resolved)),
         None => Some(safe.to_string()),
     }

@@ -90,7 +90,7 @@ interface ResolvedSubresource {
  * `href="data-heddle-path=%2FUsers…"`, a link to nowhere. Two pieces cannot be mis-split, and the caller builds the
  * markup it needs.
  */
-function resolveSubresource(href: string, base: string | undefined): ResolvedSubresource | null {
+function resolveSubresource(href: string, base: string | undefined, literalOnMalformed = true): ResolvedSubresource | null {
   const trimmed = href.trim()
   if (trimmed.length === 0) return null
   /** A remote URL is the author's choice and is left exactly as written. */
@@ -101,22 +101,23 @@ function resolveSubresource(href: string, base: string | undefined): ResolvedSub
   if (trimmed.startsWith('#')) return null
   if (base === undefined) return null
   const [target, fragment] = splitFragment(trimmed)
-  const path = decodeLocalPath(target)
+  const path = decodeLocalPath(target, literalOnMalformed)
   if (path === null) return null
   return { path: isAbsolute(path) ? path : resolve(base, path), fragment }
 }
 
 /**
  * Decode an authored local path exactly once before joining and rawUrl's transport encoding (#131).
- * DSH sidebar-documentpreview markdownImageUrl likewise decodes before joining. Malformed escapes or UTF-8
- * and decoded schemes are refused, never partially decoded or recursively interpreted; fragments stay separate.
+ * DSH sidebar-documentpreview markdownImageUrl likewise decodes before joining. Images reject malformed escapes
+ * or UTF-8; links retain the whole literal filename on decoding failure. Successfully decoded schemes are always
+ * refused, never retried as literal paths. Nothing is partially or recursively decoded; fragments stay separate.
  */
-function decodeLocalPath(path: string): string | null {
+function decodeLocalPath(path: string, literalOnMalformed = false): string | null {
   try {
     const decoded = decodeURIComponent(path)
     return /^[a-z][a-z0-9+.-]*:/i.test(decoded) ? null : decoded
   } catch {
-    return null
+    return literalOnMalformed ? path : null
   }
 }
 
@@ -174,7 +175,7 @@ function imageSource(target: string): string | null {
    * a raw `<img>`. It is a local file either way, so it is kept rather than wrapped a second time.
    */
   if (target.startsWith('/api/raw?')) return target
-  const resolved = resolveSubresource(target, imageBase)
+  const resolved = resolveSubresource(target, imageBase, false)
   if (resolved !== null) return rawUrl(resolved)
   /** Validate local paths even without a base; remote addresses remain exactly as written. */
   const remote = /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('//')
