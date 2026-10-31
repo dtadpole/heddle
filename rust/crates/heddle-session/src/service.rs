@@ -124,42 +124,34 @@ pub fn title_from(text: &str) -> String {
     format!("{}…", trim_punctuation(&String::from_utf16_lossy(chosen)))
 }
 
-/// A fork's name, DSH's `increasedForkTitle`: a title ending in `(n)` or the full-width `（n）` is
-/// incremented in place; any other gains ` (1)`; a blank one is `session (1)`. The ordinal steps past
-/// every name in `taken`.
-pub fn fork_title(base: &str, taken: &[String]) -> String {
-    let trimmed = if base.trim().is_empty() {
-        "session"
-    } else {
-        base.trim()
-    };
-    #[derive(Clone, Copy)]
-    enum Style {
-        Ascii,
-        FullWidth,
-        Space,
+/// A fork's name, from its **source's** title alone: DSH's `increasedForkTitle`
+/// (`dsh-api-session-controller` lib/client.js:3714-3720, applied at :3992 and :4003-4004 as
+/// `manager.rename(childId, increasedForkTitle(sourceTitle))`). A title ending in `(n)` or the
+/// full-width `（n）` is incremented in place; any other gains ` (1)`. No other session is consulted,
+/// so a second fork of `T` is `T (1)` again (#67); the version here used to step past every title
+/// the store held, which made it `T (2)`.
+///
+/// The number is incremented as decimal text, as DSH's `BigInt` increments it, so a long ordinal is
+/// exact and cannot overflow. A blank title gives `None` and the fork stays untitled: DSH renames the
+/// child only when its source has a durable title (`list.byId[id]?.title`).
+pub fn fork_title(base: &str) -> Option<String> {
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    let ascii = split_ordinal_suffix(trimmed, '(', ')');
-    let full_width = split_ordinal_suffix(trimmed, '（', '）');
-    let (prefix, mut ordinal, style) = match (&ascii, &full_width) {
-        (Some((prefix, value)), _) => (prefix.clone(), value + 1, Style::Ascii),
-        (None, Some((prefix, value))) => (prefix.clone(), value + 1, Style::FullWidth),
-        (None, None) => (trimmed.to_string(), 1, Style::Space),
-    };
-    let format = |value: u64| match style {
-        Style::Ascii => format!("{prefix}({value})"),
-        Style::FullWidth => format!("{prefix}（{value}）"),
-        Style::Space => format!("{prefix} ({value})"),
-    };
-    while taken.iter().any(|name| name == &format(ordinal)) {
-        ordinal += 1;
+    if let Some((prefix, digits)) = split_ordinal_suffix(trimmed, '(', ')') {
+        return Some(format!("{prefix}({})", increment_decimal(&digits)));
     }
-    format(ordinal)
+    if let Some((prefix, digits)) = split_ordinal_suffix(trimmed, '（', '）') {
+        return Some(format!("{prefix}（{}）", increment_decimal(&digits)));
+    }
+    Some(format!("{trimmed} (1)"))
 }
 
 /// The `(n)` suffix of a title, as the TypeScript regexes read it: the **first** opening bracket whose
-/// remainder is digits followed by the closing bracket and the end of the string.
-fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, u64)> {
+/// remainder is ASCII digits followed by the closing bracket and the end of the string. Answers the
+/// prefix and the digits as written.
+fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, String)> {
     let chars: Vec<char> = text.chars().collect();
     for (index, character) in chars.iter().enumerate() {
         if *character != open {
@@ -173,12 +165,29 @@ fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, 
         if digits.is_empty() || !digits.iter().all(char::is_ascii_digit) {
             continue;
         }
-        let number: String = digits.iter().collect();
-        if let Ok(value) = number.parse::<u64>() {
-            return Some((chars[..index].iter().collect(), value));
-        }
+        return Some((chars[..index].iter().collect(), digits.iter().collect()));
     }
     None
+}
+
+/// `BigInt(digits) + 1n` written back in decimal: leading zeros dropped, any length exact.
+fn increment_decimal(digits: &str) -> String {
+    let mut out: Vec<char> = digits.trim_start_matches('0').chars().collect();
+    let mut index = out.len();
+    loop {
+        if index == 0 {
+            out.insert(0, '1');
+            break;
+        }
+        index -= 1;
+        if out[index] == '9' {
+            out[index] = '0';
+        } else {
+            out[index] = char::from(out[index] as u8 + 1);
+            break;
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The session service. Cheap to clone; clones share one store.
@@ -327,24 +336,18 @@ impl SessionService {
             .find(|meta| meta.id() == handle.id)
             .map(|meta| meta.created().to_string())
             .unwrap_or_else(iso_now);
-        let base = source
-            .title()
-            .filter(|title| !title.trim().is_empty())
-            .map(|title| title.trim().to_string())
-            .unwrap_or_else(|| "session".to_string());
-        let titles: Vec<String> = self
-            .list()
-            .iter()
-            .map(|meta| meta.title().unwrap_or("").to_string())
-            .collect();
-        let title = fork_title(&base, &titles);
-        self.store.rename(&handle.id, &title)?;
+        // Named from the source's title alone, as DSH names it (`fork_title`); an untitled source
+        // leaves the fork untitled.
+        let title = fork_title(source.title().unwrap_or(""));
+        if let Some(title) = &title {
+            self.store.rename(&handle.id, title)?;
+        }
         let definition = write_session_definition(
             &handle,
             source.cwd(),
             &DefinitionOptions {
                 created_at: created,
-                title: Some(title),
+                title,
                 endpoint: source.endpoint().map(str::to_string),
                 model: source.model().map(str::to_string),
                 reasoning_effort: source.reasoning_effort().map(str::to_string),
@@ -700,23 +703,153 @@ mod tests {
 
     #[test]
     fn a_fork_title_counts_up_in_place() {
-        assert_eq!(fork_title("Source", &[]), "Source (1)");
-        assert_eq!(fork_title("Source (1)", &[]), "Source (2)");
-        assert_eq!(fork_title("Source (2)", &[]), "Source (3)");
-        assert_eq!(fork_title("Source （1）", &[]), "Source （2）");
-        assert_eq!(fork_title("", &[]), "session (1)");
-        assert_eq!(fork_title("   ", &[]), "session (1)");
-        // The reference does not look past the suffix, but a taken name steps past it.
-        let taken = vec!["Source (2)".to_string(), "Source (3)".to_string()];
-        assert_eq!(fork_title("Source (1)", &taken), "Source (4)");
+        assert_eq!(fork_title("Source").as_deref(), Some("Source (1)"));
+        assert_eq!(fork_title("Source (1)").as_deref(), Some("Source (2)"));
+        assert_eq!(fork_title("Source (2)").as_deref(), Some("Source (3)"));
+        assert_eq!(fork_title("Source （1）").as_deref(), Some("Source （2）"));
+        // A blank source names nothing: DSH renames a fork only from a durable title.
+        assert_eq!(fork_title(""), None);
+        assert_eq!(fork_title("   "), None);
+    }
+
+    #[test]
+    fn a_fork_title_is_dsh_increased_fork_title_edge_cases_included() {
+        // Each pair is what DSH's two regexes and `BigInt` produce for that title.
+        for (title, expected) in [
+            ("T", "T (1)"),
+            ("全角标题（1）", "全角标题（2）"),
+            ("Plan (2023)", "Plan (2024)"),
+            ("x(1)", "x(2)"),
+            ("(3)", "(4)"),
+            ("a (1) (2)", "a (1) (3)"),
+            ("a (1) b", "a (1) b (1)"),
+            ("x (1)（2）", "x (1)（3）"),
+            ("x（1）(2)", "x（1）(3)"),
+            ("T (01)", "T (2)"),
+            ("T (x1)", "T (x1) (1)"),
+            ("T ()", "T () (1)"),
+            ("T (99999999999999999999)", "T (100000000000000000000)"),
+            ("T (12345678901234567891)", "T (12345678901234567892)"),
+            ("T (18446744073709551615)", "T (18446744073709551616)"),
+        ] {
+            assert_eq!(fork_title(title).as_deref(), Some(expected), "{title}");
+        }
     }
 
     #[test]
     fn a_fork_of_a_fork_is_incremented_rather_than_appended() {
-        let first = fork_title("Source", &[]);
-        let second = fork_title(&first, &[]);
+        let first = fork_title("Source").unwrap();
+        let second = fork_title(&first).unwrap();
         assert_eq!(second, "Source (2)");
         assert!(!second.contains("(1) (1)"));
+    }
+
+    /// One recorded message, written to the store directly so the first-message title fallback stays out of it.
+    fn say(service: &SessionService, handle: &SessionHandle, role: Role, text: &str) {
+        service
+            .store()
+            .message(
+                handle,
+                Message {
+                    role,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: text.to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+    }
+
+    /// A session in `folder` with one completed turn, so it can be forked; titled `title` when given.
+    fn answered(service: &SessionService, folder: &str, title: Option<&str>) -> SessionHandle {
+        let handle = service.open_at(folder, OpenAtOptions::default()).unwrap();
+        say(service, &handle, Role::User, "a question worth forking");
+        say(service, &handle, Role::Assistant, "the answer");
+        service
+            .store()
+            .append(&handle, NewEvent::new("turn/completed"), Default::default())
+            .unwrap();
+        if let Some(title) = title {
+            service.rename(&handle.id, title).unwrap();
+        }
+        handle
+    }
+
+    /// Fork `id`; answer the child's id and its title, after checking its definition says the same.
+    fn fork_named(service: &SessionService, id: &str) -> (String, Option<String>) {
+        let ForkOutcome::Forked(forked) = service.fork(id).unwrap() else {
+            panic!("{id} should fork");
+        };
+        let title = service
+            .list()
+            .into_iter()
+            .find(|meta| meta.id() == forked.handle.id)
+            .and_then(|meta| meta.title().map(str::to_string));
+        let written = crate::definition::read_session_definition(&forked.definition.dir)
+            .unwrap()
+            .title()
+            .map(str::to_string);
+        assert_eq!(
+            written, title,
+            "the definition names the fork as the store does"
+        );
+        (forked.handle.id, title)
+    }
+
+    #[test]
+    fn a_second_fork_is_named_from_its_source_alone() {
+        // #67, DSH's table: fork T, fork T again, fork the first fork, fork the archived T (2).
+        let (_dir, service) = service();
+        let folder = branch();
+        let source = answered(&service, folder.path().to_str().unwrap(), Some("T"));
+        let (first, first_title) = fork_named(&service, &source.id);
+        let (second, second_title) = fork_named(&service, &source.id);
+        let (of_first, of_first_title) = fork_named(&service, &first);
+        service
+            .flags(
+                &of_first,
+                FlagPatch {
+                    archived: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (_, of_archived_title) = fork_named(&service, &of_first);
+        assert_eq!(
+            [
+                first_title.as_deref(),
+                second_title.as_deref(),
+                of_first_title.as_deref(),
+                of_archived_title.as_deref()
+            ],
+            [Some("T (1)"), Some("T (1)"), Some("T (2)"), Some("T (3)")]
+        );
+        // The archived second fork, T (1), forks into T (2) though another session holds that name.
+        service
+            .flags(
+                &second,
+                FlagPatch {
+                    archived: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(fork_named(&service, &second).1.as_deref(), Some("T (2)"));
+    }
+
+    #[test]
+    fn a_fork_of_an_untitled_session_is_left_untitled() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let source = answered(&service, folder.path().to_str().unwrap(), None);
+        assert_eq!(service.meta(&source.id).unwrap().title(), None);
+        let (_, title) = fork_named(&service, &source.id);
+        assert_eq!(
+            title, None,
+            "DSH renames a fork only from its source's title"
+        );
     }
 
     #[test]

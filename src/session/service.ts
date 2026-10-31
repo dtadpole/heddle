@@ -49,27 +49,29 @@ export function titleFrom(text: string): string {
 }
 
 /**
- * A fork's name: DSH's `<title> (1)`, with the ordinal rising past whatever the store already holds.
+ * A fork's name, from its **source's** title alone: DSH's `increasedForkTitle`.
  *
- * A pure function rather than a loop inside `fork`, because the rule is what a person reads and a fork that reused
- * an existing name would be a fork nobody could tell apart in a list.
+ * Read from DSH's session controller (`dsh-api-session-controller` lib/client.js:3714-3720, applied at :3992 and
+ * :4003-4004 as `manager.rename(childId, increasedForkTitle(sourceTitle))`): a title that already ends in `(n)` — ASCII
+ * or the full-width `（n）` a Chinese title uses — is incremented **in place**, and any other title gains ` (1)`. It
+ * looks at nothing but that one title, so a second fork of `T` is `T (1)` again, and a fork's name does not depend on
+ * which forks were made before it (#67). The version here used to step past every title the store already held, which
+ * made a second fork `T (2)`.
+ *
+ * The number is a `BigInt`, as DSH's is, so a long ordinal increments exactly rather than rounding.
+ *
+ * A source with no title gives `undefined`, and the fork is left untitled: DSH reads the source's durable title
+ * (`list.byId[id]?.title`, absent until something names the session) and renames the child only when there is one.
+ * The caller writes the answer through the store's `rename`, which cleans it as every title is cleaned (`./title-text.ts`).
  */
-export function forkTitle(base: string, taken: readonly string[]): string {
-  const trimmed = base.trim().length > 0 ? base.trim() : 'session'
-  /**
-   * DSH's `increasedForkTitle`, read from its session controller: a title that already ends in `(n)` — ASCII or the
-   * full-width `（n）` a Chinese title uses — is incremented **in place**, and only a title without a suffix gains ` (1)`.
-   * The earlier version here always appended, so forking a fork produced `x (1) (1)` where the reference produces `x (2)`.
-   */
+export function forkTitle(base: string): string | undefined {
+  const trimmed = base.trim()
+  if (trimmed.length === 0) return undefined
   const ascii = /^(.*?)\((\d+)\)$/u.exec(trimmed)
+  if (ascii?.[1] !== undefined && ascii[2] !== undefined) return `${ascii[1]}(${BigInt(ascii[2]) + 1n})`
   const fullWidth = /^(.*?)（(\d+)）$/u.exec(trimmed)
-  const match = ascii ?? fullWidth
-  const prefix = match?.[1] ?? trimmed
-  let ordinal = match?.[2] === undefined ? 1 : Number(match[2]) + 1
-  /** The reference does not look past the suffix; the store's titles are a list, so a taken name steps past it rather than colliding. */
-  const format = (value: number) => (ascii !== null ? `${prefix}(${value})` : fullWidth !== null ? `${prefix}（${value}）` : `${prefix} (${value})`)
-  while (taken.includes(format(ordinal))) ordinal += 1
-  return format(ordinal)
+  if (fullWidth?.[1] !== undefined && fullWidth[2] !== undefined) return `${fullWidth[1]}（${BigInt(fullWidth[2]) + 1n}）`
+  return `${trimmed} (1)`
 }
 
 export class SessionService extends Service {
@@ -163,8 +165,9 @@ export class SessionService extends Service {
   /**
    * Fork a session: a new one that continues from where that one stood.
    *
-   * DSH's behaviour, observed on 2026-10-17: the item acts on the session it belongs to, the fork is named
-   * `<title> (1)` with a rising ordinal, it appears beside its parent, and the view **does not** navigate to it.
+   * DSH's behaviour, observed on 2026-10-17: the item acts on the session it belongs to, the fork is named from its
+   * source's title (`<title> (1)`, or the source's own `(n)` plus one; see `forkTitle`), it appears beside its parent,
+   * and the view **does not** navigate to it.
    * The folder keeps the conventions' instance naming rule — a title with spaces and brackets is a label, not
    * an instance name — so the identity is generated as for any other session while the title carries the name.
    */
@@ -189,12 +192,12 @@ export class SessionService extends Service {
     /** A fork continues its source, so it runs under the source's preset (inventory A96). */
     if (source.preset !== undefined) this.store.recordPreset(handle.id, source.preset)
     const created = this.store.list().find((one) => one.id === handle.id)
-    const base = source.title !== undefined && source.title.trim().length > 0 ? source.title.trim() : 'session'
-    const title = forkTitle(base, this.store.list().map((one) => one.title ?? ''))
-    this.store.rename(handle.id, title)
+    /** Named from the source's title alone, as DSH names it (`forkTitle`); an untitled source leaves the fork untitled. */
+    const title = forkTitle(source.title ?? '')
+    if (title !== undefined) this.store.rename(handle.id, title)
     const definition = writeSessionDefinition(handle, source.cwd, {
       createdAt: created?.created ?? new Date().toISOString(),
-      title,
+      ...(title !== undefined ? { title } : {}),
       taken: existingSessionNames(source.cwd),
       ...(source.endpoint !== undefined ? { endpoint: source.endpoint } : {}),
       ...(source.model !== undefined ? { model: source.model } : {}),

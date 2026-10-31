@@ -10,7 +10,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -312,6 +312,8 @@ async function fragmentingChatDouble(answers) {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not one of the turns this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(body)
       const fragments = answers[Math.min(requests.length, answers.length) - 1]
       response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -729,6 +731,120 @@ test('a file under a root reads, and what cannot be shown is refused with a reas
   } finally {
     removeDir(h.home)
     removeDir(h.work)
+    removeDir(outside)
+  }
+})
+
+test('a symlink to a folder lists as a folder at its own path, and opening it lists its target, as DSH lists one', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * DSH's workspace listing reports what a child resolves to and keeps it at its own path (dsh-api-workspace-files: a
+   * symlink reports the type of its destination, a size only for a regular file, a child's path is the listing's joined
+   * with its name; list follows a final directory link inside the root). Measured on both builds before this check
+   * (live-testing draft developer-six-2): the link was a file of 0 bytes (TS) or of the folder entry's size (Rust) at
+   * its target's path, so it could not be expanded and two rows shared one path.
+   */
+  const h = harness('symlink')
+  try {
+    entry(join(h.work, 'nest', 'a.txt'), 'hello\n')
+    entry(join(h.work, 'plain.txt'), 'x\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync('nest', join(h.work, 'nest-link'))
+    symlinkSync('plain.txt', join(h.work, 'file-link'))
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    const root = realpathSync(h.work)
+
+    const { result, tree } = await treeAt(h, h.work)
+    assert.equal(result.code, 0, `the tree ran\n${result.stdout}${result.stderr}`)
+    const link = childOf(tree, 'nest-link')
+    assert.ok(link, `the link is listed\nsaw: ${(tree.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder is a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.children, null, 'which can be expanded, like any folder nobody opened yet')
+    assert.equal(link.bytes, undefined, 'and carries no size, as a folder does not')
+    assert.equal(link.path, join(root, 'nest-link'), 'at its own path')
+    const paths = (tree.children ?? []).map((node) => node.path)
+    assert.equal(new Set(paths).size, paths.length, `no two rows share one path\nsaw: ${paths.join(', ')}`)
+    const fileLink = childOf(tree, 'file-link')
+    assert.equal(fileLink?.kind, 'file', 'a link to a file is a file row')
+    assert.equal(fileLink?.bytes, 2, "with its target's size")
+
+    const opened = await treeAt(h, link.path)
+    assert.equal(opened.result.code, 0, `opening the link ran\n${opened.result.stdout}${opened.result.stderr}`)
+    assert.deepEqual(
+      (opened.tree.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['file:a.txt'],
+      'and lists what its target holds',
+    )
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a symlink that leads out of every root lists at its own path, and opening it is refused, through the Web API and the CLI', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * The row of a link stays at the link's own path (the check above), so opening it asks for a path inside the root. What
+   * refuses a link whose target no root owns is the containment check on the canonical path, the one the Web API and
+   * the CLI make before they list anything ("the Web API's tree lists only what a workspace root holds"). DSH's list
+   * confines the resolved path to the workspace root the same way (dsh-api-workspace-files list and confine,
+   * workspace-file/outside-workspace). Judged here end to end: the row a person would click, then the click.
+   */
+  const h = harness('symlink-out')
+  const root = fixtureDir('symlink-out-root')
+  const outside = fixtureDir('symlink-out-target')
+  let live
+  try {
+    entry(join(root, 'kept.txt'), 'inside\n')
+    entry(join(outside, 'not-yours.txt'), 'outside\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(outside, join(root, 'out-link'))
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const level = await treeOf(root)
+    assert.equal(level.status, 200, `the root lists (${JSON.stringify(level.body)})`)
+    const link = childOf(level.body, 'out-link')
+    assert.ok(link, `the link is listed\nsaw: ${(level.body.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder outside is still a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.path, join(realpathSync(root), 'out-link'), 'at its own path, inside the root')
+
+    const opened = await treeOf(link.path)
+    const listed = Array.isArray(opened.body?.children) ? opened.body.children.map((node) => node.label).join(', ') : ''
+    assert.equal(opened.status, 400, `opening it through the Web API is refused, not listed (${opened.status}${listed ? `, listed: ${listed}` : ''})`)
+    assert.deepEqual(opened.body, { error: `${realpathSync(outside)} is not under any workspace root` }, 'naming where the link lands')
+
+    const cli = await treeAt(h, link.path, { cwd: root })
+    assert.notEqual(cli.result.code, 0, `opening it through the CLI is refused too\n${cli.result.stdout}`)
+    assert.match(`${cli.result.stdout}${cli.result.stderr}`, /not under any workspace root/, 'with the same rule')
+    assert.doesNotMatch(cli.result.stdout, /not-yours\.txt/, 'and nothing of the target is printed')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
     removeDir(outside)
   }
 })
@@ -2880,6 +2996,79 @@ test("a session's first prompt is titled by the session's own model, not by the 
   }
 })
 
+test("a conversation started through the turn route is titled by the session's own model too", async (context) => {
+  /**
+   * #68, the twin of the check above for a session no blank row opened first: `POST /api/turn {prompt, folder, new: true}`,
+   * a turn with no session and no folder (the page's send with nothing selected), and the CLI's `--new --turn`. DSH
+   * writes no title when a session is created; dsh-session-title writes the fallback from the first eligible human
+   * message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session with no title yet
+   * (:387). Measured before on both builds: the turn route and the CLI opened the session titled with the prompt cut to
+   * 60 characters, so no title call started and `Please summarise the quarterly revenue figures for the north` stayed.
+   * The CLI is judged with a title step that fails, because a one-shot process may end before an answer lands: what it
+   * leaves is the fallback the first message wrote, cut at a word.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  const h = harness('turn-route-title')
+  const generated = 'Northern revenue year on year'
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  const fallback = 'Please summarise the quarterly revenue figures…'
+  scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: 'a scripted answer' }] })
+  const folder = join(h.work, 'ws-turn-title')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const listed = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    const turnOpens = async (body) => {
+      const before = new Set((await listed()).map((meta) => meta.id))
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const stream = await turn.text()
+      assert.equal(turn.status, 200, `the turn ran\n${stream}`)
+      assert.match(stream, /a scripted answer/, 'the turn was answered by the turn step, not the title step')
+      const made = (await listed()).filter((meta) => !before.has(meta.id))
+      assert.equal(made.length, 1, `the turn opened one new session\n${JSON.stringify(made)}`)
+      return made[0].id
+    }
+    const titleSettles = async (id) => {
+      let title
+      for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+        if (attempt > 0) await new Promise((done) => setTimeout(done, 250))
+        title = (await listed()).find((meta) => meta.id === id)?.title
+      }
+      return title
+    }
+
+    const fresh = await turnOpens({ prompt, folder, new: true })
+    const freshTitle = await titleSettles(fresh)
+    assert.notEqual(freshTitle, prompt.slice(0, 60), 'the title is not the prompt cut mid-word at 60 characters')
+    assert.equal(freshTitle, generated, `new: true in a folder: the model's title replaces the fallback\nsaw: ${JSON.stringify(freshTitle)}`)
+
+    const loose = await turnOpens({ prompt })
+    const looseTitle = await titleSettles(loose)
+    assert.equal(looseTitle, generated, `no session and no folder: the same\nsaw: ${JSON.stringify(looseTitle)}`)
+
+    scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', error: { message: 'the title model is down' } }, { text: 'a scripted answer' }] })
+    const cli = await runCli(adminArgs(h, ['--new', '--turn', prompt, '--json']), { env: h.env, cwd: folder })
+    assert.equal(cli.code, 0, `the CLI turn ran\n${cli.stdout}${cli.stderr}`)
+    const made = parseJson(cli.stdout)
+    const cliTitle = (await sessionsOf(h)).find((meta) => meta.id === made.session)?.title
+    assert.equal(cliTitle, fallback, `--new --turn: the first message wrote the fallback at a word, which a failed call leaves\nsaw: ${JSON.stringify(cliTitle)}`)
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session is pinned and archived in the store, and the tree follows both', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -3047,6 +3236,60 @@ test('a session forks into a new one named after it, with its conversation and i
     const labels = (tree.children ?? []).filter((node) => node.kind === 'session').map((node) => node.label)
     assert.ok(labels.includes(forked.name), 'the tree draws the fork beside its parent')
     assert.ok(labels.length >= 2, 'and the parent is still there')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a fork is named from its source's title alone: a second fork of T is T (1) again (#67)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-title')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    await runCli(adminArgs(h, ['--turn', 'a conversation worth forking']), { env: h.env, cwd: branch })
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(new URL(path, live.url), {
+        method: 'POST',
+        headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      })
+    const fork = async (id) => {
+      const response = await post(`/api/sessions/${id}/fork`)
+      assert.equal(response.status, 200, `${id} forks\n${await response.clone().text()}`)
+      return (await response.json()).session
+    }
+    const titleOf = async (id) => (await sessionsOf(h)).find((meta) => meta.id === id)?.title
+    assert.equal((await post(`/api/sessions/${made.session}/title`, { title: 'T' })).status, 200, 'the source is named T')
+
+    /**
+     * DSH's table in #67, read from its code: `increasedForkTitle(sourceTitle)` (`dsh-api-session-controller`
+     * lib/client.js:3714-3720, applied at :4003) looks at the source's title and nothing else. Measured on both builds
+     * before the fix: T (1), T (2), T (3), T (4), because every number another session held was skipped.
+     */
+    const first = await fork(made.session)
+    const second = await fork(made.session)
+    const ofFirst = await fork(first)
+    assert.equal((await post(`/api/sessions/${ofFirst}/flags`, { archived: true })).status, 200, 'the fork of the first fork is archived')
+    const ofArchived = await fork(ofFirst)
+    const seen = { first: await titleOf(first), second: await titleOf(second), ofFirst: await titleOf(ofFirst), ofArchived: await titleOf(ofArchived) }
+    assert.deepEqual(
+      seen,
+      { first: 'T (1)', second: 'T (1)', ofFirst: 'T (2)', ofArchived: 'T (3)' },
+      `fork T, fork T again, fork the first fork, fork the archived T (2): DSH names them T (1), T (1), T (2), T (3)\nsaw: ${JSON.stringify(seen)}`,
+    )
   } finally {
     live?.kill()
     removeDir(h.home)

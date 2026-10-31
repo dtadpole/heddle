@@ -442,10 +442,14 @@ function describeTree(node: TreeNode): string[] {
  * prints exactly what it did.
  */
 async function bootFromArgs(args: Args, options: { readonly machineOutput?: boolean } = {}) {
+  return boot({ ...bootOptions(args), ...(options.machineOutput === true ? { logLevel: 0 } : {}) })
+}
+
+/** The layers and overrides a command line boots, which the settings surface must judge writes against. */
+function bootOptions(args: Args) {
   const layers = baseLayer(args)
-  return boot({
+  return {
     configDir: process.cwd(),
-    ...(options.machineOutput === true ? { logLevel: 0 } : {}),
     ...(args.profile !== undefined ? { profile: args.profile } : {}),
     ...(layers.base !== undefined ? { base: layers.base } : {}),
     patches: [...layers.patches],
@@ -470,7 +474,7 @@ async function bootFromArgs(args: Args, options: { readonly machineOutput?: bool
           ],
         }
       : {}),
-  })
+  }
 }
 
 function hasProfile(args: Args): boolean {
@@ -513,7 +517,9 @@ async function runWeb(args: Args): Promise<void> {
       return
     }
 
+    const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
+      settings: settingsServiceFor(bootOptions(args)),
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
@@ -1107,6 +1113,9 @@ async function main(): Promise<void> {
      *
      * `--resume` still addresses a session by id from anywhere, because a person who has an id is
      * asking about that session rather than about this folder.
+     *
+     * A new session is born untitled, as the turn route's is (#68): its first message writes the fallback name and
+     * the session layer asks the model for the title (`session/title.ts`).
      */
     const folder = canonicalPath(process.cwd())
     const handle =
@@ -1116,7 +1125,6 @@ async function main(): Promise<void> {
             fresh: args.fresh,
             endpoint,
             ...(args.model !== undefined ? { model: args.model } : {}),
-            title: args.turn.slice(0, 60),
           })
 
     /**
