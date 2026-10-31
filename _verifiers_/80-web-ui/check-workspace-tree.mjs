@@ -18,7 +18,8 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
  * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
  * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
- * with the composer disabled, not to a blank page that takes a message (#56).
+ * with the composer disabled, not to a blank page that takes a message (#56); and Archived only with nothing archived
+ * says DSH's "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -1034,6 +1035,97 @@ test('a session row whose session can no longer be read opens to DSH\'s failure 
     assert.equal(fresh.disabled, false, 'its composer takes a message')
     assert.notEqual(fresh.placeholder, 'Session unavailable')
     assert.equal(fresh.doomedRow, false, 'and the gone session is not drawn')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('Archived only with nothing archived says "No archived sessions yet", and View other sessions goes back to Hide archived (#107)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's empty list (EmptySessions, dsh-client-ui-workspace lib/client.js:3005-3021, drawn at :3344 for the tree and :3384
+   * for the flat list): under Archived only it names its own emptiness, "No archived sessions yet", and adds a "View other
+   * sessions" text action (words at :4900-4901) that sets the filter back to its default (leaveArchivedOnly, :3539-3541);
+   * README.md:58 says the same. #107: with a workspace registered and nothing archived, the tree said "no workspace root yet
+   * — register one with the + above" and the flat list "no sessions to list", with no way back but View options.
+   */
+  const home = isolatedHome('tree-archived-empty')
+  const work = fixtureDir('tree-archived-empty-work')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: work, title: 'plain notes' }) })
+    assert.equal(made.status, 200, `created a session (${JSON.stringify(made.body)})`)
+    const session = made.body.session
+
+    const sessionRow = `document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]')`
+    const workspaceRow = `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(added.body.record.path)})`
+    const action = `[...document.querySelectorAll('#tree button')].find((button) => button.textContent.trim() === 'View other sessions')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        tree: document.getElementById('tree').textContent.trim(),
+        note: document.getElementById('tree-note').hidden ? '' : document.getElementById('tree-note').textContent,
+        action: ${action} !== undefined,
+        workspaceRow: ${workspaceRow} !== undefined,
+        sessionRow: ${sessionRow} !== null,
+        filter: localStorage.getItem('heddle.tree.archived.v1'),
+      })`)
+    const chooseView = async (label) => {
+      await browser.evaluate(`document.querySelector('#view-options button').click()`)
+      await browser.waitFor(`[...document.querySelectorAll('#view-options [role^=menuitem]')].some((entry) => entry.textContent.trim() === ${JSON.stringify(label)})`, 5_000)
+      await browser.evaluate(`[...document.querySelectorAll('#view-options [role^=menuitem]')].find((entry) => entry.textContent.trim() === ${JSON.stringify(label)}).click()`)
+    }
+    const until = async (expression, what, timeoutMs = 10_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    const archivedEmpty = async (where) => {
+      const said = await browser.waitFor(`document.getElementById('tree').textContent.includes('No archived sessions yet')`, 10_000).catch(() => false)
+      const seen = JSON.parse(await state())
+      assert.ok(said, `${where}: Archived only with nothing archived says DSH's "No archived sessions yet"\nsaw: ${JSON.stringify(seen)}`)
+      assert.equal(seen.tree, 'No archived sessions yetView other sessions', `${where}: the list holds the placeholder and its action, and no row\nsaw: ${JSON.stringify(seen)}`)
+      assert.equal(seen.action, true, `${where}: with DSH's View other sessions action`)
+      assert.doesNotMatch(seen.note, /no workspace root yet|no sessions to list/, `${where}: not a note that sends the person to register a folder they registered`)
+      assert.equal(seen.filter, 'only')
+    }
+
+    /** The page opens the session by name, so no first-visit blank is drawn beside it. */
+    await browser.gotoSession(server.url, session)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`document.getElementById('session-title')?.textContent === 'plain notes'`, 'the page opens the session it was given by name')
+    await until(`${sessionRow} !== null`, 'the session\'s row is drawn under its workspace')
+
+    /** Workspace Tree + Archived only: the placeholder, and its action goes back to Hide archived with the rows. */
+    await chooseView('Archived only')
+    await archivedEmpty('Workspace Tree')
+    await browser.evaluate(`${action}.click()`)
+    await until(`${workspaceRow} !== undefined && ${sessionRow} !== null`, 'View other sessions draws the workspace and its session again')
+    const back = JSON.parse(await state())
+    assert.equal(back.filter, 'hide', `the filter is Hide archived again, and kept\nsaw: ${JSON.stringify(back)}`)
+    assert.equal(back.action, false, 'and the placeholder is gone')
+    assert.doesNotMatch(back.tree, /No archived sessions yet/)
+
+    /** In one list + Archived only: the same placeholder and the same way back. */
+    await chooseView('In one list')
+    await until(`${sessionRow} !== null`, 'the flat list draws the session')
+    await chooseView('Archived only')
+    await archivedEmpty('In one list')
+    await browser.evaluate(`${action}.click()`)
+    await until(`${sessionRow} !== null`, 'View other sessions draws the session in the flat list again')
+    assert.equal(JSON.parse(await state()).filter, 'hide', 'with Hide archived kept')
   } finally {
     browser.close()
     server.kill()

@@ -63,6 +63,8 @@ interface Tree {
   savedSelection: (raw: unknown) => string | null
   recentWorkspace: (workspaces: unknown[], sessions: unknown[]) => { id: string; path: string } | undefined
   restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'none'; id?: string; path?: string; forget?: boolean }
+  EMPTY_TEXT: { none: string; noneArchived: string; viewOthers: string; noRoots: string }
+  emptyList: (archived: string, grouping: string, count: number) => { kind: 'placeholder' | 'note'; text: string; glyph?: string; action?: string } | null
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -668,4 +670,50 @@ test('the page asks those rules where it acts: a load opens no session on its ow
   assert.match(fork, /const blocked = WorkspaceTree\.forkBlocked\(node\.session\)/, 'Fork is refused before the request when there is no turn')
   assert.match(fork, /setNote\(WorkspaceTree\.forkRefusal\(body\)\)/, 'and a refusal is said in DSH\'s words')
   assert.doesNotMatch(fork, /body\.error/, 'never the server\'s, which names the raw id')
+})
+
+test('Archived only with nothing archived says DSH\'s "No archived sessions yet" and offers View other sessions, not the no-roots note (#107)', () => {
+  /**
+   * DSH's EmptySessions (dsh-client-ui-workspace lib/client.js:3005-3021, words at :4899-4901): "No sessions yet", and under
+   * Archived only "No archived sessions yet" with a "View other sessions" text action. #107: with a workspace registered and
+   * nothing archived, Archived only drops every workspace, and the page said "no workspace root yet — register one with the
+   * + above"; the flat list said "no sessions to list".
+   */
+  assert.deepEqual(tree.EMPTY_TEXT, {
+    none: 'No sessions yet',
+    noneArchived: 'No archived sessions yet',
+    viewOthers: 'View other sessions',
+    noRoots: 'no workspace root yet — register one with the + above',
+  })
+  const workspaces = [workspace('w-repo', '/repo', { sessionIds: ['s-1', 's-2'] })]
+  const sessions = [session('s-1', 1), session('s-2', 2)]
+  const archivedOnly = tree.deriveGroups(workspaces, sessions, { grouping: 'tree', archived: 'only' })
+  assert.equal(archivedOnly.length, 0, 'Archived only with nothing archived draws no group although a workspace is registered')
+  const archivedEmpty = { kind: 'placeholder', glyph: 'archive', text: 'No archived sessions yet', action: 'View other sessions' }
+  for (const grouping of ['tree', 'workspace', 'list']) {
+    assert.deepEqual(tree.emptyList('only', grouping, 0), archivedEmpty, `${grouping}: the archived view names its own emptiness and the way back`)
+  }
+  assert.deepEqual(tree.emptyList('hide', 'list', 0), { kind: 'placeholder', glyph: 'list', text: 'No sessions yet' }, 'an empty flat list is DSH\'s No sessions yet')
+  assert.deepEqual(tree.emptyList('show', 'list', 0), { kind: 'placeholder', glyph: 'list', text: 'No sessions yet' })
+  assert.deepEqual(tree.emptyList('hide', 'tree', 0), { kind: 'note', text: tree.EMPTY_TEXT.noRoots }, 'an empty registry keeps heddle\'s note: register a folder')
+  assert.deepEqual(tree.emptyList('show', 'workspace', 0), { kind: 'note', text: tree.EMPTY_TEXT.noRoots })
+  for (const archived of ['hide', 'show', 'only']) {
+    for (const grouping of ['tree', 'workspace', 'list']) assert.equal(tree.emptyList(archived, grouping, 1), null, `${archived}/${grouping}: a list with something in it says nothing`)
+  }
+})
+
+test('the page draws the empty list from those rules, and the action goes back to Hide archived (#107)', () => {
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const renderTree = body('async function renderTree() {')
+  assert.doesNotMatch(renderTree, /setNote\('no workspace root yet/, 'the tree no longer prints the no-roots note for every empty tree')
+  assert.match(renderTree, /WorkspaceTree\.emptyList\(archiveMode, groupingMode, treeGroups\.length\)/, 'it asks emptyList with the filter it drew')
+  const flat = body('async function renderFlatList() {')
+  assert.doesNotMatch(flat, /no sessions to list/, 'nor the flat list its own words')
+  assert.match(flat, /WorkspaceTree\.emptyList\(archiveMode, 'list', visible\.length\)/)
+  const paint = body('function paintEmptyList(empty) {')
+  assert.match(paint, /action\.onclick = async \(\) => \{\s*archiveMode = 'hide'\s*rememberArchived\(\)\s*await renderTree\(\)/, 'View other sessions sets Hide archived, keeps it and redraws, as DSH\'s leaveArchivedOnly')
 })

@@ -1616,6 +1616,15 @@
   #tree .turns { font-size: .72rem; opacity: .5; }
   #tree li[data-kind='generated'] .label { opacity: .55; }
   #tree li[data-kind='folder'] .label { opacity: .8; }
+  /**
+   * #107: DSH's empty list, a centred glyph over the text (`EmptySessions`, dsh-client-ui-workspace lib/client.js:3005-3021),
+   * with the archived view's "View other sessions" as a text action under it.
+   */
+  #tree > li.tree-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px 8px; text-align: center; }
+  #tree > li.tree-empty .tree-empty-glyph { opacity: .45; }
+  #tree > li.tree-empty .tree-empty-text { opacity: .65; font-size: .82rem; }
+  #tree > li.tree-empty .tree-empty-action { border: 0; background: none; padding: 2px 6px; border-radius: 6px; color: var(--accent); font: inherit; font-size: .82rem; cursor: pointer; }
+  #tree > li.tree-empty .tree-empty-action:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
   /** C37: where a dragged workspace lands, a line above or below its whole section (DSH's workspaceDropBefore / After). */
   #tree li[data-workspace-drop] { position: relative; }
   #tree li[data-workspace-drop]::after { content: ''; position: absolute; left: 0; right: 4px; height: 2px; background: var(--accent); pointer-events: none; }
@@ -9629,6 +9638,45 @@ function setNote(text) {
   treeNote.hidden = text === undefined || text === null || text === ''
 }
 
+/**
+ * Draw what `WorkspaceTree.emptyList` says for an empty list (#107): DSH's placeholder as the list's one item, a glyph over
+ * the text with the archived view's "View other sessions" action under it, or heddle's own note under the list. The
+ * action sets the filter back to `Hide archived`, as DSH's `leaveArchivedOnly` sets its default
+ * (`dsh-client-ui-workspace` `lib/client.js:3539-3541`), keeps that choice, and draws the list again.
+ */
+function paintEmptyList(empty) {
+  if (empty === null) return
+  if (empty.kind === 'note') {
+    setNote(empty.text)
+    return
+  }
+  setNote('')
+  const item = document.createElement('li')
+  item.className = 'tree-empty'
+  item.setAttribute('role', 'none')
+  const glyph = kindIcon(empty.glyph, false)
+  glyph.setAttribute('width', '24')
+  glyph.setAttribute('height', '24')
+  glyph.classList.add('tree-empty-glyph')
+  const text = document.createElement('div')
+  text.className = 'tree-empty-text'
+  text.textContent = empty.text
+  item.append(glyph, text)
+  if (empty.action !== undefined) {
+    const action = document.createElement('button')
+    action.type = 'button'
+    action.className = 'tree-empty-action'
+    action.textContent = empty.action
+    action.onclick = async () => {
+      archiveMode = 'hide'
+      rememberArchived()
+      await renderTree()
+    }
+    item.append(action)
+  }
+  treeList.append(item)
+}
+
 /* session-id-copy:begin */
 /**
  * Copy Session ID — DSH's last session-row menu item, `session-id` (dsh-client-ui-workspace `lib/client.js:4730-4740`,
@@ -11845,6 +11893,34 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * What an empty session list says (#107). DSH's `EmptySessions` (`dsh-client-ui-workspace` `lib/client.js:3005-3021`) is
+   * drawn when the tree has no group (`:3344`) or the flat list no row (`:3384`): a glyph over the text, "No sessions yet"
+   * (`empty.none`), and under `Archived only` "No archived sessions yet" (`empty.noneArchived`) with a "View other
+   * sessions" text action (`empty.viewOthers`, the words at `:4899-4901`) that sets the filter back to its default
+   * (`leaveArchivedOnly`, `:3539-3541`), which is `Hide archived` here. The README says the same (`Managing sessions`,
+   * README.md:58).
+   *
+   * `archived` is the filter (`hide`, `show`, `only`), `grouping` the view (`tree`, `workspace`, `list`), `count` how many
+   * groups or rows were drawn. The answer is null when there is something to draw, else `{ kind, text, glyph?, action? }`:
+   * a `placeholder` drawn in the list, or heddle's own `note` under it. The note stays for a tree with no group outside
+   * `Archived only`, which is a tree with no registered workspace and no session: there, registering a folder is the next
+   * step. Under `Archived only` that note was wrong, because the filter drops every workspace with no archived session,
+   * so "no groups" no longer means "no roots": it told a person to register a folder they had registered.
+   */
+  const EMPTY_TEXT = {
+    none: 'No sessions yet',
+    noneArchived: 'No archived sessions yet',
+    viewOthers: 'View other sessions',
+    noRoots: 'no workspace root yet — register one with the + above',
+  }
+  function emptyList(archived, grouping, count) {
+    if (count > 0) return null
+    if (archived === 'only') return { kind: 'placeholder', glyph: 'archive', text: EMPTY_TEXT.noneArchived, action: EMPTY_TEXT.viewOthers }
+    if (grouping === 'list') return { kind: 'placeholder', glyph: 'list', text: EMPTY_TEXT.none }
+    return { kind: 'note', text: EMPTY_TEXT.noRoots }
+  }
+
+  /**
    * The groups to draw, in order: `[{key, workspace, label, path, depth, children, sessions}]`.
    *
    * `workspaces` is `/api/workspaces`'s array (registry order, each with `parent` and `sessionIds`); `sessions` is
@@ -12102,6 +12178,8 @@ const WorkspaceTree = (() => {
     savedSelection,
     recentWorkspace,
     restoreChoice,
+    EMPTY_TEXT,
+    emptyList,
   }
 })()
 /* workspace-tree:end */
@@ -13830,7 +13908,9 @@ async function renderFlatList() {
       return li
     }),
   )
-  setNote(visible.length === 0 ? 'no sessions to list' : '')
+  /** DSH's empty list: "No sessions yet", or under `Archived only` its own emptiness and the way back (#107). */
+  setNote('')
+  paintEmptyList(WorkspaceTree.emptyList(archiveMode, 'list', visible.length))
 }
 
 async function renderTree() {
@@ -13890,9 +13970,15 @@ async function renderTree() {
     expanded.add(treeTops[0].path)
     rememberExpanded()
   }
-  if (treeTops.length === 0 && treeGroups.length === 0) setNote('no workspace root yet — register one with the + above')
-  else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
   treeList.replaceChildren(...treeGroups.map((group) => groupRow(group)))
+  /**
+   * An empty tree says why (#107): under `Archived only` DSH's "No archived sessions yet" with its way back, else heddle's
+   * no-roots note. It used to print the no-roots note whenever no group was drawn, which `Archived only` also causes with
+   * a workspace registered.
+   */
+  const empty = WorkspaceTree.emptyList(archiveMode, groupingMode, treeGroups.length)
+  if (empty !== null) paintEmptyList(empty)
+  else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
 
   /**
    * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
