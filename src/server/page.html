@@ -5379,6 +5379,13 @@ async function showSession(id) {
   liveDecodeTokens = 0
   liveRoundStartedAt = null
   updateStatusBar()
+  /**
+   * Leaving an open New session placeholder takes its row away, as DSH's `sessionVisible` does the moment another session
+   * is current (`dsh-client-ui-workspace` `lib/client.js:964-966`); the tree is redrawn once, shortly, only in that case.
+   */
+  if (current !== null && current !== id && placeholderDrawn(current)) scheduleTreeRefresh()
+  /** Opening another session gives New session's target back to it (`chosenWorkspace`, #25), even a session opened before. */
+  if (current !== id) chooseWorkspace(null)
   current = id
   paintEmptyState()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
@@ -6733,6 +6740,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          */
         if (target === null) {
           current = payload.session
+          chooseWorkspace(null)
           adoptSession(payload.session)
           /** The pending send belongs to the session it just created; the row follows it. */
           if (directTurnPending > 0) directPendingKey = payload.session
@@ -8918,6 +8926,25 @@ function paintRunningMarks() {
 let activeFolder = null
 
 /**
+ * The workspace a person last opened or added in the tree, and the session that was open when they did: `{ path, during }`.
+ *
+ * New session starts where the person acted, as DSH's does: a workspace row's own `+` passes that workspace
+ * (`dsh-client-ui-workspace` `lib/client.js:3233-3236`, then `:1508`, where a named workspace wins over the open session's),
+ * and Add workspace starts a session in the new one at once (`:3936-3938`). Opening workspace B's row after a session in A
+ * is that act here too, because this page has no Session Intent picker that shows and changes the target before the first
+ * prompt (DSH's README, "use the picker in the Session Intent hero to choose a Workspace"): without it a click on B followed
+ * by New session started the session in A, and on a shared server A was another person's project (#25). The choice holds
+ * only while the session it was made beside is still the open one: opening any session, even that one again, forgets it
+ * (`showSession`), and the decision goes back to the open session's workspace.
+ */
+let chosenWorkspace = null
+
+/** Remember (or, when `path` is null, forget) the workspace a person just opened or added. */
+function chooseWorkspace(path) {
+  chosenWorkspace = path === null ? null : { path, during: current }
+}
+
+/**
  * The workspace rows the tree last drew, in its order.
  *
  * The tree's own render is the only place that knows them, and the primary action needs one when nothing is selected —
@@ -9520,8 +9547,12 @@ async function selectSession(node) {
    * The mark is put on the row that was **clicked**, and last, because `showSession` resynchronises the
    * selection to whichever row claims the session. Before the tree stopped showing a captured conversation
    * twice, that moved the mark to the instance row — the session was shown once but claimed by two rows.
+   *
+   * Only while this session is still the open one: the load above awaits several requests, and a New session pressed
+   * meanwhile opens another session and marks its row; marking this row afterwards put the mark on a session that was
+   * no longer open (found by 80's New session check, #25).
    */
-  chooseSelected(node.path)
+  if (current === node.session.id) chooseSelected(node.path)
 }
 
 /**
@@ -9903,14 +9934,36 @@ async function setSessionFlags(node, patch, extra = {}) {
  * opened, the new session's own row is selected so the eye lands on it, and only then is the tree redrawn.
  */
 async function startSessionAt(node) {
-  const response = await fetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ branch: node.path }),
-  })
-  const body = await response.json().catch(() => ({}))
+  /**
+   * Always a **new** session, never one already listed: DSH's sidebar `New session` and its chord create a fresh Session on
+   * every press (`startSession` with no options, then `connectBlank` with no reuse, `dsh-client-ui-workspace`
+   * `lib/client.js:1403-1406`, `:1520`) and only hide the older blank (`sessionVisible`, `:964-966`). The request names no
+   * session on purpose: on a shared server an empty session in the list may be another client's, and naming it put two
+   * clients in one conversation (coordinator, 2026-10-29).
+   */
+  /**
+   * A failed start is said, in DSH's words: `New session failed: {message}` (`toast.createFailed`, `lib/client.js:4957`,
+   * raised by `openWorkspaceSession`'s catch, `:1476-1487`), with the server's refusal or, for a request that never got an
+   * answer (the network is down, the server stopped), the failure's own message (`creationFailureMessage`, `:1688-1692`).
+   * Before, a rejected `fetch` escaped every caller — the button, the chord, the row's `+` and its menu — as an unhandled
+   * rejection, and nothing on screen changed (#59).
+   */
+  const failed = (message) => setNote('New session failed: ' + message)
+  let response
+  let body
+  try {
+    response = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ branch: node.path }),
+    })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    failed(error instanceof Error ? error.message : String(error))
+    return
+  }
   if (!response.ok) {
-    setNote(body.error ?? 'could not start a session there')
+    failed(body.error ?? `the server refused it (${response.status})`)
     return
   }
   setNote('')
@@ -9928,8 +9981,10 @@ async function startSessionAt(node) {
  * Which workspace a new session should start in.
  *
  * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
- * context exists: the selected row's workspace, then the folder the prompt box was last aimed at, then the first
- * workspace the tree draws. All three are answers to "where am I", and the first one that applies wins.
+ * context exists: the workspace row the person opened or added since the open session was chosen (`chosenWorkspace`),
+ * then the open session's workspace (DSH's `currentWorkspaceId`, `lib/client.js:1505-1508`), then the selected row's
+ * workspace, then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers
+ * to "where am I", and the first one that applies wins.
  */
 function newSessionWorkspace() {
   /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
@@ -9937,7 +9992,12 @@ function newSessionWorkspace() {
     treeTops
       .filter((node) => path === node.path || path.startsWith(node.path + '/'))
       .sort((left, right) => right.path.length - left.path.length)[0] ?? null
-  /** The open session's own workspace comes first: it is the group the reader is looking at. */
+  /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
+  if (chosenWorkspace !== null && chosenWorkspace.during === current) {
+    const byChoice = treeTops.find((node) => node.path === chosenWorkspace.path)
+    if (byChoice !== undefined) return byChoice
+  }
+  /** Then the open session's own workspace: it is the group the reader is looking at. */
   if (current !== null) {
     const byCurrent = treeTops.find((node) => node.group !== undefined && WorkspaceTree.containsSession(node.group, current, false))
     if (byCurrent !== undefined) return byCurrent
@@ -10298,8 +10358,9 @@ Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSes
  *   before the parent's own sessions); `workspace` keeps every group a sibling section (DSH's `WorkSpace`).
  * - **Rows**: subagent-origin sessions are hidden (DSH hides `origin: 'subagent'`); the archive filter is DSH's three
  *   states; the order is pinned first (newest pin first), then last updated, newest first, then id.
- * - **Show more**: an open group shows 5 rows, raised to cover the last running or open session within the first 50;
- *   each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
+ * - **Show more**: an open group shows 5 conversations, raised to cover the last running or open one within the first 50,
+ *   plus the open New session placeholder, which takes none of the places; the control reads `Show {n} more sessions`
+ *   and each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -10358,6 +10419,28 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * Whether a session is a **New session placeholder**, DSH's blank row: no turn started (DSH's `blank`), and as DSH's can
+   * only be, untitled, unpinned and unarchived (DSH's blank rows carry no title and no row actions,
+   * `dsh-client-ui-workspace` `lib/client.js:1801-1803`, `:2317-2350`). A zero-turn session a person titled, pinned or
+   * archived here is one they acted on, and stays a row; a running one has started its turn.
+   */
+  function placeholder(meta) {
+    const titled = typeof meta.title === 'string' && meta.title.trim().length > 0
+    return (meta.turns ?? 0) === 0 && !titled && meta.pinned !== true && meta.archived !== true && meta.running !== true && meta.origin !== 'subagent'
+  }
+
+  /**
+   * Whether a session is left out of the rows because it is a placeholder that is not the open session — DSH's
+   * `sessionVisible` (`lib/client.js:959-966`): among blank sessions only the current one is visible, in the tree and in
+   * the flat list alike (`visibleSessionIds`, `:1122-1135`). New session makes a fresh one on every press, so the older
+   * blanks, and every blank another client of the same server made, stay out of this page's rows. `current` undefined
+   * means the caller names no open session, and nothing is left out.
+   */
+  function hiddenBlank(meta, current) {
+    return current !== undefined && placeholder(meta) && meta.id !== current
+  }
+
+  /**
    * The groups to draw, in order: `[{key, workspace, label, path, depth, children, sessions}]`.
    *
    * `workspaces` is `/api/workspaces`'s array (registry order, each with `parent` and `sessionIds`); `sessions` is
@@ -10369,6 +10452,8 @@ const WorkspaceTree = (() => {
     const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
     const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
     const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object') : []
+    /** With `current` given (the open session's id, or null), a placeholder other than the open one is not a row (`hiddenBlank`). */
+    const shown = (meta) => !hiddenBlank(meta, options.current) && visible(meta, archived)
     const byId = new Map(list.map((entry) => [entry.id, entry]))
     const registered = (entry) => entry !== undefined && entry.origin !== 'auto'
     /** The nearest registered workspace above one, following `parent`; a cycle in bad data ends the walk. */
@@ -10406,13 +10491,16 @@ const WorkspaceTree = (() => {
         const meta = metaById.get(id)
         if (meta === undefined) continue
         placed.add(id)
-        if (visible(meta, archived)) target.sessions.push(meta)
+        if (shown(meta)) target.sessions.push(meta)
       }
     }
     for (const meta of metas) {
-      if (!placed.has(meta.id) && visible(meta, archived)) ungrouped.sessions.push(meta)
+      if (!placed.has(meta.id) && shown(meta)) ungrouped.sessions.push(meta)
     }
-    for (const group of [...groups.values(), ungrouped]) group.sessions.sort(sessionOrder)
+    /** The open placeholder leads its group, ahead of pins (DSH's `sectionMembers` and `pinCurrentBlank`, `lib/client.js:954-990`). */
+    const leads = (meta) => meta.id === options.current && placeholder(meta)
+    const blankFirst = (left, right) => Number(leads(right)) - Number(leads(left))
+    for (const group of [...groups.values(), ungrouped]) group.sessions.sort((left, right) => blankFirst(left, right) || sessionOrder(left, right))
 
     let tops = []
     for (const entry of list) {
@@ -10448,40 +10536,69 @@ const WorkspaceTree = (() => {
   }
 
   /**
-   * How many of a group's rows are drawn: the watermark (5 until `Show more`), raised to cover the last running or open
-   * session among the first 50, never more than there are.
+   * How many of a group's **conversations** are drawn: the watermark (5 until `Show more`), raised to cover the last
+   * running or open conversation among the first 50, never more than there are. A New session placeholder is not one of
+   * them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
+   * `dsh-client-ui-workspace` `lib/client.js:2803-2833`), so the open blank never takes one of the five places (#54).
    */
   function shownCount(sessions, watermark, options = {}) {
-    const total = sessions.length
     const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
-    let count = Math.min(total, mark)
     const running = options.running instanceof Set ? options.running : new Set()
     const current = options.current ?? null
-    for (let index = Math.min(total, REACH) - 1; index >= count; index -= 1) {
-      const meta = sessions[index]
-      if (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current)) {
-        count = index + 1
-        break
-      }
+    let total = 0
+    let required = 0
+    for (const meta of sessions) {
+      if (placeholder(meta)) continue
+      total += 1
+      if (total <= REACH && (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current))) required = total
     }
-    return count
+    return Math.min(total, Math.max(mark, required))
   }
 
-  /** The watermark after a `Show more` click: five more rows, or all of them when five or fewer remain. */
+  /**
+   * The rows a group draws at a watermark, DSH's `watermarkRows` (`lib/client.js:2807-2819`): every placeholder, plus the
+   * first `watermark` conversations, in list order. `hidden` is how many are left out — the number the overflow control
+   * names — and `conversations` how many non-blank rows there are, which `nextWatermark` and `overflow` count against.
+   */
+  function watermarkRows(sessions, watermark) {
+    let count = 0
+    const rows = sessions.filter((meta) => {
+      if (placeholder(meta)) return true
+      count += 1
+      return count <= watermark
+    })
+    return { rows, hidden: sessions.length - rows.length, conversations: count }
+  }
+
+  /** The watermark after a `Show more` click: five more conversations, or all of them when five or fewer remain (`:3321`). */
   function nextWatermark(total, shown) {
     return Math.min(total, shown + STEP)
   }
 
-  /** The overflow control a group needs: `more`, `less` after the last batch, or none when its rows fit. */
-  function overflow(total, shown) {
-    if (total <= INITIAL) return null
+  /**
+   * The overflow control a group needs: `more`, `less` after the last batch, or none when its conversations fit at the
+   * baseline — the watermark before any `Show more`, raised as `shownCount` raises it (DSH draws the control while the
+   * collapsed rows hide one, `:3157`, `:3309`).
+   */
+  function overflow(total, shown, baseline = INITIAL) {
+    if (total <= baseline) return null
     if (shown < total) return 'more'
-    return shown > INITIAL ? 'less' : null
+    return 'less'
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+  /** The control's words, DSH's `sessions.expand` and `sessions.collapse` (`:3325`, `:4897-4898`), verbatim. */
+  function overflowLabel(mode, hidden) {
+    return mode === 'more' ? `Show ${hidden} more sessions` : 'Show less'
+  }
+
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, watermarkRows, nextWatermark, overflow, overflowLabel }
 })()
 /* workspace-tree:end */
+
+/** Whether the last tree render drew `id` as a New session placeholder row — the row that goes once another session opens. */
+function placeholderDrawn(id) {
+  return WorkspaceTree.flatten(treeGroups).some((group) => group.sessions.some((meta) => meta.id === id && WorkspaceTree.placeholder(meta)))
+}
 
 /**
  * The page's state for the workspace tree: the groups the last render drew, each group's watermark, and the definition
@@ -10588,10 +10705,17 @@ function paintSessionRows(list, group, depth) {
   }
   const groupRows = list.querySelectorAll(':scope > li[data-slot="group"]')
   const anchor = groupRows.length > 0 ? groupRows[groupRows.length - 1].nextSibling : list.firstChild
-  const total = group.sessions.length
-  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, { running: runningSessions, current })
-  const rows = group.sessions.slice(0, shown).map((meta) => sessionRow(meta, depth))
-  const mode = WorkspaceTree.overflow(total, shown)
+  /**
+   * DSH's arithmetic (`lib/client.js:3156-3158`): the open New session placeholder is drawn on top of the watermark's
+   * conversations rather than in one of their places, and the control names how many it hides (#54).
+   */
+  const raise = { running: runningSessions, current }
+  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, raise)
+  const baseline = WorkspaceTree.shownCount(group.sessions, WorkspaceTree.INITIAL, raise)
+  const drawn = WorkspaceTree.watermarkRows(group.sessions, shown)
+  const total = drawn.conversations
+  const rows = drawn.rows.map((meta) => sessionRow(meta, depth))
+  const mode = WorkspaceTree.overflow(total, shown, baseline)
   if (mode !== null) {
     const li = document.createElement('li')
     li.dataset.kind = 'more'
@@ -10608,7 +10732,7 @@ function paintSessionRows(list, group, depth) {
     spacer.setAttribute('aria-hidden', 'true')
     const label = document.createElement('span')
     label.className = 'label'
-    label.textContent = mode === 'more' ? 'Show more' : 'Show less'
+    label.textContent = WorkspaceTree.overflowLabel(mode, drawn.hidden)
     row.append(spacer, label)
     row.onclick = () => {
       if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))
@@ -10862,6 +10986,14 @@ function nodeRow(node, depth = 0) {
     if (node.kind === 'session') {
       await selectSession(node)
       return
+    }
+    /**
+     * Opening a workspace row makes it where New session starts (`chosenWorkspace`, #25); folding the chosen one away
+     * gives that back to the open session's workspace.
+     */
+    if (node.kind === 'workspace') {
+      if (li.dataset.open !== 'true') chooseWorkspace(node.path)
+      else if (chosenWorkspace !== null && chosenWorkspace.path === node.path) chooseWorkspace(null)
     }
     await toggle(node, li)
   }
@@ -11226,6 +11358,8 @@ async function renderFlatList() {
   rowIndex.clear()
   const index = await loadSearchIndex()
   const visible = index.sessions.filter((meta) => {
+    /** DSH's flat list keeps only the open blank among blank sessions (`visibleSessionIds`), as the tree does. */
+    if (WorkspaceTree.hiddenBlank(meta, current)) return false
     const archived = meta.archived === true
     if (archiveMode === 'only') return archived
     if (archiveMode === 'hide') return !archived
@@ -11308,7 +11442,7 @@ async function renderTree() {
   }
   rowIndex.clear()
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
-  treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode })
+  treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode, current })
   /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
   treeTops = WorkspaceTree.flatten(treeGroups)
     .filter((group) => group.workspace !== null)
@@ -11552,15 +11686,29 @@ async function browseTo(path) {
 
 /** Register a folder, then show it: the tree redrawn, the new workspace open and selected, the composer aimed at it. */
 async function adoptWorkspace(path) {
-  const response = await fetch('/api/workspaces', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path }),
-  })
-  const body = await response.json().catch(() => ({}))
+  /**
+   * A request that never got an answer is a refusal too, said in the dialog's alert line with the failure's own message —
+   * DSH puts an adoption failure's `message` in its folder dialog's alert (`adoptDirectory`'s catch,
+   * `dsh-client-ui-workspace` `lib/client.js:2603-2611`, drawn at `:2673-2695`). Before, the rejection escaped the click
+   * handler, the line stayed empty and only the console knew (#59).
+   */
+  let response
+  let body
+  try {
+    response = await fetch('/api/workspaces', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    return 'could not register that folder: ' + (error instanceof Error ? error.message : String(error))
+  }
   if (!response.ok) return body.error ?? 'could not register that folder'
   const added = typeof body.record?.path === 'string' ? body.record.path : path
   activeFolder = added
+  /** The workspace just added is selected, and New session starts there (DSH starts one there at once, `:3936-3938`). */
+  chooseWorkspace(added)
   expanded.add(added)
   rememberExpanded()
   await renderTree()
@@ -11603,12 +11751,19 @@ document.getElementById('workspace-picker-new').addEventListener('submit', async
   if (pickerListing === null) return
   const name = document.getElementById('workspace-picker-new-name').value.trim()
   if (name === '') return
-  const response = await fetch('/api/directories', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ parent: pickerListing.path, name }),
-  })
-  const body = await response.json().catch(() => ({}))
+  let response
+  let body
+  try {
+    response = await fetch('/api/directories', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ parent: pickerListing.path, name }),
+    })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    dialogError('workspace-picker-error', 'could not create that folder: ' + (error instanceof Error ? error.message : String(error)))
+    return
+  }
   if (!response.ok) {
     dialogError('workspace-picker-error', body.error ?? 'could not create that folder')
     return
@@ -11626,6 +11781,8 @@ document.getElementById('workspace-picker-add').addEventListener('click', async 
   pickerBusy = true
   const add = document.getElementById('workspace-picker-add')
   add.disabled = true
+  /** The line speaks for this add alone: an older listing error says nothing about it. */
+  dialogError('workspace-picker-error', '')
   try {
     const refusal = await adoptWorkspace(path)
     if (refusal !== null) {
