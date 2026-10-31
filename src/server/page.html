@@ -6394,6 +6394,9 @@ async function refreshSessions() {
  *   given, so the server replays the gap.
  * - A tab a person brings to the front takes the lock over: a background tab may be throttled or frozen, and the
  *   tab being read is the one whose stream must not stall.
+ * - The leading tab relays the server's heartbeat, and its own state on every connection attempt. A following tab
+ *   that hears nothing for three heartbeats while the stream is open (30 s while it is connecting) takes the lock
+ *   over: Chrome freezes background tabs, and a frozen one keeps its lock while relaying nothing (developer-ten).
  * - A frame whose id is not newer than the last one delivered is dropped (`FeedOrder`), so a handover that replays
  *   from an older id draws nothing twice.
  * Where the platform offers no locks or channel (an insecure origin, or an opaque frame), the tab keeps a stream of
@@ -6437,6 +6440,8 @@ const events = (() => {
   let leading = false
   /** Whether a queued (not stealing) lock request is still waiting, so a stepped-down tab queues only once. */
   let candidate = false
+  /** A following tab's watch on the leading one: armed by every relayed message, it takes the lock when it fires. */
+  let watchdog = 0
   function post(message) {
     if (channel === null) return
     try {
@@ -6479,6 +6484,8 @@ const events = (() => {
     if (!leading) return
     const es = new EventSource(lastEventId.length > 0 ? '/api/events?cursor=' + encodeURIComponent(lastEventId) : '/api/events')
     source = es
+    /** Each attempt tells the other tabs this one is still trying, so a server that is down does not look like a frozen tab. */
+    post({ kind: 'beat' })
     /** A connection that never says `ready` is as dead as one that went quiet. */
     heard()
     es.addEventListener('ready', (message) => {
@@ -6496,7 +6503,9 @@ const events = (() => {
       deliver('ready', message)
     })
     es.addEventListener('heartbeat', () => {
-      if (source === es) heard()
+      if (source !== es) return
+      heard()
+      post({ kind: 'beat' })
     })
     for (const name of handlers.keys()) if (name !== 'ready') attach(es, name)
     es.onerror = () => {
@@ -6520,6 +6529,7 @@ const events = (() => {
   /** This tab owns the stream until the lock is taken from it; the promise is the lock, held while the page lives. */
   function lead() {
     leading = true
+    clearTimeout(watchdog)
     attempt = 0
     document.body.dataset.feed = channel === null ? 'solo' : 'leader'
     connect()
@@ -6541,6 +6551,7 @@ const events = (() => {
     leading = false
     stop()
     document.body.dataset.feed = 'follower'
+    watch()
     stand()
   }
   /** Wait for the lock: granted at once to the first tab, and to a waiting one when the leading tab closes. */
@@ -6562,6 +6573,15 @@ const events = (() => {
     if (leading || channel === null) return
     navigator.locks.request(LOCK, { steal: true }, () => lead()).catch(lost)
   }
+  /** Take the lock over when the leading tab goes quiet: three heartbeats while open, 30 s while it is connecting. */
+  function watch() {
+    clearTimeout(watchdog)
+    if (leading || channel === null) return
+    const quiet = document.body.dataset.connection === 'open' ? heartbeatMs * 3 + 1000 : 30_000
+    watchdog = setTimeout(() => {
+      if (!leading) seize()
+    }, quiet)
+  }
   function relayed(message) {
     if (message === null || typeof message !== 'object') return
     if (message.kind === 'hello') {
@@ -6575,8 +6595,18 @@ const events = (() => {
       /** In order with the frames, so it is never older than what was delivered here; a handover starts from it. */
       if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
     } else if (message.kind === 'frame' && typeof message.name === 'string') {
+      if (message.name === 'ready') {
+        try {
+          const data = JSON.parse(message.data)
+          if (Number.isFinite(data.heartbeatMs) && data.heartbeatMs > 0) heartbeatMs = data.heartbeatMs
+        } catch {
+          // a ready frame without data keeps the default interval
+        }
+      }
       deliver(message.name, { data: message.data, lastEventId: typeof message.lastEventId === 'string' ? message.lastEventId : '' })
     }
+    /** Anything from the leading tab shows it is alive; armed after its state, which sets how long to wait. */
+    watch()
   }
   function share() {
     try {
@@ -6589,6 +6619,7 @@ const events = (() => {
     channel.onmessage = (event) => relayed(event.data)
     document.body.dataset.feed = 'follower'
     post({ kind: 'hello' })
+    watch()
     if (document.visibilityState === 'visible') seize()
     stand()
     document.addEventListener('visibilitychange', () => {
@@ -8095,15 +8126,20 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    for (const block of buffer.split('\n\n')) {
+    /**
+     * Only completed blocks are read; the unfinished tail waits for the next chunk (developer-ten's review of #128).
+     * The loop used to read the tail as well and keep it, so a chunk that split a `data:` line threw in JSON.parse
+     * and the turn read as failed, and a block read while partial was read again once whole.
+     */
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) {
       if (!block.trim().startsWith('event:')) continue
       const name = /event: (.+)/.exec(block)?.[1]
       const data = /data: (.+)/.exec(block)?.[1]
       if (!data) continue
       await verdict(name, JSON.parse(data))
     }
-    const lastBreak = buffer.lastIndexOf('\n\n')
-    if (lastBreak !== -1) buffer = buffer.slice(lastBreak + 2)
   }
 }
 

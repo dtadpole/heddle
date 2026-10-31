@@ -133,6 +133,7 @@ class Bus {
 interface Source {
   url: string
   closed: boolean
+  onerror: (() => void) | null
   emit(name: string, data: unknown, id?: string): void
 }
 
@@ -143,11 +144,17 @@ interface Tab {
   delivered: string[]
   body: { dataset: Record<string, string> }
   show(): void
+  /** Move this tab's clock on, firing the timers that come due. */
+  advance(ms: number): void
 }
 
 function tab(name: string, world: { locks?: Locks | null; bus: Bus; visible: boolean; refuse?: boolean }): Tab {
   const sources: Source[] = []
   const delivered: string[] = []
+  /** The tab's own clock, so a test decides when its timers fire. */
+  let now = 0
+  let nextTimer = 1
+  const timers = new Map<number, { due: number; fn: () => void }>()
   const body = { dataset: {} as Record<string, string> }
   const visibility: (() => void)[] = []
   const documentDouble = {
@@ -190,8 +197,14 @@ function tab(name: string, world: { locks?: Locks | null; bus: Bus; visible: boo
     navigator: locks === undefined ? {} : { locks },
     BroadcastChannel: world.bus.classFor(name),
     EventSource: FakeEventSource,
-    setTimeout: () => 0,
-    clearTimeout: () => {},
+    setTimeout: (fn: () => void, ms = 0) => {
+      const id = nextTimer++
+      timers.set(id, { due: now + ms, fn })
+      return id
+    },
+    clearTimeout: (id: number) => {
+      timers.delete(id)
+    },
     console,
     delivered,
   }
@@ -211,6 +224,15 @@ function tab(name: string, world: { locks?: Locks | null; bus: Bus; visible: boo
     show() {
       documentDouble.visibilityState = 'visible'
       for (const listener of visibility) listener()
+    },
+    advance(ms: number) {
+      now += ms
+      for (;;) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.due <= now).sort((a, b) => a[1].due - b[1].due)[0]
+        if (due === undefined) return
+        timers.delete(due[0])
+        due[1].fn()
+      }
     },
   }
 }
@@ -305,6 +327,60 @@ test('without locks, or where the browser refuses them, a tab keeps a stream of 
   assert.equal(refused.body.dataset.feed, 'solo')
 })
 
+test('a follower takes the stream over when the leading tab goes quiet while it is open', { timeout: 5000 }, async () => {
+  const world = { locks: new Locks(), bus: new Bus() }
+  const first = tab('first', { ...world, visible: true })
+  await settle()
+  const second = tab('second', { ...world, visible: false })
+  await settle()
+  const stream = first.open()[0]!
+  stream.emit('ready', ready('e-0'))
+  stream.emit('session', { n: 1 }, 'e-1')
+  await settle()
+  second.advance(5000)
+  stream.emit('heartbeat', { type: 'heartbeat' })
+  await settle()
+  second.advance(5000)
+  await settle()
+  assert.equal(second.body.dataset.feed, 'follower', 'relayed heartbeats keep it following')
+  second.advance(2100)
+  await settle()
+  assert.equal(second.body.dataset.feed, 'leader', 'three quiet heartbeats later it took the stream over')
+  assert.equal(second.open()[0]?.url, '/api/events?cursor=e-1', 'from the newest id it was given')
+  assert.equal(first.open().length, 0, 'and the tab it was taken from closed its own when it ran again')
+})
+
+test('while the leading tab is connecting, a follower waits 30 s before taking over', { timeout: 5000 }, async () => {
+  const world = { locks: new Locks(), bus: new Bus() }
+  const first = tab('first', { ...world, visible: true })
+  await settle()
+  const second = tab('second', { ...world, visible: false })
+  await settle()
+  const stream = first.open()[0]!
+  stream.emit('ready', ready('e-0'))
+  await settle()
+  stream.onerror?.()
+  await settle()
+  assert.equal(second.body.dataset.connection, 'connecting', "the follower shows the leader's state")
+  second.advance(20_000)
+  await settle()
+  assert.equal(second.body.dataset.feed, 'follower', 'a server that is down is not a frozen tab')
+  second.advance(10_100)
+  await settle()
+  assert.equal(second.body.dataset.feed, 'leader', 'but 30 s of silence is')
+})
+
+test('a follower starts with no connection state of its own, until the leading tab says one', { timeout: 5000 }, async () => {
+  const world = { locks: new Locks(), bus: new Bus() }
+  const first = tab('first', { ...world, visible: true })
+  await settle()
+  const second = tab('second', { ...world, visible: false })
+  assert.equal(second.body.dataset.connection, undefined, 'unknown, not connected')
+  first.open()[0]!.emit('ready', ready('e-0'))
+  await settle()
+  assert.equal(second.body.dataset.connection, 'open')
+})
+
 test('a numbered frame is new only after the newest delivered one of its epoch; unnumbered frames always are', () => {
   const order = runInNewContext(`${marked('feed-order')}; FeedOrder`) as {
     isNew(last: { epoch: string; seq: number } | null, name: string, id: string): boolean
@@ -367,7 +443,7 @@ test('a verdict the stream lost ends with a sessions read issued after the turn 
   assert.equal(ended, 'lost')
 })
 
-test('the page sends a turn detached and its runTurn ends with the verdict on the stream, not with the 202', { timeout: 5000 }, async () => {
+function runTurnHarness(answer: string) {
   const sent: Record<string, unknown>[] = []
   const calls: string[] = []
   const harness = runInNewContext(
@@ -399,14 +475,27 @@ test('the page sends a turn detached and its runTurn ends with the verdict on th
     async function fetchSessionAccess() {}
     async function sendTurn(body) {
       sent.push(body);
-      return { ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session: 'S', turn: 't9' }) };
+      return ${answer};
     }
     ${block('turnVerdicts')};
     ${source('runTurn')}
     ({ run: () => runTurn('hello', 'S', [], () => calls.push('accepted')), verdict: (data) => turnVerdicts.receive(data) })
     `,
-    { sent, calls, performance: { now: () => 0 } },
+    { sent, calls, performance: { now: () => 0 }, TextDecoder, chunks: CHUNKS },
   ) as { run(): Promise<void>; verdict(data: unknown): void }
+  return { sent, calls, harness }
+}
+
+/** A streamed turn whose second chunk finishes a `data:` line the first one split. */
+const CHUNKS = [
+  'event: session\ndata: {"session":"S","event":{"type":"x"}}\n\nevent: done\ndata: {"session":"S","den',
+  'ials":[{"tool":"bash","message":"no"}]}\n\n',
+].map((text) => new TextEncoder().encode(text))
+
+test('the page sends a turn detached and its runTurn ends with the verdict on the stream, not with the 202', { timeout: 5000 }, async () => {
+  const { sent, calls, harness } = runTurnHarness(
+    "{ ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session: 'S', turn: 't9' }) }",
+  )
   let finished = false
   let failure: unknown = null
   const running = harness.run().then(
@@ -425,4 +514,18 @@ test('the page sends a turn detached and its runTurn ends with the verdict on th
   assert.equal(failure, null)
   assert.ok(calls.includes('denied:bash: no'), JSON.stringify(calls))
   assert.ok(calls.includes('settled') && calls.includes('sessions read'), 'the done verdict settles the turn as the old done frame did')
+})
+
+test('a streamed turn from a server without detach is read frame by frame, each once, even when a chunk splits a line', { timeout: 5000 }, async () => {
+  const { calls, harness } = runTurnHarness(
+    "{ ok: true, status: 200, headers: { get: () => 'text/event-stream' }, body: { getReader: () => { let at = 0; return { read: async () => (at < chunks.length ? { value: chunks[at++], done: false } : { value: undefined, done: true }) } } } }",
+  )
+  let failure: unknown = null
+  await harness.run().catch((error: unknown) => (failure = error))
+  assert.equal(failure, null, 'a split data line is not a failed turn')
+  assert.deepEqual(
+    Array.from(calls).filter((call) => call.startsWith('denied:')),
+    ['denied:bash: no'],
+    'the done frame was read once, whole',
+  )
 })
