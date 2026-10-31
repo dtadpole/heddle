@@ -1,6 +1,6 @@
 ---
 title: Verifier 7 — Workspaces And Sessions
-version: 1.1.0
+version: 1.2.0
 description: a workspace names a target folder, a session is bound to a folder under it, and those folders form a recursive tree.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -41,6 +41,9 @@ build runs the part (TypeScript or `HEDDLE_BIN`): `the Web API adds, renames and
 Another judges first use, DSH's `workspace/initializeDefault`: `first use creates or reuses default-workspace under the
 heddle home, once, the way DSH initializes its default` (an empty install only, reused on a repeated call, never given
 back once deleted, nothing made in the user's Documents).
+Another judges DSH's refusal to archive a session with running work (R-developer-eight-13): `archiving a session with
+running work is refused with the work named, and stop: true stops it and archives` — the `409` names the turn in
+progress, or the running subagent of an idle parent, and `stop: true` stops it and archives.
 
 ## Where it stands, 2026-10-11
 

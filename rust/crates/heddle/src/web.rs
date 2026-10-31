@@ -196,6 +196,7 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
             .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
+        browser: invocation.env.get("HEDDLE_WEB_BROWSER") == Some("1"),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
         notes,
         shutdown: shutdown.clone(),
@@ -297,6 +298,21 @@ impl TurnRunner for Turns {
                 usage: serde_json::to_value(result.usage).ok(),
             })
         })
+    }
+
+    /// The runtime's live-turn registry: a subagent's, a teammate's or a notice's turn the page never started.
+    fn is_live(&self, session: &str) -> bool {
+        self.runtime
+            .turns
+            .as_ref()
+            .is_some_and(|turns| turns.is_running(session))
+    }
+
+    fn interrupt(&self, session: &str) -> bool {
+        self.runtime
+            .turns
+            .as_ref()
+            .is_some_and(|turns| turns.abort(session, Some("session archived")))
     }
 }
 
