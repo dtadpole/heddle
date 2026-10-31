@@ -6209,9 +6209,23 @@ async function showSession(id) {
   void refreshScheduleCatalog()
 }
 
+/**
+ * The stream's running marks, ordered (developer-ten's review of #122): each mark from a `model/request` takes the
+ * next tick, remembered per session. A sessions read issued before a mark cannot end that turn: its answer predates
+ * the turn's start, so dropping the mark would settle live rows and flip Stop back to Send in the middle of a turn.
+ */
+let runningTick = 0
+const runningMarkedAt = new Map()
+function markRunning(id) {
+  runningSessions.add(id)
+  runningMarkedAt.set(id, ++runningTick)
+}
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
+  /** The newest running mark this read can know about; a mark after it outranks the read's silence. */
+  const readTick = runningTick
   const response = await fetch('/api/sessions')
   if (!response.ok) return
   const sessions = await response.json()
@@ -6229,10 +6243,13 @@ async function refreshSessions() {
       live.set(String(entry.id ?? ''), entry)
     }
     let changed = false
+    /** Sessions this read found no longer running: their end was never seen on the stream. */
+    const ended = []
     for (const id of [...runningSessions]) {
-      if (!live.has(id)) {
+      if (!live.has(id) && (runningMarkedAt.get(id) ?? 0) <= readTick) {
         runningSessions.delete(id)
         runningSince.delete(id)
+        ended.push(id)
         changed = true
       }
     }
@@ -6267,6 +6284,23 @@ async function refreshSessions() {
       paintRunningMarks()
       refreshRunningStatus()
     }
+    /**
+     * A turn whose end this page never saw ends here, as the `turn/completed` handler would end it (#122): the open
+     * chat settles, the composer offers Send again, and a message queued behind that turn is sent. Measured before
+     * (issue #122, J17b): after a server restart the stream's `reset` re-read the sessions and cleared the running mark,
+     * but the queued message stayed in the page until a reload dropped it. The pump refuses to run twice, so a
+     * message is never sent twice; the same path also ends a turn missed by a reload mid-turn or a failed turn.
+     */
+    for (const id of ended) {
+      if (id === current) {
+        settleChat()
+        void renderSettledAnswers()
+      }
+      // Every session that holds a queue is pumped, not only the composer's: a page keeps one queue per session, and
+      // a message queued in a session the person has since left must not stay stranded (developer-ten, developer-twelve).
+      if (queues.has(id)) void pumpQueue(id)
+    }
+    if (ended.length > 0) renderComposerState()
   }
   /**
    * The newest session is selected when nothing is yet.
@@ -6478,7 +6512,7 @@ events.addEventListener('session', (message) => {
      * stale start left by a missed end event.
      */
     const wasRunning = runningSessions.has(payload.session)
-    runningSessions.add(payload.session)
+    markRunning(payload.session)
     if (!wasRunning || !runningSince.has(payload.session)) {
       const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
       runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
