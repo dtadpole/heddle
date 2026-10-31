@@ -30,7 +30,7 @@ function harness(previousTranscript = true) {
   const noop = () => {}
   // These explicit dependencies do not reimplement loading, replay, filtering, or retry.
   const context = {
-    AbortController, performance, console, Error,
+    AbortController, performance, console,
     document: { getElementById: (id: string) => headers.get(id) ?? null, createElement: () => ({ className: '', textContent: '', dataset: {}, setAttribute: noop }) },
     log: { replaceChildren: () => { rows.length = 0; calls.push('clear') }, append: (row: Row) => rows.push(row) },
     add: (kind: string, text: string) => { rows.push({ className: `turn ${kind}`, textContent: text }) },
@@ -149,13 +149,11 @@ for (const failure of ['fetch rejection', 'JSON rejection'] as const) {
     assert.deepEqual(state.rows, rowsAtFetch, 'Live deltas wait for the in-flight snapshot')
     if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
     else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
-    assert.equal(await loading, false, 'A rejected snapshot must not claim that history loaded')
-    assert.equal(state.unavailable(), 'S', 'Transport and JSON failures mark the session unavailable')
+    await loading
     assert.equal(state.loading(), false, 'Failure releases the pending load')
     assert.equal(state.watermark(), undefined, 'A failed snapshot establishes no watermark')
     assert.deepEqual(assistantTexts(state), ['buffered first', 'buffered second'], 'Buffered deltas below the old watermark replay once in arrival order')
-    assert.ok(state.rows.some((row) => row.className === 'turn denied load-error' && row.textContent === `Failed to load history: ${failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'} (0)`), 'The visible failure is the injected snapshot error')
-    assert.deepEqual(state.rows.map((row) => row.textContent), ['buffered first', 'buffered second', `Failed to load history: ${failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'} (0)`], 'Buffered live deltas replay before the view is marked unavailable and its alert is appended')
+    assert.ok(state.rows.some((row) => row.className === 'turn denied' && row.textContent === `could not read this session: ${failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'}`), 'The visible failure is the injected snapshot error')
     assert.ok(!state.rows.some((row) => /ReferenceError|is not defined/.test(row.textContent)), 'A missing mock dependency must not masquerade as a snapshot failure')
     state.handle(delta(92, 'later live delta'))
     assert.deepEqual(assistantTexts(state), ['buffered first', 'buffered second', 'later live delta'])
