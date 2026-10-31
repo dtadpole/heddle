@@ -511,7 +511,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page())
+      const html = page()
+      respond(response, 200, 'text/html; charset=utf-8', html, { 'content-security-policy': pagePolicy(html) })
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -2889,6 +2890,39 @@ export function tokenFormPage(options: { readonly stale?: boolean } = {}): strin
 export function markedPage(html: string): string {
   const marker = createHash('sha256').update(html).digest('hex').slice(0, 12)
   return html.replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+}
+
+/**
+ * The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`.
+ */
+export function inlineScripts(html: string): string[] {
+  return [...html.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1] ?? '')
+}
+
+/**
+ * The page's Content-Security-Policy, sent with `page.html` only.
+ *
+ * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
+ * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
+ * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
+ * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
+ * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
+ * writes the same.
+ */
+export function pagePolicy(html: string): string {
+  const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
+  return [
+    "default-src 'self'",
+    ["script-src 'self'", ...hashes].join(' '),
+    "style-src 'self' 'unsafe-inline' https:",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data: https:",
+    "media-src 'self' https:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join('; ')
 }
 
 /**

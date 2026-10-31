@@ -747,7 +747,14 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
     if path == "/" && method == Method::GET {
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
-            return respond::html(StatusCode::OK, page::page());
+            // The page's Content-Security-Policy, computed from the page as served (TS `pagePolicy`).
+            let mut answer = respond::html(StatusCode::OK, page::page());
+            if let Ok(value) = axum::http::HeaderValue::from_str(page::served_policy()) {
+                answer
+                    .headers_mut()
+                    .insert("content-security-policy", value);
+            }
+            return answer;
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,

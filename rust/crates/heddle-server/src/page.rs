@@ -36,6 +36,97 @@ pub fn page_marker(html: &str) -> String {
 /// The document with its build marker filled in: the first `<meta name="heddle-page" ...>` element is
 /// replaced by one whose `content` is [`page_marker`] of the **unmarked** document. A document without
 /// the element is returned unchanged.
+/// The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`
+/// (the TypeScript `inlineScripts`).
+pub fn inline_scripts(html: &str) -> Vec<&str> {
+    let lower = html.to_ascii_lowercase();
+    let mut scripts = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find("<script") {
+        let start = from + offset;
+        let after = start + "<script".len();
+        // `<script` must end its name here: `<scripts>` or `<scripting>` is another element.
+        if !lower[after..].starts_with(|c: char| c == '>' || c.is_ascii_whitespace()) {
+            from = after;
+            continue;
+        }
+        let Some(tag_end) = lower[after..].find('>').map(|at| after + at + 1) else {
+            break;
+        };
+        let Some(close) = closing_script(&lower, tag_end) else {
+            break;
+        };
+        if !has_src_attribute(&lower[after..tag_end - 1]) {
+            scripts.push(&html[tag_end..close.0]);
+        }
+        from = close.1;
+    }
+    scripts
+}
+
+/// The next `</script\s*>` at or after `from`: where it starts and where it ends.
+fn closing_script(lower: &str, from: usize) -> Option<(usize, usize)> {
+    let mut at = from;
+    while let Some(offset) = lower[at..].find("</script") {
+        let start = at + offset;
+        let rest = &lower[start + "</script".len()..];
+        let spaces = rest.len() - rest.trim_start().len();
+        if rest[spaces..].starts_with('>') {
+            return Some((start, start + "</script".len() + spaces + 1));
+        }
+        at = start + "</script".len();
+    }
+    None
+}
+
+/// Whether an opening tag's attributes name a `src` (`\bsrc\s*=`).
+fn has_src_attribute(attributes: &str) -> bool {
+    let bytes = attributes.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = attributes[from..].find("src") {
+        let at = from + offset;
+        let bounded = at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let rest = attributes[at + 3..].trim_start();
+        if bounded && rest.starts_with('=') {
+            return true;
+        }
+        from = at + 3;
+    }
+    false
+}
+
+/// The page's Content-Security-Policy, sent with `page.html` only (the TypeScript `pagePolicy`, word for word).
+///
+/// Defence in depth behind the sanitizer (live issues developer-two-6 and -7), approved by the coordinator as option
+/// (1): `script-src` is strict ('self' and the sha256 of each inline script of the page as served); images,
+/// stylesheets, fonts and media may also come over `https:` only because the HTML preview is a `srcdoc` frame, which
+/// inherits this policy, and a previewed document may load remote assets under its own policy (issue #50 would
+/// serve the preview at its own URL and drop them).
+pub fn page_policy(html: &str) -> String {
+    use base64::Engine as _;
+    let mut script_src = String::from("script-src 'self'");
+    for code in inline_scripts(html) {
+        let digest = Sha256::digest(code.as_bytes());
+        script_src.push_str(&format!(
+            " 'sha256-{}'",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        ));
+    }
+    [
+        "default-src 'self'",
+        &script_src,
+        "style-src 'self' 'unsafe-inline' https:",
+        "img-src 'self' data: blob: https:",
+        "font-src 'self' data: https:",
+        "media-src 'self' https:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ]
+    .join("; ")
+}
+
 pub fn marked_page(html: &str) -> String {
     const OPEN: &str = "<meta name=\"heddle-page\"";
     let Some(start) = html.find(OPEN) else {
@@ -57,6 +148,12 @@ pub fn marked_page(html: &str) -> String {
 pub fn page() -> &'static str {
     static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PAGE.get_or_init(|| marked_page(PAGE_SOURCE))
+}
+
+/// The policy for [`page`], computed once from the page as served, like the page itself.
+pub fn served_policy() -> &'static str {
+    static POLICY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    POLICY.get_or_init(|| page_policy(page()))
 }
 
 /// What a request for the page is answered with.
@@ -217,5 +314,47 @@ mod tests {
     fn the_favicon_is_the_projects_own_asset() {
         assert!(FAVICON_SVG.starts_with(b"<svg") || FAVICON_SVG.starts_with(b"<?xml"));
         assert!(!FAVICON_SVG.is_empty());
+    }
+
+    #[test]
+    fn the_page_policy_carries_a_hash_for_every_inline_script_and_nothing_inline_beyond_them() {
+        use base64::Engine as _;
+        let html = page();
+        let scripts = inline_scripts(html);
+        assert_eq!(
+            scripts.len(),
+            2,
+            "the page has a module script and a plain one"
+        );
+        let policy = served_policy();
+        for code in &scripts {
+            let hash =
+                base64::engine::general_purpose::STANDARD.encode(Sha256::digest(code.as_bytes()));
+            assert!(
+                policy.contains(&format!("'sha256-{hash}'")),
+                "every inline script is allowed by its hash"
+            );
+        }
+        assert!(
+            policy.starts_with("default-src 'self'; script-src 'self' 'sha256-"),
+            "{policy}"
+        );
+        assert!(
+            !policy.contains("unsafe-eval")
+                && !policy.contains("script-src 'self' 'unsafe-inline'"),
+            "{policy}"
+        );
+        assert!(
+            policy.ends_with(
+                "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+            ),
+            "{policy}"
+        );
+    }
+
+    #[test]
+    fn a_script_with_a_src_is_not_an_inline_script() {
+        let html = "<script src=\"/vendor/x.js\"></script><script type=\"module\">a()</script><scripts>no</scripts><SCRIPT>b()</SCRIPT >";
+        assert_eq!(inline_scripts(html), vec!["a()", "b()"]);
     }
 }
