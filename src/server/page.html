@@ -10050,7 +10050,7 @@ async function fillSettings() {
       return { failure: (error && error.message) || String(error) }
     }
   }
-  const [statusRead, endpointsRead, treeRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
+  const [statusRead, endpointsRead, workspacesRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/workspaces')])
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
@@ -10072,23 +10072,56 @@ async function fillSettings() {
   if (list.length === 0 && endpointsRead.failure === undefined) models.append(settingsNote('no endpoint is configured in this profile'))
   for (const endpoint of list) models.append(settingsEndpoint(endpoint))
 
-  if (treeRead.failure !== undefined) {
-    workspaces.append(settingsNote(`could not read the workspaces: ${treeRead.failure}`))
+  if (workspacesRead.failure !== undefined) {
+    workspaces.append(settingsNote(`could not read the workspaces: ${workspacesRead.failure}`))
   }
-  const tree = treeRead.body ?? null
-  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
-  if (roots.length === 0 && treeRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
-  for (const root of roots) {
+  const views = workspacesRead.body ?? null
+  const records = views === null || !Array.isArray(views.workspaces) ? [] : views.workspaces
+  if (records.length === 0 && workspacesRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
+  for (const { record, depth } of settingsWorkspaceOrder(records)) {
     const item = document.createElement('li')
     item.className = 'settings-workspace'
+    item.dataset.depth = String(depth)
+    item.style.marginLeft = `${depth * 1.25}rem`
     const title = document.createElement('span')
-    title.textContent = typeof root.label === 'string' ? root.label : root.path
+    title.textContent = typeof record.title === 'string' && record.title.length > 0 ? record.title : record.path
     const path = document.createElement('span')
     path.className = 'path'
-    path.textContent = root.path
+    path.textContent = record.path
     item.append(title, path)
     workspaces.append(item)
   }
+}
+
+/**
+ * Every registered workspace, each followed by the ones nested in it, indented by depth (issue #108).
+ *
+ * The section read `GET /api/tree`, whose `children` are only the top-level roots, so a workspace registered inside
+ * another one (`W/ws-01` under `W`) was missing from Settings without a word. `GET /api/workspaces` lists every
+ * record with its nearest enclosing workspace as `parent`; roots keep the record order and each one's nested
+ * workspaces follow it, as the left column's Workspace Tree groups them. A record whose parent is not in the list
+ * is a root, and a record is placed once even if the parents loop, so nothing registered is ever left out.
+ */
+function settingsWorkspaceOrder(records) {
+  const ids = new Set(records.map((record) => record.id))
+  const children = new Map()
+  for (const record of records) {
+    const parent = typeof record.parent === 'string' && ids.has(record.parent) ? record.parent : null
+    const list = children.get(parent) ?? []
+    list.push(record)
+    children.set(parent, list)
+  }
+  const ordered = []
+  const placed = new Set()
+  const visit = (record, depth) => {
+    if (placed.has(record.id)) return
+    placed.add(record.id)
+    ordered.push({ record, depth })
+    for (const child of children.get(record.id) ?? []) visit(child, depth + 1)
+  }
+  for (const root of children.get(null) ?? []) visit(root, 0)
+  for (const record of records) visit(record, 0)
+  return ordered
 }
 
 async function showSettings() {
