@@ -25,6 +25,7 @@ use crate::registry::{
     JobHooks, JobOutcome, JobRegistry, JobSpec, JobStatus, JobToolCall, OutcomeStatus,
 };
 use crate::ring::{AppendOptions, JobChannel};
+use crate::spill::{ProcessSpills, SpillSettings};
 
 pub use heddle_tools::RUN_IN_BACKGROUND_DESCRIPTION;
 
@@ -204,6 +205,8 @@ pub struct BackgroundProcess {
     /// Told the exit code (`None` for a signal) before the job settles: a promoting foreground call renders its own
     /// answer from it.
     pub on_end: Option<Box<dyn FnOnce(Option<i32>) + Send>>,
+    /// Each stream's spill file, fed the raw chunks and sealed when the process ends (`crate::spill`).
+    pub spills: Option<ProcessSpills>,
 }
 
 /// Decodes a byte stream as UTF-8 across chunk boundaries, as Node's `StringDecoder` does: an incomplete sequence
@@ -264,6 +267,7 @@ pub fn run_process(spec: BackgroundProcess, append: AppendOutput) -> JobHooks {
         escalation_modes,
         on_spawn,
         on_end,
+        spills,
         ..
     } = spec;
     let mut command = tokio::process::Command::new(&argv[0]);
@@ -295,6 +299,13 @@ pub fn run_process(spec: BackgroundProcess, append: AppendOutput) -> JobHooks {
                   channel: JobChannel| {
         let append = Arc::clone(&append);
         let tail = Arc::clone(&stderr_tail);
+        let spill = spills.as_ref().map(|spills| {
+            if channel == JobChannel::Stderr {
+                Arc::clone(&spills.stderr)
+            } else {
+                Arc::clone(&spills.stdout)
+            }
+        });
         tokio::spawn(async move {
             let Some(mut stream) = stream else {
                 return;
@@ -322,7 +333,15 @@ pub fn run_process(spec: BackgroundProcess, append: AppendOutput) -> JobHooks {
             loop {
                 match stream.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
-                    Ok(read) => take(decoder.write(&buffer[..read])),
+                    Ok(read) => {
+                        if let Some(spill) = &spill {
+                            spill
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(&buffer[..read]);
+                        }
+                        take(decoder.write(&buffer[..read]))
+                    }
                 }
             }
             take(decoder.end());
@@ -350,6 +369,9 @@ pub fn run_process(spec: BackgroundProcess, append: AppendOutput) -> JobHooks {
             let status = child.wait().await;
             let _ = stdout.await;
             let _ = stderr.await;
+            if let Some(spills) = &spills {
+                spills.seal();
+            }
             closed.store(true, Ordering::SeqCst);
             let outcome = match status {
                 Err(error) => JobOutcome::failed(error.to_string()),
@@ -513,6 +535,17 @@ pub struct BashBackgroundOptions {
     /// being killed: DSH's `promoteOnTimeout`, default true (BASH:181-183, 386-491). `Some(false)` leaves the
     /// foreground run, and its wall-time kill, to the tool.
     pub promote_on_timeout: Option<bool>,
+    /// Where and when a job's streams spill to files (`crate::spill`); DSH's defaults when `None`.
+    pub spill: Option<SpillSettings>,
+    /// Keep only the in-memory tail: no spill files at all.
+    pub spill_off: bool,
+}
+
+impl BashBackgroundOptions {
+    /// A fresh pair of spills for one command, unless spilling is off.
+    fn spills(&self) -> Option<ProcessSpills> {
+        (!self.spill_off).then(|| ProcessSpills::new(&self.spill.clone().unwrap_or_default()))
+    }
 }
 
 /// The promoted call's answer, DSH's `renderPromoted` verbatim (BASH:181-183).
@@ -591,6 +624,9 @@ impl BashBackground for BashRunner {
             let escalation_modes = sandbox.escalation_targets();
             let kill_grace_ms = options.kill_grace_ms;
             let on_spawn = options.on_spawn.clone();
+            let spills = options.spills();
+            let sources = spills.as_ref().map(ProcessSpills::sources);
+            let refused_spills = spills.clone();
             let mut spec = JobSpec::new("bash", command, move |handle| {
                 let job_id = handle.id().to_owned();
                 let append_handle = handle.clone();
@@ -608,6 +644,7 @@ impl BashBackground for BashRunner {
                                 as Box<dyn FnOnce(i32) + Send>
                         }),
                         on_end: None,
+                        spills,
                     },
                     Arc::new(move |text: &str, channel: JobChannel| {
                         append_handle.append(text, AppendOptions::channel(channel));
@@ -616,9 +653,15 @@ impl BashBackground for BashRunner {
             });
             spec.owner = context.session.as_ref().map(|session| session.id.clone());
             spec.tool_call = tool_call;
+            spec.output = sources.unwrap_or_default();
             let id = match jobs.start(spec) {
                 Ok(id) => id,
-                Err(error) => return Ok(ToolResult::refused(error.code, error.message)),
+                Err(error) => {
+                    if let Some(spills) = &refused_spills {
+                        spills.discard();
+                    }
+                    return Ok(ToolResult::refused(error.code, error.message));
+                }
             };
             context.log(&format!("started background job {id}"));
             let data = serde_json::Map::from_iter([
@@ -668,6 +711,17 @@ impl BashBackground for BashRunner {
             let kill_grace_ms = options.kill_grace_ms;
             let on_spawn = options.on_spawn.clone();
             let producer_captured = Arc::clone(&captured);
+            let spills = options.spills();
+            let sources = spills.as_ref().map(ProcessSpills::sources);
+            // A call that answered in the foreground names no file, so its spills would only be litter.
+            let drop_spills = {
+                let spills = spills.clone();
+                move || {
+                    if let Some(spills) = &spills {
+                        spills.discard();
+                    }
+                }
+            };
             let mut spec = JobSpec::new("bash", command, move |handle| {
                 let job_id = handle.id().to_owned();
                 let append_handle = handle.clone();
@@ -689,6 +743,7 @@ impl BashBackground for BashRunner {
                         on_end: Some(Box::new(move |code: Option<i32>| {
                             lock(&ended).ended = Some(code);
                         })),
+                        spills,
                     },
                     Arc::new(move |text: &str, channel: JobChannel| {
                         append_handle.append(text, AppendOptions::channel(channel));
@@ -705,9 +760,11 @@ impl BashBackground for BashRunner {
             });
             spec.owner = owner.clone();
             spec.tool_call = tool_call;
+            spec.output = sources.unwrap_or_default();
             let id = match jobs.start(spec) {
                 Ok(id) => id,
                 Err(error) => {
+                    drop_spills();
                     context.log(&format!(
                         "bash: job registration refused, running in the foreground with the wall-time kill instead: {}",
                         error.message
@@ -742,6 +799,7 @@ impl BashBackground for BashRunner {
                     {
                         let _ = jobs.remove(&id, caller);
                     }
+                    drop_spills();
                     Some(Ok(render(end(true))))
                 }
                 Ok(view) if live(view.status) => {
@@ -768,6 +826,7 @@ impl BashBackground for BashRunner {
                 }
                 Ok(view) => {
                     let _ = jobs.remove(&id, caller);
+                    drop_spills();
                     if view.status == JobStatus::Failed {
                         let detail = view
                             .detail

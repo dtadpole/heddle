@@ -28,6 +28,7 @@ pub mod notice;
 pub mod prompt;
 pub mod registry;
 pub mod ring;
+pub mod spill;
 pub mod tools;
 
 pub use compose::{JobsConfig, JobsPlugin, JobsRow, JobsTeardown, start_row};
@@ -38,3 +39,4 @@ pub use registry::{
     JobSpec, JobStatus, JobToolCall, JobView, KillOutcome, OutcomeStatus, SettleCause,
 };
 pub use ring::{AppendOptions, JobChannel, JobChunk, OutputRing, RingRead};
+pub use spill::{ProcessSpills, SpillSettings, StreamSpill};

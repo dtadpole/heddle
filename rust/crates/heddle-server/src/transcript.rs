@@ -13,8 +13,9 @@
 //!   assistant run (a real paragraph break follows sentence punctuation or whitespace).
 //! - **A stopped turn says why**: `assistant/completed` with `ended` attaches it to the answer it stopped,
 //!   or to a row that exists only to carry it.
-//! - **Edited files**: `write_file` calls since the last user message are attached, as `{path, added}`, to
-//!   that exchange's last answer once the whole log is folded.
+//! - **Edited files**: `write_file` calls since the last user message whose result succeeded are attached, as
+//!   `{path, added}`, to that exchange's last answer once the whole log is folded; a refused or failed write, or
+//!   one still waiting for its result, changed nothing and is not listed.
 //!
 //! Events are read as JSON values, because the fold's job is to ignore what it does not draw rather than to
 //! demand a shape: a real log holds `session/created`, `model/request` and many more.
@@ -235,28 +236,47 @@ fn line_count(content: &str) -> u64 {
     (lines - usize::from(content.ends_with('\n'))) as u64
 }
 
-/// Note one `write_file` call, keeping the lines of its content per path.
-fn note_write(name: &str, arguments: &str, written: &mut Vec<EditedFile>) {
+/// A `write_file` call, noted when it is made and **counted only once its result says it succeeded**.
+///
+/// A call's arguments say what the model asked for, not what happened: a write the sandbox refused, or one that
+/// failed for any other reason, changed nothing on disk. Measured 2026-10-29 (DSH parity R-developer-twelve-11):
+/// with every write refused, the panel still named three files with their added lines. So a write is held against
+/// its call until the paired result arrives, and only an `ok` result makes it an edited file.
+#[derive(Debug, Clone)]
+struct NotedWrite {
+    path: String,
+    added: u64,
+    ok: bool,
+}
+
+/// The write one `write_file` call would make, or `None` for any other tool or unreadable arguments.
+fn noted_write(name: &str, arguments: &str) -> Option<NotedWrite> {
     if name != "write_file" {
-        return;
+        return None;
     }
-    let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
-        return;
-    };
-    let (Some(path), Some(content)) = (
-        arguments.get("path").and_then(Value::as_str),
-        arguments.get("content").and_then(Value::as_str),
-    ) else {
-        return;
-    };
-    let added = line_count(content);
-    match written.iter_mut().find(|file| file.path == path) {
-        Some(existing) => existing.added = added,
-        None => written.push(EditedFile {
-            path: path.to_owned(),
-            added,
-        }),
+    let arguments = serde_json::from_str::<Value>(arguments).ok()?;
+    let path = arguments.get("path").and_then(Value::as_str)?;
+    let content = arguments.get("content").and_then(Value::as_str)?;
+    Some(NotedWrite {
+        path: path.to_owned(),
+        added: line_count(content),
+        ok: false,
+    })
+}
+
+/// The edited files of one exchange: its successful writes, first position per path, the latest lines.
+fn edited_files(writes: &[NotedWrite]) -> Vec<EditedFile> {
+    let mut files: Vec<EditedFile> = Vec::new();
+    for write in writes.iter().filter(|write| write.ok) {
+        match files.iter_mut().find(|file| file.path == write.path) {
+            Some(existing) => existing.added = write.added,
+            None => files.push(EditedFile {
+                path: write.path.clone(),
+                added: write.added,
+            }),
+        }
     }
+    files
 }
 
 /// The transcript's attachment addresses for one session (`web.ts`'s `scopeAttachmentUrls`): each card's `url` names
@@ -283,8 +303,10 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut last_open: Option<usize> = None;
     let mut open_assistant: Option<usize> = None;
     let mut open_reasoning: Option<usize> = None;
-    // Writes kept per exchange, keyed by the index of the user turn that opened it.
-    let mut sections: HashMap<usize, Vec<EditedFile>> = HashMap::new();
+    // Writes kept per exchange in call order, keyed by the index of the user turn that opened it.
+    let mut sections: HashMap<usize, Vec<NotedWrite>> = HashMap::new();
+    // The write each call would make, by the index of its turn: (the exchange's start, its position there).
+    let mut write_of_call: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut section_start: Option<usize> = None;
 
     let close_runs = |open_assistant: &mut Option<usize>, open_reasoning: &mut Option<usize>| {
@@ -339,13 +361,23 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                             turn.kind == TurnKind::Tool && turn.result.is_none()
                         });
                         if open_call {
+                            let succeeded = !starts_with_error(&text);
                             if let Some(turn) = turns.get_mut(index) {
                                 turn.result = Some(text.clone());
-                                turn.state = Some(if starts_with_error(&text) {
-                                    ToolState::Error
-                                } else {
+                                turn.state = Some(if succeeded {
                                     ToolState::Ok
+                                } else {
+                                    ToolState::Error
                                 });
+                            }
+                            // Only a write whose call succeeded is an edited file.
+                            if succeeded
+                                && let Some(&(start, position)) = write_of_call.get(&index)
+                                && let Some(write) = sections
+                                    .get_mut(&start)
+                                    .and_then(|writes| writes.get_mut(position))
+                            {
+                                write.ok = true;
                             }
                             if let Some(id) = tool_call_id.as_ref() {
                                 open.remove(id.as_str());
@@ -433,9 +465,6 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                         .get("arguments")
                         .and_then(Value::as_str)
                         .unwrap_or("{}");
-                    if let Some(start) = section_start {
-                        note_write(name, arguments, sections.entry(start).or_default());
-                    }
                     let mut turn = ChatTurn::new(TurnKind::Tool, arguments);
                     turn.name = Some(name.to_owned());
                     turn.label = Some(format!("→ {name}"));
@@ -444,6 +473,13 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     turn.tool_call_id = id.clone();
                     turns.push(turn);
                     let index = turns.len() - 1;
+                    if let Some(start) = section_start
+                        && let Some(write) = noted_write(name, arguments)
+                    {
+                        let writes = sections.entry(start).or_default();
+                        writes.push(write);
+                        write_of_call.insert(index, (start, writes.len() - 1));
+                    }
                     last_open = Some(index);
                     if let Some(id) = id {
                         open.insert(id, index);
@@ -457,9 +493,10 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
 
     // The Edited files panel belongs to the message that closes an exchange: the writes are attached to
     // that exchange's last answer once the whole log is folded.
-    let mut sections: Vec<(usize, Vec<EditedFile>)> = sections.into_iter().collect();
+    let mut sections: Vec<(usize, Vec<NotedWrite>)> = sections.into_iter().collect();
     sections.sort_by_key(|(start, _)| *start);
-    for (start, files) in sections {
+    for (start, writes) in sections {
+        let files = edited_files(&writes);
         if files.is_empty() {
             continue;
         }
@@ -649,6 +686,156 @@ mod tests {
                 path: "/w/a.txt".into(),
                 added: 2
             }])
+        );
+    }
+
+    fn answer_files(events: &[Value]) -> Option<Vec<EditedFile>> {
+        transcript_turns(events)
+            .into_iter()
+            .find(|turn| turn.kind == TurnKind::Assistant)
+            .and_then(|answer| answer.files)
+    }
+
+    fn user(text: &str) -> Value {
+        json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+    }
+
+    fn call(id: Option<&str>, name: &str, arguments: Value) -> Value {
+        let mut chunk =
+            json!({"type": "tool-call", "name": name, "arguments": arguments.to_string()});
+        if let Some(id) = id {
+            chunk["id"] = json!(id);
+        }
+        json!({"type": "assistant/chunk", "chunk": chunk})
+    }
+
+    fn result(id: Option<&str>, text: &str) -> Value {
+        let mut message = json!({"role": "tool", "content": [{"type": "text", "text": text}]});
+        if let Some(id) = id {
+            message["toolCallId"] = json!(id);
+        }
+        json!({"type": "message", "message": message})
+    }
+
+    fn answer(text: &str) -> Value {
+        json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": text}})
+    }
+
+    #[test]
+    fn a_failed_write_is_not_an_edited_file_and_a_successful_one_is() {
+        // DSH parity R-developer-twelve-11, measured 2026-10-29: with every write refused by the sandbox the panel
+        // still named the files with their added lines, though the disk was unchanged.
+        let events = vec![
+            user("edit three files"),
+            call(
+                Some("c1"),
+                "write_file",
+                json!({"path": "/w/refused.txt", "content": "one\ntwo\n"}),
+            ),
+            result(
+                Some("c1"),
+                "error (SANDBOX): '/w/refused.txt' is outside the sandbox root /elsewhere",
+            ),
+            call(
+                Some("c2"),
+                "bash",
+                json!({"command": "sed -i '' 's/a/b/' /w/shell.txt"}),
+            ),
+            result(
+                Some("c2"),
+                "error (SANDBOX): [sandbox: file access denied under workspace-write mode]",
+            ),
+            call(
+                Some("c3"),
+                "write_file",
+                json!({"path": "/w/kept.txt", "content": "x\n"}),
+            ),
+            result(Some("c3"), "wrote 2 bytes to /w/kept.txt"),
+            answer("one of three"),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            Some(vec![EditedFile {
+                path: "/w/kept.txt".into(),
+                added: 1
+            }]),
+            "only the write that succeeded is listed"
+        );
+        let turns = transcript_turns(&events);
+        let refused = turns
+            .iter()
+            .find(|turn| turn.name.as_deref() == Some("write_file"))
+            .expect("the refused call");
+        assert_eq!(
+            refused.state,
+            Some(ToolState::Error),
+            "the refused call still reads as an error"
+        );
+    }
+
+    #[test]
+    fn an_exchange_whose_every_write_failed_carries_no_panel() {
+        let events = vec![
+            user("edit"),
+            call(
+                Some("c1"),
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "x"}),
+            ),
+            result(Some("c1"), "error: permission denied"),
+            answer("could not write"),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            None,
+            "nothing changed, so no Edited files panel"
+        );
+    }
+
+    #[test]
+    fn a_write_still_waiting_for_its_result_is_not_yet_an_edited_file() {
+        let events = vec![
+            user("edit"),
+            answer("writing now"),
+            call(
+                Some("c1"),
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "x"}),
+            ),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            None,
+            "a running call has changed nothing yet"
+        );
+    }
+
+    #[test]
+    fn a_path_written_twice_keeps_the_lines_of_its_last_successful_write() {
+        // Results without ids pair with the newest open call, as a provider that sends no ids requires.
+        let events = vec![
+            user("edit"),
+            call(
+                None,
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "one\ntwo\nthree\n"}),
+            ),
+            result(None, "wrote 14 bytes to /w/a.txt"),
+            call(
+                None,
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "one\n"}),
+            ),
+            result(None, "Error: disk full"),
+            answer("the second write failed"),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            Some(vec![EditedFile {
+                path: "/w/a.txt".into(),
+                added: 3
+            }]),
+            "the failed second write does not overwrite the first"
         );
     }
 
