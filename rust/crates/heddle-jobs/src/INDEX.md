@@ -1,8 +1,8 @@
 ---
 title: The heddle-jobs sources
 created: 2026-10-31T01:30:00Z
-modified: 2026-10-31T06:52:53Z
-version: 0.2.0
+modified: 2026-10-31T09:03:13Z
+version: 0.2.1
 description: The sources of the heddle-jobs crate, with unit tests beside the code.
 grounded_in:
   - source: src/jobs/INDEX.md
@@ -23,7 +23,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`bash.rs`](bash.rs) | background `bash`: the producer (confined by `launch_shell`, its own process group, SIGTERM then SIGKILL after 3000 ms through `heddle_sandbox::signal_process_group`, DSH's outcome mapping and sandbox notes), the running tool call read from the log, the runner attached to the tools row's `bash`, and `run_foreground`: a foreground call run as a job and promoted when it outlives its wall time (`render_promoted`) |
 | [`prompt.rs`](prompt.rs) | DSH's `tool:jobs` prompt section at the end of the system prompt of a request that offers `job_output`, through the model service's `model/request` hook (`withJobsSection`) |
 | [`notice.rs`](notice.rs) | the completion notice's text and source, and `NoticeDelivery`: who is told, wake or inject, per-session serialization, `quiet` delivery and the wake budget |
-| [`http.rs`](http.rs) | the page's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`) |
+| [`http.rs`](http.rs) | the page's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`); and the archive admission (`session_job_activity`, `stop_session_jobs`) |
 | [`compose.rs`](compose.rs) | the `jobs` row over `heddle-session`, `heddle-agent` and `heddle-tools`, for the binary, and its teardown |
 
 ## Read next

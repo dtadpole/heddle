@@ -48,6 +48,11 @@ pub struct WorkspaceStoreShape {
     /// Workspace ids in the collection's own order — newest registration first.
     pub workspace_ids: Vec<String>,
     pub workspaces: IndexMap<String, WorkspaceRecord>,
+    /// The workspace first use created ([`crate::WorkspaceService::initialize_default`]), kept after its
+    /// registration is deleted — DSH's `defaultWorkspaceId`. Written last, and only once a first use has
+    /// happened, so a record that never had one keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_workspace_id: Option<String>,
 }
 
 impl Default for WorkspaceStoreShape {
@@ -56,6 +61,7 @@ impl Default for WorkspaceStoreShape {
             version: 3,
             workspace_ids: Vec::new(),
             workspaces: IndexMap::new(),
+            default_workspace_id: None,
         }
     }
 }
@@ -160,6 +166,23 @@ mod tests {
             shape.to_file_text(),
             "{\n  \"version\": 3,\n  \"workspaceIds\": [\n    \"w-1\"\n  ],\n  \"workspaces\": {\n    \"w-1\": {\n      \"id\": \"w-1\",\n      \"path\": \"/work/one\",\n      \"title\": \"one\",\n      \"origin\": \"added\",\n      \"createdAt\": \"2026-10-22T18:17:41.123Z\",\n      \"updatedAt\": \"2026-10-22T18:17:41.123Z\"\n    }\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn the_default_workspace_id_is_written_last_and_only_when_there_is_one() {
+        let shape = WorkspaceStoreShape {
+            workspace_ids: vec!["w-1".to_string()],
+            workspaces: IndexMap::from([("w-1".to_string(), record())]),
+            default_workspace_id: Some("w-1".to_string()),
+            ..Default::default()
+        };
+        let text = shape.to_file_text();
+        assert!(
+            text.ends_with("\n  },\n  \"defaultWorkspaceId\": \"w-1\"\n}\n"),
+            "after the workspaces, as the TypeScript spread writes it: {text}"
+        );
+        let plain = WorkspaceStoreShape::default().to_file_text();
+        assert!(!plain.contains("defaultWorkspaceId"));
     }
 
     #[test]

@@ -20,6 +20,32 @@ import { JobError, isTerminal, type JobRegistry } from './registry.ts'
  */
 export const JOBS_ROUTE = '/api/jobs'
 
+/** One live job as an archive refusal lists it: DSH's activity item (`dsh-jobs/lib/index.js:19-43`). */
+export interface JobActivity {
+  readonly id: string
+  readonly label: string
+}
+
+/**
+ * The jobs that keep a session from being archived: the running or stopping ones it owns (DSH's `runningJobs`, which
+ * answers `workspace/session-activity`). Unowned jobs belong to nobody and never block. Empty without the jobs row.
+ */
+export function sessionJobActivity(jobs: JobRegistry | undefined, session: string): readonly JobActivity[] {
+  if (jobs === undefined) return []
+  return jobs
+    .list(session)
+    .filter((job) => job.owner === session && !isTerminal(job.status))
+    .map((job) => ({ id: job.id, label: job.label }))
+}
+
+/**
+ * Stop a session's live jobs because it is being archived with its work (DSH's `workspace/session-stop` listener):
+ * each is killed with `session archived`. Answers the ids asked to stop; nothing without the jobs row.
+ */
+export function stopSessionJobs(jobs: JobRegistry | undefined, session: string): readonly string[] {
+  return jobs === undefined ? [] : jobs.killOwnedBy(session, 'session archived')
+}
+
 /** The largest request body a route reads; a kill carries two ids. */
 const MAX_BODY_BYTES = 64 * 1024
 
