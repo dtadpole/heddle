@@ -1777,6 +1777,77 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test("the Web API's tree lists only what a workspace root holds, and refuses a path outside every root as the CLI does", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * The CLI refuses a tree outside every root (the check above, "a folder outside every root is refused rather than
+   * walked"); this judges the route the page calls. A folder no root owns, a link inside a root that leads to it, and a
+   * dot-dot walk out of a root are each refused before anything is listed: "400" with web.ts's sentence naming the
+   * canonical path, which is where a link or a dot-dot walk lands. DSH confines a listing the same way: it resolves the
+   * path and refuses a directory its workspace root does not contain (dsh-api-workspace-files list and confine,
+   * workspace-file/outside-workspace). A folder inside the root still lists.
+   */
+  const h = harness('tree-fence')
+  const root = fixtureDir('tree-fence-root')
+  const outside = fixtureDir('tree-fence-outside')
+  let live
+  try {
+    entry(join(root, 'inner', 'kept.txt'), 'inside\n')
+    entry(join(outside, 'not-yours.txt'), 'outside\n')
+    mkdirSync(join(outside, 'a-folder'), { recursive: true })
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(outside, join(root, 'way-out'))
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const sentence = `${realpathSync(outside)} is not under any workspace root`
+    for (const [what, path] of [
+      ['a folder outside every root', outside],
+      ['a link inside the root that leads out of it', join(root, 'way-out')],
+      // Spelled by hand: join() would fold the dot-dot away before the server saw it.
+      ['a dot-dot walk out of the root', `${root}${sep}..${sep}${outside.split(sep).pop()}`],
+    ]) {
+      const refused = await treeOf(path)
+      const listed = Array.isArray(refused.body?.children) ? refused.body.children.map((node) => node.label).join(', ') : ''
+      assert.equal(refused.status, 400, `${what} is refused, not listed (${refused.status}${listed ? `, listed: ${listed}` : ''})`)
+      assert.deepEqual(refused.body, { error: sentence }, `and ${what} gets the sentence that names the rule and the canonical path`)
+    }
+
+    const inside = await treeOf(join(root, 'inner'))
+    assert.equal(inside.status, 200, `a folder inside the root still lists (${JSON.stringify(inside.body)})`)
+    assert.deepEqual(
+      (inside.body.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['file:kept.txt'],
+      'with what it holds',
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+    removeDir(outside)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
