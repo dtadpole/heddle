@@ -33,6 +33,11 @@ turn that the turn has not taken yet. It is DSH's agent inbox, recorded with DSH
 A steer is queued in the next-step list, the loop writes it at its next step boundary (after any tool result
 still due), a stop keeps it, and the next turn writes it before its own prompt (R-developer-two-5).
 
+A session's **title** is cleaned as DSH cleans an accepted one ([`title-text.ts`](title-text.ts), DSH's
+`normalizeSessionTitle`): escape sequences, controls and invisible or directional characters removed, whitespace
+collapsed, at most 80 UTF-8 bytes. The store applies it to a rename and to a session created with a title, the
+definition writers to the title they record, and the title route refuses one with nothing visible left.
+
 The log is also what **content search** reads ([`search.ts`](search.ts)): DSH's `session.search`, the sessions whose
 current user or assistant messages hold a phrase, ranked and quoted as DSH's SQLite FTS5 index answers. heddle has no
 SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-generate.ts`](unicode61-generate.ts) into

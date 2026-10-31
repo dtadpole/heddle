@@ -215,6 +215,10 @@ pub struct EndpointConfig {
     /// Milliseconds before a request is abandoned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Whether an Anthropic route marks the prompt for caching (#70). Absent means on, as DSH caches by default;
+    /// `false` is the switch for a gateway that refuses `cache_control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 /// A partial endpoint: what a layer, the local file or the environment restates. Every field optional;
@@ -259,6 +263,8 @@ pub struct EndpointPatch {
     pub proxy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 impl EndpointConfig {
@@ -454,6 +460,9 @@ fn apply_patch(endpoint: &mut EndpointConfig, patch: &EndpointPatch) {
     }
     if let Some(value) = patch.timeout_ms {
         endpoint.timeout_ms = Some(value);
+    }
+    if let Some(value) = patch.prompt_cache {
+        endpoint.prompt_cache = Some(value);
     }
 }
 

@@ -50,6 +50,9 @@ pub mod title;
 pub mod transcript;
 pub mod unicode61;
 
+/// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
+pub mod title_text;
+
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,
@@ -84,7 +87,8 @@ pub use store::{
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
-    derive_node_message, fold_surface, index_by_seq, inherits_answer, is_surface_eligible,
+    derive_node_message, fold_surface, fork_seed, index_by_seq, inherited_by_fork, inherits_answer,
+    is_surface_eligible,
 };
 pub use title::{
     LlmTitles, SESSION_TITLE_PURPOSE, SessionTitles, TitleAnswer, TitleDone, TitleModel,

@@ -221,15 +221,22 @@ async function pluginContext(config: JobsPlugin.Config = {}) {
   let gate: Promise<void> | undefined
   const purposes: (string | undefined)[] = []
   ctx.provide('model')
+  async function* answer(request: { purpose?: string }): AsyncIterable<Chunk> {
+    purposes.push(request.purpose)
+    if (gate !== undefined) await gate
+    yield { type: 'text-delta', text: 'noted' } as Chunk
+    yield { type: 'done', finishReason: 'stop' } as Chunk
+  }
+  /**
+   * The loop resolves a request once (its request hooks) and streams the resolved one (`resolve` and
+   * `streamResolved`, main 820c9d31); `stream` is both in one, for any caller that still uses it.
+   */
   ctx.set('model', {
     defaultEndpoint: () => 'fake',
     names: () => ['fake'],
-    async *stream(request: { purpose?: string }): AsyncIterable<Chunk> {
-      purposes.push(request.purpose)
-      if (gate !== undefined) await gate
-      yield { type: 'text-delta', text: 'noted' } as Chunk
-      yield { type: 'done', finishReason: 'stop' } as Chunk
-    },
+    resolve: <T,>(request: T): T => request,
+    streamResolved: answer,
+    stream: answer,
   })
   const registered: string[] = []
   ctx.provide('tools')
