@@ -614,6 +614,7 @@ mod tests {
             tools: Arc::new(tools),
             hooks: Arc::new(heddle_agent::NoTurnHooks),
             turns: turns.then(heddle_agent::TurnRegistry::new),
+            presets: None,
         });
         Fixture {
             sessions,
