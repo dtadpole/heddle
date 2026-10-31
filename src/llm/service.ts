@@ -186,6 +186,19 @@ export class ModelService extends Service {
    * made it.
    */
   stream(request: GenerateRequest, signal?: AbortSignal): AsyncIterable<Chunk> {
+    return this.streamResolved(this.resolve(request), signal)
+  }
+
+  /**
+   * The request a call sends after the `model/request` waterfall, without sending it (issue #14).
+   *
+   * The turn loop records each model request before the call, and the record must name what the call sends: a
+   * selection policy on this waterfall (the server's running-turn rule) may move a step to another endpoint, model or
+   * level. The loop resolves once, records the answer, and hands it to `streamResolved`, so the waterfall runs **once
+   * per call**: a listener may rewrite or have effects, and running it again could send something other than what was
+   * recorded. `stream` is the two in sequence for every other caller.
+   */
+  resolve(request: GenerateRequest): GenerateRequest {
     this.refresh()
     const adapter = this.endpoints.get(request.endpoint)
     if (adapter === undefined) {
@@ -202,7 +215,11 @@ export class ModelService extends Service {
      * policy attaches to. `model/stream` below is the chunk-level seam for logging,
      * retrying or replaying a call.
      */
-    const effective = this.ctx.waterfall('model/request', request, () => request)
+    return this.ctx.waterfall('model/request', request, () => request)
+  }
+
+  /** Stream a request `resolve` already answered; the `model/request` waterfall is not run again. */
+  streamResolved(effective: GenerateRequest, signal?: AbortSignal): AsyncIterable<Chunk> {
     const resolved = this.endpoints.get(effective.endpoint)
     if (resolved === undefined) {
       throw new ModelError(

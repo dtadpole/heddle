@@ -61,13 +61,13 @@ impl LlmModel {
     }
 }
 
-impl ModelPort for LlmModel {
-    fn stream(
-        &self,
-        request: GenerateRequest,
+impl LlmModel {
+    /// A service stream as the port's stream: errors converted, and cut at the caller's Stop.
+    fn port_stream(
+        opened: Result<heddle_llm::ChunkStream, heddle_llm::ModelError>,
         cancel: Option<CancellationToken>,
     ) -> BoxStream<'static, Result<Chunk, ModelError>> {
-        match self.service.stream(request) {
+        match opened {
             Err(error) => Box::pin(futures::stream::once(async move {
                 Err(ModelError::from(error))
             })),
@@ -79,6 +79,28 @@ impl ModelPort for LlmModel {
                 }
             }
         }
+    }
+}
+
+impl ModelPort for LlmModel {
+    fn stream(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        Self::port_stream(self.service.stream(request), cancel)
+    }
+
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        self.service.resolve(&request).map_err(ModelError::from)
+    }
+
+    fn stream_resolved(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        Self::port_stream(self.service.stream_resolved(request), cancel)
     }
 
     fn default_endpoint(&self) -> Option<String> {
