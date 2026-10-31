@@ -6819,7 +6819,6 @@ function handleSessionPayload(payload, replay = false) {
       runningSince.delete(payload.session)
       paintRunningMarks()
       if (payload.session === (current ?? composerKey)) {
-        liveRounds = 0
         void refreshSessionStats()
       }
       /**
@@ -8186,9 +8185,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         /** What the provider said the turn cost, and how long it took, if it said anything. */
         stopRequested = false
         stopButton.disabled = false
-        liveRounds = 0
-        liveUsage = undefined
-        updateStatusBar()
+        // Replace live figures only when the durable fold arrives; clearing first flashes an empty dock.
         void refreshSessionStats()
         for (const denial of payload.denials ?? []) add('denied', `${denial.tool}: ${denial.message}`)
         /**
@@ -8452,9 +8449,11 @@ function statPanelRows(kind) {
     if (typeof stats.llmMs === 'number') push('LLM time', formatDurationMs(stats.llmMs))
     if (typeof stats.toolMs === 'number') push('Tool time', formatDurationMs(stats.toolMs))
     if (typeof stats.ttftMs === 'number' && typeof stats.ttftSteps === 'number' && stats.ttftSteps > 0) push('Avg time to first token (TTFT)', formatDurationMs(stats.ttftMs / stats.ttftSteps))
-    if (typeof stats.generationMs === 'number' && stats.generationMs > 0 && typeof stats.decodeTokens === 'number' && stats.decodeTokens > 0) push('Tokens per second (TPS)', `${formatRate(stats.decodeTokens / (stats.generationMs / 1000))} tok/s`)
+    const generationMs = (stats.generationMs ?? 0) + liveGenerationMs
+    const decodeTokens = (stats.decodeTokens ?? 0) + liveDecodeTokens
+    if (generationMs > 0 && decodeTokens > 0) push('Tokens per second (TPS)', `${formatRate(decodeTokens / (generationMs / 1000))} tok/s`)
   } else if (kind === 'usage') {
-    const usage = stats.usage
+    const usage = addUsage(stats.usage, liveUsage)
     if (usage !== undefined) {
       const billed = (usage.inputTokens ?? 0) + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
       const hasBilled = usage.inputTokens !== undefined || usage.cacheReadTokens !== undefined || usage.cacheWriteTokens !== undefined
