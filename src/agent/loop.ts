@@ -202,10 +202,11 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
       : options.signal === undefined
         ? live.signal
         : AbortSignal.any([options.signal, live.signal])
+  const progress: TurnProgress = { text: '', reasoning: '', rounds: 0, denials: 0, completed: false }
   try {
-    return await runTurnBody(ctx, options, signal)
+    return await runTurnBody(ctx, options, signal, progress)
   } catch (error) {
-    recordUnfinished(ctx, options.session, error, signal)
+    recordUnfinished(ctx, options.session, error, signal, progress)
     throw error
   } finally {
     live?.settle()
@@ -223,28 +224,56 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
  * does: `assistant/completed` names the reason in `ended`, which the transcript draws as the turn's notice, and
  * `turn/completed` closes it. The error still reaches the caller.
  */
-function recordUnfinished(ctx: Context, session: SessionHandle, error: unknown, signal: AbortSignal | undefined): void {
+function recordUnfinished(
+  ctx: Context,
+  session: SessionHandle,
+  error: unknown,
+  signal: AbortSignal | undefined,
+  progress: TurnProgress,
+): void {
   const stopped = signal?.aborted === true
   const message = error instanceof Error ? error.message : String(error)
   try {
-    ctx.session.store.append(session, {
-      type: 'assistant/completed',
-      text: '',
-      reasoning: '',
-      finishReason: stopped ? 'aborted' : 'error',
-      rounds: 0,
-      denials: 0,
-      ended: [stopped ? 'stopped by the caller' : `failed: ${message}`],
-      ...(stopped ? {} : { error: message }),
-    })
-    ctx.session.store.append(session, { type: 'turn/completed', rounds: 0, ...(stopped ? { stopped: true } : { error: message }) })
+    /**
+     * The record keeps what the turn did before it failed: the answer of its earlier rounds, its reasoning, its round
+     * and denial counts (developer-five's review). A turn whose completion was already written (only the closing
+     * `turn/completed` failed) is not completed twice.
+     */
+    if (!progress.completed) {
+      ctx.session.store.append(session, {
+        type: 'assistant/completed',
+        text: progress.text,
+        reasoning: progress.reasoning,
+        finishReason: stopped ? 'aborted' : 'error',
+        rounds: progress.rounds,
+        denials: progress.denials,
+        ended: [stopped ? 'stopped by the caller' : `failed: ${message}`],
+        ...(stopped ? {} : { error: message }),
+      })
+    }
+    ctx.session.store.append(session, { type: 'turn/completed', rounds: progress.rounds, ...(stopped ? { stopped: true } : { error: message }) })
   } catch {
     // The log could not take the record either; the caller still gets the turn's own error.
   }
 }
 
 /** One turn's body; the exported `runTurn` adds the live-turn registration around it. */
-async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortSignal | undefined): Promise<TurnResult> {
+/** What a turn has done so far, kept where `runTurn`'s catch can read it when the turn throws (#16, #29). */
+interface TurnProgress {
+  text: string
+  reasoning: string
+  rounds: number
+  denials: number
+  /** Whether the turn's `assistant/completed` is already in the log. */
+  completed: boolean
+}
+
+async function runTurnBody(
+  ctx: Context,
+  options: RunTurnOptions,
+  signal: AbortSignal | undefined,
+  progress: TurnProgress,
+): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
@@ -311,6 +340,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     claimSteered()
     rounds += 1
+    progress.rounds = rounds
 
     /**
      * What the person had already said when this round started.
@@ -428,7 +458,10 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
           if (chunk.type === 'text-delta') roundText += chunk.text
-          else if (chunk.type === 'reasoning-delta') reasoning += chunk.text
+          else if (chunk.type === 'reasoning-delta') {
+            reasoning += chunk.text
+            progress.reasoning = reasoning
+          }
           else if (chunk.type === 'tool-call') calls.push({ id: chunk.id, name: chunk.name, arguments: chunk.arguments })
           else if (chunk.type === 'done') {
             finishReason = chunk.finishReason
@@ -505,6 +538,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       }
     }
     text += roundText
+    progress.text = text
 
     /**
      * A message that arrived while the model was answering is answered **by this turn**.
@@ -563,6 +597,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       toolCallRecords.push({ name: call.name, arguments: call.arguments, result })
       if (result.error) {
         denials.push({ tool: call.name, code: result.error.code, message: result.error.message })
+        progress.denials = denials.length
       }
       ctx.session.store.message(options.session, {
         role: 'tool',
@@ -609,6 +644,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     ...(ended.length > 0 ? { ended } : {}),
   })
+  progress.completed = true
   ctx.session.store.append(options.session, { type: 'turn/completed', rounds })
 
   return {

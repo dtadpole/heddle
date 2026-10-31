@@ -88,3 +88,41 @@ test('a turn stopped mid-stream is ended in the log as stopped', async () => {
     })
   }
 })
+
+test('a turn that fails after a round keeps that round’s progress in its record', async () => {
+  let requests = 0
+  const server = createServer((request, response: ServerResponse) => {
+    request.resume()
+    request.on('end', () => {
+      requests += 1
+      if (requests > 1) {
+        response.writeHead(500, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: { message: 'the provider broke' } }))
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      const send = (delta: unknown, finish: string | null) => response.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\n`)
+      send({ role: 'assistant', content: 'looking ' }, null)
+      send({ tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'nope', arguments: '{}' } }] }, null)
+      send({}, 'tool_calls')
+      response.end('data: [DONE]\n\n')
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { ctx, session, ends } = harness(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`)
+  try {
+    await assert.rejects(runTurn(ctx, { session, endpoint: 'double', prompt: 'go', maxRounds: 3 }))
+    const { completed, closed } = ends()
+    assert.equal(completed.length, 1, 'one completion record')
+    assert.equal(completed[0]?.text, 'looking ', 'with the answer of the round that finished')
+    assert.equal(completed[0]?.rounds, 2)
+    assert.equal(completed[0]?.denials, 1, 'and the unknown tool’s refusal')
+    assert.match(String((completed[0]?.ended as string[] | undefined)?.[0]), /^failed: /)
+    assert.equal(closed.length, 1)
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve())
+      server.closeAllConnections()
+    })
+  }
+})

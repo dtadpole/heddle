@@ -264,7 +264,8 @@ impl BegunTurn {
             live,
         } = self;
         let stopped = cancel.clone();
-        let result = run_turn_body(&runtime, &options, cancel, started).await;
+        let mut progress = TurnProgress::default();
+        let result = run_turn_body(&runtime, &options, cancel, started, &mut progress).await;
         if let Err(error) = &result {
             record_unfinished(
                 &runtime,
@@ -273,6 +274,7 @@ impl BegunTurn {
                 stopped
                     .as_ref()
                     .is_some_and(CancellationToken::is_cancelled),
+                &progress,
             );
         }
         if let Some(live) = &live {
@@ -280,6 +282,17 @@ impl BegunTurn {
         }
         result
     }
+}
+
+/// What a turn has done so far, kept where [`BegunTurn::run`] can read it when the body returns an error.
+#[derive(Debug, Default)]
+struct TurnProgress {
+    text: String,
+    reasoning: String,
+    rounds: u32,
+    denials: usize,
+    /// Whether the turn's `assistant/completed` is already in the log.
+    completed: bool,
 }
 
 /// End a turn that returned an error, durably (#16, #29; `recordUnfinished` in the TypeScript build).
@@ -290,11 +303,16 @@ impl BegunTurn {
 /// `turn/end` with its reason in a `finally`. Here the turn ends the way a stopped turn already does:
 /// `assistant/completed` names the reason in `ended`, which the transcript draws as the turn's notice, and
 /// `turn/completed` closes it. A failure to write the record is ignored; the caller still gets the turn's error.
+///
+/// The record keeps what the turn did before it failed: the answer of its earlier rounds, its reasoning, its
+/// round and denial counts (developer-five's review). A turn whose completion was already written (only the
+/// closing `turn/completed` failed) is not completed twice.
 fn record_unfinished(
     runtime: &AgentRuntime,
     session: &SessionHandle,
     error: &TurnError,
     stopped: bool,
+    progress: &TurnProgress,
 ) {
     let message = error.to_string();
     let reason = if stopped {
@@ -303,27 +321,31 @@ fn record_unfinished(
         format!("failed: {message}")
     };
     let mut completed = serde_json::Map::from_iter([
-        ("text".to_owned(), serde_json::json!("")),
-        ("reasoning".to_owned(), serde_json::json!("")),
+        ("text".to_owned(), serde_json::json!(progress.text)),
+        ("reasoning".to_owned(), serde_json::json!(progress.reasoning)),
         (
             "finishReason".to_owned(),
             serde_json::json!(if stopped { "aborted" } else { "error" }),
         ),
-        ("rounds".to_owned(), serde_json::json!(0)),
-        ("denials".to_owned(), serde_json::json!(0)),
+        ("rounds".to_owned(), serde_json::json!(progress.rounds)),
+        ("denials".to_owned(), serde_json::json!(progress.denials)),
         ("ended".to_owned(), serde_json::json!([reason])),
     ]);
-    let mut closed = serde_json::Map::from_iter([("rounds".to_owned(), serde_json::json!(0))]);
+    let mut closed = serde_json::Map::from_iter([(
+        "rounds".to_owned(),
+        serde_json::json!(progress.rounds),
+    )]);
     if stopped {
         closed.insert("stopped".to_owned(), serde_json::json!(true));
     } else {
         completed.insert("error".to_owned(), serde_json::json!(message));
         closed.insert("error".to_owned(), serde_json::json!(message));
     }
-    if runtime
-        .session
-        .append(session, events::ASSISTANT_COMPLETED, completed)
-        .is_ok()
+    if progress.completed
+        || runtime
+            .session
+            .append(session, events::ASSISTANT_COMPLETED, completed)
+            .is_ok()
     {
         let _ = runtime
             .session
@@ -398,6 +420,7 @@ async fn run_turn_body(
     options: &RunTurnOptions,
     cancel: Option<CancellationToken>,
     started: usize,
+    progress: &mut TurnProgress,
 ) -> Result<TurnResult, TurnError> {
     let session = &options.session;
     let max_rounds = match options.max_rounds {
@@ -438,6 +461,7 @@ async fn run_turn_body(
         // them is written now, after them. A stop is checked first, so a stopped turn leaves its steer pending.
         runtime.session.claim_pending_input(session)?;
         rounds += 1;
+        progress.rounds = rounds;
 
         // Keep the runtime-context snapshot current before the round measures what the person has said, so
         // the harness's own snapshot is never mistaken for a steered message.
@@ -534,7 +558,10 @@ async fn run_turn_body(
                         runtime.session.assistant_chunk(session, &chunk)?;
                         match &chunk {
                             Chunk::TextDelta { text: delta } => round_text.push_str(delta),
-                            Chunk::ReasoningDelta { text: delta } => reasoning.push_str(delta),
+                            Chunk::ReasoningDelta { text: delta } => {
+                                reasoning.push_str(delta);
+                                progress.reasoning.push_str(delta);
+                            }
                             Chunk::ToolCall(call) => calls.push((
                                 call.id.clone(),
                                 call.name.clone(),
@@ -628,6 +655,7 @@ async fn run_turn_body(
         }
 
         text.push_str(&round_text);
+        progress.text.push_str(&round_text);
 
         // A message that arrived while the model was answering is answered by this turn (steering): one that
         // waits in the inbox (a steer) or one written straight to the log (a teammate's mail). DSH takes
@@ -717,6 +745,7 @@ async fn run_turn_body(
                         code: error.code.clone(),
                         message: error.message.clone(),
                     });
+                    progress.denials = denials.len();
                 }
                 let mut answer = Message::new(
                     Role::Tool,
@@ -750,6 +779,7 @@ async fn run_turn_body(
     runtime
         .session
         .append(session, events::ASSISTANT_COMPLETED, completed)?;
+    progress.completed = true;
     runtime.session.append(
         session,
         events::TURN_COMPLETED,
@@ -2129,6 +2159,55 @@ pub(crate) mod tests {
         assert_eq!(completed.fields["error"], "the provider broke");
         let closed = session.event(events::TURN_COMPLETED).expect("and closed");
         assert_eq!(closed.fields["error"], "the provider broke");
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_fails_after_a_round_keeps_that_rounds_progress_in_its_record() {
+        // developer-five's review of #16: the record used to say text "", rounds 0, whatever the turn had done.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "looking ".into(),
+                },
+                call_chunk("c1", "nope", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Fail(ModelError {
+                code: None,
+                message: "the provider broke".into(),
+            }),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(completed.fields["text"], "looking ");
+        assert_eq!(completed.fields["rounds"], 2);
+        assert_eq!(completed.fields["denials"], 1, "the unknown tool's refusal");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["failed: the provider broke"])
+        );
+        assert_eq!(
+            session
+                .kinds()
+                .iter()
+                .filter(|kind| *kind == events::ASSISTANT_COMPLETED)
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
