@@ -99,7 +99,7 @@ test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the pan
    * The search field is put away while the sidebar is a rail, so its chord has to open the panel before focusing —
    * otherwise `Alt+Meta+K` focuses something a reader cannot see and appears to do nothing.
    */
-  assert.match(page, /\{ key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table')
+  assert.match(page, /\{ code: 'KeyB', key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table, by its physical key')
   assert.match(page, /if \(action === 'sidebar'\) \{/, 'and the handler acts on it')
   assert.match(page, /if \(sidebarCollapsed\(\)\) openSidebar\(\)/, 'search opens the panel first')
 })
@@ -174,7 +174,7 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   )
   assert.match(page, /if \(typeof selected === 'string' && !selected\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selected\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
-  assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
+  assert.match(page, /\{ code: 'KeyN', key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
 })
 
@@ -295,7 +295,7 @@ test('the panel ends with a Settings entry, and the Settings surface never rende
   assert.match(page, /Credentials are never shown here/, 'and the line that says credentials are never rendered')
   assert.match(page, /settingsDialog\.showModal\(\)/, 'shown modally, so Escape and focus containment are the platform\'s')
   assert.match(page, /if \(clickEvent\.target === settingsDialog\) settingsDialog\.close\(\)/, 'and the backdrop dismisses it')
-  assert.match(page, /\{ key: ',', alt: true, action: 'settings' \}/, 'with the reference\'s chord in the table')
+  assert.match(page, /\{ code: 'Comma', key: ',', alt: true, action: 'settings' \}/, 'with the reference\'s chord in the table')
   assert.match(page, /endpoint\.credential === 'set' \? t\('settings\.credentialSet'\) : t\('settings\.noCredential'\)/, 'the credential is reported as set or not, never printed')
   assert.match(page, /'settings\.credentialSet': 'credential set'/, 'in words that name only its presence')
 })
