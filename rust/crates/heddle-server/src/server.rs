@@ -1689,7 +1689,11 @@ fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
 }
 
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
-    let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
+    // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
+    let Some(prompt) = body
+        .str("prompt")
+        .filter(|prompt| !prompt.trim().is_empty())
+    else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
     };
     let attachments = match state.harness().attachments.as_ref() {
@@ -2823,6 +2827,12 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
+        // A prompt of only whitespace is refused before anything else, as an empty one is (#32).
+        for blank in [r#"{"prompt":""}"#, r#"{"prompt":"   "}"#, r#"{"prompt":"\n\t "}"#] {
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, blank).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
+            assert_eq!(body_text(&bytes), "a prompt is required\n", "{blank}");
+        }
     }
 
     #[tokio::test]
