@@ -3189,9 +3189,9 @@
     gives a screen reader the count and the panel each tab belongs to. Arrow keys move between tabs, which is the
     behaviour the pattern promises.
   -->
-  <nav id="views" role="tablist" aria-label="view">
-    <button type="button" role="tab" id="tab-chat" data-view="chat" aria-selected="true" aria-controls="log" tabindex="0">Chat</button>
-    <button type="button" role="tab" id="tab-trajectory" data-view="trajectory" aria-selected="false" aria-controls="ledger" tabindex="-1">Trajectory</button>
+  <nav id="views" role="tablist" aria-label="view" data-i18n-aria-label="header.views">
+    <button type="button" role="tab" id="tab-chat" data-view="chat" aria-selected="true" aria-controls="log" tabindex="0" data-i18n="header.chat">Chat</button>
+    <button type="button" role="tab" id="tab-trajectory" data-view="trajectory" aria-selected="false" aria-controls="ledger" tabindex="-1" data-i18n="header.trajectory">Trajectory</button>
   </nav>
 
   <!--
@@ -3710,6 +3710,22 @@ const MESSAGES = Object.freeze({
     'model.search': 'Search models…',
     'model.searchEmpty': 'No matching models.',
     'model.empty': 'No models available.',
+    'header.noSession': 'No session',
+    'header.views': 'view',
+    'header.chat': 'Chat',
+    'header.trajectory': 'Trajectory',
+    'header.thisSession': 'this session',
+    'header.more': 'More actions',
+    'header.download': 'Download session log',
+    'tree.newSession': 'New session',
+    'tree.newSessionHere': 'New session here',
+    'tree.rename': 'Rename',
+    'tree.deleteWorkspace': 'Delete workspace',
+    'tree.pin': 'Pin session',
+    'tree.unpin': 'Unpin session',
+    'tree.fork': 'Fork session',
+    'tree.archive': 'Archive session',
+    'tree.unarchive': 'Unarchive session',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3782,6 +3798,22 @@ const MESSAGES = Object.freeze({
     'model.search': '搜索模型…',
     'model.searchEmpty': '没有匹配的模型。',
     'model.empty': '暂无可用模型',
+    'header.noSession': '无会话',
+    'header.views': '视图',
+    'header.chat': '对话',
+    'header.trajectory': '轨迹',
+    'header.thisSession': '此会话',
+    'header.more': '更多操作',
+    'header.download': '下载会话日志',
+    'tree.newSession': '新会话',
+    'tree.newSessionHere': '在此新建会话',
+    'tree.rename': '重命名',
+    'tree.deleteWorkspace': '删除工作区',
+    'tree.pin': '置顶会话',
+    'tree.unpin': '取消置顶',
+    'tree.fork': '分叉会话',
+    'tree.archive': '归档会话',
+    'tree.unarchive': '取消归档',
   }),
 })
 
@@ -6613,7 +6645,7 @@ async function showSession(id) {
        */
       current = null
       const title = document.getElementById('session-title')
-      if (title !== null) title.textContent = 'No session'
+      if (title !== null) title.textContent = t('header.noSession')
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
@@ -11384,7 +11416,7 @@ function menuItemsFor(node) {
      * session's definition into that branch and leaves the log where logs live.
      */
     items.push({
-      label: 'New session',
+      label: t('tree.newSession'),
       glyph: 'plus',
       run: () => startSessionAt(node),
     })
@@ -11394,12 +11426,12 @@ function menuItemsFor(node) {
      * — a name another workspace has — is shown where the name is typed.
      */
     items.push({
-      label: 'Rename',
+      label: t('tree.rename'),
       glyph: 'rename',
       run: () => openRenameWorkspace(node),
     })
     items.push({
-      label: 'Delete workspace',
+      label: t('tree.deleteWorkspace'),
       glyph: 'trash',
       danger: true,
       run: () => openDeleteWorkspace(node),
@@ -11424,10 +11456,10 @@ function menuItemsFor(node) {
      * duplicating them into the label would make the name something other than the action.
      */
     /** DSH hides the pin on an archived row altogether: the two flags are mutually exclusive. */
-    if (!node.archived) items.push({ label: node.pinned ? 'Unpin session' : 'Pin session', glyph: node.pinned ? 'pin-fill' : 'pin', run: () => pinSession(node) })
-    items.push({ label: 'Rename', glyph: 'rename', run: () => renameSession(node) })
-    items.push({ label: 'Fork session', glyph: 'fork', run: () => forkSession(node) })
-    items.push({ label: node.archived ? 'Unarchive session' : 'Archive session', glyph: 'archive', run: () => archiveSession(node) })
+    if (!node.archived) items.push({ label: node.pinned ? t('tree.unpin') : t('tree.pin'), glyph: node.pinned ? 'pin-fill' : 'pin', run: () => pinSession(node) })
+    items.push({ label: t('tree.rename'), glyph: 'rename', run: () => renameSession(node) })
+    items.push({ label: t('tree.fork'), glyph: 'fork', run: () => forkSession(node) })
+    items.push({ label: node.archived ? t('tree.unarchive') : t('tree.archive'), glyph: 'archive', run: () => archiveSession(node) })
   }
   if (node.kind === 'instance') {
     /**
@@ -11438,7 +11470,7 @@ function menuItemsFor(node) {
      * what "make sure it works" found.
      */
     items.push({
-      label: 'New session here',
+      label: t('tree.newSessionHere'),
       glyph: 'plus',
       run: () => startSessionAt(node),
     })
@@ -14800,9 +14832,26 @@ function downloadSessionLog() {
   anchor.remove()
 }
 
-document.getElementById('session-more').append(
-  menuButton({ label: 'this session' }, [{ label: 'Download session log', glyph: 'download', run: downloadSessionLog }], { label: 'More actions' }),
-)
+/** The header's More actions menu, drawn in the page language and redrawn when it changes (#80). */
+function paintSessionMore() {
+  document.getElementById('session-more').replaceChildren(
+    menuButton({ label: t('header.thisSession') }, [{ label: t('header.download'), glyph: 'download', run: downloadSessionLog }], { label: t('header.more') }),
+  )
+}
+/** The empty header names no session in the page language, at load and when the language changes. */
+function paintNoSession() {
+  if (current !== null) return
+  const title = document.getElementById('session-title')
+  if (title !== null) title.textContent = t('header.noSession')
+}
+paintSessionMore()
+paintNoSession()
+window.addEventListener('heddle:locale', () => {
+  paintSessionMore()
+  paintNoSession()
+  // The tree's row menus carry their words when drawn.
+  void renderTree()
+})
 
 /**
  * The session header's **background-jobs control** (row A56): DSH's `JobListAction` from `dsh-client-ui-jobs`, drawn
