@@ -15056,9 +15056,10 @@ async function renderTree() {
     await toggle(entry.node, entry.li)
   }
   if (selectedPath === null) syncSelectionToSession()
+  /** The schedule marks go on the drawn rows first; giving the keyboard its place back is the redraw's last act (#92). */
+  paintScheduleMarks()
   markSelection()
   restoreTreeFocus(focus, true)
-  paintScheduleMarks()
 }
 
 /**
