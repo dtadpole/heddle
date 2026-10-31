@@ -1693,7 +1693,10 @@ pub(crate) mod tests {
         // Live-testing issue #9: "I'll read both files." and the answer arrived as one run-on text in the API's
         // answer, the CLI's printed answer and a child's closing message. DSH hands back the last non-empty
         // assistant message (dsh-subagent finalAssistantOutput).
-        for (last, expected) in [("It says hello.", "It says hello."), ("", "I'll read the note.")] {
+        for (last, expected) in [
+            ("It says hello.", "It says hello."),
+            ("", "I'll read the note."),
+        ] {
             let session = RecordingSession::new();
             let model = ScriptedModel::new(vec![
                 Step::Chunks(vec![
@@ -1703,10 +1706,7 @@ pub(crate) mod tests {
                     call_chunk("c1", "read_file", serde_json::json!({ "path": "note.txt" })),
                     done("tool_calls"),
                 ]),
-                Step::Chunks(vec![
-                    Chunk::TextDelta { text: last.into() },
-                    done("stop"),
-                ]),
+                Step::Chunks(vec![Chunk::TextDelta { text: last.into() }, done("stop")]),
             ]);
             let runtime = runtime(
                 Arc::clone(&model),

@@ -60,8 +60,8 @@ test("the answer is the last round's text, and the log keeps the remark before t
   assert.deepEqual(completed.map((event) => (event as { text?: string }).text), ['It says hello.'])
   // Each round's text stays in the log as its own streamed chunks, which is what the page draws.
   const streamed = events
-    .filter((event) => event.type === 'assistant/chunk' && (event as { chunk: { type: string } }).chunk.type === 'text-delta')
-    .map((event) => (event as { chunk: { text: string } }).chunk.text)
+    .filter((event) => event.type === 'assistant/chunk' && (event as unknown as { chunk: { type: string } }).chunk.type === 'text-delta')
+    .map((event) => (event as unknown as { chunk: { text: string } }).chunk.text)
   assert.deepEqual(streamed, ["I'll read the note.", 'It says hello.'], 'both rounds are still in the log')
 })
 
