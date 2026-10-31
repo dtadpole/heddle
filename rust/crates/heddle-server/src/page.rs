@@ -234,4 +234,23 @@ mod tests {
         assert!(FAVICON_SVG.starts_with(b"<svg") || FAVICON_SVG.starts_with(b"<?xml"));
         assert!(!FAVICON_SVG.is_empty());
     }
+
+    /// DSH's workspace browser does not open an archived session (`dsh-client-ui-workspace` lib/client.js:3532-3538,
+    /// `guardedOpen`): the row says "Archived sessions cannot be opened. Unarchive it to view." and carries that
+    /// sentence as its accessible description (:2279, :4934). The page is embedded, so this asserts the binary serves
+    /// the guarded row (live-testing draft developer-six-7).
+    #[test]
+    fn the_served_page_does_not_open_an_archived_session_row() {
+        let served = page();
+        assert!(served.contains(
+            "const ARCHIVED_NOT_OPENABLE = 'Archived sessions cannot be opened. Unarchive it to view.'"
+        ));
+        assert!(served.contains("return !(node?.kind === 'session' && node.archived === true)"));
+        assert!(served.contains(
+            "if (!WorkspaceTree.opensOnClick(node)) li.setAttribute('aria-description', WorkspaceTree.ARCHIVED_NOT_OPENABLE)"
+        ));
+        assert!(served.contains(
+            "if (!WorkspaceTree.opensOnClick(node)) {\n        notifyArchivedNotOpenable()\n        return\n      }"
+        ));
+    }
 }

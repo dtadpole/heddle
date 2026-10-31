@@ -222,5 +222,9 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   sessions cannot be opened. Unarchive it to view." and keeps the query.
 - **The row menu reachable.** An archived row's dimming moved from the item to its words (the item's opacity made it a
   stacking context), and an open menu's slot rises to the menus' layer, so no part of the menu lies under the conversation
-  panel. Not changed: opening an archived row from the tree, which DSH also refuses (C16's ground), and a stopped
-  subagent's settlement notice, which can still start a turn on the archived parent where DSH's pre-step gate blocks it.
+  panel. Not changed: a stopped subagent's settlement notice, which can still start a turn on the archived parent where
+  DSH's pre-step gate blocks it.
+- **An archived row does not open** (live-testing draft developer-six-7): clicking an archived row in the tree says
+  "Archived sessions cannot be opened. Unarchive it to view." in the archive notice and opens nothing, and the row
+  carries that sentence as its `aria-description` (`dsh-client-ui-workspace` `guardedOpen`, `lib/client.js:3532-3538`,
+  `:2279`).

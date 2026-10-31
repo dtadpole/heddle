@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T06:00:00Z
+modified: 2026-10-31T06:01:00Z
 level: L3
 version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -77,6 +77,10 @@ grounded_in:
   result carries `Unarchive session` and choosing it says it cannot be opened without clearing the query; a quiet
   archive's undo notice; and a running session's archive asking first in DSH's dialog, listing the work the server
   named, Cancel leaving it running, Stop and archive stopping and archiving it, and undo restoring it.
+- [`check-archived-session.mjs`](check-archived-session.mjs) — an archived session row, drawn under *All
+  conversations*, carries DSH's "Archived sessions cannot be opened. Unarchive it to view." as its accessible
+  description, and clicking it says so and opens nothing, while a live row still opens (`dsh-client-ui-workspace`
+  `guardedOpen`).
 
 ## What it deliberately does not judge
 

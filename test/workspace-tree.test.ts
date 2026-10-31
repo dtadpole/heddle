@@ -39,6 +39,8 @@ interface Tree {
   overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
+  ARCHIVED_NOT_OPENABLE: string
+  opensOnClick: (node: unknown) => boolean
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -251,4 +253,18 @@ test('the first-use workspace reads as Default workspace while it keeps its auto
   assert.equal(group?.label, 'Default workspace', 'the row shows the default name')
   const [renamed] = tree.deriveGroups([workspace('w-default', '/h/default-workspace', { title: 'Mine' })], [])
   assert.equal(renamed?.label, 'Mine', 'and a rename wins')
+})
+
+test('an archived session row does not open, and says why in DSH\'s words', () => {
+  /**
+   * DSH's workspace browser guards opening (dsh-client-ui-workspace lib/client.js:3532-3538, guardedOpen): an archived
+   * session's row raises "Archived sessions cannot be opened. Unarchive it to view." (toast.archivedNotOpenable,
+   * :4934) and opens nothing, and the row carries that sentence as its aria-description (:2279). Measured before (live-
+   * testing draft developer-six-7): clicking an archived row opened it with a working composer.
+   */
+  assert.equal(tree.ARCHIVED_NOT_OPENABLE, 'Archived sessions cannot be opened. Unarchive it to view.')
+  const live = { kind: 'session', path: 'session:s-1', session: { id: 's-1' } }
+  assert.equal(tree.opensOnClick(live), true, 'a live session opens')
+  assert.equal(tree.opensOnClick({ ...live, archived: true }), false, 'an archived one does not')
+  assert.equal(tree.opensOnClick({ kind: 'folder', path: '/w/a', archived: true }), true, 'only a session row is guarded')
 })
