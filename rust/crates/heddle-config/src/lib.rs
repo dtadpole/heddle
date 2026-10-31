@@ -57,6 +57,7 @@ mod layer;
 mod local;
 mod model_row;
 pub mod paths;
+mod presets;
 mod profile;
 mod references;
 mod retry;
@@ -81,6 +82,10 @@ pub use layer::{INLINE_FILE, Layer, NamedLayer, anchor_dir, read_layer};
 pub use local::{LocalConfig, LocalConfigLocation, local_config_candidates, read_local_config};
 pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
 pub use paths::{canonical_path, depth_of, is_under};
+pub use presets::{
+    PresetDefinition, PresetResolution, PresetRoster, missing_preset_message, preset_roster,
+    standard_preset,
+};
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,
     list_profiles, profile_argument, resolve_profile,
