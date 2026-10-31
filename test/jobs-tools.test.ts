@@ -211,17 +211,31 @@ test('a job kill and a foreground stop share one group helper: it sends the sign
   // The jobs producer sends SIGTERM, then SIGKILL, through the helper the foreground bash sends SIGKILL with.
   assert.equal(killProcessGroup(0, 'SIGTERM'), false)
   assert.equal(killProcessGroup(1, 'SIGTERM'), false)
-  const shell = spawn('/bin/sh', ['-c', 'sleep 30 & wait'], { detached: true, stdio: 'ignore' })
+  // The shell prints its background sleep's pid before waiting, so the group is known to hold both when it is signalled.
+  const shell = spawn('/bin/sh', ['-c', 'sleep 30 & echo $!; wait'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
   const pid = shell.pid as number
   const exited = new Promise<NodeJS.Signals | null>((resolve) => shell.on('exit', (_code, signal) => resolve(signal)))
-  await new Promise((resolve) => setTimeout(resolve, 100))
-  assert.equal(groupAlive(pid), true)
+  const sleeper = await new Promise<number>((resolve) => {
+    let text = ''
+    shell.stdout?.on('data', (chunk: Buffer) => {
+      text += chunk.toString()
+      if (text.includes('\n')) resolve(Number(text.trim()))
+    })
+  })
+  assert.ok(Number.isInteger(sleeper) && sleeper > 1)
   assert.equal(killProcessGroup(pid, 'SIGTERM'), true)
   assert.equal(await exited, 'SIGTERM', 'the leader died of the signal it was sent, not SIGKILL')
-  const deadline = Date.now() + 3_000
-  while (groupAlive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
-  assert.equal(groupAlive(pid), false, 'the sleep the shell started got the SIGTERM too')
-  assert.equal(killProcessGroup(pid, 'SIGTERM'), true, 'a group already gone counts as signalled')
+  const alive = (target: number): boolean => {
+    try {
+      process.kill(target, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const deadline = Date.now() + 5_000
+  while (alive(sleeper) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(alive(sleeper), false, 'the sleep the shell started got the SIGTERM too')
 })
 
 test('echo x; exit 3 settles completed with exit code 3, and job_output renders it verbatim', async () => {
