@@ -249,7 +249,26 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
      * **A search keeps the same rows.** DSH replaces its tree with a flat result list, and its filtered rows still sit
      * at 12→268 — the same inset as the tree's own rows (measured 2026-10-17). Heddle's hits must land on the tree's
      * row box, or switching to search visibly shifts the list's edges.
+     *
+     * The hit has to be one DSH's search lists: it skips every New session placeholder, the open one too
+     * (`deriveSearchResults`, dsh-client-ui-workspace lib/client.js:1185), and the two sessions above are placeholders.
+     * The open one is given a title, as a person renaming it would, and a titled session is a conversation, not a
+     * placeholder. The search for "session" used to find the placeholder's own "New Session".
      */
+    const titled = await browser.evaluate(openRow)
+    assert.equal(typeof titled, 'string', 'the chord\'s session is the open row')
+    const handshake = await fetch(server.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const renamed = await fetch(new URL(`/api/sessions/${titled}/title`, server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'resize session notes' }),
+    })
+    assert.equal(renamed.status, 200, `the open session takes a title (${renamed.status})`)
+    assert.ok(
+      await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${titled}"]')?.textContent.includes('resize session notes') === true`, 10_000),
+      'and its row reads it',
+    )
     const searchRow = JSON.parse(await browser.evaluate(`(() => {
       const treeRow = document.querySelector('#tree li[data-kind="session"] > .row')
       if (treeRow === null) return JSON.stringify({ error: 'no session row' })
