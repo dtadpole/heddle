@@ -3760,14 +3760,20 @@ test("a session row's controls appear on hover, and a search replaces the tree w
 
         /** And a selection is DSH's: the same surface as a hover, no bar, no bold. */
         target.querySelector(':scope > .row').click(); await wait(1200)
-        const selectedRow = target.querySelector(':scope > .row')
+        /**
+         * Read from the tree as it is now: opening the session redraws the tree (leaving the first visit's New session takes
+         * its row away, #17), so the element clicked may no longer be in the document, and a detached row's computed style
+         * is empty.
+         */
+        const selectedLi = document.querySelector('#tree li[data-kind="session"][data-session-id="' + CSS.escape(target.dataset.sessionId) + '"]') ?? target
+        const selectedRow = selectedLi.querySelector(':scope > .row')
         const selected = {
           background: getComputedStyle(selectedRow).backgroundColor,
           shadow: getComputedStyle(selectedRow).boxShadow,
           weight: getComputedStyle(selectedRow.querySelector('.label')).fontWeight,
         }
         const quietBackground = (() => {
-          const other = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li !== target)
+          const other = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((li) => li !== selectedLi && li.dataset.sessionId !== target.dataset.sessionId)
           return other === undefined ? null : getComputedStyle(other.querySelector(':scope > .row')).backgroundColor
         })()
 
