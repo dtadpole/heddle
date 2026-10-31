@@ -1,7 +1,7 @@
 ---
 title: The heddle-session sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T11:55:00Z
+modified: 2026-10-31T01:06:15Z
 version: 0.3.0
 description: The sources of the heddle-session crate, one module per TypeScript source, with unit tests beside the code.
 grounded_in:
@@ -28,6 +28,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`mode.rs`](mode.rs) | the `permission/mode` fold | `mode.ts` |
 | [`inbox.rs`](inbox.rs) | the pending-input inbox: DSH's `agent/inbox/spliced` fold, `queue_steer`, `claim_next_step` (R-developer-two-5) | `inbox.ts` |
 | [`definition.rs`](definition.rs) | `_sessions_/<name>/{session.json, INDEX.md}` | `definition.ts` |
+| [`title_text.rs`](title_text.rs) | DSH's title cleaning: `clean_session_title`, applied to every title the store and a definition write | `title-text.ts` |
 | [`service.rs`](service.rs) | `SessionService`, `title_from`, `fork_title` | `service.ts`, `src/plugins/session.ts` |
 | [`error.rs`](error.rs) | `SessionError`, `SessionFlagError` | the thrown messages |
 

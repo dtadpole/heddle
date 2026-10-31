@@ -1,7 +1,7 @@
 ---
 title: The heddle-session public API
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-24T05:17:28Z
+modified: 2026-10-31T01:06:15Z
 level: L1
 version: 1.1.0
 description: Every item the crate re-exports at its root, and what each one is for.
@@ -32,5 +32,6 @@ Everything is re-exported at the crate root.
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
 | `title_from`, `fork_title` | a session's label from its first message; `<title> (n)` |
 | `SessionError`, `SessionFlagError` | failures, with the TypeScript build's messages word for word |
+| `title_text::{clean_session_title, clean_title_text, truncate_title_utf8, MAX_TITLE_BYTES, TITLE_INVALID_CODE, TITLE_INVALID_MESSAGE}` | DSH's `normalizeSessionTitle` at its shipped 80-byte cap (`src/session/title-text.ts`): `rename`, `create` and the definition writers clean every title with it, and the server's title route answers `400 session/title-invalid` when nothing visible is left. Reached by its module path, not re-exported at the root |
 | `command::{run, Command, Args, Context, refuse, write_pretty}` | `heddle sessions` and `heddle transcript`, answered here (D-043); `session new` is in `heddle_workspace::command` |
 | `Message`, `ContentPart`, `Chunk`, `Role`, `RecordedMessage`, `text_of` | `heddle-llm`'s types, re-exported: `RecordedMessage` is `Message` itself (its `source` names who wrote it), so a caller crossing between the crates needs no conversion; `text_of` stays here until `heddle-llm` re-exports it |

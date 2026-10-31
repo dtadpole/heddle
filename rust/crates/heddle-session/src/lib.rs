@@ -45,6 +45,7 @@ pub mod mode;
 pub mod service;
 pub mod store;
 pub mod surface;
+pub mod title_text;
 pub mod transcript;
 
 pub use definition::{
