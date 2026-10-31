@@ -1,5 +1,17 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -52,13 +64,13 @@ function env(sb, extra = {}) {
   }
 }
 
-function run(sb, args, extra = {}) {
-  return spawnSync('/bin/sh', [RUN, ...args], { cwd: CWD, env: env(sb, extra), encoding: 'utf8' })
+function run(sb, args, extra = {}, cwd = CWD) {
+  return spawnSync('/bin/sh', [RUN, ...args], { cwd, env: env(sb, extra), encoding: 'utf8' })
 }
 
-function start(sb, args, extra = {}) {
+function start(sb, args, extra = {}, cwd = CWD) {
   const child = spawn('/bin/sh', [RUN, ...args], {
-    cwd: CWD,
+    cwd,
     env: env(sb, extra),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
@@ -83,11 +95,11 @@ function args(sb) {
 }
 
 // Poll `status` until it prints the wanted substring, or the deadline passes.
-async function waitForStatus(sb, wanted, timeoutMs = 10000) {
+async function waitForStatus(sb, wanted, timeoutMs = 10000, statusArgs = ['status']) {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    last = run(sb, ['status']).stdout
+    last = run(sb, statusArgs).stdout
     if (last.includes(wanted)) return last
     await new Promise((r) => setTimeout(r, 100))
   }
@@ -142,10 +154,10 @@ test('a caller\'s own -j is kept, in every spelling, and no -j is added to fmt',
 
 // Concurrency is proven by holding every fake cargo until released, not by timing: on a
 // loaded Mac short sleeps can run one after another and a peak of three never happen.
-async function holdAndRelease(sb, { runners, expectBusy, extra = {} }) {
+async function holdAndRelease(sb, { runners, expectBusy, extra = {}, cmd = ['check'], statusArgs = ['status'] }) {
   const release = join(sb.dir, 'release')
-  const runs = Array.from({ length: runners }, () => start(sb, ['check'], { FAKE_HOLD: release, ...extra }))
-  await waitForStatus(sb, `summary: busy=${expectBusy} `)
+  const runs = Array.from({ length: runners }, () => start(sb, cmd, { FAKE_HOLD: release, ...extra }))
+  await waitForStatus(sb, `summary: busy=${expectBusy} `, 10000, statusArgs)
   // One full retry cycle of the waiting runners (they poll every 3 s): none may get in.
   await new Promise((done) => setTimeout(done, 3500))
   const startedWhileHeld = logLines(sb).filter((line) => line.startsWith('+')).length
@@ -327,4 +339,208 @@ test('a held fake cargo exits once its hold folder is removed, so a failed test 
   const result = await held.done
   assert.equal(result.code, 0, result.stderr)
   assert.ok(Date.now() - began < 5000, `the holder exited ${Date.now() - began} ms after its folder went`)
+})
+
+// A git worktree stand-in with a tracked, an untracked, an ignored and a target-side Rust
+// file, every one dated 2020, so a touch by the runner shows as a recent mtime.
+const OLD = new Date('2020-01-01T00:00:00Z')
+function tree(sb, name) {
+  const dir = join(sb.dir, name)
+  mkdirSync(join(dir, 'src'), { recursive: true })
+  mkdirSync(join(dir, 'target'), { recursive: true })
+  spawnSync('git', ['init', '-q'], { cwd: dir })
+  writeFileSync(join(dir, '.gitignore'), 'target/\nsrc/ignored.rs\n')
+  for (const f of ['src/lib.rs', 'src/new.rs', 'src/ignored.rs', 'target/out.rs']) writeFileSync(join(dir, f), '// x\n')
+  spawnSync('git', ['add', 'src/lib.rs'], { cwd: dir })
+  const files = (...names) => names.map((f) => join(dir, f))
+  const age = () => {
+    for (const f of files('src/lib.rs', 'src/new.rs', 'src/ignored.rs', 'target/out.rs')) utimesSync(f, OLD, OLD)
+  }
+  const touched = (f) => statSync(join(dir, f)).mtimeMs > OLD.getTime() + 1000
+  age()
+  return { dir: realpathSync(dir), age, touched }
+}
+
+test('a shared CARGO_TARGET_DIR: a switch of tree touches its Rust sources, the same tree again does not', (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const b = tree(sb, 'tree-b')
+  const td = join(sb.dir, 'shared-target')
+  const stampOf = () => readFileSync(join(td, '.local-build-tree'), 'utf8').trim()
+
+  const first = run(sb, ['build'], { CARGO_TARGET_DIR: td }, a.dir)
+  assert.equal(first.status, 0, first.stderr)
+  assert.match(first.stderr, /last built from an unrecorded tree; touched 2 Rust sources in /)
+  assert.ok(a.touched('src/lib.rs') && a.touched('src/new.rs'), 'tracked and untracked sources are touched')
+  assert.ok(!a.touched('src/ignored.rs') && !a.touched('target/out.rs'), 'ignored files and build output are not')
+  assert.equal(stampOf(), a.dir)
+  assert.ok(!existsSync(join(td, '.local-build-lock')), 'the lock goes with the command')
+
+  a.age()
+  const again = run(sb, ['test'], { CARGO_TARGET_DIR: td }, a.dir)
+  assert.equal(again.status, 0, again.stderr)
+  assert.doesNotMatch(again.stderr, /touched/)
+  assert.ok(!a.touched('src/lib.rs'), 'the tree that built last is not rebuilt')
+
+  const other = run(sb, ['check'], { CARGO_TARGET_DIR: td }, b.dir)
+  assert.equal(other.status, 0, other.stderr)
+  assert.ok(other.stderr.includes(`last built from ${a.dir}; touched 2 Rust sources in ${b.dir}`), other.stderr)
+  assert.ok(b.touched('src/lib.rs') && b.touched('src/new.rs'))
+  assert.equal(stampOf(), b.dir)
+
+  const failed = run(sb, ['build'], { CARGO_TARGET_DIR: td, FAKE_RC: '101' }, a.dir)
+  assert.equal(failed.status, 101, 'cargo\'s status is kept')
+  assert.ok(!existsSync(join(td, '.local-build-lock')), 'a failed command releases the lock too')
+})
+
+test('a relative CARGO_TARGET_DIR is the caller\'s, and no target, fmt or the opt-out leave everything alone', (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const td = join(sb.dir, 'shared-target')
+
+  assert.equal(run(sb, ['build'], {}, a.dir).status, 0)
+  assert.equal(run(sb, ['fmt', '--check'], { CARGO_TARGET_DIR: td }, a.dir).status, 0)
+  assert.equal(run(sb, ['build'], { CARGO_TARGET_DIR: td, LOCAL_BUILD_TREE_GUARD: '0' }, a.dir).status, 0)
+  assert.ok(!a.touched('src/lib.rs'), 'nothing was touched')
+  assert.ok(!existsSync(td), 'and the target was never created')
+
+  const rel = run(sb, ['build'], { CARGO_TARGET_DIR: '../shared-target' }, a.dir)
+  assert.equal(rel.status, 0, rel.stderr)
+  assert.ok(rel.stderr.includes(`${a.dir}/../shared-target was last built`), 'the message names the target in full')
+  assert.equal(readFileSync(join(td, '.local-build-tree'), 'utf8').trim(), a.dir)
+  assert.ok(a.touched('src/lib.rs'))
+})
+
+test('two trees run one at a time into one target, and the second touches only after the first ends', async (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const b = tree(sb, 'tree-b')
+  const td = join(sb.dir, 'shared-target')
+  const release = join(sb.dir, 'release')
+  const first = start(sb, ['build'], { CARGO_TARGET_DIR: td, FAKE_HOLD: release }, a.dir)
+  const deadline = Date.now() + 10000
+  while (!logLines(sb).some((l) => l.startsWith('+')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
+  const cargoPid = logLines(sb).find((l) => l.startsWith('+')).slice(1)
+  const owner = readFileSync(join(td, '.local-build-lock', 'owner'), 'utf8').trim().split(' ')
+  assert.equal(owner[2], cargoPid, 'the lock records the cargo it waits for')
+  assert.equal(owner.slice(3).join(' '), a.dir)
+
+  const second = start(sb, ['build'], { CARGO_TARGET_DIR: td }, b.dir)
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(logLines(sb).filter((l) => l.startsWith('+')).length, 1, 'the second cargo waits for the lock')
+  assert.ok(!b.touched('src/lib.rs'), 'and touches nothing while the first still builds')
+  const releasedAt = Date.now()
+  writeFileSync(release, '')
+  const [ra, rb] = await Promise.all([first.done, second.done])
+  assert.equal(ra.code, 0, ra.stderr)
+  assert.equal(rb.code, 0, rb.stderr)
+  assert.ok(rb.stderr.includes(`waiting for the build in ${a.dir} to finish`), rb.stderr)
+  const events = logLines(sb).filter((l) => l.startsWith('+') || l.startsWith('-')).map((l) => l[0])
+  assert.deepEqual(events, ['+', '-', '+', '-'], 'one cargo at a time')
+  assert.ok(statSync(join(b.dir, 'src/lib.rs')).mtimeMs >= releasedAt, 'the touch came after the first build ended')
+})
+
+test('a dead holder\'s lock is reclaimed; a live one makes the run wait, then give up with 75', (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const td = join(sb.dir, 'shared-target')
+  const lock = join(td, '.local-build-lock')
+  const now = Math.floor(Date.now() / 1000)
+  mkdirSync(lock, { recursive: true })
+  writeFileSync(join(lock, 'owner'), `999999 ${now} 0 /x/gone\n`)
+  const reclaimed = run(sb, ['build'], { CARGO_TARGET_DIR: td, LOCAL_BUILD_WAIT_SECONDS: '10' }, a.dir)
+  assert.equal(reclaimed.status, 0, reclaimed.stderr)
+  assert.ok(a.touched('src/lib.rs'))
+  assert.ok(!existsSync(lock))
+
+  writeFileSync(sb.log, '')
+  mkdirSync(lock)
+  writeFileSync(join(lock, 'owner'), `${process.pid} ${now} 0 /x/live\n`)
+  const blocked = run(sb, ['build'], { CARGO_TARGET_DIR: td, LOCAL_BUILD_WAIT_SECONDS: '2' }, a.dir)
+  assert.equal(blocked.status, 75, blocked.stderr)
+  assert.match(blocked.stderr, /stayed locked by \/x\/live/)
+  assert.deepEqual(args(sb), [], 'cargo never ran')
+  assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), `${process.pid} ${now} 0 /x/live\n`, 'a live lock is untouched')
+})
+
+// TypeScript test runs: a pool of their own and a capped node test concurrency.
+const tsSlotDirs = (sb) => (existsSync(sb.root) ? readdirSync(sb.root).filter((n) => n.startsWith('ts-slot-')) : [])
+const EXEC_ARGV = ['node', '-e', 'console.log(process.execArgv.join(" "))']
+
+test('a --ts command runs in a ts slot, not through cargo, and every node it starts gets --test-concurrency=4', (t) => {
+  const sb = sandbox(t)
+  const r = run(sb, ['--ts', '--', ...EXEC_ARGV])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /--test-concurrency=4/)
+  assert.match(r.stderr, /ts slot 0, cap 2 of 4, node test concurrency 4/)
+  assert.deepEqual(args(sb), [], 'cargo never ran')
+  assert.deepEqual(tsSlotDirs(sb), [], 'the ts slot, and the node shim in it, go with the command')
+
+  const shell = run(sb, ['--ts', 'sh', '-c', 'command -v node'], { LOCAL_BUILD_TS_CONCURRENCY: '2' })
+  assert.equal(shell.status, 0, shell.stderr)
+  assert.match(shell.stdout, /ts-slot-0\/bin\/node$/m, 'the -- is optional, and the shim is first on PATH')
+  const two = run(sb, ['--ts', '--', ...EXEC_ARGV], { LOCAL_BUILD_TS_CONCURRENCY: '2' })
+  assert.match(two.stdout, /--test-concurrency=2/)
+  const bad = run(sb, ['--ts', '--', ...EXEC_ARGV], { LOCAL_BUILD_TS_CONCURRENCY: 'many' })
+  assert.match(bad.stdout, /--test-concurrency=4/)
+  assert.match(bad.stderr, /LOCAL_BUILD_TS_CONCURRENCY must be a whole number/)
+})
+
+test('the ts pool holds two by default, apart from the cargo slots, and a third ts run waits', async (t) => {
+  const sb = sandbox(t)
+  const tsCmd = ['--ts', '--', sb.cargo]
+  const { results, startedWhileHeld, peak, started } = await holdAndRelease(sb, {
+    runners: 4,
+    expectBusy: 2,
+    cmd: tsCmd,
+    statusArgs: ['--ts', 'status'],
+  })
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  assert.equal(startedWhileHeld, 2, 'two ts slots filled, and a third never got in while they were held')
+  assert.ok(peak <= 2, `two at most (peak ${peak})`)
+  assert.equal(started, 4)
+
+  writeFileSync(sb.log, '')
+  const release = join(sb.dir, 'release-2')
+  const held = [start(sb, tsCmd, { FAKE_HOLD: release }), start(sb, tsCmd, { FAKE_HOLD: release })]
+  const busy = await waitForStatus(sb, 'summary: busy=2 ', 10000, ['--ts', 'status'])
+  assert.match(busy, /^class: ts {2}slots: 4 {2}node test concurrency: 4$/m)
+  assert.match(busy, /ts slot 0: busy pid=\d+ cmd=\d+ /)
+  assert.match(busy, /cap: 2 of 4 slots \(default; no cap file\)/)
+  const cargo = run(sb, ['check'], { LOCAL_BUILD_WAIT_SECONDS: '5' })
+  assert.equal(cargo.status, 0, 'a cargo command is not held up by the ts pool')
+  assert.match(run(sb, ['status']).stdout, /summary: busy=0 stale=0 free=3/)
+  const third = run(sb, tsCmd, { LOCAL_BUILD_WAIT_SECONDS: '2' })
+  assert.equal(third.status, 75, 'a third ts run waits, then gives up')
+  writeFileSync(release, '')
+  for (const r of await Promise.all(held.map((h) => h.done))) assert.equal(r.code, 0, r.stderr)
+  assert.deepEqual(tsSlotDirs(sb), [])
+})
+
+test('ts-cap sets the ts pool alone, and an unreadable one is ignored', (t) => {
+  const sb = sandbox(t)
+  mkdirSync(sb.root, { recursive: true })
+  writeFileSync(join(sb.root, 'ts-cap'), '1\n')
+  assert.match(run(sb, ['--ts', 'status']).stdout, /cap: 1 of 4 slots \(set by .*\/ts-cap\)/)
+  assert.match(run(sb, ['status']).stdout, /cap: 3 of 3 slots \(default; no cap file\)/)
+  writeFileSync(join(sb.root, 'ts-cap'), '9\n')
+  const ignored = run(sb, ['--ts', 'status'])
+  assert.match(ignored.stderr, /ignoring .*ts-cap: it must hold a whole number from 1 to 4/)
+  assert.match(ignored.stdout, /cap: 2 of 4 slots \(cap file ignored/)
+})
+
+test('a ts run adds no -j, leaves a CARGO_TARGET_DIR alone, and needs a command that exists', (t) => {
+  const sb = sandbox(t)
+  const td = join(sb.dir, 'shared-target')
+  const r = run(sb, ['--ts', '--', sb.cargo, 'build'], { CARGO_TARGET_DIR: td })
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(args(sb), ['build'], 'the command\'s arguments are its own')
+  assert.ok(!existsSync(td), 'no target lock or stamp')
+  assert.equal(run(sb, ['--ts', '--', 'test', '-n', 'x']).status, 0, 'a command named like a cargo subcommand gets no -j either')
+  assert.equal(run(sb, ['--ts']).status, 64)
+  assert.equal(run(sb, ['--ts', '--']).status, 64)
+  const missing = run(sb, ['--ts', '--', 'no-such-command-xyz'])
+  assert.equal(missing.status, 127)
+  assert.match(missing.stderr, /command not found: no-such-command-xyz/)
+  assert.deepEqual(tsSlotDirs(sb), [])
 })

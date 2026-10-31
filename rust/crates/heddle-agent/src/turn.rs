@@ -281,6 +281,16 @@ pub fn begin_turn(runtime: &AgentRuntime, options: RunTurnOptions) -> Result<Beg
         .turns
         .as_ref()
         .map(|turns| turns.begin(&options.session.id, options.cancel.as_ref()));
+    begin_registered(runtime, options, live)
+}
+
+/// [`begin_turn`] with the registration already made: at once by `begin_turn`, or after the session's queue by
+/// [`run_turn`].
+fn begin_registered(
+    runtime: &AgentRuntime,
+    options: RunTurnOptions,
+    live: Option<crate::turns::LiveTurn>,
+) -> Result<BegunTurn, TurnError> {
     let cancel = match (&live, &options.cancel) {
         (Some(live), _) => Some(live.token().clone()),
         (None, Some(caller)) => Some(caller.clone()),
@@ -329,7 +339,18 @@ pub async fn run_turn(
     runtime: &AgentRuntime,
     options: RunTurnOptions,
 ) -> Result<TurnResult, TurnError> {
-    begin_turn(runtime, options)?.run().await
+    // One turn at a time per session (#28): a turn sent to a busy session waits for the running one, as DSH's
+    // follow-up does. `begin_turn` keeps registering at once, for a caller that needs the prompt durable before
+    // it polls anything and starts turns only on idle sessions.
+    let live = match runtime.turns.as_ref() {
+        Some(turns) => Some(
+            turns
+                .begin_queued(&options.session.id, options.cancel.as_ref())
+                .await,
+        ),
+        None => None,
+    };
+    begin_registered(runtime, options, live)?.run().await
 }
 
 /// One turn's body, after [`begin_turn`] wrote the prompt.
@@ -567,7 +588,13 @@ async fn run_turn_body(
             attempt += 1;
         }
 
-        text.push_str(&round_text);
+        // The turn's answer is its last non-empty round, DSH's rule for what a run hands back (`dsh-subagent`
+        // `finalAssistantOutput`: "the last non-empty assistant message"). Adding every round's text fused the remark a
+        // model makes before a tool call to its answer in the API's answer, the CLI's printed answer and a child's
+        // closing message (live-testing issue #9). The log keeps every round's own message.
+        if !round_text.is_empty() {
+            text.clone_from(&round_text);
+        }
 
         // A message that arrived while the model was answering is answered by this turn (steering): one that
         // waits in the inbox (a steer) or one written straight to the log (a teammate's mail). DSH takes
@@ -1683,6 +1710,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_answer_is_the_last_non_empty_round_not_every_round_fused() {
+        // Live-testing issue #9: "I'll read both files." and the answer arrived as one run-on text in the API's
+        // answer, the CLI's printed answer and a child's closing message. DSH hands back the last non-empty
+        // assistant message (dsh-subagent finalAssistantOutput).
+        for (last, expected) in [
+            ("It says hello.", "It says hello."),
+            ("", "I'll read the note."),
+        ] {
+            let session = RecordingSession::new();
+            let model = ScriptedModel::new(vec![
+                Step::Chunks(vec![
+                    Chunk::TextDelta {
+                        text: "I'll read the note.".into(),
+                    },
+                    call_chunk("c1", "read_file", serde_json::json!({ "path": "note.txt" })),
+                    done("tool_calls"),
+                ]),
+                Step::Chunks(vec![Chunk::TextDelta { text: last.into() }, done("stop")]),
+            ]);
+            let runtime = runtime(
+                Arc::clone(&model),
+                Arc::clone(&session),
+                registry_with(vec![answering_tool("read_file", "hello")]),
+                Arc::new(crate::ports::NoTurnHooks),
+            );
+            let result = run_turn(
+                &runtime,
+                RunTurnOptions::new(session_handle(), "scripted", "read the note"),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.rounds, 2);
+            assert_eq!(result.text, expected, "last round {last:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn the_round_limit_ends_the_turn_and_says_so() {
         let session = RecordingSession::new();
         let model = ScriptedModel::new(vec![
@@ -1890,7 +1954,9 @@ pub(crate) mod tests {
             "the steered message was answered by this turn"
         );
         assert_eq!(model.requests().len(), 2);
-        assert_eq!(result.text, "first second");
+        // The answer is the last non-empty round, the reply to the steered message (DSH's finalAssistantOutput;
+        // issue #9), not both rounds fused.
+        assert_eq!(result.text, " second");
     }
 
     /// Hooks that grant one retry after a failure, the way a compaction listener does.

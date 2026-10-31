@@ -55,6 +55,12 @@ impl ToolsConfig {
                 "bashOutputLimit must be at least 1",
             ));
         }
+        if parsed.bash_max_timeout_ms > crate::builtin::MAX_TIMER_DELAY_MS {
+            return Err(serde::de::Error::custom(format!(
+                "bashMaxTimeoutMs must be at most {}",
+                crate::builtin::MAX_TIMER_DELAY_MS
+            )));
+        }
         if parsed.bash_max_timeout_ms == 0 {
             return Err(serde::de::Error::custom(
                 "bashMaxTimeoutMs must be at least 1",
@@ -107,6 +113,14 @@ mod tests {
         let capped =
             ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 400 })).unwrap();
         assert_eq!(capped.bash_max_timeout_ms, 400);
+        let beyond =
+            ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 3_000_000_000_u64 }))
+                .unwrap_err();
+        assert!(
+            beyond
+                .to_string()
+                .contains("bashMaxTimeoutMs must be at most 2147483647")
+        );
         let none =
             ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 0 })).unwrap_err();
         assert!(

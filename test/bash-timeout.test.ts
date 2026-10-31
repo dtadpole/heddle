@@ -9,7 +9,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { ApprovalService } from '../src/approvals/service.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
 import { SessionService } from '../src/session/service.ts'
-import { BASH_MAX_TIMEOUT_MS, bashWallTime, builtinTools } from '../src/tools/builtin.ts'
+import ToolsPlugin from '../src/plugins/tools.ts'
+import { BASH_MAX_TIMEOUT_MS, MAX_TIMER_DELAY_MS, bashWallTime, builtinTools } from '../src/tools/builtin.ts'
 import { ToolRegistry } from '../src/tools/service.ts'
 
 /**
@@ -72,4 +73,15 @@ test('bashMaxTimeoutMs caps what a call may ask for, and the schema says so', as
   assert.deepEqual(result.error, { code: 'TIMEOUT', message: 'the command exceeded 300ms and was killed' })
   assert.equal(ran, false)
   assert.match(description, /default 30000, at most 300\./)
+})
+
+test("a cap beyond one Node timer is refused by the setting, and no wall time exceeds one timer", async () => {
+  // developer-five's review of #13: a valid-looking cap of 3000000000 with the same request fired Node's timer after 1 ms.
+  assert.throws(() => ToolsPlugin.Config({ bashMaxTimeoutMs: 3_000_000_000 }), /2147483647/)
+  assert.equal(ToolsPlugin.Config({ bashMaxTimeoutMs: MAX_TIMER_DELAY_MS }).bashMaxTimeoutMs, MAX_TIMER_DELAY_MS)
+  assert.deepEqual(bashWallTime(3_000_000_000, 30_000, 3_000_000_000), { ms: MAX_TIMER_DELAY_MS })
+  const { result, ran, description } = await bash({ timeoutMs: 3_000_000_000, command: 'sleep 0.2; touch {marker}; echo ok' }, { bashMaxTimeoutMs: 3_000_000_000 })
+  assert.equal(result.error, undefined, JSON.stringify(result.error))
+  assert.equal(ran, true, 'the command ran instead of being killed after a millisecond')
+  assert.match(description, new RegExp(`at most ${MAX_TIMER_DELAY_MS}\\.`))
 })
