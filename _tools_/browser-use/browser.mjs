@@ -38,8 +38,6 @@ export class Browser {
     this.contexts = new Map()
     this.selectedPageId = undefined
     this.nextPageId = 1
-    /** Bumped on every navigation, so a collector can tell a fresh document from an old one. */
-    this.navigationEpoch = 0
     this.dead = undefined
     this.pending = new Set()
   }

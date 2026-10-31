@@ -70,13 +70,37 @@ test('an entry a running process names (a live browser profile) stays', (t) => {
 test('--dry-run lists and removes nothing; the command reports by kind', (t) => {
   const dir = folder(t)
   const p = entry(dir, 'heddle-check-browser-q', 30 * 24) // a month old: well past any age
-  const dry = spawnSync(SCRIPT, ['--dry-run', '--dir', dir], { encoding: 'utf8' })
+  const dry = spawnSync(SCRIPT, ['--dry-run', '--dir', dir, '--no-caches'], { encoding: 'utf8' })
   assert.equal(dry.status, 0, dry.stderr)
   assert.match(dry.stdout, /would remove 1 \(heddle-\* 1, hd-\*-browser-\* 0, scoped_dir\* 0, com\.google\.Chrome\* 0\)/)
   assert.equal(existsSync(p), true)
-  const real = spawnSync(SCRIPT, ['--dir', dir], { encoding: 'utf8' })
+  const real = spawnSync(SCRIPT, ['--dir', dir, '--no-caches'], { encoding: 'utf8' })
   assert.equal(real.status, 0, real.stderr)
   assert.match(real.stdout, /removed 1 \(heddle-\* 1/)
   assert.equal(existsSync(p), false)
   assert.equal(spawnSync(SCRIPT, ['--age-minutes', 'soon'], { encoding: 'utf8' }).status, 64)
+})
+
+test('it reports the npm and uv cache sizes from the settings npm and uv read, and removes nothing there', (t) => {
+  const dir = folder(t)
+  const npm = join(dir, 'npm-cache')
+  const xdg = join(dir, 'xdg')
+  mkdirSync(join(npm, '_cacache'), { recursive: true })
+  writeFileSync(join(npm, '_cacache', 'blob'), Buffer.alloc(3 * 1024 * 1024))
+  utimesSync(join(npm, '_cacache', 'blob'), hoursAgo(30 * 24), hoursAgo(30 * 24)) // a month old: stays anyway
+  const env = { PATH: process.env.PATH, HOME: dir, npm_config_cache: npm, XDG_CACHE_HOME: xdg }
+  const r = spawnSync(SCRIPT, ['--dir', folder(t)], { encoding: 'utf8', env })
+  assert.equal(r.status, 0, r.stderr)
+  const line = r.stdout.split('\n').find((l) => l.includes('caches'))
+  assert.equal(line, `tmp-sweep: caches, sizes only, never removed: npm cache 3 MiB (${npm}), uv cache absent (${join(xdg, 'uv')})`)
+  assert.equal(existsSync(join(npm, '_cacache', 'blob')), true)
+
+  mkdirSync(join(dir, 'uv-explicit'))
+  const uv = spawnSync(SCRIPT, ['--dir', folder(t)], { encoding: 'utf8', env: { ...env, UV_CACHE_DIR: join(dir, 'uv-explicit') } })
+  assert.match(uv.stdout, new RegExp(`uv cache 0 KiB \\(${join(dir, 'uv-explicit')}\\)`), 'UV_CACHE_DIR wins over XDG_CACHE_HOME')
+  const plain = spawnSync(SCRIPT, ['--dir', folder(t), '--no-caches'], { encoding: 'utf8', env })
+  assert.equal(plain.status, 0)
+  assert.doesNotMatch(plain.stdout, /caches/)
+  const home = spawnSync(SCRIPT, ['--dir', folder(t)], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: dir } })
+  assert.match(home.stdout, new RegExp(`npm cache absent \\(${join(dir, '.npm')}\\), uv cache absent \\(${join(dir, '.cache', 'uv')}\\)`))
 })
