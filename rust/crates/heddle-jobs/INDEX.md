@@ -1,8 +1,8 @@
 ---
 title: The heddle-jobs crate
 created: 2026-10-31T01:30:00Z
-modified: 2026-10-31T02:58:42Z
-version: 0.1.2
+modified: 2026-10-31T06:52:53Z
+version: 0.1.3
 description: The Rust port crate for background jobs — the registry and its output ring, the three job tools, background bash, the completion notices and the page's job routes — what it ports and what judges it.
 grounded_in:
   - source: src/jobs (ring, registry, tools, bash, notice, http, INDEX.md) and src/plugins/jobs.ts, read 2026-10-30

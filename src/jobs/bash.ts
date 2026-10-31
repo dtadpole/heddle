@@ -8,6 +8,7 @@ import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import { launchShell, shellEnv, type BashBackground, type ForegroundRun } from '../tools/builtin.ts'
 import type { ToolResult, ToolRunContext } from '../tools/service.ts'
 import { JobError, type JobHooks, type JobOutcome, type JobRegistry, type JobToolCall } from './registry.ts'
+import { processSpills, spillSources, type ProcessSpills, type SpillSettings } from './spill.ts'
 import { renderModelDelta } from './tools.ts'
 
 /**
@@ -78,6 +79,8 @@ export interface BackgroundProcess {
   readonly onSpawn?: (pid: number) => void
   /** Told how the process ended, before the job settles (a promoting foreground call renders its own answer). */
   readonly onEnd?: (end: { readonly exitCode: number | null; readonly signal: NodeJS.Signals | null }) => void
+  /** Each stream's spill file, fed the raw chunks and sealed when the process ends (`src/jobs/spill.ts`). */
+  readonly spills?: ProcessSpills
 }
 
 /**
@@ -128,10 +131,21 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       if (channel === 'stderr') stderrTail = (stderrTail + text).slice(-STDERR_CLASSIFY_CHARS)
       append(text, channel)
     }
-    child.stdout?.on('data', (chunk: Buffer) => take('stdout', decoders.stdout.write(chunk)))
-    child.stderr?.on('data', (chunk: Buffer) => take('stderr', decoders.stderr.write(chunk)))
+    child.stdout?.on('data', (chunk: Buffer) => {
+      spec.spills?.stdout.push(chunk)
+      take('stdout', decoders.stdout.write(chunk))
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      spec.spills?.stderr.push(chunk)
+      take('stderr', decoders.stderr.write(chunk))
+    })
+    const seal = (): void => {
+      spec.spills?.stdout.seal()
+      spec.spills?.stderr.seal()
+    }
     child.on('error', (error) => {
       closed = true
+      seal()
       if (killTimer !== undefined) clearTimeout(killTimer)
       finish({ status: cancelled && pid === undefined ? 'killed' : 'failed', detail: error.message })
     })
@@ -139,6 +153,7 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       closed = true
       take('stdout', decoders.stdout.end())
       take('stderr', decoders.stderr.end())
+      seal()
       spec.onEnd?.({ exitCode: code, signal })
       // A killed group's stragglers still get their SIGKILL, but the pending timer no longer holds the process open.
       killTimer?.unref()
@@ -219,6 +234,11 @@ export interface BashBackgroundOptions {
    * wall-time kill, to the tool.
    */
   readonly promoteOnTimeout?: boolean
+  /**
+   * Where and when a job's streams spill to files (`src/jobs/spill.ts`); DSH's defaults when absent, `false` to keep
+   * only the in-memory tail.
+   */
+  readonly spill?: SpillSettings | false
 }
 
 /** The promoted call's answer, DSH's `renderPromoted` verbatim (BASH:181-183). */
@@ -247,12 +267,19 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
     let promoted = false
     let ended: { readonly exitCode: number | null; readonly signal: NodeJS.Signals | null } | undefined
     let jobId: string
+    const spills = options.spill === false ? undefined : processSpills(options.spill)
+    /** A call that answered in the foreground names no file, so its spills would only be litter. */
+    const dropSpills = (): void => {
+      spills?.stdout.discard()
+      spills?.stderr.discard()
+    }
     try {
       jobId = jobs.start({
         kind: 'bash',
         label: command,
         ...(owner !== undefined ? { owner } : {}),
         ...(toolCall !== undefined ? { toolCall } : {}),
+        ...(spills !== undefined ? { output: spillSources(spills) } : {}),
         run: (handle) =>
           runProcess(
             {
@@ -266,6 +293,7 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
               onEnd: (end) => {
                 ended = end
               },
+              ...(spills !== undefined ? { spills } : {}),
             },
             (text, channel) => {
               handle.append(text, { channel })
@@ -275,6 +303,7 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
           ),
       })
     } catch (error) {
+      dropSpills()
       if (error instanceof JobError) {
         context.log(`bash: job registration refused, running in the foreground with the wall-time kill instead: ${error.message}`)
         return undefined
@@ -291,6 +320,7 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
       view = await jobs.wait(jobId, limitMs, owner, context.signal)
     } catch {
       await stop()
+      dropSpills()
       return render({ ...captured, code: ended?.exitCode ?? null, stopped: true, timedOut: false, limitMs })
     }
     if (view.status === 'running' || view.status === 'stopping') {
@@ -303,6 +333,7 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
       }
     }
     jobs.remove(jobId, owner)
+    dropSpills()
     if (view.status === 'failed') return { output: '', error: { code: 'TOOL_FAILED', message: view.detail ?? 'the command could not start' } }
     return render({ ...captured, code: ended?.exitCode ?? null, stopped: false, timedOut: false, limitMs })
   }
@@ -317,12 +348,14 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
       if ('refusal' in launch) return launch.refusal
       const toolCall = context.session !== undefined && options.readLog !== undefined ? runningToolCall(options.readLog(context.session), 'bash', args) : undefined
       let jobId = ''
+      const spills = options.spill === false ? undefined : processSpills(options.spill)
       try {
         jobId = jobs.start({
           kind: 'bash',
           label: command,
           ...(context.session !== undefined ? { owner: context.session.id } : {}),
           ...(toolCall !== undefined ? { toolCall } : {}),
+          ...(spills !== undefined ? { output: spillSources(spills) } : {}),
           run: (handle) =>
             runProcess(
               {
@@ -333,11 +366,14 @@ export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, optio
                 escalationModes: sandbox.escalationTargets(),
                 ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
                 onSpawn: (pid) => options.onSpawn?.(handle.id, pid),
+                ...(spills !== undefined ? { spills } : {}),
               },
               (text, channel) => handle.append(text, { channel }),
             ),
         })
       } catch (error) {
+        spills?.stdout.discard()
+        spills?.stderr.discard()
         if (error instanceof JobError) return { output: '', error: { code: error.code, message: error.message } }
         throw error
       }
