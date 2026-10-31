@@ -164,6 +164,8 @@
   #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 8%, transparent); outline: none; }
   #search-results .hit-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
+  /** DSH's `searchStatus`: tertiary, 12px, the row inset — a sentence under the list, not another row. */
+  #search-more { margin: 0; padding: 10px 12px; font-size: 12px; line-height: 18px; color: var(--text-3); }
   /**
    * An archived hit, DSH's `SearchResultItem`: grayed like an archived row, explained to a screen reader, and carrying
    * its Unarchive button at the end — search is where the filter surfaces an archived session for recovery. It is a
@@ -2529,6 +2531,9 @@
    */
   #file-body { white-space: pre-wrap; font-family: var(--code-font); font-size: var(--code-size); line-height: var(--code-leading); overflow-wrap: anywhere; }
   #file-body[data-renderer='markdown'] { white-space: normal; font-family: inherit; font-size: .88rem; line-height: 1.5; }
+  #file-body[data-renderer='image'] { white-space: normal; font-family: inherit; }
+  #file-body[data-renderer='image'] img { display: block; max-width: 100%; height: auto; }
+  #file-body[data-renderer='image'] img[hidden] { display: none; }
   #file-body .line { display: block; }
   /**
    * The line numbers are a margin note, not part of the code.
@@ -3011,6 +3016,23 @@
   .team-task[data-status='completed'] { opacity: .6; }
   .team-task[data-status='deleted'] { opacity: .4; text-decoration: line-through; }
   #team-mail { opacity: .7; }
+  /**
+   * Content search's two marks (R-developer-eight-19), as DSH's search list has them: a hit found inside the
+   * conversation carries its **snippet** under the title (`searchResultSnippet`, dsh-client-ui-workspace
+   * `lib/client.js:2229-2232`), and while the host query runs, skeleton rows sit under the hits in a status region
+   * (`lib/client.js:3480-3491`).
+   */
+  #search-results .hit:has(.hit-snippet) { flex-wrap: wrap; }
+  #search-results .hit-snippet { flex: 1 0 100%; min-width: 0; font-size: .78rem; line-height: 1.35; opacity: .62; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+  #search-pending { display: flex; flex-direction: column; gap: .12rem; padding-inline: 12px calc(12px - 5px); }
+  #search-pending[hidden] { display: none; }
+  #search-pending .skeleton-row { display: flex; align-items: center; gap: .5rem; padding: .45rem .5rem; }
+  #search-pending .skeleton-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: color-mix(in oklab, currentColor 14%, transparent); }
+  #search-pending .skeleton-bars { flex: 1 1 auto; display: flex; flex-direction: column; gap: .3rem; }
+  #search-pending .skeleton-bar { display: block; height: 8px; width: 55%; border-radius: 4px; background: color-mix(in oklab, currentColor 12%, transparent); animation: search-pending-pulse 1.4s ease-in-out infinite; }
+  #search-pending .skeleton-bar.wide { width: 85%; }
+  @keyframes search-pending-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { #search-pending .skeleton-bar { animation: none; } }
 
   /**
    * Schedules and reminders — DSH's `dsh-client-ui-schedule` views in this page's palette: the transcript's
@@ -3360,6 +3382,8 @@
     <ul id="tree" role="tree" aria-label="workspace folders"></ul>
     <!-- The search's own list. DSH replaces its tree with a flat result list, and the reason is the same here. -->
     <div id="search-results" role="tree" aria-label="search results" hidden></div>
+    <!-- DSH's line under a search that stopped at its twenty rows: the query is wider than the list. -->
+    <p id="search-more" class="meta" role="status" hidden></p>
     <p id="tree-note" class="meta" hidden></p>
   </div>
   <!--
@@ -8442,7 +8466,7 @@ const slashReady = import('/commands/menu.js')
         await startNewSession()
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
-      sendAsPrompt: (text, attachments = []) => (anyRunning() ? enqueue(text, 'queue', attachments) : void sendNow(text, attachments)),
+      sendAsPrompt: (text, attachments = []) => submitText(text, attachments, 'enter'),
       pendingAttachments: () => pendingAttachments.length,
       takeAttachments: () => takeAttachments(),
       addRow: (node) => window.heddlePage.addRow('command', node),
@@ -8782,7 +8806,15 @@ function submitDraft(gesture) {
   field.value = ''
   growComposer()
   updateSendDisabled()
-  const attachments = takeAttachments()
+  submitText(text, takeAttachments(), gesture)
+}
+
+/**
+ * Send words as the person's message, by the composer's own rules: a new send resumes a queue that Stop paused (#75),
+ * and it steers, queues behind what waits, or goes as its own turn. A slash command that hands words on to the model
+ * (`sendAsPrompt`) comes through here too, so it keeps the same order as typed text (developer-ten's review).
+ */
+function submitText(text, attachments, gesture) {
   stoppedQueues.delete(queueOf())
   const mode = resolveSubmitMode(BUSY_ENTER, anyRunning(), gesture)
   if (mode === 'steer') {
@@ -11896,6 +11928,8 @@ function viewOptionItems() {
         archiveMode = mode
         rememberArchived()
         await renderTree()
+        /** A standing search follows the filter, as DSH's does (`deriveSearchResults` takes `archivedFilter`). */
+        await applySearch()
       },
     })),
   ]
@@ -12252,7 +12286,8 @@ async function showFile(node) {
       fileBody.textContent = body.error ?? `the server answered ${response.status}`
       return
     }
-    const bits = [humanBytes(body.bytes), body.lines + (body.lines === 1 ? ' line' : ' lines')]
+    const bits = [humanBytes(body.bytes)]
+    if (typeof body.lines === 'number') bits.push(body.lines + (body.lines === 1 ? ' line' : ' lines'))
     if (body.truncated) bits.push(`showing the first ${humanBytes(body.text.length)}`)
     fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}`
     /**
@@ -12268,6 +12303,37 @@ async function showFile(node) {
      * the document itself with its resources rewritten, and mixing them would mean one route deciding whether its
      * answer is data or a program.
      */
+    if (body.renderer === 'image') {
+      // Accept only the exact same-origin authorized raw address for this PNG.
+      const source = '/api/raw?path=' + encodeURIComponent(body.path)
+      if (body.image?.mediaType !== 'image/png' || body.image?.src !== source) {
+        throw new Error('invalid PNG preview source')
+      }
+      const status = document.createElement('p')
+      status.textContent = 'Loading image…'
+      status.setAttribute('role', 'status')
+      const image = document.createElement('img')
+      image.alt = 'Image preview: ' + (body.name ?? body.path)
+      image.referrerPolicy = 'no-referrer'
+      image.decoding = 'async'
+      image.draggable = false
+      image.hidden = true
+      image.onload = () => {
+        if (ticket !== fileFetches) return
+        status.hidden = true
+        image.hidden = false
+      }
+      image.onerror = () => {
+        if (ticket !== fileFetches) return
+        image.hidden = true
+        status.hidden = false
+        status.setAttribute('role', 'alert')
+        status.textContent = 'This image could not be displayed.'
+      }
+      fileBody.replaceChildren(status, image)
+      image.src = source
+      return
+    }
     if (body.renderer === 'html') {
       fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}  ·  preview`
       const htmlBody = await (await fetch('/api/html?path=' + encodeURIComponent(body.path))).json()
@@ -15308,6 +15374,83 @@ const WorkspaceTree = (() => {
     return mode === 'more' ? `Show ${hidden} more sessions` : 'Show less'
   }
 
+  /** DSH's bound on one search's rows (`SESSION_SEARCH_RESULT_LIMIT`, dsh-api-session-controller `lib/client.js:357`). */
+  const SEARCH_LIMIT = 20
+
+  /**
+   * The sidebar search, DSH's local half (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169`):
+   * `{ items: [{ meta, workspace }], hasMore }`.
+   *
+   * - **Match**: the query, trimmed and lower-cased, as a substring of the session's stored title or of the name of the
+   *   workspace it is in — the group the tree files it under, else its folder's name, DSH's `workspaceLabel`. Never the
+   *   id, and an untitled session's display name is not its title (DSH: it "does not match a directory-name title search").
+   * - **Rows**: the tree's own — `visible` under the archive filter, so a subagent's session is never a hit — and never a
+   *   New session placeholder, open or not: DSH skips every blank session before it matches (`summary.blank`,
+   *   `lib/client.js:1185`), so a fresh blank does not answer a search for its workspace's name.
+   * - **Order**: last updated, newest first, then id (DSH's `orderByRecency`); a pin does not lead a search.
+   * - **Bound**: at most `SEARCH_LIMIT`, with `hasMore` when more matched.
+   */
+  function search(workspaces, sessions, query, options = {}) {
+    const needle = String(query ?? '').trim().toLowerCase()
+    if (needle === '') return { items: [], hasMore: false }
+    const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
+    const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : SEARCH_LIMIT
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object') : []
+    const owner = new Map()
+    for (const group of flatten(deriveGroups(workspaces, metas, { grouping: 'workspace', archived: 'show' }))) {
+      if (group.workspace === null) continue
+      for (const meta of group.sessions) owner.set(meta.id, group.label)
+    }
+    const matches = []
+    for (const meta of metas) {
+      if (placeholder(meta) || !visible(meta, archived)) continue
+      const title = typeof meta.title === 'string' ? meta.title.trim() : ''
+      const workspace = owner.get(meta.id) ?? (typeof meta.cwd === 'string' && meta.cwd.length > 0 ? basename(meta.cwd) : '')
+      if (title.toLowerCase().includes(needle) || workspace.toLowerCase().includes(needle)) matches.push({ meta, workspace })
+    }
+    matches.sort((left, right) => {
+      const leftStamp = stamp(left.meta)
+      const rightStamp = stamp(right.meta)
+      if (leftStamp !== rightStamp) return leftStamp < rightStamp ? 1 : -1
+      const leftId = String(left.meta.id)
+      const rightId = String(right.meta.id)
+      return leftId === rightId ? 0 : leftId < rightId ? -1 : 1
+    })
+    return { items: matches.slice(0, limit), hasMore: matches.length > limit }
+  }
+
+  /** The groups from the top of the forest down to the one whose own rows hold `id`; empty when none does. */
+  function chainTo(groups, id) {
+    for (const group of groups) {
+      if (containsSession(group, id, false)) return [group]
+      if (containsSession(group, id, true)) {
+        const below = chainTo(group.children, id)
+        if (below.length > 0) return [group, ...below]
+      }
+    }
+    return []
+  }
+
+  /**
+   * The watermark that draws a revealed row: raised to reach it at any depth — DSH's search reveal, which the automatic
+   * fifty-row raise does not limit (`requiredWatermark`, `lib/client.js:2830`) — and never lowered. It counts
+   * conversations, as the watermark does (`watermarkRows`, #54): a New session placeholder is drawn whatever the
+   * watermark, so it neither needs a place nor takes one from the row being revealed.
+   */
+  function revealMark(sessions, id, watermark) {
+    const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
+    let conversations = 0
+    for (const meta of sessions) {
+      if (placeholder(meta)) {
+        if (meta.id === id) return mark
+        continue
+      }
+      conversations += 1
+      if (meta.id === id) return Math.max(mark, conversations)
+    }
+    return mark
+  }
+
   /** DSH's `toast.archivedNotOpenable` (`dsh-client-ui-workspace` lib/client.js:4934), word for word. */
   const ARCHIVED_NOT_OPENABLE = 'Archived sessions cannot be opened. Unarchive it to view.'
 
@@ -15418,9 +15561,80 @@ const WorkspaceTree = (() => {
     chooseOrderBy,
     withSessionOrder,
     withPinFronted,
+    SEARCH_LIMIT,
+    search,
+    chainTo,
+    revealMark,
   }
 })()
 /* workspace-tree:end */
+
+/* content-search:begin */
+/**
+ * Content search's page rules (R-developer-eight-19): the half of DSH's sidebar search that merges what the **host**
+ * found inside the conversations (`GET /api/sessions/search`, DSH's `session.search`) with the local name matches
+ * `WorkspaceTree.search` gives. Pure, and loaded out of the page by `test/content-search-page.test.ts`.
+ */
+const ContentSearch = (() => {
+  /** The pause between the latest keystroke and the host query (`SEARCH_DEBOUNCE_MS`, dsh-client-ui-workspace `lib/client.js:2800`). */
+  const DEBOUNCE_MS = 250
+  /** The wire bound on a query, in UTF-16 code units (`SEARCH_QUERY_MAX_CODE_UNITS`, `lib/client.js:2802`). */
+  const QUERY_MAX_CODE_UNITS = 500
+
+  /** DSH's `sanitizeSearchQuery` (`lib/client.js:2843-2855`): no NUL, and at most 500 units without splitting a surrogate pair. */
+  function sanitizeQuery(value) {
+    const withoutNul = String(value ?? '').replaceAll('\0', '')
+    if (withoutNul.length <= QUERY_MAX_CODE_UNITS) return withoutNul
+    let end = QUERY_MAX_CODE_UNITS
+    const last = withoutNul.charCodeAt(end - 1)
+    const next = withoutNul.charCodeAt(end)
+    if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end -= 1
+    return withoutNul.slice(0, end)
+  }
+
+  /**
+   * DSH's `deriveSearchResults` merge (`lib/client.js:1169-1221`): `{ items: [{ meta, workspace, snippet? }], hasMore }`.
+   *
+   * The local name matches come first, newest first, as `WorkspaceTree.search` orders them; then the sessions only the
+   * host found, in the host's order, under the same visibility and archive filter. A session appears once, and any row
+   * the host matched carries its snippet, local or not. Twenty rows at most, and more when the host said so or the merge
+   * ran past twenty. `content` is the host's answer for this query: `{ items: [{ sessionId, snippet }], hasMore }`.
+   */
+  function merge(workspaces, sessions, query, content, options = {}) {
+    const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
+    if (String(query ?? '').trim() === '') return { items: [], hasMore: false }
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object') : []
+    const local = WorkspaceTree.search(workspaces, metas, query, { archived, limit: Number.MAX_SAFE_INTEGER }).items
+    const found = Array.isArray(content?.items) ? content.items.filter((item) => typeof item?.sessionId === 'string') : []
+    const snippets = new Map()
+    for (const item of found) if (!snippets.has(item.sessionId) && typeof item.snippet === 'string') snippets.set(item.sessionId, item.snippet)
+    const owner = new Map()
+    for (const group of WorkspaceTree.flatten(WorkspaceTree.deriveGroups(workspaces, metas, { grouping: 'workspace', archived: 'show' }))) {
+      if (group.workspace === null) continue
+      for (const meta of group.sessions) owner.set(meta.id, group.label)
+    }
+    const byId = new Map(metas.map((meta) => [meta.id, meta]))
+    const ordered = [...local]
+    const included = new Set(local.map((entry) => entry.meta.id))
+    for (const item of found) {
+      const meta = byId.get(item.sessionId)
+      /** DSH's host half takes the same rows: no blank session, and the archive filter (`lib/client.js:1200`). */
+      if (meta === undefined || included.has(meta.id) || WorkspaceTree.placeholder(meta) || !WorkspaceTree.visible(meta, archived)) continue
+      included.add(meta.id)
+      const workspace = owner.get(meta.id) ?? (typeof meta.cwd === 'string' && meta.cwd.length > 0 ? WorkspaceTree.basename(meta.cwd) : '')
+      ordered.push({ meta, workspace })
+    }
+    return {
+      items: ordered
+        .slice(0, WorkspaceTree.SEARCH_LIMIT)
+        .map((entry) => (snippets.has(entry.meta.id) ? { ...entry, snippet: snippets.get(entry.meta.id) } : entry)),
+      hasMore: content?.hasMore === true || ordered.length > WorkspaceTree.SEARCH_LIMIT,
+    }
+  }
+
+  return { DEBOUNCE_MS, QUERY_MAX_CODE_UNITS, sanitizeQuery, merge }
+})()
+/* content-search:end */
 
 /** Whether the last tree render drew `id` as a New session placeholder row — the row that goes once another session opens. */
 function placeholderDrawn(id) {
@@ -17140,27 +17354,43 @@ async function toggle(node, li) {
 }
 
 /**
- * Filter the tree by name, without asking the server.
+ * What a search runs over: every session, the workspaces that place them (the same two answers the tree is drawn
+ * from), and the top-level roots, which name a one-column row only when no workspace list arrived (`workspaceNamer`).
  *
- * A session's name is on its row already, so the filter is a walk over the drawn rows rather than another
- * request — which is also why it can run on every keystroke. Only rows are put away: the branches stay, so the
- * answer still shows *where* the matching sessions are.
- */
-/**
- * What a search runs over: every session, and the roots that place it.
- *
- * Held until `refreshSessions` says the set changed, because a keystroke should not refetch two endpoints, and
+ * Held until `refreshSessions` says the set changed, because a keystroke should not refetch three endpoints, and
  * rebuilt rather than patched when it does change — a stale index would answer a search with sessions that no
  * longer exist and miss the ones that do.
+ *
+ * Only reads that **arrived** are held (#58). A failed one — no network, or `/api/sessions` answering an error — was
+ * kept as an empty index, so the search said `No matching sessions` beside a tree full of them and went on saying it
+ * after the network was back. DSH's title and workspace matches cannot fail that way: they are computed over the
+ * session list the client already holds (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169-1187`),
+ * and only the content request can fail (its README, Search). So a failed read is not kept, the next search asks again,
+ * and this search runs over what the page already holds: the sessions the tree is drawn with, else the last index that
+ * arrived. With neither it is `null`, and the search says it could not run rather than that nothing matched.
  */
 let searchIndex = null
+/** The last index whose reads all arrived, for a failed read to fall back to; `refreshSessions` does not drop it. */
+let heldIndex = null
+
+/** The tree's own rows as an index — what the reader sees beside the search box — or `null` when it draws none. */
+function treeIndex() {
+  if (groupingMode === 'list') return null
+  const sessions = []
+  const workspaces = []
+  for (const group of WorkspaceTree.flatten(treeGroups)) {
+    sessions.push(...group.sessions)
+    if (group.workspace !== null) workspaces.push({ ...group.workspace, sessionIds: group.sessions.map((meta) => meta.id) })
+  }
+  return sessions.length === 0 ? null : { sessions, roots: heldIndex?.roots ?? [], workspaces }
+}
 
 async function loadSearchIndex() {
   if (searchIndex !== null) return searchIndex
-  const [sessions, treeBody] = await Promise.all([
-    fetch('/api/sessions').then((response) => (response.ok ? response.json() : [])).catch(() => []),
-    fetch('/api/tree').then((response) => (response.ok ? response.json() : { children: [] })).catch(() => ({ children: [] })),
-  ])
+  /** A body, `null` for an answer that is not 2xx, `undefined` for a request that got no answer. */
+  const read = (url) => fetch(url).then((response) => (response.ok ? response.json() : null)).catch(() => undefined)
+  const [sessions, treeBody, workspaceBody] = await Promise.all([read('/api/sessions'), read('/api/tree'), read('/api/workspaces')])
+  if (!Array.isArray(sessions) || treeBody === undefined || workspaceBody === undefined) return treeIndex() ?? heldIndex
   searchIndex = {
     /**
      * Only the sessions the sidebar lists: the search and the one-column list both read this, and DSH hides a subagent's
@@ -17168,50 +17398,112 @@ async function loadSearchIndex() {
      * child the tree hides (R-developer-eight-1, -26).
      */
     sessions: SessionRules.sidebarSessions(sessions),
-    roots: (treeBody.children ?? []).map((node) => ({ path: node.path, title: node.label })),
+    roots: (treeBody?.children ?? []).map((node) => ({ path: node.path, title: node.label })),
+    workspaces: Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : [],
   }
+  heldIndex = searchIndex
   /** Every listed session, a subagent's child included: the header follows the open session's title whatever it is. */
   noteSessions(sessions)
   return searchIndex
 }
 
-/** The workspace a folder belongs to: the longest root path that contains it. */
-function workspaceOf(cwd, roots) {
-  let best = null
-  for (const root of roots) {
-    if (cwd === root.path || cwd.startsWith(root.path + '/')) {
-      if (best === null || root.path.length > best.path.length) best = root
-    }
+/**
+ * The name of the workspace each session belongs to, as a function of the session: `(meta) => name | null` (#57).
+ *
+ * It is the **nearest registered** workspace that holds the session's folder, by its title — the group the tree files
+ * the session under, so a row never names a different workspace than the tree beside it:
+ *
+ * 1. membership first: `/api/workspaces` lists in each workspace's `sessionIds` the sessions whose nearest root it is,
+ *    and the tree climbs past an automatic one to the registered workspace above (`WorkspaceTree.deriveGroups`). The
+ *    search hit names the same group (`WorkspaceTree.search`), which is DSH's rule: the workspace whose `sessionIds`
+ *    holds the session, by its title (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1182-1183`);
+ * 2. else the registered workspace with the longest path that contains the folder;
+ * 3. the top-level roots only when no registered workspace holds it — no workspace list arrived.
+ *
+ * It used to be the longest **root** path, and `/api/tree`'s roots are the top-level workspaces only, so a session in a
+ * workspace registered inside another one was named after the root above it.
+ */
+function workspaceNamer(index) {
+  const workspaces = Array.isArray(index.workspaces) ? index.workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
+  const sessions = Array.isArray(index.sessions) ? index.sessions : []
+  const members = new Map()
+  for (const group of WorkspaceTree.flatten(WorkspaceTree.deriveGroups(workspaces, sessions, { grouping: 'workspace', archived: 'show' }))) {
+    if (group.workspace === null) continue
+    for (const meta of group.sessions) members.set(meta.id, group.label)
   }
-  return best === null ? null : best.title
+  /** The entry with the longest path that is the folder or contains it, by path segment. */
+  const nearest = (cwd, entries) => {
+    let best = null
+    for (const entry of entries) {
+      if (typeof entry.path !== 'string' || entry.path.length === 0) continue
+      if (cwd === entry.path || cwd.startsWith(entry.path.endsWith('/') ? entry.path : entry.path + '/')) {
+        if (best === null || entry.path.length > best.path.length) best = entry
+      }
+    }
+    return best
+  }
+  const registered = workspaces.filter((entry) => entry.origin !== 'auto')
+  const roots = Array.isArray(index.roots) ? index.roots : []
+  return (meta) => {
+    const member = members.get(meta.id)
+    if (member !== undefined) return member
+    if (typeof meta.cwd !== 'string' || meta.cwd.length === 0) return null
+    const holder = nearest(meta.cwd, registered)
+    /** By the label the tree shows it with: the first-use workspace reads as Default workspace (`workspaceDisplayTitle`). */
+    if (holder !== null) return typeof holder.title === 'string' && holder.title.length > 0 ? workspaceDisplayTitle(holder.title) : WorkspaceTree.basename(holder.path)
+    return nearest(meta.cwd, roots)?.title ?? null
+  }
 }
+
+/** The latest search asked for; an answer to an older keystroke is dropped rather than drawn over a newer one. */
+let searchGeneration = 0
 
 /**
  * The search box, as DSH has it: a query **replaces** the tree with a flat result list whose rows say which
  * workspace each hit is in, and an empty query restores the tree.
  *
- * Measured against the earlier version, which only hid session rows: that kept the tree's shape but could not
- * find a session whose branch was closed, and it never said where a hit lived. A search is about names.
+ * What matches, in what order and how many, is `WorkspaceTree.search` — DSH's `deriveSearchResults`: the session's
+ * title or its workspace's name, newest first, twenty at most. Phase A measured the version before it matching the
+ * title and the **id**, so a workspace name found nothing and `capword` listed all 22 of its sessions.
  */
 async function applySearch() {
-  const query = document.getElementById('session-search').value.trim()
+  const generation = ++searchGeneration
+  const query = ContentSearch.sanitizeQuery(document.getElementById('session-search').value).trim()
   const results = document.getElementById('search-results')
   const note = document.getElementById('search-note')
+  const more = document.getElementById('search-more')
+  requestContentSearch(query)
   if (query.length === 0) {
     results.hidden = true
     results.replaceChildren()
     treeList.hidden = false
     note.hidden = true
     note.textContent = ''
+    more.hidden = true
+    more.textContent = ''
+    paintSearchPending(0)
     return
   }
   const index = await loadSearchIndex()
-  const needle = query.toLowerCase()
-  const hits = index.sessions.filter((meta) => `${meta.title ?? ''} ${meta.id}`.toLowerCase().includes(needle))
+  if (generation !== searchGeneration) return
   treeList.hidden = true
   results.hidden = false
+  if (index === null) {
+    /** Nothing read and nothing held: the search did not run, which is not the same as finding nothing (#58). */
+    results.replaceChildren()
+    paintSearchPending(0)
+    note.hidden = false
+    note.textContent = 'Search could not run: the session list did not load'
+    more.hidden = true
+    more.textContent = ''
+    return
+  }
+  /** The host's answer for **this** query, else loading — DSH's `currentRemote` (`lib/client.js:3445-3450`). */
+  const remote = contentSearch.query === query ? contentSearch : { query, status: 'loading', items: [], hasMore: false }
+  const pending = remote.status === 'loading'
+  const { items, hasMore } = ContentSearch.merge(index.workspaces, index.sessions, query, remote, { archived: archiveMode })
   results.replaceChildren(
-    ...hits.map((meta) => {
+    ...items.map(({ meta, workspace, snippet }) => {
       /**
        * An **archived** hit is DSH's archived `SearchResultItem`: it cannot be opened — choosing it says why, keeping the
        * query and the view where they are — and it carries an `Unarchive session` button that restores it in place (the
@@ -17228,7 +17520,11 @@ async function applySearch() {
       button.setAttribute('role', 'treeitem')
       const title = document.createElement('span')
       title.className = 'hit-title'
-      /** DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`), never the id (#24). */
+      /**
+       * DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`; `sessionTitle`,
+       * `:998-999`, is empty for a blank), never the id (#24). Not `WorkspaceTree.sessionLabel`: its `New Session` names
+       * the open blank in the tree, and a hit can be a blank that is not open.
+       */
       title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
       const place = document.createElement('span')
       place.className = 'hit-workspace'
@@ -17236,9 +17532,18 @@ async function applySearch() {
        * The workspace, and the **age**. DSH's results read `title workspace`; the age is added because a store
        * can hold several sessions with the same first message — measured: a search for `ready` returned 34 rows
        * with one title between them — and a result a reader cannot tell apart is a result they cannot choose.
+       * It is the age the hits are ordered by: last written, else created.
        */
-      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      place.textContent = [workspace, relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part !== undefined && part.length > 0).join(' · ')
       button.append(title, place)
+      /** The host's snippet takes a line of its own under the title and the workspace (`.hit-snippet` wraps). */
+      const addSnippet = () => {
+        if (typeof snippet !== 'string') return
+        const quote = document.createElement('span')
+        quote.className = 'hit-snippet'
+        quote.textContent = snippet
+        button.append(quote)
+      }
       if (archived) {
         const restore = document.createElement('button')
         restore.type = 'button'
@@ -17252,6 +17557,7 @@ async function applySearch() {
           if (result.ok) await applySearch()
         }
         button.append(restore)
+        addSnippet()
         button.onclick = () => showArchiveNotice('archivedNotOpenable')
         button.onkeydown = (keyEvent) => {
           if (keyEvent.target !== button || (keyEvent.key !== 'Enter' && keyEvent.key !== ' ')) return
@@ -17260,12 +17566,153 @@ async function applySearch() {
         }
         return button
       }
-      button.onclick = () => showSession(meta.id)
+      addSnippet()
+      button.onclick = () => void openSearchResult(meta.id)
       return button
     }),
   )
-  note.hidden = hits.length > 0
-  note.textContent = hits.length > 0 ? '' : `no session matches “${query}”`
+  paintSearchPending(pending ? (items.length === 0 ? 2 : 1) : 0)
+  /**
+   * DSH's two sentences (`search.noMatches`, `search.hasMore`, dsh-client-ui-workspace `lib/client.js:4909-4910`). "No
+   * matching sessions" waits for the host's answer, as DSH's does (`!pending`, `lib/client.js:3492`).
+   */
+  note.hidden = items.length > 0 || pending
+  note.textContent = note.hidden ? '' : 'No matching sessions'
+  more.hidden = !hasMore
+  more.textContent = hasMore ? `Showing the first ${WorkspaceTree.SEARCH_LIMIT} results. Narrow your search.` : ''
+}
+
+/**
+ * The host half of content search (R-developer-eight-19): DSH's remote-search effect (dsh-client-ui-workspace
+ * `lib/client.js:3727-3767`). A new non-empty query is `loading` at once; after a 250 ms pause the host is asked
+ * (`GET /api/sessions/search`), and a newer keystroke aborts the older request. An answer redraws the search; a failure
+ * is `error`, which leaves the name matches alone, with no warning of their own ("a failed content search leaves
+ * metadata matches visible without an additional warning", dsh-client-ui-workspace README, Search). The same query
+ * again asks nothing — unless its request failed: a failure is not kept as the query's answer (#58), so the redraw that
+ * reports it asks nothing and the next search for that query asks the host again.
+ */
+let contentSearch = { query: '', status: 'idle', items: [], hasMore: false }
+let contentSearchTimer = null
+let contentSearchAbort = null
+
+function requestContentSearch(query) {
+  if (query === contentSearch.query) {
+    if (contentSearch.status !== 'error') return
+    if (contentSearch.reported !== true) {
+      contentSearch.reported = true
+      return
+    }
+  }
+  if (contentSearchTimer !== null) clearTimeout(contentSearchTimer)
+  contentSearchAbort?.abort()
+  contentSearchTimer = null
+  contentSearchAbort = null
+  if (query === '') {
+    contentSearch = { query: '', status: 'idle', items: [], hasMore: false }
+    return
+  }
+  const controller = new AbortController()
+  contentSearchAbort = controller
+  contentSearch = { query, status: 'loading', items: [], hasMore: false }
+  const settle = (next) => {
+    if (controller.signal.aborted) return
+    contentSearch = next
+    void applySearch()
+  }
+  contentSearchTimer = setTimeout(() => {
+    contentSearchTimer = null
+    fetch(`/api/sessions/search?q=${encodeURIComponent(query)}`, { signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`search answered ${response.status}`))))
+      .then((body) => settle({ query, status: 'ready', items: Array.isArray(body?.items) ? body.items : [], hasMore: body?.hasMore === true }))
+      .catch(() => settle({ query, status: 'error', items: [], hasMore: false }))
+  }, ContentSearch.DEBOUNCE_MS)
+}
+
+/** DSH's skeleton rows under the hits while the host query runs: a status region named for what it waits on. */
+function paintSearchPending(rows) {
+  let box = document.getElementById('search-pending')
+  if (box === null) {
+    if (rows === 0) return
+    box = document.createElement('div')
+    box.id = 'search-pending'
+    box.setAttribute('role', 'status')
+    box.setAttribute('aria-label', 'Searching session history…')
+    document.getElementById('search-results').after(box)
+  }
+  box.hidden = rows === 0
+  box.replaceChildren(
+    ...Array.from({ length: rows }, () => {
+      const row = document.createElement('div')
+      row.className = 'skeleton-row'
+      row.setAttribute('aria-hidden', 'true')
+      const dot = document.createElement('span')
+      dot.className = 'skeleton-dot'
+      const bars = document.createElement('span')
+      bars.className = 'skeleton-bars'
+      const short = document.createElement('span')
+      short.className = 'skeleton-bar'
+      const wide = document.createElement('span')
+      wide.className = 'skeleton-bar wide'
+      bars.append(short, wide)
+      row.append(dot, bars)
+      return row
+    }),
+  )
+}
+
+/** The search box takes no more than the wire carries (DSH's input has `maxLength` 500). */
+document.getElementById('session-search').maxLength = ContentSearch.QUERY_MAX_CODE_UNITS
+
+/**
+ * Choosing a hit is DSH's `openSearchResult` (dsh-client-ui-workspace `lib/client.js:3664`): the query is cleared, so the
+ * tree is back, the session opens, and its row is revealed. Phase A measured the version before it leaving the query and
+ * the results up after the click, with the opened row not drawn in the tree behind them.
+ */
+async function openSearchResult(id) {
+  document.getElementById('session-search').value = ''
+  await applySearch()
+  /** A session that could not be loaded, or an open a later one replaced, is not the open one: no row is revealed for it (#56). */
+  if (!(await showSession(id))) return
+  await revealSession(id)
+}
+
+/**
+ * Bring a session's row on screen: every group above it opened, its own group's watermark raised to reach it, the row
+ * selected and scrolled into view — DSH's reveal (`lib/client.js:3081` opens the groups, `:2830` raises the watermark at
+ * any depth, `:2269` scrolls with `block: 'nearest'`). The tree is re-read once when it does not draw the session yet.
+ */
+async function revealSession(id) {
+  if (groupingMode === 'list') {
+    /** The list is redrawn once when it does not draw the session yet, as the tree is re-read below. */
+    const drawn = () => [...treeList.querySelectorAll('li[data-kind="session"]')].find((item) => item.dataset.sessionId === id)
+    let li = drawn()
+    if (li === undefined) {
+      await renderTree()
+      li = drawn()
+    }
+    li?.querySelector(':scope > .row')?.scrollIntoView({ block: 'nearest' })
+    return
+  }
+  let chain = WorkspaceTree.chainTo(treeGroups, id)
+  if (chain.length === 0) {
+    await renderTree()
+    chain = WorkspaceTree.chainTo(treeGroups, id)
+  }
+  if (chain.length === 0) return
+  const owner = chain[chain.length - 1]
+  watermarks.set(owner.key, WorkspaceTree.revealMark(owner.sessions, id, watermarks.get(owner.key)))
+  for (const group of chain) {
+    const entry = rowIndex.get(group.workspace === null ? '#ungrouped' : group.path)
+    if (entry === undefined) return
+    if (entry.li.dataset.open !== 'true') {
+      await toggle(entry.node, entry.li)
+    } else if (group === owner) {
+      const list = entry.li.querySelector(':scope > ul[role="group"]')
+      if (list !== null) paintSessionRows(list, owner, Number(entry.li.style.getPropertyValue('--tree-depth') || '0') + 1)
+    }
+  }
+  chooseSelected('session:' + id)
+  rowIndex.get('session:' + id)?.li.querySelector(':scope > .row')?.scrollIntoView({ block: 'nearest' })
 }
 
 /** Escape is the second way out of a search, because the first is a small × most browsers draw. */
@@ -17292,6 +17739,10 @@ async function renderFlatList() {
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
+  if (index === null) {
+    setNote('could not read the sessions')
+    return
+  }
   /**
    * C17: the flat list is one account of its own, in the chosen order — Last updated by prompt time, or Manual. Among
    * blank sessions only the open one is a row, and it leads, as in the tree (`withOpenBlank`; DSH `sessionVisible`
@@ -17300,6 +17751,8 @@ async function renderFlatList() {
   const flat = WorkspaceTree.flatRows(index.sessions, { archived: archiveMode, order: orderState })
   shownOrders = { ...shownOrders, [WorkspaceTree.FLAT]: flat.order }
   const visible = WorkspaceTree.withOpenBlank(flat.rows, current)
+  /** The workspace a row names is the one the tree files it under, the nested one included (#57). */
+  const workspaceOf = workspaceNamer(index)
   treeList.replaceChildren(
     ...visible.map((meta) => {
       const li = document.createElement('li')
@@ -17320,7 +17773,7 @@ async function renderFlatList() {
       label.textContent = WorkspaceTree.sessionLabel(meta)
       const place = document.createElement('span')
       place.className = 'age'
-      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      place.textContent = [workspaceOf(meta), relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       row.append(icon, label, place)
       /**
        * A row in the flat list is also **the selected row**.

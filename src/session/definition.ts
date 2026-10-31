@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
 import { canonicalPath } from '../paths.ts'
@@ -46,6 +46,46 @@ export function unwritableIn(branch: string, error: unknown): unknown {
   if (code !== 'EACCES' && code !== 'EPERM') return error
   const canonical = canonicalPath(branch)
   return new SessionUnwritableError(basename(canonical) || canonical)
+}
+
+/**
+ * A session's folder that is no longer there: deleted or moved outside heddle, or replaced by a file (issue #56).
+ *
+ * Beside `SessionUnwritableError` and shaped like it: a code the routes answer `400` beside the sentence
+ * (`session/folder-missing`, heddle's, in DSH's `session/` family), and the folder named by its name, never by its absolute
+ * path (#106). The words are the ones #56 asked for. DSH has no such sentence: its turn fails with
+ * `working-directory: directory does not exist: "<path>"` (dsh-working-directory lib/index.js:123-131), and its create
+ * makes the folder instead. Recognised by **class, name or code**, as `SessionFlagError` is, because a route that misses it
+ * answers a refusal as a 500. The sentence and code are the Rust build's `SessionError::MissingFolder`, word for word.
+ */
+export class MissingFolderError extends Error {
+  readonly code = 'session/folder-missing'
+  /** The folder's name, as the sentence says it. */
+  readonly folder: string
+
+  constructor(folder: string) {
+    super(`This workspace's folder no longer exists: "${folder}"`)
+    this.name = 'MissingFolderError'
+    this.folder = folder
+  }
+}
+
+/**
+ * Refuse a folder that is not an existing directory, naming it; it never creates one.
+ *
+ * DSH validates a session's working directory before every step's prompt and, when the session's original directory is
+ * gone as well, fails with `working-directory: directory does not exist` rather than bringing it back
+ * (dsh-working-directory lib/index.js:87-102, :123-131). A heddle session's recorded folder is its original directory,
+ * so this is that check, with heddle's sentence.
+ */
+export function requireFolder(folder: string): void {
+  let directory = false
+  try {
+    directory = statSync(folder).isDirectory()
+  } catch {
+    directory = false
+  }
+  if (!directory) throw new MissingFolderError(basename(folder) || folder)
 }
 
 /** The type folder a branch's sessions live in. The tree never draws it — it hoists what is inside. */
