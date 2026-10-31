@@ -1627,7 +1627,11 @@ impl SessionStore {
         )?;
         if message.role == Role::User {
             let prompted_at = message.source.is_none().then_some(event.at.as_str());
-            self.write_meta_touch(handle, 1, prompted_at, fallback_title);
+            // Every title the store writes is announced (#33), this one too: once the write that named the session is
+            // done and the meta lock released, as `rename` announces.
+            if let Some(named) = self.write_meta_touch(handle, 1, prompted_at, fallback_title) {
+                self.announce_title(&named);
+            }
         }
         Ok(event)
     }
@@ -1719,33 +1723,31 @@ impl SessionStore {
     /// inherited user message at once and dates nothing, so a fork's row is dated by its creation until its
     /// own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
     fn touch_counting(&self, handle: &SessionHandle, turns: u64, prompted_at: Option<&str>) {
-        self.write_meta_touch(handle, turns, prompted_at, None);
+        let _ = self.write_meta_touch(handle, turns, prompted_at, None);
     }
 
     /// [`SessionStore::touch_counting`], also naming an untitled session with `fallback_title` in the same write
     /// ([`SessionStore::user_message_named`]). The keys change in the order the separate writes changed them —
     /// `updated`, `turns`, then `title` — so the record's bytes are the ones a touch then a rename left.
+    ///
+    /// Answers the record when this write **named** the session, so the caller can announce the title once the meta
+    /// lock (held only inside this call) is released; `None` when it named nothing.
     fn write_meta_touch(
         &self,
         handle: &SessionHandle,
         turns: u64,
         prompted_at: Option<&str>,
         fallback_title: Option<&str>,
-    ) {
+    ) -> Option<SessionMeta> {
         let fallback_title = fallback_title.filter(|title| !title.is_empty());
         if turns == 0 && prompted_at.is_none() && fallback_title.is_none() {
-            return;
+            return None;
         }
         let _meta = self.meta_guard();
-        let Ok(text) = std::fs::read_to_string(&handle.meta) else {
-            return;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            return;
-        };
-        let Some(mut meta) = SessionMeta::from_value(value) else {
-            return;
-        };
+        let text = std::fs::read_to_string(&handle.meta).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        let mut meta = SessionMeta::from_value(value)?;
+        let mut named = false;
         if let Some(at) = prompted_at {
             meta.set("updated", Value::String(at.to_string()));
         }
@@ -1761,9 +1763,11 @@ impl SessionStore {
                 meta.remove("title");
             } else {
                 meta.set("title", Value::String(cleaned));
+                named = true;
             }
         }
-        let _ = crate::fsio::write_atomic(&handle.meta, meta.to_file_text());
+        let written = crate::fsio::write_atomic(&handle.meta, meta.to_file_text()).is_ok();
+        (named && written).then_some(meta)
     }
 }
 
