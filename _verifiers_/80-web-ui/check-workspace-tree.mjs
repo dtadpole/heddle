@@ -239,3 +239,95 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     fixture.close()
   }
 })
+
+test('a session dragged above another switches the order to Manual, and the order is kept across a reload', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH parity C17 (R-developer-eight-20), dsh-client-ui-workspace's *Reordering and view options*: Last updated sorts by
+   * the latest prompt; dragging a row edits the saved sequence and selects Manual (client.js:2987-2999 sessionDragOrder,
+   * 1297-1302 setSessionOrder); the order and the mode are browser-local and survive a reload (the persisted view store,
+   * client.js:1265-1315); choosing Last updated discards the layout. Three of the outer workspace's sessions get a turn,
+   * so they lead by prompt time and are draggable (a session with no turn is DSH's blank row, which is not).
+   */
+  const fixture = await seeded('order')
+  const browser = await openBrowser()
+  try {
+    for (const id of fixture.created.slice(0, 3)) {
+      const turn = await api(fixture.url, fixture.cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ session: id, prompt: 'a prompt that dates this row' }) })
+      assert.equal(turn.status, 200, `the turn ran (${JSON.stringify(turn.body).slice(0, 300)})`)
+      await new Promise((done) => setTimeout(done, 20))
+    }
+    const labels = `JSON.stringify([...document.querySelectorAll('#tree > li[data-kind="workspace"] > ul > li[data-kind="session"] > .row .label')].map((label) => label.textContent))`
+    const ready = async () => {
+      await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+      await browser.waitFor(`document.querySelectorAll('#tree > li[data-kind="workspace"] > ul > li[data-kind="session"]').length >= 3`, 15_000)
+    }
+    /** The View options item marked current in the ordering pair. */
+    const checkedOrder = `(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      document.querySelector('#view-options button').click()
+      await wait(250)
+      const items = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')]
+      const checked = items.filter((item) => item.getAttribute('aria-checked') === 'true').map((item) => item.textContent.trim()).filter((label) => label === 'Manual' || label === 'Last updated')
+      document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      return JSON.stringify(checked)
+    })()`
+    await browser.goto(fixture.url)
+    await ready()
+    const before = JSON.parse(await browser.evaluate(labels))
+    assert.deepEqual(before.slice(0, 3), ['repo session 3', 'repo session 2', 'repo session 1'], `Last updated: the latest prompt first\nsaw: ${JSON.stringify(before)}`)
+    assert.deepEqual(JSON.parse(await browser.evaluate(checkedOrder)), ['Last updated'], 'Last updated is the default order')
+
+    /** Drag repo session 1 onto the top half of repo session 3, with the events a pointer drag dispatches. */
+    const dragged = JSON.parse(await browser.evaluate(`(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const rowOf = (text) => [...document.querySelectorAll('#tree > li[data-kind="workspace"] > ul > li[data-kind="session"] > .row')].find((row) => row.querySelector('.label').textContent === text)
+      const source = rowOf('repo session 1')
+      const target = rowOf('repo session 3')
+      if (source === undefined || target === undefined) return JSON.stringify({ error: 'rows not found' })
+      const box = target.getBoundingClientRect()
+      const at = { clientX: Math.round(box.left + box.width / 2), clientY: Math.round(box.top + 3) }
+      const dataTransfer = new DataTransfer()
+      const fire = (node, type) => node.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer, ...at }))
+      const draggable = source.draggable
+      fire(source, 'dragstart')
+      fire(target, 'dragenter')
+      const accepted = !fire(target, 'dragover')
+      const marker = target.closest('li').dataset.drop ?? null
+      fire(target, 'drop')
+      fire(source, 'dragend')
+      await wait(1500)
+      return JSON.stringify({ draggable, accepted, marker, stored: localStorage.getItem('heddle.tree.order.v1') })
+    })()`))
+    assert.equal(dragged.error, undefined, `the rows were found\nsaw: ${JSON.stringify(dragged)}`)
+    assert.equal(dragged.draggable, true, 'a session row with a turn is draggable')
+    assert.equal(dragged.accepted, true, 'a row of the same list accepts the drag')
+    assert.equal(dragged.marker, 'before', 'and marks the half it would land on')
+    const afterDrag = JSON.parse(await browser.evaluate(labels))
+    assert.deepEqual(afterDrag.slice(0, 3), ['repo session 1', 'repo session 3', 'repo session 2'], `the dragged row is above its target\nsaw: ${JSON.stringify(afterDrag)}`)
+    assert.equal(JSON.parse(String(dragged.stored)).orderBy, 'manual', `the order is stored in the browser as Manual\nsaw: ${dragged.stored}`)
+    assert.deepEqual(JSON.parse(await browser.evaluate(checkedOrder)), ['Manual'], 'View options now marks Manual')
+
+    /** A reload keeps both the mode and the order. */
+    await browser.goto(fixture.url)
+    await ready()
+    const reloaded = JSON.parse(await browser.evaluate(labels))
+    assert.deepEqual(reloaded.slice(0, 3), ['repo session 1', 'repo session 3', 'repo session 2'], `the order survives a reload\nsaw: ${JSON.stringify(reloaded)}`)
+    assert.deepEqual(JSON.parse(await browser.evaluate(checkedOrder)), ['Manual'], 'and so does the mode')
+
+    /** Choosing Last updated discards the manual layout. */
+    await browser.evaluate(`(async () => {
+      document.querySelector('#view-options button').click()
+      await new Promise((done) => setTimeout(done, 250))
+      ;[...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((item) => item.textContent.trim() === 'Last updated').click()
+      await new Promise((done) => setTimeout(done, 1500))
+    })()`)
+    const restored = JSON.parse(await browser.evaluate(labels))
+    assert.deepEqual(restored.slice(0, 3), ['repo session 3', 'repo session 2', 'repo session 1'], `Last updated is back to prompt time\nsaw: ${JSON.stringify(restored)}`)
+    assert.equal(JSON.parse(await browser.evaluate(`localStorage.getItem('heddle.tree.order.v1')`) ?? 'null')?.orderBy, 'updated', 'and the browser stores the choice')
+  } finally {
+    browser.close()
+    fixture.close()
+  }
+})

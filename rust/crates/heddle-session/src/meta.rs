@@ -77,7 +77,7 @@ impl SessionMeta {
     pub fn created(&self) -> &str {
         self.string("created").unwrap_or("")
     }
-    /// When it was last written to — the age a row shows.
+    /// When a person last prompted or steered it — the age a row shows and what Last updated sorts by.
     pub fn updated(&self) -> Option<&str> {
         self.string("updated")
     }

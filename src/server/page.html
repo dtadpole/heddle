@@ -1570,6 +1570,10 @@
   #tree li[data-kind='more'] > .row:hover { color: var(--text-2); background: transparent; }
   #tree li.tree-heading { display: flex; align-items: center; height: 24px; padding: 0 .5rem 0 calc(.5rem + var(--tree-depth, 0) * 14px); font-size: 11px; color: var(--text-3); cursor: default; user-select: none; }
   #tree li[data-kind='ungrouped'] > .row .label { color: var(--text-2); }
+  /** C17: where a dragged session lands, a line above or below the row, as DSH's dropBefore / dropAfter rows draw it. */
+  #tree li[data-drop] > .row::before { content: ''; position: absolute; left: 0; right: 4px; height: 2px; background: var(--accent); pointer-events: none; }
+  #tree li[data-drop='before'] > .row::before { top: -1px; }
+  #tree li[data-drop='after'] > .row::before { bottom: -1px; }
   /** The adopted-folder group used to live here; the owner removed it, so the tree ends its own list. */
   /**
    * The composer: the draft on top, its tool row underneath, and **this rule is load-bearing**.
@@ -1711,8 +1715,14 @@
    * **two spans** — the model in the secondary text colour and the reasoning effort in a dimmer caption tone that
    * shrinks first (`flex-shrink: 1000`). The two tiers the owner asked for live in its menu: a root pane with a
    * `Model` row and an `Effort` row, each drilling into its own list; the model list is grouped by endpoint.
+   *
+   * The seat is a **flex box** so its trigger can be narrower than the model's name. A button sizes itself to its
+   * content, and the name does not wrap, so in a plain box the trigger kept the name's width when the row ran short and
+   * was drawn under the send button at phone width (#117). As a flex item with `min-width: 0` it shrinks with the seat,
+   * and the label ellipsizes. DSH swaps the name for a model icon when its row cannot fit (`data-model-compact`); this
+   * page has no model icon, so it shortens the name instead.
    */
-  #model-seat { position: relative; margin-left: auto; min-width: 0; }
+  #model-seat { position: relative; display: flex; margin-left: auto; min-width: 0; }
   #model-trigger {
     display: inline-flex; align-items: center; gap: 4px; min-width: 0;
     max-width: min(360px, 45cqw); height: 28px; padding: 0 4px 0 8px;
@@ -2007,7 +2017,12 @@
     font-variant-numeric: tabular-nums;
   }
   #composer-status[hidden] { display: none; }
-  #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  /**
+   * A pill may shrink below its text (`min-width: 0`, at most the line's width), and its label then ellipsizes: DSH's
+   * anchor and pill rules. Without them a line wider than its column was centred past both edges and its first words
+   * were cut off with nothing to scroll to (#117).
+   */
+  #composer-status .stat-pill { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
   #composer-status .stat-icon { flex: none; width: 16px; height: 16px; }
   #composer-status .stat-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #composer-status .stat-sep { margin: 0 6px; color: inherit; }
@@ -9925,9 +9940,7 @@ function viewOptionItems() {
     /**
      * DSH's View options is four groups, read from its own menu on 2026-10-17: a `WorkSpace` heading, the grouping
      * pair (`Workspace Tree` / `In one list`), the ordering pair (`Manual` / `Last updated`), and the archive trio.
-     * This menu carries the grouping pair and the archive trio. `Manual` is **not** here: `Last updated` is the only
-     * order this UI has, and drag-to-order plus a persisted order is a feature rather than a switch. A group with one
-     * item would be a control that cannot be chosen, so that group is left out and the difference is written down.
+     * This menu carries all three groups under the one heading (the ordering pair since C17).
      */
     { heading: 'WorkSpace' },
     {
@@ -9964,15 +9977,13 @@ function viewOptionItems() {
         await renderTree()
       },
     },
-    {
-      label: 'Last updated',
-      glyph: 'clock',
-      current: true,
-      run: async () => {
-        /** The only order there is; choosing it is a no-op rather than an error. */
-        await renderTree()
-      },
-    },
+    /**
+     * DSH's ordering pair, Manual first (`ViewOptionsMenu`, dsh-client-ui-workspace/lib/client.js:2914-2923). Manual
+     * freezes the order on screen, Last updated discards the saved one (`setOrderBy`, client.js:1279-1283); a drag
+     * also selects Manual (C17, R-developer-eight-20).
+     */
+    { label: 'Manual', glyph: 'chevrons-up-down', current: orderState.orderBy === 'manual', run: () => chooseOrder('manual') },
+    { label: 'Last updated', glyph: 'clock', current: orderState.orderBy !== 'manual', run: () => chooseOrder('updated') },
     ...archiveModes.map(([mode, label]) => ({
       label,
       glyph: mode === 'hide' ? 'archive' : mode === 'show' ? 'archive-restore' : 'archive-only',
@@ -10079,6 +10090,7 @@ function kindIcon(kind, open = false) {
     list: 'M3 4h10M3 8h10M3 12h10',
     workspace: 'M2.5 3h3.5l1 1.2h6.5v3H2.5zM2.5 9.3h11v3.7h-11z',
     clock: 'M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11M8 5v3.2l2.2 1.3',
+    'chevrons-up-down': 'M5 6l3-3 3 3M5 10l3 3 3-3',
     'archive-restore': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M8 2.5v4M6 4.5L8 2.5l2 2',
     'archive-only': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M6 3.5h4',
   }
@@ -10769,7 +10781,11 @@ async function forkSession(node) {
 
 /** Pin or unpin, and archive or unarchive — the two states a row can carry. */
 function pinSession(node) {
-  return setSessionFlags(node, { pinned: !node.pinned })
+  /** C17: a pin that lands under Manual also fronts the session in its saved orders (DSH `pinSessionOrder`); the mode stays. */
+  const front = () => {
+    if (!node.pinned && orderState.orderBy === 'manual') rememberOrder(WorkspaceTree.withPinFronted(orderState, node.session.id, shownOrders))
+  }
+  return setSessionFlags(node, { pinned: !node.pinned }, {}, front)
 }
 
 /**
@@ -10794,7 +10810,7 @@ async function archiveSession(node) {
  * One function for both flags because the route is one: the record and the definition are written together, and
  * a row's menu only decides which of the two it is changing.
  */
-async function setSessionFlags(node, patch, extra = {}) {
+async function setSessionFlags(node, patch, extra = {}, applied = () => {}) {
   const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -10820,6 +10836,7 @@ async function setSessionFlags(node, patch, extra = {}) {
     return
   }
   setNote('')
+  applied()
   /**
    * A flag changes the row's **place**, and the reference glides it there instead of letting it jump: the rows are measured
    * before the redraw and animated from where they were after it (`AnimatedRows`, 200 ms ease-out). Only this handler wraps
@@ -11289,7 +11306,8 @@ Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSes
  * - **Nesting**: `tree` puts a group under its nearest registered ancestor (DSH's `Workspace Tree`, child workspaces
  *   before the parent's own sessions); `workspace` keeps every group a sibling section (DSH's `WorkSpace`).
  * - **Rows**: subagent-origin sessions are hidden (DSH hides `origin: 'subagent'`); the archive filter is DSH's three
- *   states; the order is pinned first (newest pin first), then last updated, newest first, then id.
+ *   states; pinned rows lead, and the order is DSH's two modes (C17): **Last updated** (newest prompt first, then id;
+ *   pin time does not order it) or **Manual** (a saved sequence per account, reconciled with the members).
  * - **Show more**: an open group shows 5 rows, raised to cover the last running or open session within the first 50;
  *   each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
  */
@@ -11310,20 +11328,16 @@ const WorkspaceTree = (() => {
     return String(meta.updated ?? meta.created ?? '')
   }
 
-  /** Pinned first (the newest pin first, a timed pin before an untimed one), then last updated, then id. */
-  function sessionOrder(left, right) {
-    const leftPinned = left.pinned === true && left.archived !== true
-    const rightPinned = right.pinned === true && right.archived !== true
-    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1
-    if (leftPinned) {
-      const leftAt = left.pinnedAt === undefined ? '' : String(left.pinnedAt)
-      const rightAt = right.pinnedAt === undefined ? '' : String(right.pinnedAt)
-      if (leftAt !== rightAt) {
-        if (leftAt === '') return 1
-        if (rightAt === '') return -1
-        return leftAt < rightAt ? 1 : -1
-      }
-    }
+  /** The flat list's account key, DSH's `FLAT_SESSION_ORDER_KEY` (dsh-client-ui-workspace/lib/client.js:1256). */
+  const FLAT = '__flat_session_order__'
+
+  /** Pinned and not archived: a row that leads its list in either order (DSH keeps the two sets exclusive). */
+  function leads(meta) {
+    return meta.pinned === true && meta.archived !== true
+  }
+
+  /** Newest prompt first (`updated`, else `created`), then id: DSH's `orderByRecency` (client.js:886-898). */
+  function byRecency(left, right) {
     const leftStamp = stamp(left)
     const rightStamp = stamp(right)
     if (leftStamp !== rightStamp) return leftStamp < rightStamp ? 1 : -1
@@ -11332,26 +11346,132 @@ const WorkspaceTree = (() => {
     return leftId === rightId ? 0 : leftId < rightId ? -1 : 1
   }
 
+  /** The newest pin first, a timed pin before an untimed one: DSH's pin-array order. */
+  function byPinTime(left, right) {
+    const leftAt = left.pinnedAt === undefined ? '' : String(left.pinnedAt)
+    const rightAt = right.pinnedAt === undefined ? '' : String(right.pinnedAt)
+    if (leftAt === rightAt) return byRecency(left, right)
+    if (leftAt === '') return 1
+    if (rightAt === '') return -1
+    return leftAt < rightAt ? 1 : -1
+  }
+
   /**
-   * DSH's `In one list` rows: every session the archive filter shows, in **the tree's order** — the newest pin first,
-   * then the last write, then id. DSH keeps one pin list, most recent pin first, and fronts a new pin in the group and in
-   * the flat list alike (`dsh-workspace` `pinSession`; `dsh-client-ui-workspace` `pinSessionOrder` / `pinOrderAccounts`),
-   * and its flat list orders the rest by `Last updated` as a group does. The list used to sort by creation, so two pins
-   * read in one order here and in the other in the tree (R-developer-eight-17).
-   *
-   * Only the order is the tree's: the list keeps every session it listed before, the archive filter aside.
+   * **Last updated**: pinned rows lead, and each part is by recency alone. DSH's README (*Reordering and view options*):
+   * "sorts each partition strictly by the latest user prompt or steer time, newest first; pin time does not affect it".
    */
-  function flatList(sessions, options = {}) {
-    const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
-    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
-    return metas
-      .filter((meta) => {
-        const isArchived = meta.archived === true
-        if (archived === 'only') return isArchived
-        if (archived === 'show') return true
-        return !isArchived
-      })
-      .sort(sessionOrder)
+  function sessionOrder(left, right) {
+    const leftPinned = leads(left)
+    if (leftPinned !== leads(right)) return leftPinned ? -1 : 1
+    return byRecency(left, right)
+  }
+
+  /**
+   * A saved **Manual** sequence reconciled with the account's members, DSH's `reconcileManualOrder` (client.js:908-947):
+   * saved positions first, kept even while a member's record is missing; missing pinned members before them, newest pin
+   * first; the other missing members after them by recency, archived last. (DSH also seats a new fork before its
+   * source; heddle's session record names no fork source, so a new fork is placed by recency.)
+   */
+  function reconcileOrder(ids, saved, metaById) {
+    const members = new Set(ids)
+    const included = new Set()
+    const ordered = []
+    for (const id of Array.isArray(saved) ? saved : []) {
+      if (!members.has(id) || included.has(id)) continue
+      ordered.push(id)
+      included.add(id)
+    }
+    const missing = ids.filter((id) => !included.has(id) && metaById.has(id)).map((id) => metaById.get(id))
+    const pins = missing.filter(leads).sort(byPinTime)
+    const rest = missing.filter((meta) => !leads(meta)).sort(byRecency)
+    return [...pins.map((meta) => meta.id), ...ordered, ...rest.filter((meta) => meta.archived !== true).map((meta) => meta.id), ...rest.filter((meta) => meta.archived === true).map((meta) => meta.id)]
+  }
+
+  /** One account's complete order — every member, hidden ones too — under `order` (`{orderBy, orders}`). */
+  function arrange(metas, key, order) {
+    if (order?.orderBy !== 'manual') return [...metas].sort(byRecency).map((meta) => meta.id)
+    return reconcileOrder(metas.map((meta) => meta.id), order.orders?.[key], new Map(metas.map((meta) => [meta.id, meta])))
+  }
+
+  /** An ordered account's rows: the visible members, pinned first, each part in the account's order (DSH `sectionMembers`). */
+  function rowsOf(ids, metaById, archived) {
+    const metas = ids.map((id) => metaById.get(id)).filter((meta) => visible(meta, archived))
+    return [...metas.filter(leads), ...metas.filter((meta) => !leads(meta))]
+  }
+
+  /** The flat list (`In one list`): its complete order and its rows. */
+  function flatRows(sessions, options = {}) {
+    const metas = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string')
+    const order = arrange(metas, FLAT, options.order)
+    return { order, rows: rowsOf(order, new Map(metas.map((meta) => [meta.id, meta])), options.archived) }
+  }
+
+  /** Every account's complete order (each workspace, Ungrouped, the flat list): what Manual freezes and a drag keeps. */
+  function accountOrders(workspaces, sessions, order) {
+    const orders = {}
+    for (const group of deriveGroups(workspaces, sessions, { grouping: 'workspace', archived: 'show', order })) orders[group.key] = group.order
+    orders[FLAT] = flatRows(sessions, { order }).order
+    return orders
+  }
+
+  /** A session with no turn is DSH's blank row, and it and an archived row cannot be dragged. */
+  function draggable(meta) {
+    return meta.archived !== true && (meta.turns ?? 0) > 0
+  }
+
+  /**
+   * Where a drop puts a session, DSH's `sessionDragOrder` (client.js:2987-2999): within one account and one part (pinned
+   * or not), before or after the target row; `undefined` when the drop changes nothing. `order` is the account's
+   * complete order, `rows` the rows on screen, `drag` `{id, pinned}`, `over` `{id, half}`.
+   */
+  function dragOrder(order, rows, drag, over) {
+    const source = rows.find((meta) => meta.id === drag.id)
+    const target = rows.find((meta) => meta.id === over.id)
+    if (source === undefined || target === undefined || !draggable(source) || source.id === target.id || !order.includes(source.id)) return undefined
+    if (leads(source) !== drag.pinned || leads(target) !== drag.pinned) return undefined
+    const after = over.half === 'after' ? 1 : 0
+    const section = rows.filter((meta) => leads(meta) === drag.pinned)
+    const sourceIndex = section.findIndex((meta) => meta.id === source.id)
+    if (section.filter((meta) => meta.id !== source.id).findIndex((meta) => meta.id === target.id) + after === sourceIndex) return undefined
+    const next = order.filter((id) => id !== source.id)
+    const at = next.indexOf(target.id)
+    if (at === -1) return undefined
+    next.splice(at + after, 0, source.id)
+    return next
+  }
+
+  /** The order state from storage, `{orderBy: 'updated' | 'manual', orders: {key: [id]}}`, Last updated when unreadable. */
+  function readOrder(text) {
+    try {
+      const value = JSON.parse(String(text))
+      const orders = {}
+      for (const [key, ids] of Object.entries(value?.orders ?? {})) if (Array.isArray(ids)) orders[key] = ids.filter((id) => typeof id === 'string')
+      return { orderBy: value?.orderBy === 'manual' ? 'manual' : 'updated', orders: value?.orderBy === 'manual' ? orders : {} }
+    } catch (error) {
+      return { orderBy: 'updated', orders: {} }
+    }
+  }
+
+  const copyOrders = (orders) => Object.fromEntries(Object.entries(orders ?? {}).map(([key, ids]) => [key, [...ids]]))
+
+  /** Choosing a mode, DSH's `setOrderBy` (client.js:1279-1283): Manual freezes the orders shown, Last updated drops them. */
+  function chooseOrderBy(state, mode, shown) {
+    if (mode === state.orderBy) return state
+    return { orderBy: mode, orders: mode === 'manual' ? copyOrders(shown) : {} }
+  }
+
+  /** A drop, DSH's `setSessionOrder` (client.js:1297-1302): the account's new order is saved and Manual selected. */
+  function withSessionOrder(state, key, order, shown) {
+    const orders = state.orderBy === 'manual' ? { ...state.orders, ...copyOrders(shown) } : copyOrders(shown)
+    orders[key] = [...order]
+    return { orderBy: 'manual', orders }
+  }
+
+  /** A pin under Manual, DSH's `pinSessionOrder` (client.js:1303-1309): the session moves to the front of each saved order holding it. */
+  function withPinFronted(state, id, shown) {
+    const orders = {}
+    for (const [key, ids] of Object.entries(shown ?? {})) orders[key] = ids.includes(id) ? [id, ...ids.filter((each) => each !== id)] : [...ids]
+    return { ...state, orders }
   }
 
   /** Whether a session is a row under the archive filter: `hide` (the default), `show`, or `only`. */
@@ -11407,9 +11527,10 @@ const WorkspaceTree = (() => {
         depth: 0,
         children: [],
         sessions: [],
+        members: [],
       })
     }
-    const ungrouped = { key: UNGROUPED, workspace: null, label: 'Ungrouped', path: '', depth: 0, children: [], sessions: [] }
+    const ungrouped = { key: UNGROUPED, workspace: null, label: 'Ungrouped', path: '', depth: 0, children: [], sessions: [], members: [] }
     const metaById = new Map(metas.map((meta) => [meta.id, meta]))
     const placed = new Set()
     for (const entry of list) {
@@ -11420,13 +11541,18 @@ const WorkspaceTree = (() => {
         const meta = metaById.get(id)
         if (meta === undefined) continue
         placed.add(id)
-        if (visible(meta, archived)) target.sessions.push(meta)
+        target.members.push(meta)
       }
     }
     for (const meta of metas) {
-      if (!placed.has(meta.id) && visible(meta, archived)) ungrouped.sessions.push(meta)
+      if (!placed.has(meta.id)) ungrouped.members.push(meta)
     }
-    for (const group of [...groups.values(), ungrouped]) group.sessions.sort(sessionOrder)
+    /** `order` is the account's complete order (C17: Last updated, or Manual from `options.order`); `sessions` its rows. */
+    for (const group of [...groups.values(), ungrouped]) {
+      group.order = arrange(group.members, group.key, options.order)
+      group.sessions = rowsOf(group.order, metaById, archived)
+      delete group.members
+    }
 
     let tops = []
     for (const entry of list) {
@@ -11493,7 +11619,10 @@ const WorkspaceTree = (() => {
     return shown > INITIAL ? 'less' : null
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, flatList, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+  return {
+    UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow,
+    FLAT, leads, reconcileOrder, flatRows, accountOrders, draggable, dragOrder, readOrder, chooseOrderBy, withSessionOrder, withPinFronted,
+  }
 })()
 /* workspace-tree:end */
 
@@ -11506,6 +11635,121 @@ const watermarks = new Map()
 const definitionOf = new Map()
 /** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
 let listedSessions = new Set()
+
+/* order-modes:begin */
+/**
+ * DSH's **Order by** (C17, R-developer-eight-20): Last updated (the default) or Manual, and Manual's saved sequence per
+ * account. DSH keeps both in the browser — `orderBy` and `sessionOrderByAccount` in its persisted view store
+ * `dsh.workspace.view.v5` (dsh-client-ui-workspace/lib/client.js:1265-1315), and its README says Session display
+ * orders are browser-local — so this lives in `localStorage` too, not on the host. `shownOrders` is every account's
+ * complete order as last drawn: what choosing Manual freezes, and what a drop or a pin writes beside its own account.
+ */
+const ORDER_KEY = 'heddle.tree.order.v1'
+let orderState = WorkspaceTree.readOrder((() => {
+  try {
+    return localStorage.getItem(ORDER_KEY)
+  } catch (error) {
+    return null
+  }
+})())
+let shownOrders = {}
+
+function rememberOrder(next) {
+  if (next === orderState) return
+  orderState = next
+  try {
+    localStorage.setItem(ORDER_KEY, JSON.stringify(orderState))
+  } catch (error) {
+    /* A browser with no storage still orders the list; keeping it across a reload is what is lost. */
+  }
+  paintViewOptions()
+}
+
+/**
+ * Every account's complete order **now**, DSH's `activeSessionOrders` (client.js:3593-3597), which DSH derives for every
+ * account whichever view is on screen, so entering Manual or dropping a row freezes them all (`setOrderBy` /
+ * `setSessionOrder`, client.js:1279-1283, 1297-1302). In one list draws only the flat account, so there the groups'
+ * orders are read fresh. Without it, Manual chosen in a freshly loaded flat list froze the flat list alone, and each group
+ * then reconciled its pins by pin time instead of keeping the Last updated order the reader saw (C13, #63).
+ */
+async function liveOrders() {
+  if (groupingMode !== 'list') return shownOrders
+  try {
+    const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
+    if (!workspaceResponse.ok || !sessionResponse.ok) return shownOrders
+    const workspaces = (await workspaceResponse.json()).workspaces ?? []
+    const sessions = await sessionResponse.json()
+    const fresh = WorkspaceTree.accountOrders(workspaces, Array.isArray(sessions) ? sessions : [], orderState)
+    /** The flat account keeps the order on screen, which is the one the reader chose from. */
+    return { ...fresh, [WorkspaceTree.FLAT]: shownOrders[WorkspaceTree.FLAT] ?? fresh[WorkspaceTree.FLAT] }
+  } catch (error) {
+    return shownOrders
+  }
+}
+
+async function chooseOrder(mode) {
+  const shown = mode === 'manual' && orderState.orderBy !== 'manual' ? await liveOrders() : shownOrders
+  rememberOrder(WorkspaceTree.chooseOrderBy(orderState, mode, shown))
+  await renderTree()
+}
+
+/** The View options control, rebuilt so its marks follow the order a drag selected. */
+function paintViewOptions() {
+  document.getElementById('view-options').replaceChildren(menuButton({ label: 'view options' }, viewOptionItems()))
+}
+
+/**
+ * Let one list's session rows be dragged onto each other — DSH's row drag (client.js:2285-2302, `commitSessionDrag`
+ * client.js:3107-3119): only within one account (`key`) and one part (pinned or not), never a blank or archived row; a
+ * line marks the landing half, and the drop saves the account's complete order and selects Manual.
+ */
+let sessionDragging = null
+function clearDropMarks() {
+  for (const node of treeList.querySelectorAll('li[data-drop]')) delete node.dataset.drop
+}
+function wireSessionDrag(items, key, rows, order) {
+  for (const li of items) {
+    const meta = rows.find((each) => each.id === li.dataset.sessionId)
+    const row = li.querySelector(':scope > .row')
+    if (meta === undefined || row === null) continue
+    const half = (event) => {
+      const box = row.getBoundingClientRect()
+      return event.clientY < box.top + box.height / 2 ? 'before' : 'after'
+    }
+    const accepts = () => sessionDragging !== null && sessionDragging.key === key && WorkspaceTree.leads(meta) === sessionDragging.pinned
+    if (WorkspaceTree.draggable(meta)) {
+      row.draggable = true
+      row.addEventListener('dragstart', (event) => {
+        event.dataTransfer.effectAllowed = 'move'
+        event.dataTransfer.setData('text/plain', meta.id)
+        sessionDragging = { key, id: meta.id, pinned: WorkspaceTree.leads(meta) }
+      })
+      row.addEventListener('dragend', () => {
+        sessionDragging = null
+        clearDropMarks()
+      })
+    }
+    row.addEventListener('dragover', (event) => {
+      if (!accepts()) return
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'move'
+      clearDropMarks()
+      li.dataset.drop = half(event)
+    })
+    row.addEventListener('drop', async (event) => {
+      if (!accepts()) return
+      event.preventDefault()
+      const drag = sessionDragging
+      sessionDragging = null
+      clearDropMarks()
+      const next = WorkspaceTree.dragOrder(order, rows, drag, { id: meta.id, half: half(event) })
+      if (next === undefined) return
+      rememberOrder(WorkspaceTree.withSessionOrder(orderState, key, next, { ...(await liveOrders()), [key]: order }))
+      await renderTree()
+    })
+  }
+}
+/* order-modes:end */
 
 /**
  * Remember where a session's definition sits, and let its row say so: a session nobody named is labelled with its
@@ -11605,6 +11849,7 @@ function paintSessionRows(list, group, depth) {
   const total = group.sessions.length
   const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, { running: runningSessions, current })
   const rows = group.sessions.slice(0, shown).map((meta) => sessionRow(meta, depth))
+  wireSessionDrag(rows, group.key, group.sessions.slice(0, shown), group.order ?? [])
   const mode = WorkspaceTree.overflow(total, shown)
   if (mode !== null) {
     const li = document.createElement('li')
@@ -12228,9 +12473,11 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
 })
 
 /**
- * DSH's `In one list`: every session in one flat column, newest first, pinned first — the same order the tree uses
- * inside a branch, without the folders. `WorkspaceTree.flatList` picks and orders the rows, so the two views cannot
- * drift apart again; each row's age is the stamp it sorts by, last written, as a tree row's is.
+ * DSH's `In one list`: every session in one flat column, pinned first, in **the tree's rule for the selected order**
+ * (`WorkspaceTree.flatRows`, the same `arrange` and `rowsOf` a group uses), so the two views cannot drift apart again
+ * (C13): under Last updated each part goes by its latest prompt, pin time aside; under Manual by the flat list's own
+ * saved sequence, which a pin fronts as it fronts the group's (DSH `deriveFlat` / `pinOrderAccounts`,
+ * dsh-client-ui-workspace/lib/client.js:1146-1154, 1343-1345). Each row's age is the stamp Last updated sorts by.
  *
  * It is a **reading** list rather than a second tree: a row opens its session, and the hover controls that need a
  * session's definition folder stay on the tree's rows, where that folder is known. A flat row that offered a rename it
@@ -12240,7 +12487,10 @@ async function renderFlatList() {
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
-  const visible = WorkspaceTree.flatList(index.sessions, { archived: archiveMode })
+  /** C17: the flat list is one account of its own, in the chosen order — Last updated by prompt time, or Manual. */
+  const flat = WorkspaceTree.flatRows(index.sessions, { archived: archiveMode, order: orderState })
+  shownOrders = { ...shownOrders, [WorkspaceTree.FLAT]: flat.order }
+  const visible = flat.rows
   treeList.replaceChildren(
     ...visible.map((meta) => {
       const li = document.createElement('li')
@@ -12280,6 +12530,7 @@ async function renderFlatList() {
       return li
     }),
   )
+  wireSessionDrag([...treeList.children], WorkspaceTree.FLAT, visible, flat.order)
   setNote(visible.length === 0 ? 'no sessions to list' : '')
 }
 
@@ -12317,7 +12568,8 @@ async function renderTree() {
   }
   rowIndex.clear()
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
-  treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode })
+  treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode, order: orderState })
+  shownOrders = WorkspaceTree.accountOrders(workspaces, Array.isArray(sessions) ? sessions : [], orderState)
   /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
   treeTops = WorkspaceTree.flatten(treeGroups)
     .filter((group) => group.workspace !== null)
@@ -12419,7 +12671,7 @@ function downloadSessionLog() {
 document.getElementById('session-more').append(
   menuButton({ label: 'this session' }, [{ label: 'Download session log', glyph: 'download', run: downloadSessionLog }], { label: 'More actions' }),
 )
-document.getElementById('view-options').append(menuButton({ label: 'view options' }, viewOptionItems()))
+paintViewOptions()
 /**
  * The three workspace acts, DSH's way: Add workspace, Rename, Delete workspace — each a dialog of the page's own.
  *
