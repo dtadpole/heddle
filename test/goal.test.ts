@@ -36,6 +36,14 @@ async function service() {
   return { goals: new GoalService(new Context(), sessions), sessions, handle }
 }
 
+/**
+ * A person's message in the open turn: written with no `source`, which is what makes the turn a direct human turn.
+ * The goal tools refuse create, edit, pause and resume without one (the authority tests are in goal-tool.test.ts).
+ */
+function personSays(sessions: SessionStore, handle: ReturnType<SessionStore['create']>, text = 'please'): void {
+  sessions.message(handle, { role: 'user', content: [{ type: 'text', text }] })
+}
+
 test('a goal lives in the log, and folds back to the same snapshot', async () => {
   const { goals, sessions, handle } = await service()
   const created = goals.create(handle, { objective: 'ship the goal feature', maxGoalRounds: 4 })
@@ -184,9 +192,11 @@ test('only edit may change the definition, and clear leaves a tombstone', async 
 })
 
 test('the model cannot resume a goal a person paused', async () => {
-  const { goals, handle } = await service()
+  const { goals, sessions, handle } = await service()
   const created = goals.create(handle, { objective: 'one' })
   const paused = goals.pause(handle, { id: created.id, revision: 1 })
+  // Even inside a person's own turn: the pause is the person's decision, and only the person undoes it.
+  personSays(sessions, handle, 'carry on')
   const tool = goalTools(goals).find((definition) => definition.spec.name === 'update_goal')
   assert.ok(tool !== undefined)
   const result = await tool.run(
@@ -197,7 +207,8 @@ test('the model cannot resume a goal a person paused', async () => {
 })
 
 test('the model creates a goal through the tool, and reads it back', async () => {
-  const { goals, handle } = await service()
+  const { goals, sessions, handle } = await service()
+  personSays(sessions, handle, 'finish the goal feature, however long it takes')
   const tools = goalTools(goals)
   const create = tools.find((definition) => definition.spec.name === 'create_goal')
   const get = tools.find((definition) => definition.spec.name === 'get_goal')

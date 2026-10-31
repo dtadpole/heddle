@@ -1,0 +1,4 @@
+#!/bin/sh
+# Remove superseded heddle build artifacts from target/*/deps (newer one with the same name exists, older than
+# an hour, folder not in use). See deps-sweep.md; --all covers every worktree, --dry-run lists only.
+exec node "$(dirname "$0")/deps-sweep.mjs" "$@"

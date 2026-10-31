@@ -16,7 +16,16 @@ pub struct ToolsConfig {
     pub include_builtins: bool,
     /// Wall time a `bash` call may take before it is killed, in milliseconds.
     pub bash_timeout_ms: u64,
+    /// Characters of a `bash` call's combined output the model is shown; the rest is cut and marked (DSH's
+    /// output cap). At least 1.
+    pub bash_output_limit: usize,
+    /// Parallel-safe tool calls one model step runs at once; 1 runs every call alone (DSH's
+    /// `maxParallelToolCalls`). At least 1.
+    pub max_parallel_tool_calls: usize,
 }
+
+/// The default for `maxParallelToolCalls` (DSH's default).
+pub const DEFAULT_MAX_PARALLEL_TOOL_CALLS: usize = 10;
 
 impl Default for ToolsConfig {
     fn default() -> Self {
@@ -24,6 +33,8 @@ impl Default for ToolsConfig {
             allow: Vec::new(),
             include_builtins: true,
             bash_timeout_ms: 30_000,
+            bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
+            max_parallel_tool_calls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
         }
     }
 }
@@ -34,7 +45,18 @@ impl ToolsConfig {
         if config.is_null() {
             return Ok(Self::default());
         }
-        serde_json::from_value(config.clone())
+        let parsed: Self = serde_json::from_value(config.clone())?;
+        if parsed.bash_output_limit == 0 {
+            return Err(serde::de::Error::custom(
+                "bashOutputLimit must be at least 1",
+            ));
+        }
+        if parsed.max_parallel_tool_calls == 0 {
+            return Err(serde::de::Error::custom(
+                "maxParallelToolCalls must be at least 1",
+            ));
+        }
+        Ok(parsed)
     }
 }
 
@@ -50,8 +72,34 @@ mod tests {
             ToolsConfig {
                 allow: vec![],
                 include_builtins: true,
-                bash_timeout_ms: 30_000
+                bash_timeout_ms: 30_000,
+                bash_output_limit: 20_000,
+                max_parallel_tool_calls: 10
             }
+        );
+    }
+
+    #[test]
+    fn the_parallel_cap_is_a_setting_of_at_least_one() {
+        let config =
+            ToolsConfig::from_row(&serde_json::json!({ "maxParallelToolCalls": 3 })).unwrap();
+        assert_eq!(config.max_parallel_tool_calls, 3);
+        let zero =
+            ToolsConfig::from_row(&serde_json::json!({ "maxParallelToolCalls": 0 })).unwrap_err();
+        assert!(
+            zero.to_string()
+                .contains("maxParallelToolCalls must be at least 1")
+        );
+    }
+
+    #[test]
+    fn the_output_limit_is_a_setting_of_at_least_one() {
+        let config = ToolsConfig::from_row(&serde_json::json!({ "bashOutputLimit": 50 })).unwrap();
+        assert_eq!(config.bash_output_limit, 50);
+        let zero = ToolsConfig::from_row(&serde_json::json!({ "bashOutputLimit": 0 })).unwrap_err();
+        assert!(
+            zero.to_string()
+                .contains("bashOutputLimit must be at least 1")
         );
     }
 

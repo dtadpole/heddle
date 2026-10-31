@@ -155,6 +155,21 @@ mod tests {
         assert!(std::ptr::eq(page(), page()));
     }
 
+    /// DSH's session rename (`dsh-client-ui-workspace`, `RenameSession.js`): one *Rename session* dialog, opened by
+    /// the row menu, the `Mod+Alt+G` chord and a double-click on the row's title. The page is embedded, so this
+    /// asserts the binary serves that dialog and the double-click that opens it, not a native `window.prompt`.
+    #[test]
+    fn the_served_page_renames_a_session_in_dshs_dialog_and_on_a_title_double_click() {
+        let served = page();
+        assert!(served.contains(
+            "<dialog id=\"session-rename\" class=\"ws-dialog\" aria-labelledby=\"session-rename-title\">"
+        ));
+        assert!(served.contains("<h2 id=\"session-rename-title\">Rename session</h2>"));
+        assert!(served.contains("id=\"session-rename-input\" aria-label=\"Session name\""));
+        assert!(served.contains("label.addEventListener('dblclick', (event) => {"));
+        assert!(!served.contains("window.prompt('Rename this session'"));
+    }
+
     #[test]
     fn page_access_tells_missing_from_stale() {
         assert_eq!(

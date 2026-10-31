@@ -65,7 +65,7 @@ use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
     ServiceError, SessionMeta, StartSession,
 };
-use crate::stream::{EventHub, SseFrame, names, sse_response};
+use crate::stream::{self, EventHub, SseFrame, names, sse_response};
 use crate::token::{
     self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
 };
@@ -466,9 +466,26 @@ impl ServerBuilder {
                     }
                 })
             });
+        // The heartbeat: every interval each `/api/events` subscriber gets a `heartbeat` frame, and a connection
+        // whose writes stay pending for two intervals is closed (DSH's dead-peer rule, `stall.rs`).
+        let interval = stream::heartbeat_interval();
+        let heartbeat = {
+            let hub = state.events().clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    hub.publish(SseFrame::heartbeat());
+                }
+            })
+        };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(without_nagle(listener), router)
+            let listener =
+                crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
+            let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
@@ -485,6 +502,7 @@ impl ServerBuilder {
             task: Some(task),
             detach_approvals,
             approval_relay,
+            heartbeat: Some(heartbeat),
         })
     }
 }
@@ -502,6 +520,8 @@ pub struct WebServer {
     detach_approvals: Option<Box<dyn FnOnce() + Send>>,
     /// The task relaying the approval service's published questions into the hub.
     approval_relay: Option<tokio::task::JoinHandle<()>>,
+    /// The task writing a heartbeat to every stream once per interval.
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WebServer {
@@ -560,6 +580,9 @@ impl WebServer {
         }
         if let Some(relay) = self.approval_relay.take() {
             relay.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
         }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {
@@ -839,7 +862,13 @@ async fn page_route() -> Response {
 }
 
 async fn events_route(State(state): State<AppState>) -> Response {
-    sse_response(state.events().subscribe())
+    // Subscribed before the body starts, so `ready` is followed by every frame published after it.
+    let subscription = state.events().subscribe();
+    sse_response(stream::events_frames(
+        subscription,
+        &stream::new_client_id(),
+        &stream::host_home(),
+    ))
 }
 
 /// One session's meta as a listing entry: the store's record plus this server's run state.
@@ -1534,6 +1563,14 @@ async fn html_preview(
             "that path is not under any workspace root",
         );
     }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or
+    // not, is refused, as web.ts does.
+    if !preview::is_html_document(&path) {
+        return respond::error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            preview::NOT_AN_HTML_DOCUMENT,
+        );
+    }
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => metadata,
         _ => return respond::error(StatusCode::NOT_FOUND, "not a file"),
@@ -1587,6 +1624,35 @@ fn without_nagle(
     })
 }
 
+/// The body of the `409` a turn into a one-shot subagent's session gets, or `None` when the session takes turns —
+/// web.ts `subagentTurnRefusal`.
+///
+/// DSH's generic session route leaves a subagent's child to subagent routing and refuses a prompt into it with
+/// `session/agent-busy`, `session "<id>" is owned by subagent routing`, reason `use subagent delivery for this child
+/// session` (dsh-api-session-controller `lib/index.js:128-142`, reached from `prompt` at `:925-926`). A one-shot child
+/// has no delivery at all: `delegate` runs it for one task and settles it. Phase A measured both builds answering
+/// `200` and growing the child's log (R-developer-eight-26). A teammate (`teamId`) is a continuable child, as DSH's
+/// teammates are, and this route is the delivery the page uses for it, so it is not refused.
+fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
+    let meta = meta?;
+    if meta.rest.get("origin").and_then(Value::as_str) != Some("subagent") {
+        return None;
+    }
+    if meta
+        .rest
+        .get("teamId")
+        .and_then(Value::as_str)
+        .is_some_and(|team| !team.is_empty())
+    {
+        return None;
+    }
+    Some(json!({
+        "error": format!("session \"{}\" is owned by subagent routing", meta.id),
+        "code": "session/agent-busy",
+        "reason": "use subagent delivery for this child session",
+    }))
+}
+
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
@@ -1624,6 +1690,13 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let resume = body.str("session").filter(|id| !id.is_empty());
     let folder = body.non_empty("folder").map(canonical_path);
     let title: String = prompt.chars().take(60).collect();
+    // A one-shot subagent's session takes no turn from here, refused before the session is opened so the child's log
+    // gets nothing (web.ts asks `subagentTurnRefusal` at the same point).
+    if let Some(resume) = resume
+        && let Some(refusal) = subagent_turn_refusal(sessions.meta(resume).as_ref())
+    {
+        return respond::json_compact(StatusCode::CONFLICT, &refusal);
+    }
     let session = if let Some(resume) = resume {
         // A resumed session keeps the selection it recorded; only a session this request creates is
         // born with the request's choice (web.ts passes `{ resume }` alone).
@@ -2393,6 +2466,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_html_route_previews_only_an_html_document() {
+        let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<h1>page</h1>").unwrap();
+        // A real Word document is a zip; a text file is valid UTF-8. Neither is a page.
+        std::fs::write(
+            dir.join("report.docx"),
+            b"PK\x03\x04\x14\x00\x00\x00\x08\x00binary",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain words").unwrap();
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("html-only")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = |leaf: &str| {
+            format!(
+                "/api/html?path={}",
+                dir.join(leaf).to_string_lossy().replace('/', "%2F")
+            )
+        };
+        let (status, _, bytes) = call(&router, Method::GET, &uri("page.html"), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("page"), "{}", body_text(&bytes));
+        for leaf in ["report.docx", "notes.txt"] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri(leaf), Some(&cookie)).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{leaf}");
+            assert_eq!(
+                body_text(&bytes),
+                format!("{{\"error\":\"{}\"}}\n", preview::NOT_AN_HTML_DOCUMENT),
+                "{leaf}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
     async fn status_names_the_deployment_mode_and_root() {
         let (router, _) = app("status");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
@@ -2828,6 +2948,98 @@ mod tests {
         assert!(body_text(&bytes).contains("event: done"));
     }
 
+    /// A runner that counts the turns it is asked to run.
+    struct CountingTurns(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TurnRunner for CountingTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(TurnOutcome::default()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_into_a_one_shot_subagent_session_is_refused_in_dshs_words() {
+        // DSH parity C23 (R-developer-eight-26): dsh-api-session-controller refuses a prompt into a subagent's child
+        // with `session/agent-busy` (`lib/index.js:128-142`); phase A measured `/api/turn` answering 200 and running it.
+        // A teammate is a continuable child and still takes the turn.
+        let child = "session-one-shot-child";
+        let mate = "session-continuable-teammate";
+        let meta = |id: &str, rest: Value| SessionMeta {
+            id: id.into(),
+            cwd: Some("/work".into()),
+            endpoint: Some("double".into()),
+            turns: 1,
+            rest: rest.as_object().cloned().unwrap_or_default(),
+            ..SessionMeta::default()
+        };
+        let sessions = Sessions {
+            metas: vec![
+                meta(
+                    child,
+                    json!({"parentSession": "session-p", "origin": "subagent", "delegationDepth": 1}),
+                ),
+                meta(
+                    mate,
+                    json!({"parentSession": "session-l", "origin": "subagent", "delegationDepth": 1, "teamId": "session-l"}),
+                ),
+            ],
+            events: HashMap::new(),
+        };
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(CountingTurns(Arc::clone(&ran))),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        harness.approvals = Some(Arc::new(Approvals));
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("subagent-turn-refusal")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let into_child = json!({"session": child, "prompt": "write into child"});
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, &into_child.to_string()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!(
+                "{{\"error\":\"session \\\"{child}\\\" is owned by subagent routing\",\"code\":\"session/agent-busy\",\"reason\":\"use subagent delivery for this child session\"}}\n"
+            )
+        );
+        assert_eq!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no turn ran in the child"
+        );
+
+        let into_mate = json!({"session": mate, "prompt": "a message for the teammate"});
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, &into_mate.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        assert_eq!(subagent_turn_refusal(None), None);
+        assert_eq!(
+            subagent_turn_refusal(Some(&meta("session-plain", json!({})))),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn a_turn_streams_its_sessions_events_and_ends_with_done() {
         let hub = Arc::new(std::sync::OnceLock::new());
@@ -3189,6 +3401,64 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_text(&bytes), "not found\n");
+    }
+
+    /// `/api/events` opens with its comment and then DSH's `ready` frame, and a frame published after the
+    /// subscription was registered (before any byte was read) arrives after `ready`, not lost.
+    #[tokio::test]
+    async fn the_event_stream_opens_with_ready_and_then_carries_what_is_published() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-ready");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/events")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"type": "message"}));
+        let mut text = String::new();
+        while !text.contains("event: session\n") {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                .await
+                .expect("a frame in time")
+                .expect("the stream stays open")
+                .expect("a body frame");
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+        assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
+        let rest = &text[": heddle stream open\n\n".len()..];
+        assert!(rest.starts_with("event: ready\ndata: "), "{text}");
+        let data: Value =
+            serde_json::from_str(rest.lines().nth(1).unwrap().trim_start_matches("data: "))
+                .unwrap();
+        assert_eq!(data["type"], "ready");
+        let client = data["clientId"].as_str().unwrap();
+        assert!(
+            client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()),
+            "{client}"
+        );
+        assert_eq!(
+            data["host"]["home"],
+            std::env::var("HOME").unwrap_or_default()
+        );
+        assert!(
+            rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(),
+            "{text}"
+        );
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.

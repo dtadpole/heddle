@@ -965,7 +965,8 @@ pub fn subagent_tools(service: Arc<SubagentService>) -> Vec<Arc<dyn Tool>> {
             }
         })
     });
-    vec![tool]
+    // Returns at once with the child's id, so two delegates of one step start together (DSH's subagent spawn).
+    vec![heddle_tools::parallel_safe(tool)]
 }
 
 #[cfg(test)]
@@ -2028,6 +2029,10 @@ mod tests {
         )
         .unwrap();
         assert!(registry.has("delegate"));
+        assert!(
+            registry.is_concurrency_safe("delegate"),
+            "two delegates of one step start together"
+        );
         let error = register_subagent_row(
             &registry,
             &serde_json::json!({ "bogus": true }),

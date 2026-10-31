@@ -15,7 +15,8 @@ import type { SessionEvent, SessionHandle, SessionStore } from '../session/store
  * per-turn plan. This project's durable unit is the **session**, and a task list that vanishes between
  * turns is not a list a person can read; so the list persists until it is replaced (or written empty,
  * which the UI hides). The cost is recorded in the reading: a stale list can linger until the model
- * replaces it, which is why `todo_read` exists for a model resuming after a restart.
+ * replaces it. The model has no read tool, as in DSH: it knows its list from its own `todo_write`
+ * arguments, and the persisted list serves the page's dock and `GET /api/todo`.
  */
 
 /** Version of the `todo/write` payload shape. A log written by a later version fails loudly. */
@@ -68,12 +69,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** DSH's refusal of an empty (or non-string) content, word for word. */
+export const TODO_EMPTY_CONTENT_MESSAGE = 'invalid todo: `content` must be a non-empty string'
+
 /**
  * Validate one list, the way both the write path and the fold need it.
  *
  * `code` names the refusal — `TODO_INVALID_LIST` for a model's write, `TODO_INVALID_LOG` for a
  * replay — and `allowParallel` is a **policy**: the write path applies it, but the fold accepts any
  * structurally valid list so that changing a deployment's policy cannot make an older log unreadable.
+ *
+ * The content, duplicate and in-progress refusals are DSH's sentences (`dsh-tool-todo`), content
+ * trimmed first. DSH refuses a non-array, a non-object item, an unknown key or an unknown status at its
+ * registry's schema boundary; this project's registry checks no schema, so those keep their own texts.
  */
 export function validateTodos(raw: unknown, code: string, allowParallel: boolean): TodoItem[] {
   if (!Array.isArray(raw)) fail(code, 'todos must be an array')
@@ -83,16 +91,16 @@ export function validateTodos(raw: unknown, code: string, allowParallel: boolean
   for (const item of raw) {
     if (!isRecord(item)) fail(code, 'a todo must be an object')
     for (const key of Object.keys(item)) if (!ITEM_KEYS.has(key)) fail(code, `unknown todo key ${JSON.stringify(key)}`)
-    if (typeof item.content !== 'string') fail(code, 'todo content must be a string')
+    if (typeof item.content !== 'string') fail(code, TODO_EMPTY_CONTENT_MESSAGE)
     const content = item.content.trim()
-    if (content.length === 0) fail(code, 'todo content must be non-empty')
-    if (seen.has(content)) fail(code, `duplicate todo content ${JSON.stringify(content)}`)
+    if (content.length === 0) fail(code, TODO_EMPTY_CONTENT_MESSAGE)
+    if (seen.has(content)) fail(code, `invalid todos: duplicate content ${JSON.stringify(content)}`)
     seen.add(content)
     if (typeof item.status !== 'string' || !STATUSES.has(item.status)) fail(code, `unknown todo status ${JSON.stringify(item.status)}`)
     if (item.status === 'in_progress') active += 1
     todos.push({ content, status: item.status as TodoStatus })
   }
-  if (!allowParallel && active > 1) fail(code, `at most one todo may be in_progress (got ${active})`)
+  if (!allowParallel && active > 1) fail(code, `invalid todos: at most one task may be in_progress (got ${active})`)
   return todos
 }
 
@@ -147,9 +155,14 @@ export class TodoService extends Service {
     return foldTodos(this.store.read(handle))
   }
 
-  /** Replace the whole list; returns the view the write produced. */
-  write(handle: SessionHandle, raw: unknown): TodoView {
-    const todos = validateTodos(raw, 'TODO_INVALID_LIST', this.allowParallel)
+  /**
+   * Replace the whole list; returns the view the write produced.
+   *
+   * `allowParallelInProgress` is the caller's policy — the todo tool passes its own required setting — and
+   * falls back to the service's construction option (one item in progress) for a caller that names none.
+   */
+  write(handle: SessionHandle, raw: unknown, policy: { readonly allowParallelInProgress?: boolean } = {}): TodoView {
+    const todos = validateTodos(raw, 'TODO_INVALID_LIST', policy.allowParallelInProgress ?? this.allowParallel)
     return this.commit(handle, todos)
   }
 

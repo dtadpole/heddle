@@ -1,8 +1,8 @@
 ---
 title: Goal
 created: 2026-10-17T22:49:02Z
-modified: 2026-10-29T11:47:04Z
-version: 1.1.0
+modified: 2026-10-29T13:37:20Z
+version: 1.2.0
 description: A persisted goal, its verbs, and the round driver that keeps pushing it across rounds and restarts.
 grounded_in:
   - source: human-authored
@@ -17,7 +17,7 @@ Goal management, modelled on DSH's five `dsh-goal*` packages — the reading wit
 | File | What it is |
 |---|---|
 | [`service.ts`](service.ts) | The **event-sourced state machine**: one `goal/change` event carrying a complete snapshot (or a clear tombstone); `foldGoal` replays it strictly; every mutation is a compare-and-set on `GoalRef{id, revision}`; the transition table is DSH's, including `block` only from `active` and `resume` refused once the round budget is exhausted |
-| [`tool.ts`](tool.ts) | The **model's verbs**: `create_goal`, `get_goal`, `update_goal`. Two policies live in the descriptions where a model reads them — a long request may be inferred to be a goal, and a paused goal is resumed by the *person*, not the model |
+| [`tool.ts`](tool.ts) | The **model's verbs**, DSH's `dsh-tool-goal`: `create_goal`, `get_goal`, and `update_goal` with exactly `edit`, `pause`, `resume`, `complete`, `blocked` (the old `update` is an unadvertised alias of `edit`). **Authority** is read from the session's log: create, edit, pause and resume need a direct human turn (a top-level session whose open turn holds a person's unsourced message); complete and blocked also accept the goal's exact current round; a goal round may not block before `blockedAfterConsecutiveRounds` (default 3); a paused goal is resumed by the *person*, not the model; only a goal round's terminal verb is told to end its run |
 | [`driver.ts`](driver.ts) | The **round driver**: a level-triggered reconciler. A round is a user message the harness writes, carrying `source={kind:'goal', goalId, revision, round}`, which is what `foldGoal` counts as an admitted round (in log order and across revisions, as DSH does, so an edit never resets the cap: R-developer-two-31); the driver re-evaluates a pure condition on every edge, yields between rounds, and blocks with `round-limit` at the cap |
 
 ## The rule it follows
@@ -48,6 +48,9 @@ chain with the round attributed to the revision it started under.
 
 - [`../../test/goal.test.ts`](../../test/goal.test.ts) — the fold, the revision CAS, every transition and
   refusal, the block reason's lifetime, the tombstone, and the restart rule for activation.
+- [`../../test/goal-tool.test.ts`](../../test/goal-tool.test.ts) — the tools against DSH: the verb enum and its
+  descriptions, the filler rule, every per-verb refusal, the block threshold at N-1 and N, and authority for a
+  person's turn, a goal round, a reminder or team-sourced turn, and a delegated session.
 - [`../../test/goal-driver.test.ts`](../../test/goal-driver.test.ts) — the round decision, the prompt, the
   chain's safety stops, the reentrant re-evaluation, the boot sweep, and the yield to the event loop.
 - [`../../_verifiers_/80-web-ui/check-goal.mjs`](../../_verifiers_/80-web-ui/check-goal.mjs) — end to end:

@@ -15,8 +15,8 @@ function sandbox(t) {
 }
 
 function envFor(root, extra = {}) {
-  // healthy memory by default, so the suite never depends on this Mac's swap
-  const env = { ...process.env, LOCAL_BUILD_SLOT_ROOT: root, BROWSER_SLOT_POLL_MS: '50', BROWSER_SLOT_FAKE_FREE_PCT: '50', BROWSER_SLOT_FAKE_SWAP_MB: '1000', ...extra }
+  // healthy memory and disk by default, so the suite never depends on this Mac's readings
+  const env = { ...process.env, LOCAL_BUILD_SLOT_ROOT: root, BROWSER_SLOT_POLL_MS: '50', BROWSER_SLOT_FAKE_FREE_PCT: '50', BROWSER_SLOT_FAKE_DISK_GB: '100', ...extra }
   delete env.HD_SEAT
   return env
 }
@@ -194,7 +194,7 @@ test('status names the holder, browser.next and the queue in serving order', (t)
   writeFileSync(join(root, 'browser.next'), 'developer-five (coordinator)\n')
   const r = bs(root, ['status'])
   assert.equal(r.status, 0)
-  assert.match(r.out, /cap {5}1 slot\(s\); memory free 50%, swap 1000M: new holders allowed/)
+  assert.match(r.out, /cap {5}1 slot\(s\); memory free 50%, disk 100\.0 GiB free: new holders allowed/)
   assert.match(r.out, /slot 1  developer-nine ui gate 05:00:00 {2}\(16m\d\ds, pid \d+ gone; over 10 minutes; stale, cleared on the next take\)/)
   assert.match(r.out, /next {4}developer-five \(browser\.next\)/)
   assert.match(r.out, /queue {3}1\. developer-five .*\n {8}2\. developer-two/)
@@ -241,16 +241,27 @@ test('a hand-made browser.lock2 holds the integrator slot', (t) => {
   assert.equal(take(root, 'integrator-one').status, 75)
 })
 
-test('no new holder while memory is short: free under 25% or swap at or over 7168M', (t) => {
+test('no new holder while memory free is under 25% or disk free under 20 GiB; swap is no gate (D-064)', (t) => {
   const root = sandbox(t)
   const low = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '24' })
   assert.equal(low.status, 75)
-  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-060\)/)
-  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '7168' })
-  assert.equal(swap.status, 75)
-  assert.match(swap.out, /no new holder: swap 7168M >= 7168M \(D-051\)/)
-  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_SWAP_MB: '7100' }).status, 0)
-  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_SWAP_MB: '7200' }).out, /no new holder, swap 7200M >= 7168M/)
+  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-064\)/)
+  const full = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_DISK_GB: '19.9' })
+  assert.equal(full.status, 75)
+  assert.match(full.out, /no new holder: disk free 19\.9 GiB < 20 GiB \(D-064\)/)
+  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_DISK_GB: '12' }).out, /disk 12\.0 GiB free: no new holder, disk free 12\.0 GiB < 20 GiB/)
+  const edge = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_DISK_GB: '20' })
+  assert.equal(edge.status, 0, 'exactly 25% memory and 20 GiB disk admit; swap is not read at all')
+})
+
+test('browser-cap can move the memory lines without a code change', (t) => {
+  const root = sandbox(t)
+  cap(root, '1 min-free=50 disk-min=30 swap-stop=7000') // an old swap key is ignored (D-064)
+  const free = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '44' })
+  assert.match(free.out, /memory free 44% < 50%/)
+  const disk = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_DISK_GB: '25' })
+  assert.match(disk.out, /disk free 25\.0 GiB < 30 GiB/)
+  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_DISK_GB: '30' }).status, 0)
 })
 
 test('forcing a release with two holders names the slot; a holder over a lowered cap is shown and released', (t) => {
@@ -265,4 +276,51 @@ test('forcing a release with two holders names the slot; a holder over a lowered
   assert.equal(bs(root, ['release', '--seat', 'coordinator', '--force', '--slot', '2']).status, 0)
   assert.equal(existsSync(lock2(root)), false)
   assert.equal(existsSync(lock(root)), true)
+})
+
+test('a head that does not take a free slot within 60 s is passed over, and keeps first place', (t) => {
+  const root = sandbox(t)
+  take(root, 'developer-one')
+  take(root, 'developer-two')
+  take(root, 'developer-three')
+  bs(root, ['release', '--seat', 'developer-one'])
+  const early = take(root, 'developer-three')
+  assert.equal(early.status, 75)
+  assert.match(early.out, /slot 1 free, developer-two is first \(\d+s before the next may take it\)/)
+  utimesSync(join(root, 'browser.free-since1'), minutesAgo(2), minutesAgo(2))
+  const late = take(root, 'developer-three')
+  assert.equal(late.status, 0, late.out)
+  assert.match(late.out, /developer-two did not take slot 1 within 60s; it keeps first place/)
+  assert.equal(existsSync(join(root, 'browser.free-since1')), false, 'a taken slot starts a new free period')
+  assert.match(bs(root, ['status']).out, /queue {3}1\. developer-two/)
+})
+
+test('an older copy of the tool refuses once a newer one is in use, without touching its ticket', (t) => {
+  const root = sandbox(t)
+  writeFileSync(join(root, 'browser-slot.version'), '99\n')
+  const r = take(root, 'developer-one')
+  assert.equal(r.status, 78, r.out)
+  assert.match(r.out, /this copy is version \d+, but version 99 is in use\. Sync it from heddle main/)
+  assert.equal(existsSync(join(root, 'browser.queue')), false)
+  writeFileSync(join(root, 'browser-slot.version'), '1\n')
+  assert.equal(take(root, 'developer-one').status, 0)
+  assert.notEqual(readFileSync(join(root, 'browser-slot.version'), 'utf8').trim(), '1', 'a newer copy records its version')
+})
+
+test('status shows why each waiter did not take a slot on its last call', (t) => {
+  const root = sandbox(t)
+  take(root, 'developer-one')
+  take(root, 'developer-two')
+  assert.match(bs(root, ['status']).out, /1\. developer-two {2}waiting \d+s; last take \d+s ago: slot 1 held by developer-one/)
+})
+
+test("a take refreshes only the caller's ticket", (t) => {
+  const root = sandbox(t)
+  take(root, 'developer-one')
+  take(root, 'developer-two')
+  const [ticket] = readdirSync(join(root, 'browser.queue'))
+  utimesSync(join(root, 'browser.queue', ticket), minutesAgo(4), minutesAgo(4))
+  take(root, 'developer-three')
+  const ageS = (Date.now() - statSync(join(root, 'browser.queue', ticket)).mtimeMs) / 1000
+  assert.ok(ageS > 200, `developer-two's ticket kept its age (${ageS}s)`)
 })

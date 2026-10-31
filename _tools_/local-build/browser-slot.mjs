@@ -36,8 +36,17 @@ const NEXT_STALE_S = number('BROWSER_SLOT_NEXT_SECONDS', 1800) // an older brows
 const POLL_MS = number('BROWSER_SLOT_POLL_MS', 1000)
 const MAX_HOLD_S = 600 // the team's rule: hold the slot at most ten minutes
 const QUEUED = 75 // EX_TEMPFAIL: still waiting, the ticket is kept
-const MIN_FREE_PCT = number('BROWSER_SLOT_MIN_FREE_PCT', 25) // D-060: memory_pressure free under this admits no one
-const SWAP_STOP_MB = number('BROWSER_SLOT_SWAP_STOP_MB', 7168) // D-051/D-060: swap used at or over this admits no one
+const STALE_COPY = 78 // EX_CONFIG: this copy is older than one already in use
+export const VERSION = 4 // bump on every change to the queue's rules; older copies then refuse
+const VERSION_FILE = path.join(ROOT, 'browser-slot.version')
+// A free slot the first waiter has not taken for this long may go to the next waiter whose gate passes.
+const HEAD_GRACE_S = number('BROWSER_SLOT_HEAD_GRACE_SECONDS', 60)
+const freeSince = (n) => path.join(ROOT, `browser.free-since${n}`)
+// D-064: a new holder needs memory_pressure free >= 25% and disk free >= 20 GiB on the volume of the slot folder.
+// Swap is no gate (macOS keeps stale pages there and grows it on demand); browser-cap's old swap keys are ignored.
+// browser-cap may move the lines ("min-free=25 disk-min=20"); the environment overrides both (tests).
+const MIN_FREE_PCT = 25
+const MIN_DISK_GB = 20
 
 export const lockDir = (n) => path.join(ROOT, n === 1 ? 'browser.lock' : `browser.lock${n}`)
 
@@ -49,7 +58,10 @@ export function config() {
   } catch {}
   const count = Math.max(1, Math.floor(Number(text.trim().split(/\s+/)[0])) || 1)
   const reserve = (text.match(/reserve=([a-z0-9-]+)/) || [])[1] || null
-  return { count, reserve: count >= 2 ? reserve : null }
+  const key = (name, fallback) => Number((text.match(new RegExp(`${name}=(\\d+)`)) || [])[1]) || fallback
+  const minFree = number('BROWSER_SLOT_MIN_FREE_PCT', key('min-free', MIN_FREE_PCT))
+  const minDisk = number('BROWSER_SLOT_MIN_DISK_GB', key('disk-min', MIN_DISK_GB))
+  return { count, reserve: count >= 2 ? reserve : null, minFree, minDisk }
 }
 
 export const roleOf = (seat, role) => role || (seat.startsWith('integrator-') ? 'integrator' : 'developer')
@@ -72,19 +84,25 @@ function slotNumbers(cfg) {
   return [...Array.from({ length: cfg.count }, (_, i) => i + 1), ...extra.sort((a, b) => a - b)]
 }
 
-/** D-060: no new holder while memory_pressure reports under 25% free or swap used is at or over 7168M. */
-export function memoryGate() {
-  const read = (fake, cmd, args, pattern) => {
-    if (env[fake] !== undefined && env[fake] !== '') return Number(env[fake])
-    const r = spawnSync(cmd, args, { encoding: 'utf8' })
-    const m = (r.stdout || '').match(pattern)
-    return m ? Number(m[1]) : null
+/** D-064: no new holder while memory_pressure reports under 25% free, or the slot folder's volume has under 20 GiB. */
+export function memoryGate(cfg = config()) {
+  const fake = (name) => (env[name] !== undefined && env[name] !== '' ? Number(env[name]) : undefined)
+  let free = fake('BROWSER_SLOT_FAKE_FREE_PCT')
+  if (free === undefined) {
+    const m = (spawnSync('memory_pressure', [], { encoding: 'utf8' }).stdout || '').match(/free percentage:\s*(\d+)%/)
+    free = m ? Number(m[1]) : null
   }
-  const free = read('BROWSER_SLOT_FAKE_FREE_PCT', 'memory_pressure', [], /free percentage:\s*(\d+)%/)
-  const swap = read('BROWSER_SLOT_FAKE_SWAP_MB', 'sysctl', ['-n', 'vm.swapusage'], /used\s*=\s*([\d.]+)M/)
-  const reading = `memory free ${free ?? '?'}%, swap ${swap === null ? '?' : Math.round(swap)}M`
-  if (free !== null && free < MIN_FREE_PCT) return { ok: false, reading, why: `memory free ${free}% < ${MIN_FREE_PCT}% (D-060)` }
-  if (swap !== null && swap >= SWAP_STOP_MB) return { ok: false, reading, why: `swap ${Math.round(swap)}M >= ${SWAP_STOP_MB}M (D-051)` }
+  let disk = fake('BROWSER_SLOT_FAKE_DISK_GB')
+  if (disk === undefined) {
+    // df -k: the last line's fourth field is the available KiB of the volume holding the slot folder
+    const lines = (spawnSync('df', ['-k', fs.existsSync(ROOT) ? ROOT : os.homedir()], { encoding: 'utf8' }).stdout || '').trim().split('\n')
+    const kb = Number((lines.at(-1) || '').split(/\s+/)[3])
+    disk = lines.length > 1 && Number.isFinite(kb) ? kb / 1024 / 1024 : null
+  }
+  const reading = `memory free ${free ?? '?'}%, disk ${disk === null ? '?' : disk.toFixed(1)} GiB free`
+  if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-064)` }
+  if (disk !== null && disk < cfg.minDisk)
+    return { ok: false, reading, why: `disk free ${disk.toFixed(1)} GiB < ${cfg.minDisk} GiB (D-064)` }
   return { ok: true, reading, why: '' }
 }
 
@@ -172,11 +190,13 @@ export function listTickets({ prune = true } = {}) {
       continue
     }
     seen.add(m[2])
-    let role = null
+    let text = ''
     try {
-      role = (fs.readFileSync(file, 'utf8').match(/^role=(.*)$/m) || [])[1] || null
+      text = fs.readFileSync(file, 'utf8')
     } catch {}
-    tickets.push({ name, file, seat: m[2], role: roleOf(m[2], role), queuedS: Number(m[1]) / 1000, stale })
+    const field = (k) => (text.match(new RegExp(`^${k}=(.*)$`, 'm')) || [])[1] || null
+    tickets.push({ name, file, seat: m[2], role: roleOf(m[2], field('role')), queuedS: Number(m[1]) / 1000, stale,
+      verdict: field('verdict'), checkedS: Number(field('checked')) || null })
   }
   return tickets
 }
@@ -203,12 +223,20 @@ function ensureTicket(seat, purpose, role) {
   const mine = listTickets().find((t) => t.seat === seat)
   if (mine) {
     const now = new Date()
-    fs.utimesSync(mine.file, now, now) // refresh: still waiting
+    fs.utimesSync(mine.file, now, now) // refresh this seat's ticket only: still waiting
     return mine
   }
   const name = `${String(Date.now()).padStart(13, '0')}-${seat}`
   fs.writeFileSync(path.join(QUEUE, name), `seat=${seat}\nrole=${role}\npurpose=${purpose}\nqueued=${clock()}\n`)
   return listTickets().find((t) => t.seat === seat)
+}
+
+/** Record why this seat did not take a slot on its last call; status shows it. Also refreshes the ticket. */
+function noteVerdict(seat, verdict) {
+  const mine = listTickets().find((t) => t.seat === seat)
+  if (!mine) return
+  const text = fs.readFileSync(mine.file, 'utf8').replace(/^(verdict|checked)=.*\n/gm, '')
+  fs.writeFileSync(mine.file, `${text}verdict=${verdict.replace(/\n/g, ' ')}\nchecked=${Math.floor(nowS())}\n`)
 }
 
 function dropTicket(seat) {
@@ -228,9 +256,40 @@ function tryTake(n, seat, purpose, pid) {
   return true
 }
 
+/** Null when this copy is current; otherwise the message telling the seat to sync. Records a newer version. */
+export function staleCopy() {
+  let recorded = 0
+  try {
+    recorded = Number(fs.readFileSync(VERSION_FILE, 'utf8').trim()) || 0
+  } catch {}
+  if (recorded > VERSION)
+    return `browser-slot: this copy is version ${VERSION}, but version ${recorded} is in use. Sync it from heddle main ` +
+      '(git fetch && git checkout origin/main -- _tools_/local-build) and run take again; your ticket keeps no place meanwhile.'
+  if (recorded < VERSION) {
+    try {
+      fs.mkdirSync(ROOT, { recursive: true })
+      fs.writeFileSync(VERSION_FILE, `${VERSION}\n`)
+    } catch {}
+  }
+  return null
+}
+
+function age_of(file) {
+  try {
+    return nowS() - fs.statSync(file).mtimeMs / 1000
+  } catch {
+    return null
+  }
+}
+
 /** Queue for a slot and wait up to waitS seconds. 0 when held, QUEUED when still waiting (ticket kept). */
 export function take({ seat, role, purpose = 'browser gate', waitS = 100, pid = process.ppid, out = console.log }) {
   role = roleOf(seat, role)
+  const stale = staleCopy()
+  if (stale) {
+    out(stale)
+    return STALE_COPY
+  }
   const deadline = Date.now() + waitS * 1000
   for (;;) {
     const cfg = config()
@@ -245,21 +304,35 @@ export function take({ seat, role, purpose = 'browser gate', waitS = 100, pid = 
     }
     ensureTicket(seat, purpose, role)
     const order = servingOrder(listTickets())
+    for (const n of slots) if (holders.get(n)) fs.rmSync(freeSince(n), { force: true }) // held again: a new free period
     let held = ''
     for (const n of slots.filter((k) => k <= cfg.count && !holders.get(k) && eligible(k, role, cfg))) {
-      if (order.find((t) => eligible(n, t.role, cfg))?.seat !== seat) continue
-      const gate = memoryGate()
+      if (!fs.existsSync(freeSince(n))) fs.writeFileSync(freeSince(n), `${clock()}\n`)
+      const head = order.find((t) => eligible(n, t.role, cfg))
+      const freeFor = age_of(freeSince(n)) ?? 0
+      // The head goes first; once the slot has been free past the grace, the next waiter may take it instead.
+      if (head?.seat !== seat && freeFor < HEAD_GRACE_S) {
+        held = `slot ${n} free, ${head?.seat} is first (${Math.ceil(HEAD_GRACE_S - freeFor)}s before the next may take it)`
+        continue
+      }
+      const gate = memoryGate(cfg)
       if (!gate.ok) {
         held = `no new holder: ${gate.why}`
         break
       }
       if (tryTake(n, seat, purpose, pid)) {
         dropTicket(seat)
+        fs.rmSync(freeSince(n), { force: true })
+        if (head?.seat !== seat) out(`browser-slot: ${head?.seat} did not take slot ${n} within ${HEAD_GRACE_S}s; it keeps first place`)
         if (nextSeat() === seat) fs.rmSync(NEXT, { force: true }) // the priority turn is used
         out(`browser-slot: ${seat} took slot ${n} (${path.basename(lockDir(n))}) at ${clock()}; release it within ${MAX_HOLD_S / 60} minutes`)
         return 0
       }
     }
+    const busyNow = slots
+      .filter((k) => k <= cfg.count && eligible(k, role, cfg) && holders.get(k))
+      .map((k) => `slot ${k} held by ${holders.get(k).seat}`)
+    noteVerdict(seat, held || busyNow.join('; ') || 'waiting')
     if (Date.now() >= deadline) {
       const mineClass = order.filter((t) => !cfg.reserve || (t.role === cfg.reserve) === (role === cfg.reserve))
       const position = mineClass.findIndex((t) => t.seat === seat) + 1
@@ -295,9 +368,14 @@ export function release({ seat, force = false, slot, out = console.log }) {
 
 export function status({ out = console.log } = {}) {
   const cfg = config()
-  const gate = memoryGate()
+  const gate = memoryGate(cfg)
   const reserved = cfg.reserve ? `, ${path.basename(lockDir(cfg.count))} reserved for ${cfg.reserve}` : ''
   out(`cap     ${cfg.count} slot(s)${reserved}; ${gate.reading}: ${gate.ok ? 'new holders allowed' : `no new holder, ${gate.why}`}`)
+  let recorded = '?'
+  try {
+    recorded = fs.readFileSync(VERSION_FILE, 'utf8').trim()
+  } catch {}
+  out(`tool    version ${VERSION} (newest in use: ${recorded})`)
   for (const n of slotNumbers(cfg)) {
     const holder = readHolder(n)
     const label = `slot ${n}`.padEnd(8)
@@ -315,7 +393,11 @@ export function status({ out = console.log } = {}) {
   const order = servingOrder(listTickets({ prune: false }))
   if (!order.length) out('queue   empty')
   order.forEach((t, i) =>
-    out(`${i ? '        ' : 'queue   '}${i + 1}. ${t.seat}${t.role !== 'developer' ? ` (${t.role})` : ''}  waiting ${age(nowS() - t.queuedS)}${t.stale ? ' (stale, dropped on the next take)' : ''}`),
+    out(
+      `${i ? '        ' : 'queue   '}${i + 1}. ${t.seat}${t.role !== 'developer' ? ` (${t.role})` : ''}  waiting ${age(nowS() - t.queuedS)}` +
+        (t.verdict ? `; last take ${age(nowS() - (t.checkedS || nowS()))} ago: ${t.verdict}` : '; no take since queueing') +
+        (t.stale ? ' (stale, dropped on the next take)' : ''),
+    ),
   )
   return 0
 }
