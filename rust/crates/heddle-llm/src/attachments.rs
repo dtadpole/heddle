@@ -260,6 +260,7 @@ mod tests {
             }),
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 

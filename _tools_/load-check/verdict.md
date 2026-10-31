@@ -1,9 +1,9 @@
 ---
 title: Load check verdict and exit codes
 created: 2026-10-24T05:01:48Z
-modified: 2026-10-31T01:20:28Z
+modified: 2026-10-31T07:45:00Z
 level: L2
-version: 1.4.0
+version: 1.5.0
 description: When a load-check line warns or stops and why, how to override a threshold for one run, and the exit codes.
 status: unverified
 grounded_in:
@@ -14,8 +14,9 @@ grounded_in:
 
 ## What warns and what stops
 
-- **disk** — the working model removes release artifacts below 26 GB, and below 20 GB nothing new starts
-  (D-064's other gate), so those are the warn and stop lines.
+- **disk** — the working model removes release artifacts below 26 GB, and below 16 GB nothing new starts
+  (D-067, which moved D-064's disk gate from 20 GB; between 16 and 20 GB the coordinator sweeps every pass), so
+  those are the warn and stop lines.
 - **team** — over 1.0/core is a warn and 1.3 a stop. **The verdict follows this figure**, not the load line,
   so Spotlight or Chrome cannot make the coordinator throttle the team.
 - **memory** — D-064's gate: `memory_pressure` free under 25% is a stop, nothing new starts. Under 30% it

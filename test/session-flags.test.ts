@@ -39,11 +39,10 @@ test('a session is named from its first message, and the name is one line a list
   assert.ok(!/\s…$/.test(long), 'without leaving a space before the ellipsis')
 })
 
-test('a fork is named after its parent with a rising ordinal, and never reuses a name', () => {
-  assert.equal(forkTitle('a conversation', []), 'a conversation (1)', 'DSH names a fork after its parent')
-  assert.equal(forkTitle('a conversation', ['a conversation (1)']), 'a conversation (2)', 'and the ordinal rises')
-  assert.equal(forkTitle('a conversation', ['a conversation (1)', 'a conversation (2)']), 'a conversation (3)', 'for as long as it must')
-  assert.equal(forkTitle('   ', ['x']), 'session (1)', 'an unnamed parent still yields a readable name')
+test('a fork is named after its parent alone, as DSH names it (#67)', () => {
+  assert.equal(forkTitle('a conversation'), 'a conversation (1)', 'DSH names a fork after its parent')
+  /** DSH's `increasedForkTitle` reads the source title and nothing else; the store-level case is test/session-fork-title.test.ts. */
+  assert.equal(forkTitle('   '), undefined, 'an unnamed parent leaves the fork unnamed, as DSH renames a fork only from a title')
 })
 
 test("a session's flags are written to its record, and a flag that is false is removed rather than stored", () => {
@@ -157,12 +156,10 @@ test('a fork of a fork is a fork of the conversation, not of the first session',
 
 test('a fork is named the way the reference names it: an existing ordinal is incremented, not appended to', () => {
   /** DSH's `increasedForkTitle`: `x (1)` becomes `x (2)`, a full-width `x（2）` becomes `x（3）`, and a bare title gains ` (1)`. */
-  assert.equal(forkTitle('a conversation', []), 'a conversation (1)', 'a title without an ordinal gains one')
-  assert.equal(forkTitle('a conversation (1)', []), 'a conversation (2)', 'an ASCII ordinal is incremented in place')
-  assert.equal(forkTitle('a conversation (9)', []), 'a conversation (10)', 'and the number is not a character count')
-  assert.equal(forkTitle('对话（2）', []), '对话（3）', 'a full-width ordinal, as a Chinese title carries, increments in its own form')
-  /** A taken name still steps past it: this store lists titles side by side, so a duplicate is a row nobody can tell apart. */
-  assert.equal(forkTitle('a conversation (19)', ['a conversation (20)']), 'a conversation (21)', 'a taken ordinal steps past itself')
+  assert.equal(forkTitle('a conversation'), 'a conversation (1)', 'a title without an ordinal gains one')
+  assert.equal(forkTitle('a conversation (1)'), 'a conversation (2)', 'an ASCII ordinal is incremented in place')
+  assert.equal(forkTitle('a conversation (9)'), 'a conversation (10)', 'and the number is not a character count')
+  assert.equal(forkTitle('对话（2）'), '对话（3）', 'a full-width ordinal, as a Chinese title carries, increments in its own form')
 })
 
 test('a fork inherits the projection cut at the last completed turn, not a dangling half-turn', () => {

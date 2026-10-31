@@ -89,7 +89,8 @@ test('the collapsed state is not remembered, so a reload cannot hide the tree', 
    */
   assert.doesNotMatch(page, /heddle\.layout\.collapsed/, 'no storage key for the collapsed state')
   assert.doesNotMatch(page, /setItem\(SIDEBAR_COLLAPSED_KEY/, 'and nothing written when it changes')
-  assert.match(page, /\/\*\* Every visit starts wide[\s\S]*?setSidebarCollapsed\(false\)/, 'a load puts the panel back')
+  // Below DSH's 1024-pixel breakpoint the first paint is the rail (live-testing draft developer-ten-9); wide, the panel.
+  assert.match(page, /Every visit starts wide on a wide window[\s\S]*?\npaintSidebarCollapse\(\)\n/, 'a load puts the panel back on a wide window')
 })
 
 test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the panel first", () => {
@@ -100,7 +101,7 @@ test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the pan
    */
   assert.match(page, /\{ key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table')
   assert.match(page, /if \(action === 'sidebar'\) \{/, 'and the handler acts on it')
-  assert.match(page, /if \(sidebarCollapsed\(\)\) setSidebarCollapsed\(false\)/, 'search opens the panel first')
+  assert.match(page, /if \(sidebarCollapsed\(\)\) openSidebar\(\)/, 'search opens the panel first')
 })
 
 test('the right panel is a tablist, with a tab and a panel for each view', () => {

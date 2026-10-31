@@ -23,7 +23,8 @@ import { fixtureDir, readTranscript, removeDir, repoRoot, runCli, sessionsUnder,
 
 const CAPABILITY = 'compaction through an OpenAI-compatible endpoint'
 const REASONING_TOKENS = 2000
-const INSTRUCTION = 'Summarise the conversation above so it can continue without the original messages.'
+/** The summariser's directive, recognised in either form: DSH's since #77, the older request before it. */
+const isInstruction = (text) => text.includes('acting as a compaction engine') || text.includes('Summarise the conversation above')
 
 /** A chat double that reasons for REASONING_TOKENS before answering, and records every request. */
 async function reasoningDouble() {
@@ -42,7 +43,7 @@ async function reasoningDouble() {
       const parsed = JSON.parse(body || '{}')
       const last = (parsed.messages ?? []).at(-1)
       const lastText = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '')
-      const summary = lastText.includes(INSTRUCTION)
+      const summary = isInstruction(lastText)
       requests.push({ summary, maxTokens: parsed.max_tokens })
       const frame = (delta, finish = null, usage) =>
         response.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }], ...(usage ? { usage } : {}) })}\n\n`)

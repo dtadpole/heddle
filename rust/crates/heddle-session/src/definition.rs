@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 use crate::clock::parse_iso;
 use crate::error::SessionError;
 use crate::event::SessionHandle;
+use crate::title_text::clean_session_title;
 
 /// The type folder a branch's sessions live in. The tree never draws it; it hoists what is inside.
 pub const SESSIONS_FOLDER: &str = "_sessions_";
@@ -238,8 +239,14 @@ pub fn write_session_definition(
         "createdAt".to_string(),
         Value::String(options.created_at.clone()),
     );
+    // The store's rule for a title (`title_text`), so the definition and the record name the session alike.
+    let title = options
+        .title
+        .as_deref()
+        .map(clean_session_title)
+        .filter(|title| !title.is_empty());
     for (key, value) in [
-        ("title", options.title.clone()),
+        ("title", title),
         ("endpoint", options.endpoint.clone()),
         ("model", options.model.clone()),
         ("reasoningEffort", options.reasoning_effort.clone()),
@@ -294,11 +301,12 @@ pub fn update_session_definition(dir: &str, title: Option<&str>) -> Result<bool,
         return Ok(false);
     };
     if let Some(title) = title {
-        let trimmed = title.trim();
-        if trimmed.is_empty() {
+        // Cleaned as the store cleans a rename (`title_text`); nothing visible left deletes the key.
+        let cleaned = clean_session_title(title);
+        if cleaned.is_empty() {
             current.remove("title");
         } else {
-            current.set("title", Value::String(trimmed.to_string()));
+            current.set("title", Value::String(cleaned));
         }
     }
     let file = Path::new(dir).join(DEFINITION_FILE);

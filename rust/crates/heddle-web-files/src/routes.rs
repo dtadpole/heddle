@@ -28,7 +28,7 @@
 //! | Method and path | Answers |
 //! |---|---|
 //! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text |
-//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf without ">"` · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
+//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf>"`, or for a leaf beyond visible ASCII (or with `"` or `\`) `attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded leaf>` (`attachment_disposition`) · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
 //! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
@@ -467,6 +467,38 @@ fn owned(host: &Arc<dyn FilesHost>, path: &Path) -> bool {
     host.workspace_owner(path) == WorkspaceAnswer::Owned
 }
 
+/// The `attachment` disposition for a file's own name, with nothing but visible ASCII in the header. A name of
+/// visible ASCII without `"` or `\` is sent as it is. Any other name keeps an ASCII `filename="…"` fallback, each
+/// other character (per code point) replaced by `_`, and carries the real name in `filename*=UTF-8''…` (RFC 6266,
+/// RFC 5987). The percent-encoding keeps only letters, digits and `-_.!~`, which is exactly JavaScript's
+/// `encodeURIComponent` with `'()*` also encoded, so the TypeScript server's `attachmentDisposition` writes the same
+/// bytes. Before this, a name such as `说明.txt` went into the header as raw UTF-8 bytes, which browsers decode
+/// differently and a strict proxy may refuse (live issue developer-two-3).
+pub(crate) fn attachment_disposition(name: &str) -> String {
+    let fallback: String = name
+        .chars()
+        .map(|c| {
+            if (' '..='~').contains(&c) && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if fallback == name {
+        return format!("attachment; filename=\"{name}\"");
+    }
+    let mut encoded = String::with_capacity(name.len() * 3);
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
 /// Serve one file's bytes with the type its extension names, and a download for anything a browser would run.
 fn serve_bytes(path: &Path, download_name: &str) -> Response {
     let metadata = match std::fs::metadata(path) {
@@ -480,10 +512,7 @@ fn serve_bytes(path: &Path, download_name: &str) -> Response {
     let inline = inline_content_type(&path.to_string_lossy());
     let disposition = match inline {
         Some(_) => "inline".to_string(),
-        None => format!(
-            "attachment; filename=\"{}\"",
-            download_name.replace('"', "")
-        ),
+        None => attachment_disposition(download_name),
     };
     let content_type = inline.unwrap_or("application/octet-stream");
     let mut response = Response::new(Body::from(bytes));
@@ -572,8 +601,12 @@ pub(crate) fn inline_content_type(path: &str) -> Option<&'static str> {
         .map(|(_, mime)| *mime)
 }
 
-/// Images, video, audio, fonts and PDF — what an `<img>`, a `<video>` or an `@font-face` needs. Nothing a browser
-/// would run as a page or a script.
+/// Images, video, audio, fonts, PDF and stylesheets — what an `<img>`, a `<video>`, an `@font-face` or a
+/// `<link rel="stylesheet">` needs. Nothing a browser would run as a page or a script.
+///
+/// A stylesheet is here because an HTML preview's `<link rel="stylesheet">` is rewritten to `/api/raw`, and a browser
+/// refuses a stylesheet whose type is not `text/css` in a standards-mode document: measured 2026-10-29 (DSH parity
+/// R-developer-twelve-14), a preview's relative CSS never applied because it arrived as a download type.
 pub(crate) const INLINE_TYPES: &[(&str, &str)] = &[
     (".png", "image/png"),
     (".jpg", "image/jpeg"),
@@ -594,6 +627,7 @@ pub(crate) const INLINE_TYPES: &[(&str, &str)] = &[
     (".ttf", "font/ttf"),
     (".otf", "font/otf"),
     (".pdf", "application/pdf"),
+    (".css", "text/css; charset=utf-8"),
 ];
 
 #[cfg(test)]
@@ -605,6 +639,19 @@ mod tests {
         assert_eq!(inline_content_type("/w/heddle.svg"), Some("image/svg+xml"));
         assert_eq!(inline_content_type("/w/SHOT.PNG"), Some("image/png"));
         assert_eq!(inline_content_type("/w/doc.pdf"), Some("application/pdf"));
+    }
+
+    #[test]
+    fn a_stylesheet_is_served_inline_as_css_so_an_html_preview_can_apply_it() {
+        // DSH parity R-developer-twelve-14: served as a download type, a preview's relative CSS never applied.
+        assert_eq!(
+            inline_content_type("/w/style.css"),
+            Some("text/css; charset=utf-8")
+        );
+        assert_eq!(
+            inline_content_type("/w/THEME.CSS"),
+            Some("text/css; charset=utf-8")
+        );
     }
 
     #[test]
@@ -1122,6 +1169,74 @@ mod tests {
                 .to_str()
                 .unwrap(),
             "attachment; filename=\"AGENTS.md\""
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_download_name_reaches_the_header_as_visible_ascii_with_the_real_name_encoded() {
+        assert_eq!(
+            attachment_disposition("notes.txt"),
+            "attachment; filename=\"notes.txt\""
+        );
+        assert_eq!(
+            attachment_disposition("说明.txt"),
+            "attachment; filename=\"__.txt\"; filename*=UTF-8''%E8%AF%B4%E6%98%8E.txt"
+        );
+        assert_eq!(
+            attachment_disposition("café.txt"),
+            "attachment; filename=\"caf_.txt\"; filename*=UTF-8''caf%C3%A9.txt"
+        );
+        assert_eq!(
+            attachment_disposition("say \"hi\"\\now.txt"),
+            "attachment; filename=\"say _hi__now.txt\"; filename*=UTF-8''say%20%22hi%22%5Cnow.txt"
+        );
+        assert_eq!(
+            attachment_disposition("line\nbreak (1)'*.txt"),
+            "attachment; filename=\"line_break (1)'*.txt\"; filename*=UTF-8''line%0Abreak%20%281%29%27%2A.txt"
+        );
+        assert_eq!(
+            attachment_disposition("🦀.bin"),
+            "attachment; filename=\"_.bin\"; filename*=UTF-8''%F0%9F%A6%80.bin"
+        );
+        for name in ["说明.txt", "café.txt", "a\"b\\c\n.txt", "🦀.bin"] {
+            let value = attachment_disposition(name);
+            assert!(
+                value.bytes().all(|b| (0x20..0x7f).contains(&b)),
+                "only visible ASCII in the header for {name:?}: {value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_named_beyond_ascii_downloads_whole_under_its_real_name() {
+        let (base, host) = scratch("raw-unicode-name");
+        let path = host.root.join("说明.txt");
+        std::fs::write(&path, "第一行\n").unwrap();
+        let (status, headers, bytes) = call(
+            routes_of(host),
+            "GET",
+            &format!(
+                "/api/raw?path={}",
+                crate::markdown::percent_encode(&path.to_string_lossy())
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(status, Status::OK);
+        assert_eq!(body_text(&bytes), "第一行\n", "the whole file is the body");
+        let disposition = headers
+            .get(header::CONTENT_DISPOSITION)
+            .expect("a download carries a disposition")
+            .as_bytes();
+        assert!(
+            disposition.iter().all(|b| (0x20..0x7f).contains(b)),
+            "no raw byte beyond ASCII in the header: {:?}",
+            String::from_utf8_lossy(disposition)
+        );
+        assert_eq!(
+            disposition,
+            b"attachment; filename=\"__.txt\"; filename*=UTF-8''%E8%AF%B4%E6%98%8E.txt"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

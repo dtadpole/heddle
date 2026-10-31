@@ -36,6 +36,8 @@ export default class ToolsPlugin extends ToolRegistry {
     includeBuiltins: Schema.boolean().default(true),
     /** Wall time a `bash` call may take before it is killed. */
     bashTimeoutMs: Schema.number().default(30_000),
+    /** The most wall time a `bash` call may ask for with its own `timeoutMs`; a larger request is cut (DSH's `maxTimeoutMs`). */
+    bashMaxTimeoutMs: Schema.natural().min(1).max(2_147_483_647).default(600_000),
     /** Characters of a `bash` call's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
     bashOutputLimit: Schema.natural().min(1).default(20_000),
     /** Parallel-safe tool calls one model step runs at once; 1 runs every call alone (DSH's `maxParallelToolCalls`). */
@@ -48,6 +50,7 @@ export default class ToolsPlugin extends ToolRegistry {
       allow?: readonly string[]
       includeBuiltins?: boolean
       bashTimeoutMs?: number
+      bashMaxTimeoutMs?: number
       bashOutputLimit?: number
       maxParallelToolCalls?: number
     } = {},
@@ -60,6 +63,7 @@ export default class ToolsPlugin extends ToolRegistry {
     const definitions = config.includeBuiltins === false ? [] : [
             ...builtinTools(ctx.sandbox, {
               ...(config.bashTimeoutMs !== undefined ? { bashTimeoutMs: config.bashTimeoutMs } : {}),
+              ...(config.bashMaxTimeoutMs !== undefined ? { bashMaxTimeoutMs: config.bashMaxTimeoutMs } : {}),
               ...(config.bashOutputLimit !== undefined ? { bashOutputLimit: config.bashOutputLimit } : {}),
             }),
           ]

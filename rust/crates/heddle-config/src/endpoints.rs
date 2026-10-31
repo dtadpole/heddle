@@ -215,6 +215,10 @@ pub struct EndpointConfig {
     /// Milliseconds before a request is abandoned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Whether an Anthropic route marks the prompt for caching (#70). Absent means on, as DSH caches by default;
+    /// `false` is the switch for a gateway that refuses `cache_control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 /// A partial endpoint: what a layer, the local file or the environment restates. Every field optional;
@@ -259,6 +263,8 @@ pub struct EndpointPatch {
     pub proxy: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 impl EndpointConfig {
@@ -346,6 +352,36 @@ pub fn default_endpoints() -> Vec<EndpointConfig> {
         capabilities: Some(vec!["offline".into(), "tools".into()]),
         ..EndpointConfig::default()
     }]
+}
+
+/// Whether `endpoint` is the shipped offline fixture as [`default_endpoints`] ships it: same name, kind and
+/// script path (`isShippedFixture`). A machine that restated it with its own script is not.
+pub fn is_shipped_fixture(endpoint: &EndpointConfig) -> bool {
+    default_endpoints().iter().any(|shipped| {
+        shipped.name == endpoint.name
+            && shipped.kind == endpoint.kind
+            && shipped.base_url == endpoint.base_url
+    })
+}
+
+/// What a turn on the shipped fixture says when its script is not there (`unscriptedFixtureMessage`, issue #74).
+///
+/// That is what a home that configured nothing runs on, so the old "the script for 'scripted' could not be read
+/// at scripted.json" was the first thing a new user saw, and it named a test file. This names the machine file a
+/// run reads (the first of [`crate::local_config_candidates`]) and the shape to write there, as DSH's missing-key
+/// message names the credential and where to store it.
+pub fn unscripted_fixture_message(env: &Env) -> String {
+    let path = crate::local_config_candidates(env)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| heddle_home(env).join("heddle.json"));
+    format!(
+        "the offline test endpoint 'scripted' has no script at scripted.json. To talk to a model, pick another \
+         endpoint for this session, or declare one in {}, for example {{\"endpoints\": [{{\"name\": \"mine\", \
+         \"kind\": \"openai-chat\", \"baseUrl\": \"<url>\", \"model\": \"<model>\", \"apiKeyFile\": \"<key file>\"}}], \
+         \"default\": \"mine\"}}",
+        path.display()
+    )
 }
 
 /// `configPaths` from `src/endpoints.ts`: `[$HEDDLE_CONFIG]` when it is non-empty, else
@@ -454,6 +490,9 @@ fn apply_patch(endpoint: &mut EndpointConfig, patch: &EndpointPatch) {
     }
     if let Some(value) = patch.timeout_ms {
         endpoint.timeout_ms = Some(value);
+    }
+    if let Some(value) = patch.prompt_cache {
+        endpoint.prompt_cache = Some(value);
     }
 }
 
@@ -1211,6 +1250,51 @@ mod tests {
                 PathBuf::from("/home/someone/.h/heddle.json"),
                 PathBuf::from("/home/someone/.heddle/heddle.json"),
             ]
+        );
+    }
+
+    #[test]
+    fn only_the_fixture_as_shipped_is_the_shipped_fixture() {
+        let shipped = default_endpoints().remove(0);
+        assert!(is_shipped_fixture(&shipped));
+        let scripted_elsewhere = EndpointConfig {
+            base_url: "/tmp/steps.json".into(),
+            ..shipped.clone()
+        };
+        assert!(!is_shipped_fixture(&scripted_elsewhere));
+        let renamed = EndpointConfig {
+            name: "double".into(),
+            ..shipped.clone()
+        };
+        assert!(!is_shipped_fixture(&renamed));
+        let other_kind = EndpointConfig {
+            kind: EndpointKind::OpenaiChat,
+            ..shipped
+        };
+        assert!(!is_shipped_fixture(&other_kind));
+    }
+
+    #[test]
+    fn the_unscripted_fixture_message_names_the_machine_file_a_run_reads() {
+        let home = Env::default()
+            .with("HOME", "/home/someone")
+            .with("HEDDLE_HOME", "/home/someone/.h");
+        let message = unscripted_fixture_message(&home);
+        assert!(
+            message.starts_with(
+                "the offline test endpoint 'scripted' has no script at scripted.json. To talk to a model,"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("declare one in /home/someone/.h/heddle.json, for example {\"endpoints\": [{\"name\": \"mine\", \"kind\": \"openai-chat\""),
+            "{message}"
+        );
+        assert!(message.ends_with("\"default\": \"mine\"}"), "{message}");
+        let named = home.with("HEDDLE_CONFIG", "/etc/heddle.json");
+        assert!(
+            unscripted_fixture_message(&named).contains("declare one in /etc/heddle.json,"),
+            "HEDDLE_CONFIG is the file a run reads first"
         );
     }
 }
