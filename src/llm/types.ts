@@ -497,6 +497,15 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'session/event'(payload: { readonly session: string; readonly event: { readonly seq: number; readonly at: string; readonly type: string; readonly [key: string]: unknown } }): void
+
+    /**
+     * A session's title was written: a person's rename, the first message's fallback, a fork's name or the title model's
+     * answer (#33). The title lives in the meta record, so no `session/event` carries it.
+     *
+     * @param payload - the session id and the title now stored (`''` when cleared).
+     * @mode emit
+     */
+    'session/renamed'(payload: { readonly session: string; readonly title: string }): void
   }
 }
 

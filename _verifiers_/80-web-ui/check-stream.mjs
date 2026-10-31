@@ -541,6 +541,89 @@ test('renames, workspace edits and settled approvals are pushed to every stream,
   }
 })
 
+test('a session titled from its first message, then by the title model, is pushed as renamed to every stream', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  /**
+   * #33: DSH writes a session's title each time it changes, first the fallback from the first message and then the title
+   * model's answer, and every view of the session follows (inventory-shell S16). Only a person's rename was pushed. The
+   * tree, re-read on log events, took the title, but the open session's header kept its raw id until a reload.
+   */
+  const generated = 'Counting To Three'
+  const server = await startServer('auto-title', [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: '1 2 3' }])
+  const pages = []
+  try {
+    const cookie = await cookieFor(server)
+    pages.push(await openStream(server, cookie), await openStream(server, cookie))
+    for (const page of pages) await page.next((frame) => frame.event === 'ready')
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work })
+    assert.equal(created.status, 200, created.text)
+    const session = created.json.session
+    const prompt = 'Write the whole numbers from 1 to 3'
+    const turn = await runTurn(server, cookie, { session, prompt })
+    assert.equal(turn.status, 200, turn.text)
+    const renamed = (title) => (frame) => frame.event === 'sessions' && frame.data?.type === 'session/renamed' && frame.data.session === session && frame.data.title === title
+    for (const page of pages) {
+      const fallback = await page.next(renamed(prompt), 10_000)
+      const titled = await page.next(renamed(generated), 10_000)
+      for (const frame of [fallback, titled]) assert.match(frame.id ?? '', /^[0-9a-f]+-\d+$/, 'each rename is a numbered frame')
+      assert.ok(Number(titled.id.split('-').at(-1)) > Number(fallback.id.split('-').at(-1)), "the model's title follows the first message's")
+    }
+    /**
+     * A person's rename comes through the same one path, so it is pushed once, not once by the route and once by the
+     * store. A later sentinel rename bounds the wait: once a page has it, every earlier push has arrived, so each title
+     * can be counted exactly.
+     */
+    const rename = async (title) => {
+      const answer = await api(server, cookie, 'POST', `/api/sessions/${encodeURIComponent(session)}/title`, { title })
+      assert.equal(answer.status, 200, answer.text)
+    }
+    await rename('named by a person')
+    await rename('sentinel')
+    for (const [index, page] of pages.entries()) {
+      await page.next(renamed('sentinel'), 10_000)
+      for (const title of [prompt, generated, 'named by a person']) {
+        assert.equal(page.frames.filter(renamed(title)).length, 1, `page ${index + 1} hears ${JSON.stringify(title)} once`)
+      }
+    }
+  } finally {
+    for (const page of pages) page.close()
+    await server.close()
+  }
+})
+
+test("the open session's header follows its automatic title without a reload, as the tree row does", async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** #33, in the page: the header kept the raw session id for the whole conversation, until a reload. */
+  const generated = 'Counting To Three'
+  const server = await startServer('header-title', [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: '1 2 3' }])
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    const cookie = await cookieFor(server)
+    await api(server, cookie, 'POST', '/api/workspaces', { path: server.work })
+    const created = await api(server, cookie, 'POST', '/api/sessions', { branch: server.work })
+    const session = created.json.session
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    /** A blank session is a tree row only while it is open (stack 2, DSH's sessionVisible), so it is opened by id. */
+    assert.equal(await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`), true, 'the session is open')
+    await browser.evaluate('window.__heddleNoReload = true')
+    assert.ok(await browser.waitFor('document.body.dataset.connection === "open"', 10_000), 'the page says its stream is open')
+
+    const turn = await runTurn(server, cookie, { session, prompt: 'Write the whole numbers from 1 to 3' })
+    assert.equal(turn.status, 200, turn.text)
+    const header = `document.getElementById('session-title').textContent.trim()`
+    const row = `(document.querySelector('#tree li[data-session-id="${session}"]')?.textContent ?? '')`
+    assert.ok(await browser.waitFor(`${header} === ${JSON.stringify(generated)}`, 10_000), `the header reads the generated title (it reads ${JSON.stringify(await browser.evaluate(header))})`)
+    assert.ok(await browser.waitFor(`${row}.includes(${JSON.stringify(generated)})`, 10_000), 'and so does the tree row')
+    assert.equal(await browser.evaluate('window.__heddleNoReload === true'), true, 'and the page was never reloaded')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a page redraws a rename and a new workspace made elsewhere, without a reload', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
