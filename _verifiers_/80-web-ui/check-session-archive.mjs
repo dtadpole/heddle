@@ -238,6 +238,22 @@ test('an archived session is restored from Archived only and from search, and a 
     assert.equal(await noticeText('archived'), 'Session archived. You can undo or filter archived sessions', "and DSH's notice offers undo and the filter")
 
     /**
+     * Under *Hide archived* the archived session is no search result: not by its title, and not as the host's content hit
+     * (its first prompt holds the word). Search follows the filter, as DSH's does (`sessionVisible` in
+     * `deriveSearchResults`, lib/client.js:1185 and :1199), and "No matching sessions" waits for the host's answer
+     * (`!pending`, :3492), so the note judges both halves.
+     */
+    await search('kestrel')
+    assert.ok(
+      await browser
+        .waitFor(`document.getElementById('search-note').hidden === false && document.getElementById('search-note').textContent === 'No matching sessions'`, 10_000)
+        .catch(() => false),
+      `under Hide archived the archived session is not found\nhits: ${await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#search-results .hit')].map((hit) => hit.textContent))`)}`,
+    )
+    assert.equal(await browser.evaluate(`document.querySelectorAll('#search-results .hit').length`), 0, 'and no result is listed for it')
+    await search('')
+
+    /**
      * Search: an archived result carries Unarchive, and choosing the result explains rather than opens. Search follows
      * the archive filter, as DSH's does (`sessionVisible` in `deriveSearchResults`, lib/client.js:1185), so the archived
      * session is a result under *All conversations (show archived)*, the filter DSH's stop-and-archive dialog names.
