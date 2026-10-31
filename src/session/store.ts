@@ -892,7 +892,8 @@ export class SessionStore {
     foldSurface([...log.events, ...records])
     const lines = records.map((record) => `${JSON.stringify(record)}\n`)
     appendFileSync(handle.transcript, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
-    log.events.push(...records)
+    /** One push per event: a long source's seed is far more events than a spread may pass as arguments. */
+    for (const record of records) log.events.push(record)
     const turns = records.filter((record) => record.type === 'message' && (record.message as RecordedMessage | undefined)?.role === 'user').length
     this.touch(handle, { addTurns: turns })
   }
