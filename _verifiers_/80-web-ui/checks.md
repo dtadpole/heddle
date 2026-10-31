@@ -3,7 +3,7 @@ title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
 modified: 2026-10-31T08:45:00Z
 level: L3
-version: 1.1.1
+version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -49,12 +49,26 @@ grounded_in:
   (a rename to another workspace's name is `409 workspace/name-conflict`), delete removing the registration while its
   sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
-  workspace* and *Delete workspace* dialogs end to end.
+  workspace* and *Delete workspace* dialogs end to end; with the server gone, *Add workspace* and *New session* say
+  that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
-  nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
-  Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
-  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+  nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
+  less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
+  the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
+  starting in the workspace row the person opened rather than the open session's, and the `Workspace` grouping
+  drawing sibling sections; and the Session Intent hero's workspace picker (C36): over a blank session a `Choose
+  workspace` chip naming its workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu
+  keys, and a pick that moves the new session and its draft so the first prompt runs in the picked workspace.
+- [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
+  real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
+  relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
+  card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
+  none for Ungrouped; the card closing when the pointer leaves the list.
+- [`check-workspace-drag.mjs`](check-workspace-drag.mjs) — reordering workspaces by drag (DSH's
+  `workspace/insertBefore`, C37): a workspace header dragged onto a sibling's section lands before or after it with
+  the drop line drawn, the host stores the order (`GET /api/workspaces`) and a reload keeps it, while a nested
+  workspace or Ungrouped is not a place a top-level workspace can land.
 - [`check-narrow-layout.mjs`](check-narrow-layout.mjs) — a narrow window at DSH parity: below 1024 pixels the
   sidebar is the 56-pixel rail (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so at phone width (390 x 844, the
   protocol's device metrics) the conversation keeps a readable width and the composer and its send button stay on

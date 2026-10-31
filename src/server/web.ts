@@ -9,6 +9,10 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
 import type { TurnRegistry } from '../agent/turns.ts'
+import { handleCommandRequest } from '../commands/http.ts'
+import type { CommandService } from '../commands/service.ts'
+import { handlePlanRequest } from '../plan/http.ts'
+import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
@@ -37,7 +41,7 @@ import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { pendingInbox, queueSteer, steeringOpen } from '../session/inbox.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
-import { handleJobsRoute } from '../jobs/http.ts'
+import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -608,6 +612,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  /** The slash commands (`src/commands/`, developer-three): their list and a run, handed over behind the door. */
+  const commands = ctx.get('commands') as CommandService | undefined
+  if (commands !== undefined && (await handleCommandRequest(commands.routes, request, response, url))) return
+  /** Plan mode (`src/plan/`, developer-three): whether a session is in it, for the composer's Plan chip. */
+  const plan = ctx.get('plan') as PlanService | undefined
+  if (plan !== undefined && (await handlePlanRequest(plan.routes, request, response, url))) return
+
   /**
    * A file's **bytes**, so a document's embedded images and other subresources can load.
    *
@@ -926,22 +937,30 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
     }
-    const node = tree(wanted === null || wanted.length === 0 ? null : wanted, {
-      roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
-      sessions: ctx.session.list(),
-      generated: workspaces.generated,
-      /**
-       * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
-       * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
-       * person may have bookmarked.
-       */
-      archived:
-        url.searchParams.get('archived') === 'only'
-          ? 'only'
-          : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
-            ? 'show'
-            : 'hide',
-    })
+    /** A folder the tree may not read is `400` with its code (#106), as the folder picker answers an unreadable one. */
+    let node
+    try {
+      node = tree(wanted === null || wanted.length === 0 ? null : wanted, {
+        roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
+        sessions: ctx.session.list(),
+        generated: workspaces.generated,
+        /**
+         * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
+         * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
+         * person may have bookmarked.
+         */
+        archived:
+          url.searchParams.get('archived') === 'only'
+            ? 'only'
+            : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
+              ? 'show'
+              : 'hide',
+      })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'workspace-file/unreadable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace-file/unreadable' })}\n`)
+      return
+    }
     respond(response, 200, 'application/json', `${JSON.stringify(node, null, 2)}\n`)
     return
   }
@@ -1295,6 +1314,28 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  /**
+   * First use — DSH's `workspace/initializeDefault` (dsh-api-workspace-controller lib/index.js:881-887): create or reuse
+   * the default workspace, `$HEDDLE_HOME/default-workspace`, while nothing is registered and no session exists, and
+   * answer `{workspace}` — the record, or `null` when this install is not a first use (that is not an error). The page
+   * asks once at startup when it has nothing to show. No session is started and nothing is sent. A folder that cannot
+   * be made is `500 {error, code: 'workspace/default-failed'}`.
+   */
+  if (url.pathname === '/api/workspaces/default' && request.method === 'POST') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    try {
+      const record = workspaces.initializeDefault(ctx.session.list())
+      respond(response, 200, 'application/json', `${JSON.stringify({ workspace: record ?? null }, null, 2)}\n`)
+    } catch (error) {
+      respond(response, 500, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace/default-failed' })}\n`)
+    }
+    return
+  }
+
   if (url.pathname === '/api/workspaces/pick' && request.method === 'POST') {
     const outcome = await pickFolder()
     if (outcome.kind === 'unavailable') {
@@ -1599,19 +1640,35 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
      * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
      */
+    /**
+     * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
+     * they block the archive the same way, are listed in the refusal, and with `stop: true` are killed with
+     * `session archived` once the archive is written.
+     */
+    const jobs = ctx.get('jobs') as JobRegistry | undefined
+    const stopJobs = archived === true && body.stop === true
     if (archived === true) {
       const running = state.running.get(id) ?? 0
-      if (running > 0) {
+      const liveJobs = sessionJobActivity(jobs, id)
+      if (running > 0 || liveJobs.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
-            `${JSON.stringify({ error: `session ${id} is running; pass stop: true to stop it and archive`, code: 'active', running })}\n`,
+            `${JSON.stringify({
+              error:
+                running > 0
+                  ? `session ${id} is running; pass stop: true to stop it and archive`
+                  : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
+              code: 'active',
+              running,
+              ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
+            })}\n`,
           )
           return
         }
-        abortSession(state.controllers, id)
+        if (running > 0) abortSession(state.controllers, id)
       }
     }
     let meta
@@ -1637,6 +1694,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
+    if (stopJobs) stopSessionJobs(jobs, id)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -1834,10 +1892,19 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const preset = newSessionPreset(ctx, named.preset)
-    const { handle, definition } = ctx.session.createAt(wanted, {
-      ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
-      ...(preset !== undefined ? { preset } : {}),
-    })
+    /** A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. */
+    let created
+    try {
+      created = ctx.session.createAt(wanted, {
+        ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+        ...(preset !== undefined ? { preset } : {}),
+      })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'session/unwritable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+      return
+    }
+    const { handle, definition } = created
     respond(
       response,
       200,
@@ -3189,7 +3256,35 @@ export function transcriptTurns(
     if (write !== undefined && state === 'ok') write.ok = true
   }
 
+  /** Where each slash command's row sits, by its run id (src/commands/, developer-three). */
+  const commandAt = new Map<string, number>()
+
   for (const event of events) {
+    /**
+     * A slash command is a row of its own, outside the conversation: `command/run` opens it and `command/done`
+     * settles it with the host's words. Neither is a message, so the model never saw either.
+     */
+    if (event.type === 'command/run' && typeof event.commandId === 'string') {
+      closeRuns()
+      commandAt.set(event.commandId, turns.length)
+      turns.push({
+        kind: 'command',
+        text: '',
+        commandId: event.commandId,
+        name: typeof event.name === 'string' ? event.name : '',
+        ...(typeof event.args === 'string' ? { args: event.args } : {}),
+        state: 'running',
+      })
+      continue
+    }
+    if (event.type === 'command/done' && typeof event.commandId === 'string') {
+      const index = commandAt.get(event.commandId)
+      const turn = index === undefined ? undefined : turns[index]
+      if (index !== undefined && turn !== undefined) {
+        turns[index] = { ...turn, state: event.kind === 'error' ? 'error' : 'done', text: typeof event.text === 'string' ? event.text : '' }
+      }
+      continue
+    }
     if (event.type === 'message') {
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
@@ -3329,7 +3424,7 @@ export interface TurnAttachment {
 }
 
 export interface ChatTurn {
-  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool'
+  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'command'
   /**
    * A user row the loop wrote by claiming a steer names the steer's id (#31), so a page that missed the live claim
    * (a reload, a reconnect, a second tab) can retire its "Steering…" row from this view.
@@ -3371,8 +3466,12 @@ export interface ChatTurn {
   readonly toolCallId?: string
   /** What the tool answered — on the same turn, which is what makes one element of it. */
   readonly result?: string
-  /** DSH's phases, simplified: a call is running until its result says otherwise. */
-  readonly state?: 'running' | 'ok' | 'error'
+  /** DSH's phases, simplified: a call is running until its result says otherwise; a command is done or failed. */
+  readonly state?: 'running' | 'ok' | 'error' | 'done'
+  /** A slash command's run id, which pairs its `command/run` and `command/done` (src/commands/). */
+  readonly commandId?: string
+  /** What followed the command's name, when the log kept it. */
+  readonly args?: string
 }
 
 /**

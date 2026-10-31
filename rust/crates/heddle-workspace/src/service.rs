@@ -41,11 +41,28 @@ pub fn default_workspace_file(env: &Env) -> String {
         .into_owned()
 }
 
+/// The first-use folder's own name — DSH's `DEFAULT_WORKSPACE_DIRECTORY`
+/// (dsh-api-workspace-controller `lib/types/default-workspace.js`). Fixed and language-neutral; the
+/// workspace's first title is this same name, which the page labels *Default workspace*.
+pub const DEFAULT_WORKSPACE_DIRECTORY: &str = "default-workspace";
+
+/// Where first use puts its workspace: `$HEDDLE_HOME/default-workspace`, else
+/// `~/.heddle/default-workspace` (`defaultWorkspaceDirectory` in `src/workspace/service.ts`). DSH uses
+/// `<Documents>/deepseek-harness/default-workspace`; heddle's counterpart of that product folder is its own
+/// home, so first use never reaches into the user's Documents.
+pub fn default_workspace_directory(env: &Env) -> String {
+    heddle_home(env)
+        .join(DEFAULT_WORKSPACE_DIRECTORY)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// The workspace service.
 #[derive(Debug)]
 pub struct WorkspaceService {
     file: String,
     generated: Vec<String>,
+    default_directory: String,
     lock: std::sync::Mutex<()>,
 }
 
@@ -60,6 +77,7 @@ impl WorkspaceService {
         WorkspaceService {
             file: canonical_path(&expanded).to_string_lossy().into_owned(),
             generated: config.generated.clone(),
+            default_directory: default_workspace_directory(env),
             lock: std::sync::Mutex::new(()),
         }
     }
@@ -67,6 +85,12 @@ impl WorkspaceService {
     /// The record file's absolute path.
     pub fn file(&self) -> &str {
         &self.file
+    }
+
+    /// The folder [`WorkspaceService::initialize_default`] creates or reuses
+    /// ([`default_workspace_directory`] of the environment the service was made with).
+    pub fn default_directory(&self) -> &str {
+        &self.default_directory
     }
 
     /// The configured generated-folder names.
@@ -141,6 +165,10 @@ impl WorkspaceService {
             version: 3,
             workspace_ids,
             workspaces,
+            default_workspace_id: value
+                .get("defaultWorkspaceId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }
     }
 
@@ -246,6 +274,54 @@ impl WorkspaceService {
             record,
             created: before.is_none(),
         })
+    }
+
+    /// First use: create or reuse the default workspace in [`WorkspaceService::default_directory`] — DSH's
+    /// `workspace/initializeDefault` (dsh-workspace `lib/index.js:425-440`), `initializeDefault` in
+    /// `src/workspace/service.ts`.
+    ///
+    /// Once a first use has happened the answer is that workspace, or `None` when its registration was
+    /// deleted (deleting it turns first use off for good). Otherwise it applies only to an empty install —
+    /// no workspace record of any kind and no session in `all` — and anything else is `Ok(None)`, not an
+    /// error. The folder is made when missing and reused when present; the workspace is `added`, titled
+    /// [`DEFAULT_WORKSPACE_DIRECTORY`]. No session is started.
+    pub fn initialize_default(
+        &self,
+        all: &[SessionMeta],
+    ) -> Result<Option<WorkspaceRecord>, WorkspaceError> {
+        let _guard = self
+            .lock
+            .lock()
+            .expect("the workspace lock is never poisoned");
+        let shape = self.read();
+        if let Some(id) = &shape.default_workspace_id {
+            return Ok(shape.workspaces.get(id).cloned());
+        }
+        if !shape.workspace_ids.is_empty() || !shape.workspaces.is_empty() || !all.is_empty() {
+            return Ok(None);
+        }
+        std::fs::create_dir_all(&self.default_directory).map_err(|error| WorkspaceError::Io {
+            path: self.default_directory.clone(),
+            source: error,
+        })?;
+        let now = iso_now();
+        let record = WorkspaceRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: canonical_path(Path::new(&self.default_directory))
+                .to_string_lossy()
+                .into_owned(),
+            title: DEFAULT_WORKSPACE_DIRECTORY.to_string(),
+            origin: WorkspaceOrigin::Added,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        self.write(&WorkspaceStoreShape {
+            version: 3,
+            workspace_ids: vec![record.id.clone()],
+            workspaces: IndexMap::from([(record.id.clone(), record.clone())]),
+            default_workspace_id: Some(record.id.clone()),
+        })?;
+        Ok(Some(record))
     }
 
     /// Unregister a root by id or path.
@@ -1025,5 +1101,121 @@ mod tests {
             meta("session-link", link.to_str().unwrap()),
         ]);
         assert_eq!(views[0].session_ids, vec!["session-upper", "session-link"]);
+    }
+
+    /// A store whose `$HEDDLE_HOME` is a temp folder, so first use makes its folder there.
+    fn install() -> (tempfile::TempDir, WorkspaceService) {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let env = Env::default().with("HEDDLE_HOME", home.to_string_lossy());
+        let service = WorkspaceService::new(&WorkspaceConfig::default(), &env);
+        (dir, service)
+    }
+
+    #[test]
+    fn the_default_folder_is_heddles_home_default_workspace() {
+        let env = Env::default().with("HEDDLE_HOME", "/fixture/home");
+        assert_eq!(DEFAULT_WORKSPACE_DIRECTORY, "default-workspace");
+        assert_eq!(
+            default_workspace_directory(&env),
+            "/fixture/home/default-workspace"
+        );
+        let service = WorkspaceService::new(&WorkspaceConfig::default(), &env);
+        assert_eq!(
+            service.default_directory(),
+            "/fixture/home/default-workspace"
+        );
+        let unset = Env::default().with("HOME", "/fixture/user");
+        assert_eq!(
+            default_workspace_directory(&unset),
+            "/fixture/user/.heddle/default-workspace",
+            "heddle's own home, never the user's Documents"
+        );
+    }
+
+    #[test]
+    fn an_empty_install_creates_the_default_workspace_once_and_reuses_it() {
+        let (_dir, service) = install();
+        let created = service
+            .initialize_default(&[])
+            .unwrap()
+            .expect("a first use");
+        assert_eq!(created.path, cwd(service.default_directory()));
+        assert_eq!(created.title, "default-workspace");
+        assert_eq!(created.origin, WorkspaceOrigin::Added);
+        assert!(Path::new(service.default_directory()).is_dir());
+        assert_eq!(service.list(), vec![created.clone()]);
+        assert_eq!(
+            service.read().default_workspace_id,
+            Some(created.id.clone())
+        );
+
+        let again = service.initialize_default(&[]).unwrap().expect("reused");
+        assert_eq!(again.id, created.id, "the same workspace, not a second one");
+        assert_eq!(service.list().len(), 1);
+    }
+
+    #[test]
+    fn a_default_folder_that_already_exists_is_reused_as_it_is() {
+        let (_dir, service) = install();
+        std::fs::create_dir_all(service.default_directory()).unwrap();
+        let notes = Path::new(service.default_directory()).join("notes.md");
+        std::fs::write(&notes, "kept\n").unwrap();
+        let record = service.initialize_default(&[]).unwrap().unwrap();
+        assert_eq!(record.path, cwd(service.default_directory()));
+        assert_eq!(std::fs::read_to_string(&notes).unwrap(), "kept\n");
+    }
+
+    #[test]
+    fn first_use_is_only_for_an_empty_install() {
+        let (dir, with_workspace) = install();
+        let chosen = dir.path().join("chosen");
+        std::fs::create_dir_all(&chosen).unwrap();
+        with_workspace.add(chosen.to_str().unwrap(), None).unwrap();
+        assert_eq!(with_workspace.initialize_default(&[]).unwrap(), None);
+        assert!(!Path::new(with_workspace.default_directory()).exists());
+
+        let (dir, with_session) = install();
+        let elsewhere = dir.path().join("elsewhere");
+        let sessions = [meta("session-1", elsewhere.to_str().unwrap())];
+        assert_eq!(with_session.initialize_default(&sessions).unwrap(), None);
+        assert!(!Path::new(with_session.default_directory()).exists());
+        assert!(with_session.list().is_empty());
+    }
+
+    #[test]
+    fn deleting_the_default_workspace_turns_first_use_off_and_keeps_its_folder() {
+        let (_dir, service) = install();
+        let created = service.initialize_default(&[]).unwrap().unwrap();
+        service.remove(&created.id, &[], false).unwrap();
+        assert!(service.list().is_empty());
+        assert_eq!(service.initialize_default(&[]).unwrap(), None);
+        assert!(service.list().is_empty());
+        assert!(Path::new(service.default_directory()).is_dir());
+        assert_eq!(service.read().default_workspace_id, Some(created.id));
+    }
+
+    #[test]
+    fn the_record_keeps_the_default_workspace_through_other_writes() {
+        let (dir, service) = install();
+        let created = service.initialize_default(&[]).unwrap().unwrap();
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        service.add(other.to_str().unwrap(), None).unwrap();
+        service.rename(&created.id, "Mine").unwrap();
+        let text = std::fs::read_to_string(service.file()).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            vec![
+                "version",
+                "workspaceIds",
+                "workspaces",
+                "defaultWorkspaceId"
+            ],
+            "the TypeScript build's order"
+        );
+        assert_eq!(value["defaultWorkspaceId"], created.id.as_str());
     }
 }

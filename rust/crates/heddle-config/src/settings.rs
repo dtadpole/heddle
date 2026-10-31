@@ -870,9 +870,15 @@ impl State {
                 }
                 redact(Value::Object(fields))
             });
-        let schema = match catalog.lookup(&row.row, anchor) {
-            SchemaLookup::Schema(schema) => serde_json::to_value(*schema).unwrap_or(Value::Null),
-            _ => Value::Null,
+        // DSH's form projection where the catalog has one (every built-in with a Config, #123), else the plain schema.
+        let schema = match catalog.form(&row.row, anchor) {
+            Some(form) => form,
+            None => match catalog.lookup(&row.row, anchor) {
+                SchemaLookup::Schema(schema) => {
+                    serde_json::to_value(*schema).unwrap_or(Value::Null)
+                }
+                _ => Value::Null,
+            },
         };
         let reason = if self.target.is_none() {
             Some("this run has no profile patch to write".to_string())
