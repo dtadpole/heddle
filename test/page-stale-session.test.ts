@@ -32,6 +32,14 @@ function run<T>(name: string, scope: Record<string, unknown>): T {
   return new Function(...keys, `${lift(name)}\nreturn ${name}`)(...keys.map((key) => scope[key])) as T
 }
 
+/**
+ * submitDraft hands a message's words to submitText, the composer's own submit rules (developer-three's ui-followups).
+ * The harness lifts it too, with the same scope, so the two run together as on the page.
+ */
+function submitScope(scope: Record<string, unknown>): Record<string, unknown> {
+  return /function submitText\(/.test(page) ? { ...scope, submitText: run('submitText', scope) } : scope
+}
+
 test("the failure line is DSH's, with the server's reason and the status code", () => {
   const historyFailureText = run<(status: number, statusText: string, failure: unknown) => string>('historyFailureText', {})
   assert.equal(
@@ -123,7 +131,7 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
 
   const sent: string[] = []
   const submit = (unavailable: string | null) =>
-    run<(gesture: string) => void>('submitDraft', {
+    run<(gesture: string) => void>('submitDraft', submitScope({
       unavailableSession: unavailable,
       document: { body: { dataset: { composer: 'writable' } } },
       field,
@@ -144,7 +152,7 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       deliverSteered: () => {},
       sendNow: (text: string) => sent.push(text),
       enqueue: () => {},
-    })('enter')
+    }))('enter')
   field.value = 'into a session that is gone'
   submit('session-66666666-6666-4666-8666-666666666666')
   assert.deepEqual(sent, [], 'Enter sends nothing from that state')
@@ -189,7 +197,7 @@ test('with no session and no workspace to start one in, the composer is inert in
   const notes: string[] = []
   let picker = 0
   const submit = (aimless: boolean) =>
-    run<(gesture: string) => void>('submitDraft', {
+    run<(gesture: string) => void>('submitDraft', submitScope({
       unavailableSession: null,
       document: { body: { dataset: { composer: 'writable' } } },
       field,
@@ -214,7 +222,7 @@ test('with no session and no workspace to start one in, the composer is inert in
       deliverSteered: () => {},
       sendNow: (text: string) => sent.push(text),
       enqueue: () => {},
-    })('enter')
+    }))('enter')
   field.value = 'where does this go'
   submit(true)
   assert.deepEqual(sent, [], 'Enter sends nothing with nowhere to send')

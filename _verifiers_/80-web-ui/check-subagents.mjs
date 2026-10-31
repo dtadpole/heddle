@@ -198,7 +198,12 @@ test('a subagent\'s child stays out of the sidebar, a reload reopens the open se
         })()`),
       )
     assert.deepEqual((await search('notes')).sort(), ['Alpha notes', 'Beta notes'], 'the search answers')
-    assert.deepEqual(await search('child task'), [], 'and lists no subagent child, as DSH\'s deriveSearchResults')
+    /**
+     * The child's title names no hit. The search may still list the **parent**: its delegate call carries the child's
+     * prompt, and content search reads a tool call's name and arguments, as DSH's index does (src/session/search.ts).
+     */
+    const childSearch = await search('child task')
+    assert.ok(!childSearch.includes(CHILD_TITLE), `and lists no subagent child, as DSH's deriveSearchResults\nsaw: ${JSON.stringify(childSearch)}`)
 
     /** Open Beta notes, then switch to the one-column list: the reload reopens Beta, and the list has no child row. */
     await browser.evaluate(`showSession(${JSON.stringify((await api(fixture.url, fixture.cookie, '/api/sessions')).body.find((meta) => meta.title === 'Beta notes').id)})`)
