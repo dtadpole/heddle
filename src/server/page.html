@@ -17150,8 +17150,8 @@ async function applySearch() {
       title.className = 'hit-title'
       /**
        * DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`; `sessionTitle`,
-       * `:998-999`, is empty for a blank), never the id (#24). Not `WorkspaceTree.sessionLabel`: its `New Session` names
-       * the open blank in the tree, and a hit can be a blank that is not open.
+       * `:998-999`), never the id (#24). `WorkspaceTree.sessionLabel` differs only by the `New Session` it gives the open
+       * blank in the tree, and no blank is a hit, open or not (`WorkspaceTree.search`; DSH skips `summary.blank`, `:1185`).
        */
       title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
       const place = document.createElement('span')
