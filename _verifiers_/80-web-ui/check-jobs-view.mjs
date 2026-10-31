@@ -21,9 +21,9 @@ import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, rep
  * trigger focus back (:417-425).
  *
  * A second test archives, from the row's quick action, a session whose background job still runs: the route refuses
- * it as active and names the job (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`), the page asks to stop
- * the job, declining leaves the session and the job as they were, and agreeing archives the session and kills the
- * job with `session archived`.
+ * it as active and names the job (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`), the page's
+ * stop-and-archive dialog lists it, Cancel leaves the session and the job as they were, and Stop and archive archives the
+ * session and kills the job with `session archived`.
  *
  * Every UI step is followed by a read of `/api/jobs` from Node, with the page's cookie: a view that repaints without the
  * server agreeing is the failure this exists to catch. The follow requests are counted through the page's own `fetch`.
@@ -172,7 +172,11 @@ test('the header jobs control shows a background job, streams its output while e
     const triggerLabel = `document.getElementById('jobs-trigger')?.getAttribute('aria-label') ?? null`
     const item = `document.querySelector('#jobs-menu li.jobs-item[data-job-id=${JSON.stringify(id)}]')`
 
-    await browser.goto(server.url)
+    /**
+     * Opened on the quiet session by name: a first visit starts a fresh New session (#17), and among blank sessions only
+     * the open one is a row (C2), so the quiet blank would otherwise not be drawn.
+     */
+    await browser.gotoSession(server.url, quiet)
 
     // 1. A session with no jobs shows no control at all.
     await openSessionRow(quiet)
@@ -358,7 +362,7 @@ test('the header jobs control shows a background job, streams its output while e
   }
 })
 
-test('archiving from the row with a background job running asks to stop it; no keeps both, yes archives and kills the job', async (context) => {
+test('archiving from the row with a background job running opens DSH\'s stop-and-archive dialog listing it; Cancel keeps both, Stop and archive archives and kills the job', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer()
@@ -383,28 +387,33 @@ test('archiving from the row with a background job running asks to stop it; no k
     const metaOf = async () => (await server.api('/api/sessions')).body.find((entry) => entry.id === session)
     assert.equal((await jobOf())?.status, 'running', 'the background job runs')
 
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, session)
     const row = `document.querySelector('li[data-session-id=${JSON.stringify(session)}]')`
     const archive = `${row}?.querySelector('button[aria-label="Archive session"]')`
     await browser.waitFor(`${archive} != null`, 20_000)
 
-    // No: the confirm names the job, and nothing changes.
-    await browser.evaluate(`(() => { window.__confirms = []; window.confirm = (text) => { window.__confirms.push(text); return false }; return true })()`)
+    /**
+     * The refusal names the job in DSH's activity list, so the page opens DSH's SessionArchiveConfirmDialog (the
+     * stop-and-archive dialog, archive R-developer-eight-13), not a native confirm. Its list says the job's family, count
+     * and label, as DSH's activity line does.
+     */
+    const dialog = `(() => { const d = document.getElementById('session-archive'); return JSON.stringify({ open: d?.open === true, items: [...(d?.querySelectorAll('#session-archive-activity li') ?? [])].map((li) => li.textContent) }) })()`
+    // Cancel: the dialog names the job, and nothing changes.
     await browser.evaluate(`${archive}.click()`)
-    await browser.waitFor('window.__confirms.length === 1', 10_000)
-    assert.equal(
-      await browser.evaluate('window.__confirms[0]'),
-      `This session has a running background job (${LOOP}). Stop it and archive the session?`,
-    )
+    await browser.waitFor(`document.getElementById('session-archive')?.open === true`, 10_000)
+    assert.deepEqual(JSON.parse(await browser.evaluate(dialog)), { open: true, items: [`1 background job: ${LOOP}`] }, 'the dialog lists the job')
+    await browser.evaluate(`[...document.querySelectorAll('#session-archive [data-ws-close]')].find((button) => button.textContent.trim() === 'Cancel').click()`)
+    await browser.waitFor(`document.getElementById('session-archive')?.open === false`, 10_000)
     await sleep(500)
-    assert.notEqual((await metaOf())?.archived, true, 'declining leaves the session unarchived')
-    assert.equal((await jobOf())?.status, 'running', 'declining leaves the job running')
+    assert.notEqual((await metaOf())?.archived, true, 'cancelling leaves the session unarchived')
+    assert.equal((await jobOf())?.status, 'running', 'cancelling leaves the job running')
     assert.equal(await browser.evaluate(`${row} !== null`), true, 'the row stays')
 
-    // Yes: archived, the row leaves the tree, and the job is killed with "session archived".
-    await browser.evaluate(`(() => { window.confirm = (text) => { window.__confirms.push(text); return true }; return true })()`)
+    // Stop and archive: archived, the row leaves the tree, and the job is killed with "session archived".
     await browser.evaluate(`${archive}.click()`)
-    await browser.waitFor('window.__confirms.length === 2', 10_000)
+    await browser.waitFor(`document.getElementById('session-archive')?.open === true`, 10_000)
+    await browser.evaluate(`document.getElementById('session-archive-confirm').click()`)
     let job
     for (let attempt = 0; attempt < 50; attempt += 1) {
       job = await jobOf()
