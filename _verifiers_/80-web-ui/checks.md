@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T08:45:00Z
+modified: 2026-10-31T20:00:00Z
 level: L3
-version: 1.4.0
+version: 1.5.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -129,6 +129,10 @@ grounded_in:
   the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
   shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
   composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
+- [`check-send-toast.mjs`](check-send-toast.mjs) — a refused send is DSH's composer Toast (R-developer-seven-1, S27):
+  with `/api/turn` answered through a replaced `fetch`, a `session/writer-held` refusal shows DSH's sentence and a coded
+  one reads `<message> (<code>)`, announced (`role=alert`), just above and centred on the composer card, gone after the
+  Toast's three seconds and its fade; the words go back to the composer and no `denied` line is written.
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every
