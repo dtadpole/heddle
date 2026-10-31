@@ -12,7 +12,8 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  *
  * DSH: `/plan` puts a session in plan mode, a `plan/mode` event in its log; every request the model then receives
  * carries the plan-mode policy section; `exit_plan_mode` is in the catalog in every mode and presents a plan for review
- * (and refuses, saying so, when no review channel exists); `/plan off` leaves, and the model is told the mode changed.
+ * through the user-question channel (and refuses, saying so, when no such channel exists: the unit tests judge that,
+ * since the profile loads the `questions` row); `/plan off` leaves, and the model is told the mode changed.
  *
  * The model's side is read from what a **provider double** received, not from the log, because the log records a
  * request's message count, not its words — and "the guidance reached the model" is the claim.
@@ -160,11 +161,12 @@ async function openSession(server, cookie) {
   return id
 }
 
-async function turn(server, cookie, session, prompt) {
+async function turn(server, cookie, session, prompt, options = {}) {
   const response = await fetch(new URL('/api/turn', server.url), {
     method: 'POST',
     headers: { cookie, 'content-type': 'application/json' },
     body: JSON.stringify({ prompt, folder: server.work, session }),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   })
   assert.equal(response.status, 200, `the turn ran (${response.status})`)
   await response.text()
@@ -245,26 +247,53 @@ test('/plan puts a session in plan mode, and every request the model then gets c
   }
 })
 
-test('exit_plan_mode refuses, saying why, when no review channel exists, and the session stays in plan mode', async (context) => {
+/**
+ * DSH's exit_plan_mode asks through `userQuestions` when that channel exists (dsh-plan-mode: `ctx.get("userQuestions")`,
+ * else the refusal), and the profile loads the `questions` row, so the review is one question to the person.
+ *
+ * The turn waits on that question, so every wait is bounded, as check-slash-commands' are: a regression fails this test
+ * by name instead of holding the file until undici's 300 s limit.
+ */
+const TEST_TIMEOUT_MS = 120_000
+const REQUEST_TIMEOUT_MS = 60_000
+
+test("exit_plan_mode puts the plan to the person as DSH's Plan review question, and Approve leaves plan mode", { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('exit', [
     { toolCall: { name: 'exit_plan_mode', arguments: { plan: '# Ship the menu\n\n1. Registry\n2. Menu' } } },
-    { text: 'I will ask you to switch modes' },
+    { text: 'carrying out the plan' },
   ])
   try {
     const cookie = await cookieFor(server.url)
     const id = await openSession(server, cookie)
     await runLine(server, cookie, id, '/plan')
-    await turn(server, cookie, id, 'plan the menu')
+    const running = turn(server, cookie, id, 'plan the menu', { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
+    running.catch(() => {})
+    let open = []
+    for (let tries = 0; tries < 150 && open.length === 0; tries++) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      open = (await api(server.url, cookie, `/api/questions?session=${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })).body.requests ?? []
+    }
+    assert.equal(open.length, 1, 'the review is one open question batch (none means exit_plan_mode found no channel)')
+    const [review] = open[0].questions ?? []
+    assert.deepEqual(
+      [review?.id, review?.header, (review?.options ?? []).map((option) => option.label)],
+      ['plan-review', 'Plan review', ['Approve', 'Keep planning']],
+      "DSH's plan-review question, header and options",
+    )
+    assert.match(review.question, /^Approve this plan and leave plan mode\?\n\n# Ship the menu\n\n1\. Registry/, 'the plan is under the question')
+    const answered = await api(server.url, cookie, `/api/questions/${encodeURIComponent(open[0].id)}`, {
+      method: 'POST',
+      body: JSON.stringify({ session: id, answers: [{ id: 'plan-review', selected: ['Approve'] }] }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    assert.equal(answered.status, 200, `the answer is taken: ${JSON.stringify(answered.body)}`)
+    await running
     assert.equal(server.provider.bodies.length, 2, 'the tool ran and its result went back to the model')
     const toolMessage = (server.provider.bodies[1].messages ?? []).find((message) => message.role === 'tool')
     assert.ok(toolMessage !== undefined, 'the second request carries the tool result')
-    assert.match(
-      JSON.stringify(toolMessage),
-      /no user-questions channel is available to review the plan; ask the user to switch the session mode instead/,
-      "DSH's sentence for a missing review channel",
-    )
-    assert.deepEqual((await api(server.url, cookie, `/api/sessions/${encodeURIComponent(id)}/plan`)).body, { session: id, active: true }, 'plan mode stays on')
+    assert.match(JSON.stringify(toolMessage), /Plan approved — plan mode exited; carry out the plan starting with your next step\./, "DSH's sentence for an approved plan")
+    assert.deepEqual((await api(server.url, cookie, `/api/sessions/${encodeURIComponent(id)}/plan`)).body, { session: id, active: false }, 'plan mode is off')
   } finally {
     server.close()
   }
