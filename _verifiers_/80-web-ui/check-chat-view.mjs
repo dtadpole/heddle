@@ -2839,3 +2839,44 @@ test('a turn that runs while its session is opening is drawn once, not live and 
     await server.close()
   }
 })
+
+test('a turn that creates its session reads the session record a handful of times, not at every event', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The composer adopted the session a new turn creates on every `session` event the turn stream relayed, and each
+   * adoption re-read the whole session for its permission mode. Measured: 52 reads of /api/sessions/{id} in one
+   * test's two messages, about five per model round. A turn's legitimate reads are a few at its end (stats, usage,
+   * the edited-files card, the access record), so five rounds must stay within a small bound.
+   */
+  const steps = () => [
+    ...Array.from({ length: 4 }, (_, index) => ({ reasoning: `round ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'true' } } })),
+    { text: 'done after five rounds' },
+  ]
+  const server = await startServer('session-reads', steps, { sandboxRoot: true })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
+    await browser.evaluate(`(() => {
+      window.__sessionReads = 0
+      const original = window.fetch
+      window.fetch = (input, init) => {
+        const address = new URL(typeof input === 'string' ? input : input.url, location.href)
+        const parts = address.pathname.split('/')
+        if (parts.length === 4 && parts[1] === 'api' && parts[2] === 'sessions' && !address.search && (init?.method ?? 'GET') === 'GET') window.__sessionReads += 1
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await sendMessage(browser, 'five rounds please')
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("done after five rounds")', 30_000), 'the turn finished')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 10_000), 'the composer is idle again')
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const reads = Number(await browser.evaluate('window.__sessionReads'))
+    assert.ok(reads <= 8, `the session record was read ${reads} times for one five-round turn (a handful at its end, not one per event)`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
