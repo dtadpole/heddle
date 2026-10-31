@@ -183,6 +183,9 @@ test('a detached turn answers 202 while it runs, and its verdict follows its eve
       assert.match(String(accepted.headers.get('content-type')), /application\/json/)
       const body = (await accepted.json()) as { session?: string; turn?: string }
       assert.ok(typeof body.session === 'string' && typeof body.turn === 'string' && body.turn.length > 0, JSON.stringify(body))
+      /** Answered once the prompt is in the log: a page that adopts the session from this answer and reads it sees the message. */
+      const view = (await (await fetch(new URL(`/api/sessions/${body.session}`, url), { headers: { cookie } })).json()) as { turns?: { kind?: string; text?: string }[] }
+      assert.ok((view.turns ?? []).some((turn) => turn.kind === 'user' && String(turn.text).includes('go')), `the prompt is in the session at the 202: ${JSON.stringify(view.turns)}`)
       await stream.until((frame) => frame.name === 'session' && JSON.stringify(frame.data).includes('held'))
       const listed = (await (await fetch(new URL('/api/sessions', url), { headers: { cookie } })).json()) as { id: string; running?: boolean }[]
       assert.equal(listed.find((entry) => entry.id === body.session)?.running, true, 'accepted and still running')

@@ -2130,18 +2130,23 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let runner = state.harness().turns.clone();
     let sessions = state.harness().sessions.clone();
     if body.bool("detach") == Some(true) {
-        // Detached (#128): the answer is `202 {session, turn}` now, and the turn's verdict goes out on
-        // `/api/events` as a `turn` frame. A browser allows six connections per host, shared by every tab,
-        // and a turn that holds its own response open for minutes holds one of them, so five running turns
-        // stalled every other request of the page. The verdict goes through the hub's log after every event
-        // the turn published, so it is replayed to a page that reconnects and never arrives before the
-        // answer it closes. Without `detach` the response streams as before.
+        // Detached (#128): the answer is `202 {session, turn}` once the turn's first event is in the log, normally
+        // its prompt, and the turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six
+        // connections per host, shared by every tab, and a turn that holds its own response open for minutes
+        // holds one of them, so five running turns stalled every other request of the page. Answering only after
+        // the first event keeps what the streamed answer's first frame meant: the page adopts a session it created
+        // from this answer and redraws the log from its history, so an earlier answer lost the person's message.
+        // The verdict goes through the hub's log after every event the turn published, so it is replayed to a page
+        // that reconnects and never arrives before the answer it closes. Without `detach` the response streams.
         let turn_id = stream::new_client_id();
         let hub = state.events().clone();
+        let mut first = Box::pin(state.events().subscribe().for_session(session.clone()));
+        let (ended, ended_signal) = tokio::sync::oneshot::channel::<()>();
         let turn_session = session.clone();
         let verdict_turn = turn_id.clone();
         tokio::spawn(async move {
             let outcome = runner.run_turn(request).await;
+            let _ = ended.send(());
             drop(guard);
             let (outcome_name, mut verdict, failure) =
                 turn_verdict(outcome, cancel.is_cancelled(), &turn_session, false);
@@ -2152,6 +2157,15 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 record_turn_failure(sessions.as_ref(), &turn_session, message);
             }
         });
+        // The first event, the turn's end, or 10 s behind another turn of the session, whichever comes first.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            use futures::StreamExt;
+            tokio::select! {
+                _ = first.next() => {}
+                _ = ended_signal => {}
+            }
+        })
+        .await;
         return respond::json(
             StatusCode::ACCEPTED,
             &json!({"session": session, "turn": turn_id}),
@@ -4124,6 +4138,13 @@ mod tests {
         let turn = body["turn"].as_str().expect("the turn id").to_owned();
         assert!(!turn.is_empty());
         assert!(state.runs().is_running(&session), "accepted and running");
+        // The answer came after the turn's first event, which is already on the stream.
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            (event.as_str(), data["event"]["type"].as_str()),
+            ("session", Some("assistant/chunk")),
+            "the turn's first event precedes its 202"
+        );
 
         release.notify_one();
         let mut seen = Vec::new();
@@ -4140,7 +4161,7 @@ mod tests {
         };
         assert_eq!(
             seen,
-            vec!["assistant/chunk", "turn/completed"],
+            vec!["turn/completed"],
             "the verdict follows the turn's own events"
         );
         assert_eq!(verdict["turn"], json!(turn));

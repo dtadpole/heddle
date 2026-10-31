@@ -2757,16 +2757,15 @@ export function unknownTurnSession(
   handles.add(controller)
   state.controllers.set(handle.id, handles)
   /**
-   * Detached (#128): the answer is `202 {session, turn}` now, and the turn's verdict goes out on `/api/events` as
-   * a `turn` frame. A browser allows six connections per host, shared by every tab, and a turn that holds its own
+   * Detached (#128): the answer is `202 {session, turn}` as soon as the turn's prompt is in the log (below), and the
+   * turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six connections per host, shared by every tab, and a turn that holds its own
    * response open for minutes holds one of them: five running turns stalled every other request of the page. The
    * verdict goes through the stream's log after every event the turn appended, so it is replayed to a page that
    * reconnects and never arrives before the answer it closes. Without `detach` the response streams as before.
    */
   const detached = body.detach === true
   const turnId = newClientId()
-  if (detached) respond(response, 202, 'application/json', `${JSON.stringify({ session: handle.id, turn: turnId })}\n`)
-  else {
+  if (!detached) {
     respondSse(response)
     state.clients.add(response)
   }
@@ -2799,22 +2798,54 @@ export function unknownTurnSession(
   // request has none, so the turn's events are relayed by subscribing directly to the
   // same emit the server already listens on for other clients. A detached turn relays nothing.
   const unsubscribe = detached ? () => {} : subscribeSessionEvent(ctx, forward)
+  /**
+   * A detached turn is answered once its first event is in the log, normally its prompt (or the end, if it ends
+   * first, or 10 s at most behind another turn of the session). That is the moment the streamed answer's first frame
+   * used to mark. The page adopts a session it created from this answer and redraws the log from the session's
+   * history, so answering before the prompt was written lost the person's own message from the page.
+   */
+  let recorded: () => void = () => {}
+  const firstRecord = new Promise<void>((resolve) => {
+    recorded = resolve
+  })
+  const stopWatching = detached
+    ? subscribeSessionEvent(ctx, (payload) => {
+        if (payload.session === handle.id) recorded()
+      })
+    : () => {}
+  const running = runTurn(ctx, {
+    session: handle,
+    endpoint,
+    prompt: body.prompt,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    signal: controller.signal,
+    /**
+     * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
+     * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
+     * "backend stopped to respond" on prompts with more than twenty steps.
+     */
+    maxRounds: state.maxRounds,
+    ...(runModel !== undefined ? { model: runModel } : {}),
+    ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
+  })
+  if (detached) {
+    let bound: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      firstRecord,
+      running.then(
+        () => {},
+        () => {},
+      ),
+      new Promise<void>((resolve) => {
+        bound = setTimeout(resolve, 10_000)
+      }),
+    ])
+    clearTimeout(bound)
+    stopWatching()
+    respond(response, 202, 'application/json', `${JSON.stringify({ session: handle.id, turn: turnId })}\n`)
+  }
   try {
-    const result = await runTurn(ctx, {
-      session: handle,
-      endpoint,
-      prompt: body.prompt,
-      ...(attachments.length > 0 ? { attachments } : {}),
-      signal: controller.signal,
-      /**
-       * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
-       * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
-       * "backend stopped to respond" on prompts with more than twenty steps.
-       */
-      maxRounds: state.maxRounds,
-      ...(runModel !== undefined ? { model: runModel } : {}),
-      ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
-    })
+    const result = await running
     /**
      * A turn that was stopped is a cancellation, not a completion — including the case where the loop noticed the
      * abort between rounds and returned a result instead of throwing. Without this, the page saw a normal `done`
