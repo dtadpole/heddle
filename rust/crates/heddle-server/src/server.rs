@@ -66,6 +66,9 @@ use crate::services::{
     ServiceError, SessionMeta, StartSession,
 };
 use crate::stream::{self, EventHub, SseFrame, names, sse_response};
+use crate::terminals::{
+    CreateRefusal, InputResult, ResizeResult, TerminalEvent, TerminalRegistry, TerminalSpawn,
+};
 use crate::token::{
     self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
 };
@@ -97,11 +100,18 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/permission"),
     ("POST", "/api/sessions/{id}/steer"),
     ("POST", "/api/sessions/{id}/stop"),
+    ("GET", "/api/sessions/{id}/terminals"),
+    ("POST", "/api/sessions/{id}/terminals"),
+    ("DELETE", "/api/sessions/{id}/terminals/{terminal}"),
+    ("GET", "/api/sessions/{id}/terminals/{terminal}/stream"),
+    ("POST", "/api/sessions/{id}/terminals/{terminal}/input"),
+    ("POST", "/api/sessions/{id}/terminals/{terminal}/resize"),
     ("POST", "/api/folders/session"),
     ("POST", "/api/turn"),
     ("GET", "/api/tree"),
     ("GET", "/api/workspaces"),
     ("POST", "/api/workspaces"),
+    ("POST", "/api/workspaces/default"),
     ("PATCH", "/api/workspaces/{id}"),
     ("DELETE", "/api/workspaces/{id}"),
     ("POST", "/api/workspaces/insertBefore"),
@@ -238,6 +248,8 @@ struct Shared {
     launch_token: String,
     secret: String,
     port: u16,
+    /// The page's interactive terminals, per session (#85).
+    terminals: TerminalRegistry,
 }
 
 impl AppState {
@@ -270,6 +282,11 @@ impl AppState {
     /// A registered session view by name.
     pub fn session_view(&self, name: &str) -> Option<Arc<dyn SessionView>> {
         self.inner.views.get(name).cloned()
+    }
+
+    /// Each session's interactive terminals (#85).
+    pub fn terminals(&self) -> &TerminalRegistry {
+        &self.inner.terminals
     }
 }
 
@@ -372,6 +389,7 @@ impl ServerBuilder {
                 launch_token,
                 secret,
                 port,
+                terminals: TerminalRegistry::default(),
             }),
         };
 
@@ -392,10 +410,34 @@ impl ServerBuilder {
             .route("/api/sessions/{id}/permission", post(permission_session))
             .route("/api/sessions/{id}/steer", post(steer_session))
             .route("/api/sessions/{id}/stop", post(stop_session))
+            .route(
+                "/api/sessions/{id}/terminals",
+                get(list_terminals).post(create_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}",
+                delete(close_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/stream",
+                get(stream_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/input",
+                post(input_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/resize",
+                post(resize_terminal),
+            )
             .route("/api/folders/session", post(folder_session))
             .route("/api/turn", post(turn))
             .route("/api/tree", get(tree))
             .route("/api/workspaces", get(list_workspaces).post(add_workspace))
+            .route(
+                "/api/workspaces/default",
+                post(initialize_default_workspace),
+            )
             .route("/api/workspaces/{id}", patch(rename_workspace))
             .route("/api/workspaces/{id}", delete(remove_workspace))
             .route(
@@ -597,6 +639,9 @@ impl WebServer {
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
         }
+        // Then the terminals end, and their processes with them, so a restart leaves no orphan shell (#85). After the
+        // turns' grace, so a terminal opened during it is ended too.
+        self.state.terminals().close_all().await;
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
@@ -901,13 +946,39 @@ fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
     heddle_config::document_language(locale)
 }
 
-async fn events_route(State(state): State<AppState>) -> Response {
-    // Subscribed before the body starts, so `ready` is followed by every frame published after it.
-    let subscription = state.events().subscribe();
-    sse_response(stream::events_frames(
-        subscription,
+async fn events_route(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // The follow cursor: `Last-Event-ID` from the browser's own retries, `?cursor=` from the page's reconnects
+    // (web.ts reads the header first). Subscribed and replayed under one lock, before the body starts.
+    let presented = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| query.get("cursor").cloned())
+        .filter(|cursor| !cursor.is_empty());
+    let mut follow = state.events().subscribe_from(presented.as_deref());
+    // A question answered while the client was away is not put back on its page: only waiting ones replay.
+    let waiting: std::collections::HashSet<String> = state
+        .harness()
+        .approvals
+        .as_ref()
+        .map(|approvals| approvals.pending_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    follow.replay = follow
+        .replay
+        .map(|frames| stream::without_settled_approvals(frames, &waiting));
+    sse_response(stream::follow_frames(
+        follow,
+        presented.is_some(),
         &stream::new_client_id(),
         &stream::host_home(),
+        stream::heartbeat_interval().as_millis() as u64,
     ))
 }
 
@@ -1248,18 +1319,43 @@ async fn flags_session(
     if pinned.is_none() && archived.is_none() {
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
-    if archived == Some(true) && state.runs().is_running(id.as_str()) {
-        if body.bool("stop") != Some(true) {
-            return respond::json(
-                StatusCode::CONFLICT,
-                &json!({
-                    "error": format!("session {id} is running; pass stop: true to stop it and archive"),
+    // A session's live background jobs are activity too (DSH's job archive admission): they block the archive the
+    // same way, are listed in the refusal, and with `stop: true` are stopped once the archive is written.
+    let activity = state.harness().activity.clone();
+    let stop = archived == Some(true) && body.bool("stop") == Some(true);
+    if archived == Some(true) {
+        let running = state.runs().is_running(id.as_str());
+        let jobs: Vec<Value> = activity
+            .as_ref()
+            .map(|activity| activity.active(id.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.kind == crate::services::ActivityKind::Job)
+            .map(|item| json!({ "id": item.id, "label": item.label }))
+            .collect();
+        if running || !jobs.is_empty() {
+            if !stop {
+                let error = if running {
+                    format!("session {id} is running; pass stop: true to stop it and archive")
+                } else {
+                    format!(
+                        "session {id} has running background jobs; pass stop: true to stop them and archive"
+                    )
+                };
+                let mut refusal = json!({
+                    "error": error,
                     "code": "active",
                     "running": state.runs().running(id.as_str()),
-                }),
-            );
+                });
+                if !jobs.is_empty() {
+                    refusal["jobs"] = Value::Array(jobs);
+                }
+                return respond::json(StatusCode::CONFLICT, &refusal);
+            }
+            if running {
+                state.runs().abort(id.as_str());
+            }
         }
-        state.runs().abort(id.as_str());
     }
     match state
         .harness()
@@ -1267,7 +1363,17 @@ async fn flags_session(
         .set_flags(id.as_str(), FlagPatch { pinned, archived })
     {
         Ok(None) => respond::no_session(id.as_str()),
-        Ok(Some(meta)) => respond::json(StatusCode::OK, &meta),
+        Ok(Some(meta)) => {
+            if let (true, Some(activity)) = (stop, activity.as_ref()) {
+                activity.stop(id.as_str());
+            }
+            // Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end
+            // with their owner (#85).
+            if archived == Some(true) {
+                state.terminals().close_session(id.as_str()).await;
+            }
+            respond::json(StatusCode::OK, &meta)
+        }
         Err(error) => {
             let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
@@ -1318,6 +1424,10 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
+            state.events().push(
+                "sessions",
+                &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
+            );
             respond::json(StatusCode::OK, &meta)
         }
     }
@@ -1346,6 +1456,11 @@ async fn permission_session(
         ),
         Ok(mode) => match sessions.set_mode(id.as_str(), &mode, &fallback) {
             Ok(written) => {
+                // A terminal is confined by the mode it was opened under, and a mode change (a narrowing above all)
+                // must not leave a wider shell running, so the session's terminals end with the change (#85).
+                if written.changed {
+                    state.terminals().close_session(id.as_str()).await;
+                }
                 let mut body = Map::new();
                 body.insert("session".into(), Value::String(id.to_string()));
                 body.insert("mode".into(), Value::String(written.mode));
@@ -1505,11 +1620,40 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
         }
     }
     match workspaces.add(&path, name) {
-        Ok((record, created)) => respond::json(
-            StatusCode::OK,
-            &json!({"record": record, "created": created}),
-        ),
+        Ok((record, created)) => {
+            if created {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/added", "workspace": record}),
+                );
+            }
+            respond::json(
+                StatusCode::OK,
+                &json!({"record": record, "created": created}),
+            )
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// First use (web.ts's `POST /api/workspaces/default`, DSH's `workspace/initializeDefault`): `{workspace}`, the
+/// record or `null` when this install is not a first use; `500 {error, code: "workspace/default-failed"}` when
+/// the folder cannot be made; `503` without a workspace plugin.
+async fn initialize_default_workspace(State(state): State<AppState>) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let sessions = state.harness().sessions.list();
+    match workspaces.initialize_default(&sessions) {
+        Ok(record) => respond::json(
+            StatusCode::OK,
+            &json!({"workspace": record.unwrap_or(Value::Null)}),
+        ),
+        Err(error) => respond::error_with_code(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.message,
+            "workspace/default-failed",
+        ),
     }
 }
 
@@ -1525,7 +1669,13 @@ async fn rename_workspace(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     match workspaces.rename(&id, title) {
-        Ok(Some(record)) => respond::json(StatusCode::OK, &record),
+        Ok(Some(record)) => {
+            state.events().push(
+                "workspace",
+                &json!({"type": "workspace/renamed", "workspace": record}),
+            );
+            respond::json(StatusCode::OK, &record)
+        }
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
         Err(error) if error.code.as_deref() == Some("workspace/name-conflict") => {
             service_refusal(error, StatusCode::CONFLICT)
@@ -1546,7 +1696,12 @@ async fn remove_workspace(
     }
     let sessions = state.harness().sessions.list();
     match workspaces.remove(&id, &sessions) {
-        Ok(outcome) => respond::json(StatusCode::OK, &outcome),
+        Ok(outcome) => {
+            state
+                .events()
+                .push("workspace", &json!({"type": "workspace/removed", "id": id}));
+            respond::json(StatusCode::OK, &outcome)
+        }
         Err(error) => service_refusal(error, StatusCode::CONFLICT),
     }
 }
@@ -1632,6 +1787,10 @@ async fn answer_approval(
         return approval_not_waiting();
     };
     if service.answer(&id, outcome) {
+        state.events().push(
+            "approval-settled",
+            &json!({"type": "approval/settled", "id": id, "outcome": outcome}),
+        );
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
     } else {
         approval_not_waiting()
@@ -2081,6 +2240,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         reasoning_effort: selection.reasoning_effort.clone(),
     };
     let runner = state.harness().turns.clone();
+    let sessions = state.harness().sessions.clone();
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
@@ -2161,8 +2321,20 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 } else {
                     let _ = sender.send(SseFrame::new(
                         names::ERROR,
-                        &json!({"session": stream_session, "message": error.message}),
+                        &json!({"session": stream_session, "message": error.message.clone()}),
                     ));
+                    // Recorded as well, so the failure reaches every client and every later read
+                    // (R-developer-six-2, DSH's api-session/error); web.ts appends the same `turn/failed`.
+                    if let Err(failure) = sessions.record(
+                        &stream_session,
+                        "turn/failed",
+                        json!({"message": error.message}),
+                    ) {
+                        eprintln!(
+                            "heddle web: the failed turn could not be recorded: {}",
+                            failure.message
+                        );
+                    }
                 }
             }
         }
@@ -2171,6 +2343,432 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         receiver.recv().await.map(|frame| (frame, receiver))
     });
     sse_response(stream)
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Terminals (#85)
+
+/// Whether a write says it is JSON (`/^application\/json\s*(;|$)/i`, as web.ts judges it). A page sends JSON,
+/// and a form on another site cannot.
+fn json_write(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.strip_prefix("application/json").is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.is_empty() || rest.starts_with(';')
+            })
+        })
+}
+
+fn not_json_write() -> Response {
+    respond::error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "a terminal request must be sent as application/json",
+    )
+}
+
+/// The checks every terminal route makes after the door, in web.ts's order:
+/// - the session id's shape (`400`);
+/// - the session is this server's (`404`) and its folder sits under one of its workspace roots (`403`);
+/// - an archived session is refused (`409`).
+///
+/// `lenient` is for listing and closing, which stay open to an archived session and to one whose workspace was
+/// removed, so its terminals can still be ended.
+fn terminal_session(
+    state: &AppState,
+    raw: &str,
+    lenient: bool,
+) -> Result<(SessionId, SessionMeta), Box<Response>> {
+    let id = SessionId::parse(raw).ok_or_else(|| Box::new(respond::not_a_session_id()))?;
+    let meta = state
+        .harness()
+        .sessions
+        .meta(id.as_str())
+        .ok_or_else(|| Box::new(respond::no_session(id.as_str())))?;
+    if let Some(workspaces) = &state.harness().workspaces
+        && !lenient
+        && !workspaces.owns(&canonical_path(meta.cwd.as_deref().unwrap_or("")))
+    {
+        return Err(Box::new(respond::error_with_code(
+            StatusCode::FORBIDDEN,
+            format!("session {id} is not under any workspace root of this server"),
+            "not-owned",
+        )));
+    }
+    if is_archived(&meta) && !lenient {
+        return Err(Box::new(respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!("session {id} is archived"),
+            "archived",
+        )));
+    }
+    Ok((id, meta))
+}
+
+fn is_archived(meta: &SessionMeta) -> bool {
+    meta.rest.get("archived").and_then(Value::as_bool) == Some(true)
+}
+
+/// A write's JSON body, read after the checks as web.ts reads it: over `MAX_JSON_BODY` is `413 request too large`,
+/// empty is `{}`, a non-object is `{}`, and anything else is `400 the body must be JSON`.
+async fn terminal_body(body: Body) -> Result<Map<String, Value>, Box<Response>> {
+    let Ok(bytes) = axum::body::to_bytes(body, respond::MAX_JSON_BODY).await else {
+        return Err(Box::new(respond::text(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request too large\n",
+        )));
+    };
+    if bytes.is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Ok(Map::new()),
+        Err(_) => Err(Box::new(respond::text(
+            StatusCode::BAD_REQUEST,
+            "the body must be JSON\n",
+        ))),
+    }
+}
+
+fn no_terminal(terminal: &str, session: &SessionId) -> Response {
+    respond::error(
+        StatusCode::NOT_FOUND,
+        format!("no terminal {terminal} in session {session}"),
+    )
+}
+
+fn terminal_size_refusal(state: &AppState) -> Response {
+    let limits = state.terminals().limits();
+    respond::error(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "cols and rows must be whole numbers from 1 to {} and {}",
+            limits.max_cols, limits.max_rows
+        ),
+    )
+}
+
+async fn list_terminals(
+    State(state): State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Response {
+    let (id, _) = match terminal_session(&state, &raw, true) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    respond::json_compact(
+        StatusCode::OK,
+        &json!({
+            "terminals": state.terminals().list(id.as_str()),
+            "limits": state.terminals().limits(),
+        }),
+    )
+}
+
+async fn create_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+    body: Body,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, meta) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(body).await {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let size = |key: &str, default: f64| match body.get(key) {
+        None => Some(default),
+        Some(value) => value.as_f64(),
+    };
+    let (Some(cols), Some(rows)) = (size("cols", 80.0), size("rows", 24.0)) else {
+        return terminal_size_refusal(&state);
+    };
+    let limits = state.terminals().limits();
+    if !limits.fits(cols, rows) {
+        return terminal_size_refusal(&state);
+    }
+    let sandbox = state.harness().sandbox.clone();
+    let mode = state
+        .harness()
+        .sessions
+        .effective_mode(id.as_str(), &sandbox.default_mode());
+    let root = sandbox.root_for(meta.cwd.as_deref().map(std::path::Path::new));
+    if !root.is_dir() {
+        return respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "the session's folder {} is not an available directory",
+                root.display()
+            ),
+            "cwd-missing",
+        );
+    }
+    let spawn = TerminalSpawn {
+        session: id.as_str().to_owned(),
+        cwd: root.clone(),
+        mode: mode.clone(),
+        cols: cols as u32,
+        rows: rows as u32,
+        shell: None,
+    };
+    match state
+        .terminals()
+        .create(spawn, |argv| sandbox.confine(argv, &mode, &root))
+    {
+        Ok(info) => {
+            // An archive that landed while this request was in flight found nothing to close, so the archive is
+            // read again now that the terminal exists, and a terminal on an archived session is ended at once.
+            let archived_now = state
+                .harness()
+                .sessions
+                .meta(id.as_str())
+                .is_some_and(|meta| is_archived(&meta));
+            if archived_now {
+                state.terminals().close(id.as_str(), &info.id).await;
+                return respond::error_with_code(
+                    StatusCode::CONFLICT,
+                    format!("session {id} is archived"),
+                    "archived",
+                );
+            }
+            // The same race for the permission mode: a mode change that landed during the spawn closed only the
+            // terminals already inserted, so this one would keep the old, possibly wider, confinement. It is ended
+            // and refused rather than kept. TypeScript needs no twin: its create is synchronous after the mode read.
+            let mode_now = state
+                .harness()
+                .sessions
+                .effective_mode(id.as_str(), &sandbox.default_mode());
+            if mode_now != mode {
+                state.terminals().close(id.as_str(), &info.id).await;
+                return respond::error_with_code(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "session {id}'s permission mode changed to {mode_now} while the terminal was starting; open it again"
+                    ),
+                    "mode-changed",
+                );
+            }
+            respond::json_compact(StatusCode::CREATED, &json!({ "terminal": info }))
+        }
+        Err(CreateRefusal::Closed) => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the server is shutting down",
+            "shutting-down",
+        ),
+        Err(CreateRefusal::Limit) => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "session {id} already holds {} terminals; close one first",
+                limits.max_terminals
+            ),
+            "limit",
+        ),
+        Err(CreateRefusal::Sandbox(message)) => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "sandbox-unavailable",
+        ),
+        Err(CreateRefusal::Spawn(message)) => respond::internal_error(message),
+    }
+}
+
+async fn close_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, true) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    if !state.terminals().close(id.as_str(), &terminal).await {
+        return no_terminal(&terminal, &id);
+    }
+    respond::json_compact(
+        StatusCode::OK,
+        &json!({ "closed": true, "terminal": terminal }),
+    )
+}
+
+async fn input_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+    body: Body,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(body).await {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let Some(data) = body.get("data").and_then(Value::as_str) else {
+        return respond::error(StatusCode::BAD_REQUEST, "data must be a string");
+    };
+    match state.terminals().input(id.as_str(), &terminal, data).await {
+        InputResult::Ok => respond::json_compact(StatusCode::OK, &json!({ "ok": true })),
+        InputResult::Missing => no_terminal(&terminal, &id),
+        InputResult::Exited => {
+            respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
+        }
+        InputResult::Busy => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the terminal has too much input waiting; try again",
+            "busy",
+        ),
+        InputResult::TooLarge => respond::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "input is limited to {} bytes per request",
+                state.terminals().limits().max_input_bytes
+            ),
+        ),
+    }
+}
+
+async fn resize_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+    body: Body,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(body).await {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let (Some(cols), Some(rows)) = (
+        body.get("cols").and_then(Value::as_f64),
+        body.get("rows").and_then(Value::as_f64),
+    ) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "cols and rows are required numbers",
+        );
+    };
+    match state
+        .terminals()
+        .resize(id.as_str(), &terminal, cols, rows)
+        .await
+    {
+        ResizeResult::Ok => respond::json_compact(
+            StatusCode::OK,
+            &json!({ "ok": true, "cols": cols as u32, "rows": rows as u32 }),
+        ),
+        ResizeResult::Missing => no_terminal(&terminal, &id),
+        ResizeResult::Exited => {
+            respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
+        }
+        ResizeResult::OutOfRange => terminal_size_refusal(&state),
+        ResizeResult::Unavailable => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the terminal could not be resized",
+            "unavailable",
+        ),
+    }
+}
+
+/// One frame of a terminal stream, as web.ts writes it: `event: <type>` and the event's JSON.
+fn terminal_frame(event: &TerminalEvent) -> String {
+    let name = match event {
+        TerminalEvent::Output { .. } => "output",
+        TerminalEvent::Exit { .. } => "exit",
+    };
+    format!(
+        "event: {name}\ndata: {}\n\n",
+        serde_json::to_string(event).expect("a terminal event serializes")
+    )
+}
+
+/// One terminal's output as an event stream: a `snapshot` of the retained tail first, then `output` frames and
+/// one `exit`, after which the stream ends. The listener is attached before the snapshot is taken, so no output
+/// falls between them. A heartbeat comment keeps an idle stream open; dropping the body detaches.
+async fn stream_terminal(
+    State(state): State<AppState>,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+) -> Response {
+    use futures::StreamExt;
+
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let Some((snapshot, receiver, hold)) = state.terminals().attach(id.as_str(), &terminal) else {
+        return no_terminal(&terminal, &id);
+    };
+    let opening = format!(
+        "{}event: snapshot\ndata: {}\n\n",
+        stream::STREAM_OPEN,
+        serde_json::to_string(&snapshot).expect("a snapshot serializes")
+    );
+    let ended = snapshot.exited;
+    let closing = ended.then(|| {
+        terminal_frame(&TerminalEvent::Exit {
+            code: snapshot.exit_code,
+        })
+    });
+    let mut ticker = tokio::time::interval(stream::heartbeat_interval());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let live = futures::stream::unfold(
+        (receiver, hold, ticker, ended, false),
+        |(mut receiver, hold, mut ticker, ended, primed)| async move {
+            if ended {
+                return None;
+            }
+            let mut primed = primed;
+            if !primed {
+                // The first tick of an interval completes at once; it is spent here, not sent.
+                ticker.tick().await;
+                primed = true;
+            }
+            tokio::select! {
+                event = receiver.recv() => match event {
+                    Some(event) => {
+                        let last = matches!(event, TerminalEvent::Exit { .. });
+                        Some((terminal_frame(&event), (receiver, hold, ticker, last, primed)))
+                    }
+                    None => None,
+                },
+                _ = ticker.tick() => Some((": heartbeat\n\n".to_owned(), (receiver, hold, ticker, false, primed))),
+            }
+        },
+    );
+    let body = futures::stream::once(async move { opening })
+        .chain(futures::stream::iter(closing))
+        .chain(live)
+        .map(Ok::<_, std::io::Error>);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-store")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(body))
+        .expect("a response builder with static headers")
 }
 
 #[cfg(test)]
@@ -2190,6 +2788,10 @@ mod tests {
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
+        /// Answers for successive `effective_mode` reads, first to last; the fallback once it is empty.
+        modes: std::sync::Mutex<Vec<String>>,
+        /// Every `record` call, as `(session, type, fields)`.
+        recorded: std::sync::Mutex<Vec<(String, String, Value)>>,
     }
 
     impl Sessions {
@@ -2204,11 +2806,20 @@ mod tests {
                     ..SessionMeta::default()
                 }],
                 events: HashMap::new(),
+                modes: std::sync::Mutex::new(Vec::new()),
+                recorded: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
 
     impl SessionService for Sessions {
+        fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), kind.to_owned(), fields));
+            Ok(())
+        }
         fn list(&self) -> Vec<SessionMeta> {
             self.metas.clone()
         }
@@ -2264,7 +2875,12 @@ mod tests {
             self.metas.first().cloned()
         }
         fn effective_mode(&self, _id: &str, fallback: &str) -> String {
-            fallback.to_owned()
+            let mut modes = self.modes.lock().unwrap();
+            if modes.is_empty() {
+                fallback.to_owned()
+            } else {
+                modes.remove(0)
+            }
         }
         fn set_mode(
             &self,
@@ -2420,10 +3036,59 @@ mod tests {
         harness
     }
 
+    /// A folder a test made under the system temp dir, removed when it is dropped.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// The temp folders of the test running on this thread. The harness runs each test on its own thread, and a
+        /// thread's locals are dropped when it ends, after a panic's unwinding too, so a failing test cleans up as a
+        /// passing one does. Before, every run left its `heddle-server-test-*` folders in TMPDIR (1,218 counted).
+        static TEMP_FOLDERS: std::cell::RefCell<Vec<TempFolder>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A secret path in a folder of its own, owned by the calling test: labels are unique per test, so no two
+    /// running tests share a folder, and the folder goes when the test's thread ends.
     fn temp_secret(label: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("heddle-server-test-{label}-{}", std::process::id()))
-            .join("web-secret")
+        let folder =
+            std::env::temp_dir().join(format!("heddle-server-test-{label}-{}", std::process::id()));
+        TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
+        folder.join("web-secret")
+    }
+
+    #[test]
+    fn a_tests_temp_folder_is_removed_when_its_thread_ends() {
+        let folder = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe");
+            let folder = secret.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(&secret, "s").unwrap();
+            assert!(folder.exists());
+            folder
+        })
+        .join()
+        .unwrap();
+        assert!(
+            !folder.exists(),
+            "the folder went with the thread that made it"
+        );
+        let panicked = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe-panic");
+            std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+            panic!("a failing test");
+        })
+        .join();
+        assert!(panicked.is_err());
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-server-test-cleanup-probe-panic-{}",
+            std::process::id()
+        ));
+        assert!(!folder.exists(), "and a panicking test cleans up too");
     }
 
     fn app(label: &str) -> (Router, AppState) {
@@ -2721,6 +3386,99 @@ mod tests {
                 "parent": null, "createdAt": "a", "updatedAt": "a", "sessionIds": ids}]),
             )
         }
+        fn initialize_default(
+            &self,
+            sessions: &[SessionMeta],
+        ) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(
+                json!({"id": "w-default", "title": "default-workspace", "seen": sessions.len()}),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn first_use_answers_the_registry_default_and_null_from_a_double_that_has_none() {
+        let (router, _) = app("workspaces-default-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, _) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin, no first use"
+        );
+
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-default")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["workspace"]["id"], "w-default", "{body}");
+        assert_eq!(
+            body["workspace"]["seen"], 1,
+            "the route hands the registry the store's sessions: {body}"
+        );
+        // The trait's own default — a registry that does not model first use — answers `null`.
+        let none = crate::services::WorkspaceService::initialize_default(&NoDefault, &[]).unwrap();
+        assert_eq!(none, None);
+    }
+
+    /// A registry double that keeps every trait default, so the default `initialize_default` is the one judged.
+    struct NoDefault;
+
+    impl crate::services::WorkspaceService for NoDefault {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            false
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
     }
 
     #[tokio::test]
@@ -3102,6 +3860,61 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_terminal_whose_mode_changed_while_it_started_is_ended_and_refused() {
+        // #85 R1: create reads the mode, spawns (milliseconds of fork/exec), then inserts. A permission change in
+        // that window closes only inserted terminals, so create reads the mode again and refuses a mismatch. The
+        // first read answers the mode the spawn uses; the second, the mode a concurrent change wrote.
+        let folder = std::env::temp_dir().join(format!("heddle-r1-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let sessions = Sessions {
+            metas: vec![SessionMeta {
+                id: id.into(),
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                turns: 1,
+                ..SessionMeta::default()
+            }],
+            events: HashMap::new(),
+            modes: std::sync::Mutex::new(vec!["danger-full-access".into(), "read-only".into()]),
+            recorded: std::sync::Mutex::new(Vec::new()),
+        };
+        let harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        let (router, state) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("terminal-mode-changed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/terminals"),
+            &cookie,
+            "{}",
+        )
+        .await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(body["code"], "mode-changed", "{body}");
+        assert!(
+            state.terminals().list(id).is_empty(),
+            "the terminal that started under the old mode is gone"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[tokio::test]
     async fn a_session_view_is_refused_when_it_does_not_exist_and_the_chat_view_has_its_record() {
         let (router, _) = app("chat");
@@ -3382,6 +4195,81 @@ mod tests {
         );
         let _ = runner.hub.set(builder.events());
         builder.into_router(3082).expect("the test router")
+    }
+
+    /// The jobs row's archive admission, as a double: one live job until it is stopped.
+    #[derive(Default)]
+    struct OneJob {
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for OneJob {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                vec![crate::services::ActivityItem {
+                    kind: crate::services::ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }]
+            }
+        }
+        fn stop(&self, session: &str) {
+            self.stopped.lock().unwrap().push(session.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_background_job_blocks_the_archive_until_stop_and_stop_kills_it_after_the_write()
+    {
+        let activity = Arc::new(OneJob::default());
+        let mut with_jobs = harness();
+        with_jobs.activity = Some(activity.clone());
+        let (router, _) = ServerBuilder::new(
+            with_jobs,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-jobs")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let flags = "/api/sessions/session-00000000-0000-0000-0000-000000000001/flags";
+
+        let (status, bytes) = post_json(&router, flags, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refusal["code"], "active");
+        assert_eq!(
+            refusal["error"],
+            "session session-00000000-0000-0000-0000-000000000001 has running background jobs; pass stop: true to stop them and archive"
+        );
+        assert_eq!(refusal["running"], 0);
+        assert_eq!(
+            refusal["jobs"],
+            json!([{ "id": "bash-0123456789abcdef", "label": "sleep 30" }])
+        );
+        assert!(
+            activity.stopped.lock().unwrap().is_empty(),
+            "nothing stopped without stop: true"
+        );
+
+        let (status, _) =
+            post_json(&router, flags, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *activity.stopped.lock().unwrap(),
+            ["session-00000000-0000-0000-0000-000000000001"]
+        );
+
+        // Pinning is not archiving: it never consults the activity.
+        let (status, _) = post_json(&router, flags, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(activity.stopped.lock().unwrap().len(), 1);
     }
 
     /// The agent runtime's live-turn registry, as a double: one turn this server did not start.
@@ -3713,6 +4601,8 @@ mod tests {
                 ),
             ],
             events: HashMap::new(),
+            modes: std::sync::Mutex::new(Vec::new()),
+            recorded: std::sync::Mutex::new(Vec::new()),
         };
         let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut harness = Harness::new(
@@ -4246,6 +5136,280 @@ mod tests {
         assert!(
             rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(),
             "{text}"
+        );
+    }
+
+    /// A reconnect with `Last-Event-ID` is given the frames it missed after `ready`; a cursor from another
+    /// server start is given `reset`.
+    #[tokio::test]
+    async fn the_event_stream_replays_after_a_cursor_and_resets_an_unknown_one() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-follow");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        let seen = state.events().cursor();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        async fn read_until(router: &Router, cookie: &str, cursor: &str, marker: &str) -> String {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri("/api/events")
+                        .header("cookie", cookie)
+                        .header("last-event-id", cursor)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut body = response.into_body();
+            let mut text = String::new();
+            while !text.contains(marker) {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                    .await
+                    .expect("a frame in time")
+                    .expect("the stream stays open")
+                    .expect("a body frame");
+                if let Ok(data) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            text
+        }
+        let text = read_until(&router, &cookie, &seen, "\"n\":2").await;
+        assert!(text.contains("\"resumed\":true"), "{text}");
+        assert!(
+            !text.contains("\"n\":1"),
+            "nothing before the cursor is repeated: {text}"
+        );
+        assert!(
+            text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(),
+            "{text}"
+        );
+        let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
+        assert!(text.contains("\"resumed\":false"), "{text}");
+    }
+
+    /// An approval double whose questions are always waiting, so an answer settles one.
+    struct AnsweringApprovals;
+
+    impl ApprovalService for AnsweringApprovals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            true
+        }
+    }
+
+    /// A workspace double whose add creates, whose rename finds and whose remove succeeds.
+    struct EditableWorkspaces;
+
+    impl crate::services::WorkspaceService for EditableWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({"id": "w-2", "path": path, "title": "added"}), true))
+        }
+        fn find(&self, _id: &str) -> bool {
+            true
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({"removed": true}))
+        }
+        fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(json!({"id": id, "title": title})))
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// The next frame a subscription holds, as `(event, data)`, within a second.
+    async fn next_pushed(
+        subscription: &mut crate::stream::Subscription,
+    ) -> (String, Value, Option<String>) {
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
+                .await
+                .expect("a frame in time")
+                .expect("the hub is open");
+        (
+            frame.event,
+            serde_json::from_str(&frame.data).unwrap(),
+            frame.id,
+        )
+    }
+
+    /// The changes that never reach a session's log are pushed to the stream, numbered like every frame:
+    /// a renamed session, an added, renamed and removed workspace, and a settled approval (phase B item 4).
+    #[tokio::test]
+    async fn renames_workspace_edits_and_settled_approvals_are_pushed() {
+        let mut with_services = harness();
+        with_services.workspaces = Some(Arc::new(EditableWorkspaces));
+        with_services.approvals = Some(Arc::new(AnsweringApprovals));
+        let (router, state) = ServerBuilder::new(
+            with_services,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("pushes")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{session}/title"),
+            &cookie,
+            r#"{"title":"renamed"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "sessions");
+        assert_eq!(
+            data,
+            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+        );
+        assert!(
+            id.is_some(),
+            "a push is numbered, so it is replayed to a reconnecting client"
+        );
+
+        let folder = std::env::temp_dir();
+        let body = json!({"path": folder}).to_string();
+        let (status, _) = post_json(&router, "/api/workspaces", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            (event.as_str(), data["type"].as_str()),
+            ("workspace", Some("workspace/added"))
+        );
+
+        for (method, expected) in [
+            (Method::PATCH, "workspace/renamed"),
+            (Method::DELETE, "workspace/removed"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/api/workspaces/w-2")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"title":"retitled"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            assert_eq!(
+                (event.as_str(), data["type"].as_str()),
+                ("workspace", Some(expected))
+            );
+        }
+
+        let (status, _) = post_json(
+            &router,
+            "/api/approvals/approval-00000000-0000-0000-0000-000000000000",
+            &cookie,
+            r#"{"outcome":"rejected"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "approval-settled");
+        assert_eq!(
+            data,
+            json!({"type": "approval/settled", "id": "approval-00000000-0000-0000-0000-000000000000", "outcome": "rejected"})
+        );
+    }
+
+    /// A runner whose turn fails, as a provider's 502 does.
+    struct FailingTurns;
+
+    impl TurnRunner for FailingTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Err(ServiceError::new("upstream answered 502")) })
+        }
+    }
+
+    /// A failed turn tells the client that started it and is recorded as `turn/failed`, so it reaches every
+    /// client and every later read (R-developer-six-2).
+    #[tokio::test]
+    async fn a_failed_turn_is_recorded_for_every_client_as_well_as_streamed_to_its_own() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, _) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(&bytes);
+        assert!(
+            text.contains("event: error\n") && text.contains("upstream answered 502"),
+            "{text}"
+        );
+        let recorded = sessions.recorded.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
         );
     }
 

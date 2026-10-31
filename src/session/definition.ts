@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { canonicalPath } from '../paths.ts'
 import type { SessionHandle } from './store.ts'
@@ -19,6 +19,34 @@ import { normalizeSessionTitle } from './title-text.ts'
  * passes the linter like any other instance, and it sorts chronologically, so the newest session of a
  * branch is also the last one a listing shows.
  */
+
+/**
+ * A branch heddle may not write, so a session cannot be filed in it (issue #106).
+ *
+ * The definition is written into the branch, so a folder heddle cannot write fails there — and it failed with Node's raw
+ * `EACCES: permission denied, mkdir '<absolute path>'`, which the route answered as a `500 internal error`. This is the
+ * sentence instead, naming the folder by its name and never by its absolute path, with a code the route answers `400`
+ * beside it. DSH files no session in the folder, so it has no such refusal; the code is heddle's, in DSH's `session/`
+ * family, and the sentence follows DSH's file backend (`cannot write "<path>": …`, dsh-fs-local lib/index.js:495).
+ */
+export class SessionUnwritableError extends Error {
+  readonly code = 'session/unwritable'
+  /** The folder's name, as the sentence says it. */
+  readonly folder: string
+  constructor(folder: string) {
+    super(`cannot write to "${folder}": permission denied`)
+    this.name = 'SessionUnwritableError'
+    this.folder = folder
+  }
+}
+
+/** The refusal for a permission error met writing into `branch`; any other error is answered as it is. */
+export function unwritableIn(branch: string, error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code !== 'EACCES' && code !== 'EPERM') return error
+  const canonical = canonicalPath(branch)
+  return new SessionUnwritableError(basename(canonical) || canonical)
+}
 
 /** The type folder a branch's sessions live in. The tree never draws it — it hoists what is inside. */
 export const SESSIONS_FOLDER = '_sessions_'

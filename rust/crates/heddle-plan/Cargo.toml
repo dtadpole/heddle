@@ -1,0 +1,32 @@
+[package]
+name = "heddle-plan"
+description = "Heddle in Rust: plan mode — the mode fold, the plan-mode policy section, /plan, exit_plan_mode and the plan route"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+# The exit tool's run and a review are boxed futures.
+futures.workspace = true
+# `/plan` is a command definition in the slash-command registry; the route answers with its pretty JSON helper.
+heddle-commands = { path = "../heddle-commands" }
+# The `model/request` hook and the request it rewrites.
+heddle-llm.workspace = true
+# The session log the mode is folded from and written to.
+heddle-session.workspace = true
+# `exit_plan_mode` is a tool in the registry.
+heddle-tools.workspace = true
+# `preserve_order`: an event and an answer keep the TypeScript build's key order, as `JSON.stringify` writes them.
+serde_json = { workspace = true, features = ["preserve_order"] }
+
+[dev-dependencies]
+# A real session store in the tests needs its environment type.
+heddle-config.workspace = true
+tokio.workspace = true
+# The route test calls the router in-process, as heddle-commands' do.
+tower = { version = "0.5", features = ["util"] }
