@@ -82,6 +82,8 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
     let liveTurns = 0;
     const QUEUE_KEY_NONE = '';
     let activeFolder = null;
+    const firstTreeReady = Promise.resolve(), workspaceRoutes = 'absent';
+    function newConversationTarget() { return null }
     const modelTrigger = { setAttribute() {} };
     const modelSpinner = { hidden: true };
     const modelMenu = { hidden: true };

@@ -84,6 +84,9 @@ pub enum ForkOutcome {
     NotFound,
     /// The source has no completed turn with an answer to inherit — a `409`.
     Unavailable,
+    /// An explicit `atSeq` names no event of the source — a `409` with DSH's sentence, which cites the
+    /// source's last seq (`None` for an empty log).
+    NoSuchEvent { at_seq: u64, last_seq: Option<u64> },
     /// The child session, named `<title> (n)`, with its definition in the source's folder.
     Forked(CreatedDefinition),
 }
@@ -315,23 +318,44 @@ impl SessionService {
     /// Fork a session: a child that continues from its last completed turn, recording `parentSession`,
     /// titled `<title> (n)`, with its own definition in the source's folder.
     pub fn fork(&self, id: &str) -> Result<ForkOutcome, SessionError> {
+        self.fork_at(id, None)
+    }
+
+    /// [`SessionService::fork`] with DSH's `atSeq` (dsh-api-session-controller/lib/index.js:849-872):
+    /// `Some(seq)` cuts at that event, inclusive, and must name an event the source has; it need not fall
+    /// on a completed turn, as DSH accepts any existing seq. `None` is the last completed turn.
+    pub fn fork_at(&self, id: &str, at_seq: Option<u64>) -> Result<ForkOutcome, SessionError> {
         let Some(source) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(ForkOutcome::NotFound);
         };
         let Some(source_handle) = self.store.open(id) else {
             return Ok(ForkOutcome::Unavailable);
         };
-        // The question is "does the inherited projection contain an assistant message", not "does the
-        // log contain assistant chunks": a fork's own log holds copied messages and no chunks.
-        if !inherits_answer(self.store.read(&source_handle)?.as_slice())? {
-            return Ok(ForkOutcome::Unavailable);
+        let events = self.store.read(&source_handle)?;
+        match at_seq {
+            Some(cut) => {
+                if !events.iter().any(|event| event.seq == cut) {
+                    return Ok(ForkOutcome::NoSuchEvent {
+                        at_seq: cut,
+                        last_seq: events.last().map(|event| event.seq),
+                    });
+                }
+            }
+            // The question is "does the inherited projection contain an assistant message", not "does
+            // the log contain assistant chunks": a fork's own log holds copied messages and no chunks.
+            None => {
+                if !inherits_answer(events.as_slice())? {
+                    return Ok(ForkOutcome::Unavailable);
+                }
+            }
         }
-        let Some(handle) = self.store.fork(
+        let Some(handle) = self.store.fork_at(
             id,
             ForkAttribution {
                 parent_session: Some(id.to_string()),
                 ..Default::default()
             },
+            at_seq,
         )?
         else {
             return Ok(ForkOutcome::Unavailable);
@@ -1313,6 +1337,103 @@ mod tests {
         assert_eq!(recorded.preset(), Some("standard"));
         service.record_preset(&plain.id, "reader").unwrap();
         assert_eq!(preset_of(&plain.id).as_deref(), Some("standard"));
+    }
+
+    #[test]
+    fn a_fork_at_a_turn_end_holds_the_turns_up_to_it() {
+        // DSH's `session/fork` with `atSeq` (R-developer-eight-16): an inclusive cut at an existing event.
+        let (_dir, service) = service();
+        let folder = branch();
+        let source = service
+            .open_at(folder.path().to_str().unwrap(), OpenAtOptions::default())
+            .unwrap();
+        service.rename(&source.id, "Long").unwrap();
+        let mut ends = Vec::new();
+        for prompt in ["turn one", "turn two", "turn three"] {
+            service.user(&source, prompt, None).unwrap();
+            service
+                .store()
+                .message(
+                    &source,
+                    Message {
+                        role: Role::Assistant,
+                        tool_call_id: None,
+                        content: vec![ContentPart::Text {
+                            text: format!("answer to {prompt}"),
+                        }],
+                        source: None,
+                    },
+                )
+                .unwrap();
+            let end = service
+                .store()
+                .append(&source, NewEvent::new("turn/completed"), Default::default())
+                .unwrap();
+            ends.push(end.seq);
+        }
+
+        let ForkOutcome::Forked(forked) = service.fork_at(&source.id, Some(ends[1])).unwrap()
+        else {
+            panic!("the cut at the second turn's end forks");
+        };
+        let carried: Vec<String> = service
+            .messages(&forked.handle)
+            .unwrap()
+            .iter()
+            .map(|message| text_of(&message.content))
+            .collect();
+        assert_eq!(
+            carried,
+            vec![
+                "turn one",
+                "answer to turn one",
+                "turn two",
+                "answer to turn two"
+            ],
+            "the child ends after turn two"
+        );
+        assert_eq!(
+            service
+                .list()
+                .into_iter()
+                .find(|meta| meta.id() == forked.handle.id)
+                .unwrap()
+                .title(),
+            Some("Long (1)")
+        );
+
+        let last = service
+            .store()
+            .read(&source)
+            .unwrap()
+            .last()
+            .map(|event| event.seq);
+        assert_eq!(
+            service.fork_at(&source.id, Some(9999)).unwrap(),
+            ForkOutcome::NoSuchEvent {
+                at_seq: 9999,
+                last_seq: last
+            },
+            "a seq past the log is refused with the last seq"
+        );
+        // An explicit seq need not fall on a completed turn: DSH accepts any existing event.
+        let untouched = service
+            .open_at(
+                folder.path().to_str().unwrap(),
+                OpenAtOptions {
+                    fresh: true,
+                    ..OpenAtOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            service.fork(&untouched.id).unwrap(),
+            ForkOutcome::Unavailable
+        );
+        assert!(matches!(
+            service.fork_at(&untouched.id, Some(0)).unwrap(),
+            ForkOutcome::Forked(_)
+        ));
     }
 
     #[test]

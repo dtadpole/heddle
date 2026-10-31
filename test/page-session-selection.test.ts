@@ -15,6 +15,8 @@ const turnStart = page.indexOf('async function runTurn(')
 const turnSource = page.slice(turnStart, page.indexOf('\n}', turnStart) + 2)
 const seatStart = page.indexOf('function selectionForSeat(')
 const seatSource = page.slice(seatStart, page.indexOf('\n}', seatStart) + 2)
+const failureStart = page.indexOf('function historyFailureText(')
+const failureSource = page.slice(failureStart, page.indexOf('\n}', failureStart) + 2)
 assert.ok(start >= 0 && selectStart >= 0 && adoptStart >= 0, 'the page defines both session entry points and the model publication guard')
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -35,20 +37,25 @@ function harness() {
     closeSchedulesPage() {}, closeScheduleDrawer() {}, resetScheduleList() {},
     updateStatusBar() {}, paintEmptyState() {}, applySessionAccess() {},
     placeholderDrawn: () => false, scheduleTreeRefresh() {}, chooseWorkspace() {}, jobsSessionChanged() {},
+    rememberCurrent() {}, paintComposerAccess() {}, paintRunningMarks() {}, renderComposerState() {},
+    renderTree: async () => {}, markSelection() {},
+    paintSessionHeading: (meta?: { title?: string }) => { title.textContent = meta?.title ?? 'Session unavailable' },
+    firstTreeReady: Promise.resolve(), newConversationTarget: () => null, workspaceRoutes: 'absent',
     slashReady: Promise.resolve(null),
     syncSelectionToSession() {}, paintScheduleHeader() {}, followChatTail() {},
     renderScheduleCards() {}, renderScheduleDrawer() {}, refreshScheduleList() {}, refreshScheduleCatalog() {},
     refreshSessions: async () => {}, refreshGoal: async () => {}, refreshTodo: async () => {}, showLedger: async () => {},
     log: { replaceChildren: () => rows.splice(0), append: (note: { textContent: string }) => rows.push(note.textContent) },
     add: (_kind: string, text: string) => rows.push(text),
-    document: { getElementById: (id: string) => id === 'session-title' ? title : branch, createElement: () => ({ className: '', textContent: '' }) },
+    document: { getElementById: (id: string) => id === 'session-title' ? title : branch, createElement: () => ({ className: '', textContent: '', setAttribute() {} }) },
     fetch: async (url: string) => {
       if (url.endsWith('/A')) { started.resolve(); return ++aRequests === 1 ? a.promise : nextA.promise }
       return { ok: true, json: async () => ({ title: 'B title', cwd: '/B', endpoint: 'B model', turns: [{ kind: 'user', text: 'B message' }] }) }
     },
   }
   const api = runInNewContext(`
-    let current = null, composerKey = '', view = 'chat', sessionViewGeneration = 0;
+    let current = null, composerKey = '', view = 'chat', showGeneration = 0, unavailableSession = null, selectedPath = null;
+    const unreadSessions = new Set(), sessionMetas = new Map();
     let sessionStats, liveRounds, liveUsage, liveTurns, liveGenerationMs, liveDecodeTokens, liveRoundStartedAt;
     let seat = '', activeFolder = null, selected = null;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
@@ -67,6 +74,7 @@ function harness() {
       seat = chosenEndpoint = endpoint; chosenModel = model; chosenEffort = effort;
     }
     ${adoptSource}
+    ${failureSource}
     ${source}
     ${selectSource}
     ${seatSource}
@@ -74,8 +82,8 @@ function harness() {
     ({ showSession, selectSession, sends, recorded: (id) => recordedSelections.has(id),
       turn: (key) => runTurn('queued message', key).catch(() => {}),
       chooseModel(endpoint) { latestSelection.set(current, ++selectionSeq); applySessionModel(endpoint, null, null) },
-      state: () => ({ current, composerKey, seat, selected }) })
-  `, context) as { recorded(id: string): boolean; sends: Record<string, unknown>[]; turn(key: string): Promise<void>; chooseModel(endpoint: string): void; showSession(id: string): Promise<void>; selectSession(node: {path:string;cwd:string;session:{id:string}}):Promise<void>; state(): { current: string; composerKey: string; seat: string; selected:string } }
+      state: () => ({ current, composerKey, seat, selected, unavailableSession }) })
+  `, context) as { recorded(id: string): boolean; sends: Record<string, unknown>[]; turn(key: string): Promise<void>; chooseModel(endpoint: string): void; showSession(id: string): Promise<boolean>; selectSession(node: {path:string;cwd:string;session:{id:string}}):Promise<void>; state(): { current: string; composerKey: string; seat: string; selected:string; unavailableSession: string | null } }
   return { ...api, a, nextA, started, title, rows }
 }
 
@@ -84,10 +92,10 @@ for (const outcome of ['success', 'refused', 'failed'] as const) {
     const h = harness()
     const old = h.showSession('A')
     await h.started.promise
-    await h.showSession('B')
+    assert.equal(await h.showSession('B'), true)
     if (outcome === 'failed') h.a.reject(new Error('A unavailable'))
     else h.a.resolve({ ok: outcome === 'success', json: async () => ({ title: 'A title', endpoint: 'A model', turns: [{ kind: 'user', text: 'A message' }] }) })
-    await old
+    assert.equal(await old, false)
     assert.equal(h.state().current, 'B')
     assert.equal(h.state().composerKey, 'B')
     assert.equal(h.state().seat, 'B model')
@@ -163,4 +171,17 @@ test('a late A JSON view records A model state without publishing over B', { tim
   assert.equal(h.state().seat, 'B model')
   assert.equal(h.title.textContent, 'B title')
   assert.deepEqual(h.rows, ['B message'])
+})
+
+test('an unavailable session resolves false and displays the failure line before another open clears it', { timeout: 5000 }, async () => {
+  const h = harness()
+  const opened = h.showSession('A')
+  await h.started.promise
+  h.a.resolve({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'A was removed' }) } as { ok: boolean; json: () => Promise<unknown> })
+  assert.equal(await opened, false)
+  assert.equal(h.state().current, null)
+  assert.equal(h.state().unavailableSession, 'A')
+  assert.deepEqual(h.rows, ['Failed to load history: A was removed (404)'])
+  assert.equal(await h.showSession('B'), true)
+  assert.equal(h.state().unavailableSession, null)
 })
