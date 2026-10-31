@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
@@ -27,7 +27,7 @@ function startServer(label, stepsFor) {
       const work = fixtureDir(`approval-${label}-work`)
       const outsideDir = fixtureDir(`approval-${label}-outside`)
       const outsidePath = join(outsideDir, 'outside.txt')
-      const steps = stepsFor({ outsidePath })
+      const steps = stepsFor({ outsidePath, work })
       const { config } = scriptedConfig({ home, steps })
       const child = spawn(
         ...heddleCommand([
@@ -285,6 +285,45 @@ test('a refused call\'s note sits before the turn\'s answer, and the answer stay
     const notes = rows.flatMap((row, index) => (row.kind === 'denied' ? [index] : []))
     assert.ok(notes.length >= 1, `the refusal is noted (${kinds})`)
     assert.ok(notes.every((index) => index < answerAt), `and its note sits before the answer, with the call (${kinds})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a write the sandbox refused is not an edited file: the card and the transcript list only what was written', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-five-6: both servers noted a file when its write_file was asked for, so a write the
+   * sandbox refused was listed on the Edited files card. DSH lists deliverables, recorded only after the file was
+   * written. One write goes outside the workspace and is refused; the next is inside and lands.
+   */
+  const server = await startServer('edited-refused', ({ outsidePath, work }) => [
+    { toolCall: { name: 'write_file', arguments: { path: outsidePath, content: 'outside\n' } } },
+    { toolCall: { name: 'write_file', arguments: { path: join(work, 'kept.txt'), content: 'kept\n' } } },
+    { text: 'one file written' },
+  ])
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
+    await sendMessage(browser, 'write two files')
+    assert.ok(
+      await browser.waitFor(`[...document.querySelectorAll('#log .turn.assistant')].some((row) => row.dataset.rendered === 'true' && row.textContent.includes('one file written'))`, 20_000),
+      'the answer settles',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    assert.equal(existsSync(server.outsidePath), false, 'the sandbox refused the outside write')
+    const cards = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#log [data-changed-files]')].map((card) => card.textContent))`))
+    assert.equal(cards.length, 1, `one card for the turn (${JSON.stringify(cards)})`)
+    assert.match(cards[0], /kept\.txt/, 'naming the file that was written')
+    assert.doesNotMatch(cards[0], new RegExp(basename(server.outsidePath).replace('.', '\\.')), 'and not the one the sandbox refused')
+
+    const sessions = await request(server, '/api/sessions').then((response) => response.json())
+    const record = await request(server, `/api/sessions/${encodeURIComponent(sessions[0].id)}`).then((response) => response.json())
+    const files = (record.turns ?? []).filter((turn) => turn.kind === 'assistant').flatMap((turn) => turn.files ?? []).map((file) => file.path)
+    assert.deepEqual(files.map((path) => basename(path)), ['kept.txt'], `the transcript lists only the written file (${JSON.stringify(files)})`)
   } finally {
     browser.close()
     await server.close()
