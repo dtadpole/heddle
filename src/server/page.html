@@ -1171,10 +1171,11 @@
   .markdown .frontmatter h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
   #timeline { position: relative; height: 1.6rem; margin: .1rem 0 .7rem; border-radius: .25rem; background: color-mix(in oklab, currentColor 7%, transparent); overflow: hidden; }
   #timeline:empty { display: none; }
-  #timeline button { position: absolute; top: 0; bottom: 0; padding: 0; border: none; border-right: 1px solid var(--line); background: color-mix(in oklab, #4b8bf5 45%, transparent); cursor: pointer; }
-  #timeline button[data-leading='assistant'] { background: color-mix(in oklab, #2fa36b 45%, transparent); }
-  #timeline button[data-leading='reasoning'] { background: color-mix(in oklab, #b7791f 45%, transparent); }
-  #timeline button[data-leading='tool'] { background: color-mix(in oklab, #8b5cf6 45%, transparent); }
+  /*
+   * The strip's old per-turn band rules (`#timeline button`, by data-leading) are gone: nothing sets data-leading any
+   * more, and their 1,0,1 specificity beat the lane strip's `.tr-tick` rules below, hiding the lane colours, moving the
+   * ticks to top 0 and resetting the TTFT split's gradient (developer-ten's review of S151).
+   */
   /**
    * The column's resize grips — DSH's own pair (`wSkVaW_widthHandle`).
    *
@@ -1206,8 +1207,6 @@
   .column-grip:hover::after, .column-grip:focus-visible::after, .column-grip[data-dragging='true']::after { opacity: 1; }
   .column-grip:focus-visible { outline: 1px solid color-mix(in oklab, currentColor 40%, transparent); outline-offset: 2px; border-radius: 4px; }
   .column-grip[data-dragging='true'] { z-index: 8; }
-  #timeline button[data-running='true'] { background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, color-mix(in oklab, currentColor 25%, transparent) 4px, color-mix(in oklab, currentColor 25%, transparent) 8px); }
-  #timeline button[aria-current='true'] { outline: 2px solid currentColor; outline-offset: -2px; }
   #timeline-legend { display: flex; gap: .75rem; font-size: .72rem; opacity: .6; margin: -.4rem 0 .7rem; }
   /**
    * The session header: DSH's shape — the name at the reading column's left edge, above the tabs, with the branch
@@ -2716,6 +2715,8 @@
   /** An answer's bar splits at its TTFT, as DSH's does: the wait for the first token lighter, the decoding darker. */
   .tr-tick[data-split='true'] { background: linear-gradient(to right, color-mix(in oklab, #8b5cf6 25%, transparent) 0 var(--ttft), color-mix(in oklab, #8b5cf6 75%, transparent) var(--ttft) 100%); }
   .tr-tick:hover, .tr-tick[aria-current='true'] { outline: 1px solid var(--text-3); }
+  /** A focused bar's own ring, drawn inside the lane: the browser's default ring is clipped by the strip's overflow. */
+  .tr-tick:focus-visible { outline: 2px solid var(--text-2); outline-offset: 1px; }
   .tr-focus {
     position: absolute;
     top: 0;
@@ -6360,6 +6361,11 @@ function timingSection(record, turn, step) {
 }
 
 /* timeline-tip:begin */
+/** A span of time in the strip's words: `840 ms`, `3.25 s`, `12.5 s`, `1m 15s`. One formatter for every figure in a tip. */
+function timelineDuration(lasted) {
+  return lasted < 1000 ? Math.round(lasted) + ' ms' : lasted < 60_000 ? (lasted / 1000).toFixed(lasted < 10_000 ? 2 : 1) + ' s' : Math.floor(lasted / 60_000) + 'm ' + Math.round((lasted % 60_000) / 1000) + 's'
+}
+
 /**
  * What an overview tick says when hovered: its turn and kinds, then the clock it started at and how long it lasted
  * (DSH's overview shows a span's exact clock and duration after a 500 ms hover). A running span shows only its start,
@@ -6369,7 +6375,7 @@ function timingSection(record, turn, step) {
 function timelineTickText(span, totalMs, startsAtMs) {
   const label = 'turn ' + span.turn + ' · ' + ((span.kinds ?? []).join(', ') || 'records')
   const lasted = Math.max(0, (span.end - span.start) * totalMs)
-  const duration = lasted < 1000 ? Math.round(lasted) + ' ms' : lasted < 60_000 ? (lasted / 1000).toFixed(lasted < 10_000 ? 2 : 1) + ' s' : Math.floor(lasted / 60_000) + 'm ' + Math.round((lasted % 60_000) / 1000) + 's'
+  const duration = timelineDuration(lasted)
   let clock = null
   if (Number.isFinite(startsAtMs)) {
     const at = new Date(startsAtMs + span.start * totalMs)
@@ -6384,10 +6390,16 @@ function timelineTickText(span, totalMs, startsAtMs) {
 /* overview-bars:begin */
 /**
  * The overview's bars, as DSH's overview draws them: one per timed record, in its lane (S151, R-developer-eleven-21).
- * A turn's records in one lane are drawn one by one when they are few and each is at least a pixel wide; otherwise they
+ * A turn's records in one lane are drawn one by one when they are few and none is narrower than a pixel; otherwise they
  * merge into one bar for that turn and lane, so a long session stays a few hundred nodes, not thousands. A bar carries
  * the TTFT split only when the record does (the projections give it only when 0 <= ttftMs <= durationMs). Pure, and
  * fenced so test/page-overview-bars.test.ts judges it.
+ *
+ * Layout and time are kept apart (developer-ten's review): `x0`/`x1` are where a record is drawn (its time in actual
+ * mode, its equal slot in the default mode) and decide the pixel test and the drawn extent; `start`/`end` stay its
+ * recorded time, which the tip's clock and duration read, so a bar says the same in both modes. A record without
+ * `x0`/`x1` is drawn at its time. A record with no measured width (instantaneous, or still running) is drawn at the
+ * floor width and does not force a merge, and a group of one never merges.
  */
 function overviewBars(records, trackPx) {
   const width = trackPx > 0 ? trackPx : 1000
@@ -6395,11 +6407,12 @@ function overviewBars(records, trackPx) {
   for (const record of records) {
     const key = record.turn + '|' + record.lane
     if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(record)
+    groups.get(key).push({ ...record, x0: record.x0 ?? record.start, x1: record.x1 ?? record.end })
   }
   const bars = []
   for (const group of groups.values()) {
-    const drawable = group.length <= 12 && group.every((record) => (record.end - record.start) * width >= 1)
+    const subPixel = (record) => record.x1 > record.x0 && (record.x1 - record.x0) * width < 1
+    const drawable = group.length === 1 || (group.length <= 12 && !group.some(subPixel))
     if (drawable) {
       for (const record of group) bars.push({ ...record, kinds: [record.kind], merged: 1 })
       continue
@@ -6411,6 +6424,8 @@ function overviewBars(records, trackPx) {
       kinds: [...new Set(group.map((record) => record.kind))],
       start: Math.min(...group.map((record) => record.start)),
       end: Math.max(...group.map((record) => record.end)),
+      x0: Math.min(...group.map((record) => record.x0)),
+      x1: Math.max(...group.map((record) => record.x1)),
       running: group.some((record) => record.running),
       merged: group.length,
     })
@@ -6422,8 +6437,7 @@ function overviewBars(records, trackPx) {
 function timelineRecordText(bar, totalMs, startsAtMs) {
   const text = timelineTickText(bar, totalMs, startsAtMs)
   const label = bar.merged > 1 ? text.label + ' · ' + bar.merged + ' records' : text.label
-  const ms = (value) => (value < 1000 ? Math.round(value) + ' ms' : (value / 1000).toFixed(value < 10_000 ? 2 : 1) + ' s')
-  const split = bar.ttftMs !== undefined && bar.decodingMs !== undefined ? ' · TTFT ' + ms(bar.ttftMs) + ' · decoding ' + ms(bar.decodingMs) : ''
+  const split = Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) ? ' · TTFT ' + timelineDuration(bar.ttftMs) + ' · decoding ' + timelineDuration(bar.decodingMs) : ''
   return { label, when: text.when + split }
 }
 /* overview-bars:end */
@@ -6444,14 +6458,14 @@ function renderTimeline(timeline_, data = {}) {
    */
   const placed = trajectory.durationActual
     ? records
-    : records.map((record, index) => ({ ...record, start: index / records.length, end: (index + 0.9) / records.length }))
-  const bars = records.length > 0 ? overviewBars(placed, timeline.clientWidth) : null
+    : records.map((record, index) => ({ ...record, x0: index / records.length, x1: (index + 0.9) / records.length }))
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
   const focusBox = document.createElement('div')
   focusBox.className = 'tr-focus'
   wrapper.append(focusBox)
   const equal = 1 / spans.length
+  const tracks = new Map()
   for (const lane of lanes) {
     const laneBox = document.createElement('div')
     laneBox.className = 'tr-lane'
@@ -6461,10 +6475,22 @@ function renderTimeline(timeline_, data = {}) {
     label.textContent = lane
     const track = document.createElement('div')
     track.className = 'tr-lane-track'
+    laneBox.append(label, track)
+    wrapper.append(laneBox)
+    tracks.set(lane, track)
+  }
+  /**
+   * The strip is in the page before its bars are laid out, so the pixel test reads the track's real width: an emptied
+   * strip is `display: none` (`#timeline:empty`) and measured 0, which always fell back to 1000 px (developer-ten's N1).
+   */
+  timeline.append(wrapper)
+  const bars = records.length > 0 ? overviewBars(placed, tracks.get('input')?.clientWidth ?? 0) : null
+  for (const lane of lanes) {
+    const track = tracks.get(lane)
     /**
      * With per-record data, the lane draws DSH's per-record bars; an answer from a server without records keeps one tick
      * per turn. Bars are buttons like ticks, so Tab reaches them and Enter picks their turn; their listeners are the
-     * strip's own, below.
+     * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time.
      */
     if (bars !== null) {
       for (const bar of bars) {
@@ -6475,10 +6501,10 @@ function renderTimeline(timeline_, data = {}) {
         element.dataset.lane = lane
         element.dataset.turn = String(bar.turn)
         element.dataset.kind = bar.kinds.join(' ')
-        element.style.left = (bar.start * 100).toFixed(3) + '%'
-        element.style.width = (Math.max(bar.end - bar.start, 0.004) * 100).toFixed(3) + '%'
+        element.style.left = (bar.x0 * 100).toFixed(3) + '%'
+        element.style.width = (Math.max(bar.x1 - bar.x0, 0.004) * 100).toFixed(3) + '%'
         if (bar.running) element.dataset.running = 'true'
-        if (bar.ttftMs !== undefined && bar.decodingMs !== undefined && bar.ttftMs + bar.decodingMs > 0) {
+        if (Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) && bar.ttftMs + bar.decodingMs > 0) {
           element.dataset.split = 'true'
           element.style.setProperty('--ttft', ((bar.ttftMs / (bar.ttftMs + bar.decodingMs)) * 100).toFixed(1) + '%')
         }
@@ -6488,12 +6514,9 @@ function renderTimeline(timeline_, data = {}) {
         element.setAttribute('aria-label', text.label + ' · ' + text.when)
         track.append(element)
       }
-      laneBox.append(label, track)
-      wrapper.append(laneBox)
       continue
     }
     spans.forEach((span, index) => {
-      const kinds = span.kinds ?? []
       if (!(span.lanes ?? []).includes(lane)) return
       const tick = document.createElement('button')
       tick.type = 'button'
@@ -6515,10 +6538,7 @@ function renderTimeline(timeline_, data = {}) {
       tick.dataset.turn = String(span.turn)
       track.append(tick)
     })
-    laneBox.append(label, track)
-    wrapper.append(laneBox)
   }
-  timeline.append(wrapper)
   /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
   const tip = document.createElement('div')
   tip.id = 'timeline-tip'
