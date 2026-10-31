@@ -102,3 +102,51 @@ test('a settings write to the model row applies to the next turn without a resta
     removeDir(home)
   }
 })
+
+test('a settings write of the presets default is the next new session\'s, and an existing session keeps its own (A96)', async () => {
+  const home = isolatedHome('settings-live-presets')
+  const double = await chatDouble({ content: 'ok' })
+  let server
+  try {
+    const config = join(home, 'heddle.json')
+    writeFileSync(config, JSON.stringify({ default: 'gateway', exclude: ['scripted'], endpoints: [{ name: 'gateway', kind: 'openai-chat', baseUrl: double.baseUrl, model: 'm', stream: true }] }))
+    const profile = scratchProfile(home)
+    // The shipped tree has no presets row; this profile adds one, so the settings write lands in the profile's patch.
+    const patch = join(profile, 'heddle.patch.yml')
+    writeFileSync(
+      patch,
+      readFileSync(patch, 'utf8') +
+        `\n- insert:\n    - id: presets\n      name: ${repoRoot}/src/plugins/presets.ts\n      config:\n        default: standard\n        presets:\n          - id: standard\n            name: Standard\n          - id: reader\n            name: Reader\n`,
+    )
+    server = await startServer(['--profile', profile, '--sandbox-root', home], { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config })
+    const sessionIds = async () => ((await call(server, 'GET', '/api/sessions')).body ?? []).map((session) => session.id)
+    const startTurn = async (body) => {
+      const before = await sessionIds()
+      const turn = await call(server, 'POST', '/api/turn', body)
+      assert.equal(turn.status, 200, `the turn ran\n${JSON.stringify(turn.body).slice(0, 300)}`)
+      return (await sessionIds()).find((id) => !before.includes(id))
+    }
+    const presetOf = async (id) => (await call(server, 'GET', `/api/sessions/${id}`)).body?.preset
+
+    const existing = await startTurn({ prompt: 'first' })
+    assert.equal(await presetOf(existing), 'standard', 'a session made before the write runs the booted default')
+
+    const before = await call(server, 'GET', '/api/settings/presets')
+    assert.equal(before.status, 200, `the presets row is a settings entry\n${JSON.stringify(before.body).slice(0, 300)}`)
+    assert.equal(before.body.applies, 'live', 'a presets write applies to the running server')
+    const written = await call(server, 'POST', '/api/settings/presets', { update: { default: 'reader' }, expectedRevision: before.body.revision })
+    assert.equal(written.status, 200, `the write is accepted\n${JSON.stringify(written.body).slice(0, 300)}`)
+    assert.equal(written.body.applyError, undefined, 'and the running tree took it')
+
+    assert.equal((await call(server, 'GET', '/api/presets')).body.default, 'reader', 'the roster answers the written default at once')
+    const fresh = await startTurn({ prompt: 'second' })
+    assert.equal(await presetOf(fresh), 'reader', 'a new session starts under the written default')
+    const again = await call(server, 'POST', '/api/turn', { prompt: 'again', session: existing })
+    assert.equal(again.status, 200, `the existing session runs on\n${JSON.stringify(again.body).slice(0, 300)}`)
+    assert.equal(await presetOf(existing), 'standard', 'and keeps the preset it recorded')
+  } finally {
+    server?.kill()
+    await double.close()
+    removeDir(home)
+  }
+})
