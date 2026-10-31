@@ -70,6 +70,7 @@ pub use message::{
 };
 pub use meta::{
     CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta, SessionOrigin,
+    under_archived_session,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
 pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
