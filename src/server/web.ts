@@ -39,9 +39,10 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
-import { activitySessions, sessionActivity } from '../session/activity.ts'
+import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
-import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
+import type { ScheduleService } from '../schedule/service.ts'
+import { handleJobsRoute } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -1663,39 +1664,36 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
      *
      * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
-     * `details.activity`): the turn in progress and the running subagent descendants, which the page's stop-and-archive
-     * dialog lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn,
-     * a teammate's, a notice's), because a session the page did not start can still be working.
+     * `details.activity`): the turn in progress, the session's live background jobs, its running subagent descendants and
+     * its active reminders, in DSH's listener order (`src/session/activity.ts`), which the page's stop-and-archive dialog
+     * lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn, a
+     * teammate's, a notice's), because a session the page did not start can still be working. The jobs are also listed
+     * as `jobs`, the jobs row's own field (`sessionJobActivity`), which the page's older confirm reads.
+     *
+     * With `stop: true` the jobs are killed with `session archived` and the reminders removed once the archive is
+     * written, which is DSH's order for every family: the archive set first, then each `workspace/session-stop`
+     * listener, awaited (`dsh-workspace/lib/index.js:527-541`, `:621-628`). The turn and the subagents are still
+     * stopped before the write (a known difference, `SESSION_ACTIONS.md`).
      */
-    /**
-     * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
-     * they block the archive the same way, are listed in the refusal, and with `stop: true` are killed with
-     * `session archived` once the archive is written.
-     */
-    const jobs = ctx.get('jobs') as JobRegistry | undefined
-    const stopJobs = archived === true && body.stop === true
+    const rows = { jobs: ctx.get('jobs') as JobRegistry | undefined, schedule: ctx.get('schedule') as ScheduleService | undefined }
+    const stopRows = archived === true && body.stop === true
     if (archived === true) {
       const turns = ctx.get('turns') as TurnRegistry | undefined
       const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
-      /** The session's own turn and its running subagents (stack-2's archive), then its live jobs (main's jobs view). */
-      const activity = sessionActivity(id, ctx.session.list(), isRunning)
-      const liveJobs = sessionJobActivity(jobs, id)
-      if (activity.length > 0 || liveJobs.length > 0) {
+      const work = await rowActivity(rows, id)
+      const activity = sessionActivity(id, ctx.session.list(), isRunning, work)
+      if (activity.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
             `${JSON.stringify({
-              error:
-                activity.length > 0
-                  ? `session ${id} is running; pass stop: true to stop it and archive`
-                  : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
+              error: refusalSentence(id, activity),
               code: 'active',
               running: state.running.get(id) ?? 0,
-              /** DSH's list, every family: `dsh-jobs` prepends its `{ kind: 'job', items }` ahead of the rest (lib/index.js:19-31). */
-              activity: [...(liveJobs.length > 0 ? [{ kind: 'job', items: liveJobs }] : []), ...activity],
-              ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
+              activity,
+              ...(work.jobs.length > 0 ? { jobs: work.jobs } : {}),
             })}\n`,
           )
           return
@@ -1729,7 +1727,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
-    if (stopJobs) stopSessionJobs(jobs, id)
+    if (stopRows) await stopRowActivity(rows, id, (message) => ctx.logger.warn(message))
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }

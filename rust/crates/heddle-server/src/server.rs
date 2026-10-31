@@ -1319,14 +1319,18 @@ async fn flags_session(
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
     // The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace`
-    // `archiveSession`, `details.activity`): the turn in progress and the running subagent descendants, which
-    // the page's stop-and-archive dialog lists. A turn is running when this server started it or the agent
-    // runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
-    // A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs`
-    // lib/index.js:19-31, which puts its `{ kind: "job", items }` ahead of the rest): they block the archive
-    // the same way, are listed in the refusal (also as `jobs`), and with `stop: true` are stopped once the
-    // archive is written.
-    let activity = state.harness().activity.clone();
+    // `archiveSession`, `details.activity`): the turn in progress, the session's live background jobs, its
+    // running subagent descendants and its active reminders, in DSH's listener order
+    // (`heddle_session::session_activity`), which the page's stop-and-archive dialog lists. The jobs and the
+    // reminders are what the rows behind the activity port report; the jobs are also listed as `jobs`, the jobs
+    // row's own field, which the page's older confirm reads. A turn is running when this server started it or the
+    // agent runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
+    //
+    // With `stop: true` the turn and the subagents are stopped here (before the write: a known difference from
+    // DSH, `SESSION_ACTIONS.md`), and the port's work once the archive is written — DSH's order: it writes the
+    // archive set, then asks every `workspace/session-stop` listener and awaits them
+    // (`dsh-workspace/lib/index.js:527-541`, `:621-628`).
+    let port = state.harness().activity.clone();
     let stop = archived == Some(true) && body.bool("stop") == Some(true);
     if archived == Some(true) {
         let runs = state.runs();
@@ -1344,44 +1348,27 @@ async fn flags_session(
                     .and_then(heddle_session::LineageMeta::from_map)
             })
             .collect();
-        let work = heddle_session::session_activity(id.as_str(), &metas, is_running);
-        let jobs: Vec<Value> = activity
-            .as_ref()
-            .map(|activity| activity.active(id.as_str()))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|item| item.kind == crate::services::ActivityKind::Job)
+        let rows = row_activity(port.as_deref(), id.as_str());
+        let jobs: Vec<Value> = rows
+            .jobs
+            .iter()
             .map(|item| json!({ "id": item.id, "label": item.label }))
             .collect();
-        if !work.is_empty() || !jobs.is_empty() {
+        let activity = heddle_session::session_activity(id.as_str(), &metas, is_running, rows);
+        if !activity.is_empty() {
             if !stop {
-                let error = if !work.is_empty() {
-                    format!("session {id} is running; pass stop: true to stop it and archive")
-                } else {
-                    format!(
-                        "session {id} has running background jobs; pass stop: true to stop them and archive"
-                    )
-                };
-                let mut listed: Vec<Value> = Vec::new();
-                if !jobs.is_empty() {
-                    listed.push(json!({ "kind": "job", "items": jobs.clone() }));
-                }
-                listed.extend(
-                    work.iter()
-                        .filter_map(|entry| serde_json::to_value(entry).ok()),
-                );
                 let mut refusal = json!({
-                    "error": error,
+                    "error": heddle_session::refusal_sentence(id.as_str(), &activity),
                     "code": "active",
                     "running": runs.running(id.as_str()),
-                    "activity": listed,
+                    "activity": activity,
                 });
                 if !jobs.is_empty() {
                     refusal["jobs"] = Value::Array(jobs);
                 }
                 return respond::json(StatusCode::CONFLICT, &refusal);
             }
-            for session in heddle_session::activity_sessions(id.as_str(), &work) {
+            for session in heddle_session::activity_sessions(id.as_str(), &activity) {
                 runs.abort(&session);
                 runner.interrupt(&session);
             }
@@ -1394,8 +1381,8 @@ async fn flags_session(
     {
         Ok(None) => respond::no_session(id.as_str()),
         Ok(Some(meta)) => {
-            if let (true, Some(activity)) = (stop, activity.as_ref()) {
-                activity.stop(id.as_str());
+            if let (true, Some(port)) = (stop, port.as_ref()) {
+                port.stop(id.as_str()).await;
             }
             respond::json(StatusCode::OK, &meta)
         }
@@ -1404,6 +1391,29 @@ async fn flags_session(
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
         }
     }
+}
+
+/// The activity port's items as the families `heddle_session::session_activity` places in DSH's order: each
+/// `job` and `schedule` item, labelled. Turns and subagents are the server's own count, so the port's items of
+/// those kinds are not read here.
+fn row_activity(
+    port: Option<&dyn crate::services::SessionActivity>,
+    session: &str,
+) -> heddle_session::RowActivity {
+    use crate::services::ActivityKind;
+    let mut rows = heddle_session::RowActivity::default();
+    for item in port.map(|port| port.active(session)).unwrap_or_default() {
+        let entry = heddle_session::ActivityItem {
+            id: item.id,
+            label: Some(item.label),
+        };
+        match item.kind {
+            ActivityKind::Job => rows.jobs.push(entry),
+            ActivityKind::Schedule => rows.schedules.push(entry),
+            ActivityKind::Turn | ActivityKind::Subagent => {}
+        }
+    }
+    rows
 }
 
 async fn title_session(
@@ -3769,8 +3779,9 @@ mod tests {
                 }]
             }
         }
-        fn stop(&self, session: &str) {
+        fn stop(&self, session: &str) -> BoxFuture<'static, ()> {
             self.stopped.lock().unwrap().push(session.to_owned());
+            Box::pin(async {})
         }
     }
 
@@ -4371,6 +4382,141 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(guard.is_cancelled(), "stop: true cancels the turn");
         drop(guard);
+    }
+
+    /// The activity port as a double: the work it reports for one session until that session is stopped.
+    struct RowWork {
+        items: Vec<crate::services::ActivityItem>,
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for RowWork {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                self.items.clone()
+            }
+        }
+        fn stop(&self, session: &str) -> BoxFuture<'static, ()> {
+            self.stopped.lock().unwrap().push(session.to_owned());
+            Box::pin(async {})
+        }
+    }
+
+    /// DSH's schedule plugin is an activity provider (`dsh-schedule/lib/index.js:2043-2064`): an active reminder
+    /// refuses a plain archive even of an idle session, the families come in DSH's listener order (turn, job,
+    /// subagent, schedule), and `stop: true` asks the port to stop once the archive is written.
+    #[tokio::test]
+    async fn the_ports_reminders_and_jobs_are_listed_in_dsh_order_and_stopped_by_stop_true() {
+        use crate::services::{ActivityItem, ActivityKind};
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let port = Arc::new(RowWork {
+            items: vec![
+                ActivityItem {
+                    kind: ActivityKind::Schedule,
+                    id: "schedule-1".into(),
+                    label: "Stand-up".into(),
+                },
+                ActivityItem {
+                    kind: ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                },
+            ],
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_rows = harness();
+        with_rows.activity = Some(port.clone());
+        let (router, state) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = format!("/api/sessions/{id}/flags");
+
+        let guard = state.runs().begin(id);
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["activity"],
+            json!([
+                { "kind": "turn" },
+                { "kind": "job", "items": [{ "id": "bash-0123456789abcdef", "label": "sleep 30" }] },
+                { "kind": "schedule", "items": [{ "id": "schedule-1", "label": "Stand-up" }] }
+            ]),
+            "{body}"
+        );
+        drop(guard);
+
+        let reminders_only = Arc::new(RowWork {
+            items: port.items[..1].to_vec(),
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut idle = harness();
+        idle.activity = Some(reminders_only.clone());
+        let (router, _) = ServerBuilder::new(
+            idle,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-reminder")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an idle session with a reminder"
+        );
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "active");
+        assert_eq!(
+            body["error"],
+            format!(
+                "session {id} has active scheduled reminders; pass stop: true to stop them and archive"
+            )
+        );
+        assert_eq!(
+            body["activity"],
+            json!([{ "kind": "schedule", "items": [{ "id": "schedule-1", "label": "Stand-up" }] }]),
+            "{body}"
+        );
+        assert!(
+            reminders_only.stopped.lock().unwrap().is_empty(),
+            "a refusal stops nothing"
+        );
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(*reminders_only.stopped.lock().unwrap(), [id]);
+        let (status, _) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "with the reminder stopped, nothing blocks"
+        );
+
+        let (status, _) = post_json(&router, &uri, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            reminders_only.stopped.lock().unwrap().len(),
+            1,
+            "pinning never stops anything"
+        );
     }
 
     /// A runner whose agent runtime holds turns the server did not start, and records what it was asked to stop.

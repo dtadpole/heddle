@@ -549,22 +549,42 @@ pub trait TurnInterrupter: Send + Sync {
     fn interrupt(&self, session: &str) -> bool;
 }
 
-/// Work a session holds besides its turns, which an archive is refused by unless the caller agrees to stop it: DSH's
-/// `workspace/session-activity` waterfall and `workspace/session-stop` (`dsh-workspace` archive,
-/// `lib/index.js:512-540`). The binary supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`).
+/// Work a session holds besides the turns and subagents the server counts itself, which an archive is refused by
+/// unless the caller agrees to stop it: DSH's other `workspace/session-activity` providers and their
+/// `workspace/session-stop` listeners (`dsh-workspace` `archiveSession`, `lib/index.js:527-541`). The binary
+/// supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`) and the schedule row
+/// (`dsh-schedule/lib/index.js:2043-2064`).
 pub trait SessionActivity: Send + Sync {
-    /// The live work that blocks archiving `session`, in provider order (DSH's activity entries).
+    /// The live work that blocks archiving `session`, each item under its kind. The server lists the items of
+    /// the `job` and `schedule` kinds in DSH's listener order (`heddle_session::session_activity`); it counts
+    /// turns and subagents itself.
     fn active(&self, session: &str) -> Vec<ActivityItem>;
-    /// Stop it, once the archive is written: a background job is killed with `session archived`.
-    fn stop(&self, session: &str);
+    /// Stop it, once the archive is written: a background job is killed with `session archived`, a reminder is
+    /// removed. The server awaits it before answering, as DSH's registry awaits every stop listener
+    /// (`dsh-workspace/lib/index.js:540`, `:621-628`) — a reminder's removal waits its turn in the schedule
+    /// service's queue (`stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
+    fn stop(&self, session: &str) -> BoxFuture<'static, ()>;
 }
 
-/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`. Turns are counted by the server itself today;
-/// the kind lets them come through the same port later.
+/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityKind {
     Turn,
     Job,
+    Subagent,
+    Schedule,
+}
+
+impl ActivityKind {
+    /// The kind as DSH spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Job => "job",
+            Self::Subagent => "subagent",
+            Self::Schedule => "schedule",
+        }
+    }
 }
 
 /// One piece of live work an archive is refused by (DSH's activity item: `{ id, label }` under a `kind`).
@@ -632,7 +652,7 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
-    /// Work besides turns that an archive stops or is refused by; `None`: turns are the only activity.
+    /// Work besides turns and subagents that an archive stops or is refused by; `None`: no such row is loaded.
     pub activity: Option<Arc<dyn SessionActivity>>,
     /// The interface language the optional `locale` row stores (issue #80): the page is served with its
     /// `<html lang>`; `None` follows each browser's `Accept-Language`.

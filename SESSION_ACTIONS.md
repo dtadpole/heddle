@@ -1,6 +1,6 @@
 ---
 title: Session actions — pin, archive and fork
-version: 1.1.0
+version: 1.2.0
 description: What the reference implementation means by pinning, archiving and forking a session — read from the installed DSH packages — and how this project's backend and UI implement the same three, row by row.
 grounded_in:
   - source: human-authored reading of the installed DSH packages on 2026-10-17
@@ -211,9 +211,8 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   `workspace/session-active`): `{kind: 'turn'}` for the session's own running turn and `{kind: 'subagent', items}` for its
   running subagent descendants, found by lineage (`src/session/activity.ts`, `heddle_session::session_activity`). A session
   whose own turn has ended but whose subagent still works is refused too; `stop: true` stops the turn and each listed child
-  (the Web server's handles and the live-turn registry). DSH's two other families: background jobs have no runtime
-  here; scheduled reminders landed on main (`src/schedule/`, `heddle-schedule`) after this fix, with DSH's
-  `list({sessionId})` and `stopSessionTasks`, and reporting them is a follow-up. The page already words both families.
+  (the Web server's handles and the live-turn registry). DSH's two other families came later: see *DSH parity, 31 Oct*
+  below. The page already words all four families.
 - **The dialog.** The page sends the plain archive first and opens the stop-and-archive dialog only when the server
   refuses: DSH's title, its description naming the session and the restore path, the work one family per line, Cancel and
   Stop and archive. A quiet archive asks nothing and, like a stop-and-archive, shows DSH's notice with `undo` (and
@@ -228,3 +227,56 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   "Archived sessions cannot be opened. Unarchive it to view." in the archive notice and opens nothing, and the row
   carries that sentence as its `aria-description` (`dsh-client-ui-workspace` `guardedOpen`, `lib/client.js:3532-3538`,
   `:2279`).
+
+## DSH parity, 31 Oct — reminders in the activity, and DSH's family order (R-developer-eight-13)
+
+- **Reminders are activity.** DSH's schedule plugin answers `workspace/session-activity` with
+  `{kind: 'schedule', items: [{id, label: title}]}` for the session's active reminders, and `workspace/session-stop`
+  with `stopSessionTasks`, which removes every active task of the session inside the service's queue
+  (`dsh-schedule/lib/index.js:2043-2064`, `:2273-2292`). Heddle now does the same in both builds, through the schedule
+  row's public API: `ScheduleService.list({sessionId})` and `stopSessionTasks` in TypeScript
+  (`scheduleActivity`, `stopSessionSchedules` in `src/session/activity.ts`), `ScheduleService::list` and
+  `stop_session_tasks` in Rust (the binary's `ScheduleActivity`, behind `heddle-server`'s `SessionActivity` port). A
+  session whose only work is a reminder is refused a plain archive with `409 code: 'active'`, the sentence
+  `session <id> has active scheduled reminders; pass stop: true to stop them and archive`, and the family in
+  `activity`; `stop: true` archives it and then removes its reminders, awaited before the answer, as DSH writes the
+  archive set first and then awaits every stop listener (`dsh-workspace/lib/index.js:527-541`, `:621-628`). A failing
+  removal is logged (`workspace: stopping session '<id>' for archive failed: …`), never a reason to keep the session
+  visible.
+- **Known difference: the turn and the subagents stop before the write.** DSH writes the archive set first and only
+  then asks every `workspace/session-stop` listener — the turn's cancel and the subagents' included — so the stops'
+  wakes already meet its `agent/pre-step` gate (`dsh-workspace/lib/index.js:527-541`). Both heddle servers abort the
+  session's turn and its running subagents *before* they write the archive flag, and stop only the rows' work (the
+  reminders, and the jobs) after it. Not changed here; a failing write after those aborts leaves the work stopped and
+  the session unarchived, where DSH would have stopped nothing.
+- **The order is DSH's.** `workspace/session-activity` is a Cordis waterfall: listeners run in registration order
+  (`cordis/lib/index.js:317-325`, pushed at `:335-345`) and each answers `[own, ...rest]`, so the first registered
+  family comes first. They register in this order:
+
+  | Family | Registered | Why there |
+  |---|---|---|
+  | `turn` | the Agent registry's constructor, `dsh-agent/lib/index.js:26-37`, `:358` | the class injects nothing |
+  | `job` | the job registry seam's constructor, `dsh-jobs/lib/index.js:19-43`, `:119` | `dsh-jobs-local` injects nothing (`lib/index.js:356-391`); its row follows `agent` (`dsh-base/cordis.patch.yml:82-97`) |
+  | `subagent` | inside `ctx.inject(['agents'], …)`, `dsh-subagent/lib/index.js:2510-2529`, `:3014-3016` | after the Agent registry is up; the service itself injects `workingDirectory` (`:2982`) |
+  | `schedule` | the Schedule service's constructor effect, `dsh-schedule/lib/index.js:2043-2064` | the service injects `agents`, `sessions`, `storageDomain`, `sessionController`, `sessionPersistence` (`:1969-1975`) |
+
+  A fiber starts one microtask after it is asked (`cordis/lib/index.js:1349-1356`), so a constructor finishes before
+  any dependant starts: `turn` before `subagent` and `schedule` is fixed, and `job`, with nothing to wait for, comes
+  before both in practice. `turn` against `job` is which of two dependency-free rows finishes importing first: the
+  loader starts every row at once, in row order, and applies each when its module resolves
+  (`cordis-plugin-loader/lib/index.js:87-92`, `:451-463`), and `agent` is the earlier row. DSH's own type comment
+  lists the shipped providers as `turn`, `job`, `subagent`, `schedule` (`dsh-workspace/lib/types/types.d.ts:28-35`).
+  This is read from the code, not observed in a running DSH. Heddle's `sessionActivity` /
+  `heddle_session::session_activity` emit exactly that order; the page's dialog draws the families in the order
+  received, as DSH's `activityLine` list does (`dsh-client-ui-workspace/lib/client.js:4232-4275`).
+- **The jobs, in their slot.** The jobs row's own archive admission (developer-nine's, from main) fills the `job`
+  slot between the turn and the subagents: `sessionJobActivity` / `heddle_jobs::http::session_job_activity` (DSH's
+  `runningJobs`, the running or stopping jobs the session owns), read through `rowActivity` in TypeScript and the
+  binary's `JobActivity` behind the same port in Rust; `stop: true` kills each with `session archived` after the write
+  (`stopSessionJobs`, DSH's `dsh-jobs/lib/index.js:32-36`), together with the reminders' removal. The jobs row's own
+  `jobs` field stays beside `activity`. A running `bash` call is itself a job from its start (`promoteOnTimeout`, in
+  heddle's `runForeground` and in DSH, `dsh-tool-bash/lib/index.js:386-410`), so a turn sleeping in a foreground
+  command is refused as `[turn, job(<command>)]`. The first merge of main listed the job family **first**, reading
+  "`dsh-jobs` prepends its entry" as an order; but every listener prepends its own entry before `rest`, the turn's
+  too (`dsh-agent/lib/index.js:26-31`), so only registration order decides, and the job follows the turn. A job's or a
+  reminder's id is never taken for a session to abort: the stop walks only the `subagent` family.
