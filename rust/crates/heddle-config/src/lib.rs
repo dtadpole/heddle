@@ -95,7 +95,7 @@ pub use locale::{
     locale_label, locale_preference, locale_schema, negotiate_locale,
 };
 pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
-pub use paths::{canonical_path, depth_of, is_under};
+pub use paths::{canonical_path, canonical_path_through_ancestors, depth_of, is_under};
 pub use plugin_inventory::{
     PluginFiberPhase, PluginInventoryEntry, PluginInventorySnapshot, plugin_inventory,
 };

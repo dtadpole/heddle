@@ -50,6 +50,35 @@ pub fn canonical_path(path: &Path) -> PathBuf {
     std::fs::canonicalize(&absolute).unwrap_or(absolute)
 }
 
+/// Where a path is, or was: the `realpath` of its **deepest existing ancestor** with the missing tail put back —
+/// `canonicalPathThroughAncestors` in `src/paths.ts`.
+///
+/// For a folder that exists this is [`canonical_path`]. For one that is gone it is the spelling its record was stored
+/// under while it existed, which the lexical fallback cannot give once a link sits on the way: a workspace registered
+/// at `/tmp/x/w` is stored as `/private/tmp/x/w` on macOS, and after the folder is deleted or moved the lexical
+/// `/tmp/x/w` names no record and no root (GitHub issue #141). [`canonical_path`] keeps its fallback; this is for the
+/// questions about a folder that may be gone. `heddle-sandbox`'s `paths::canonical` resolves a missing tail the same way.
+pub fn canonical_path_through_ancestors(path: &Path) -> PathBuf {
+    let absolute = resolve_from_cwd(path);
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut current = absolute.clone();
+    loop {
+        if let Ok(existing) = std::fs::canonicalize(&current) {
+            return missing
+                .iter()
+                .rev()
+                .fold(existing, |path, segment| path.join(segment));
+        }
+        match (current.parent(), current.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                current = parent.to_path_buf();
+            }
+            _ => return absolute,
+        }
+    }
+}
+
 /// Is `child` at or below `parent`, compared **by path segment**?
 ///
 /// Segment-wise, never string-wise, and that is the whole point: `/a/b-sibling` shares every character
@@ -124,5 +153,49 @@ mod tests {
         let expected = std::fs::canonicalize(&target).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(resolved, expected);
+    }
+
+    /// A folder that is gone keeps the spelling its record was stored under: the real path of what still exists,
+    /// with the missing tail put back (#141). `canonical_path` itself keeps its lexical fallback.
+    #[test]
+    fn a_folder_that_is_gone_is_spelled_through_the_real_path_of_its_deepest_existing_ancestor() {
+        let root = std::env::temp_dir().join(format!(
+            "heddle-config-through-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let real = root.join("real");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(real.join("here")).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canonical_real = std::fs::canonicalize(&real).unwrap();
+        let here = canonical_path_through_ancestors(&alias.join("here"));
+        let gone = canonical_path_through_ancestors(&alias.join("gone").join("deeper"));
+        let dotted = canonical_path_through_ancestors(&alias.join("gone/../gone/"));
+        let lexical = canonical_path(&alias.join("gone"));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            here,
+            canonical_real.join("here"),
+            "an existing folder is its real path"
+        );
+        assert_eq!(
+            gone,
+            canonical_real.join("gone").join("deeper"),
+            "a missing tail is kept under the real path of what exists"
+        );
+        assert_eq!(
+            dotted,
+            canonical_real.join("gone"),
+            "dots and a trailing separator are folded first"
+        );
+        assert_eq!(
+            lexical,
+            alias.join("gone"),
+            "canonical_path keeps its lexical fallback"
+        );
     }
 }

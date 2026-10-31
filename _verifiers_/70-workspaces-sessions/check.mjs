@@ -2789,6 +2789,115 @@ test('a workspace moved before another keeps its place across a restart, as DSH 
   }
 })
 
+test('a workspace whose folder was deleted or moved is renamed and deleted by the routes the page uses, and the tree says the folder is gone (#141)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * GitHub issue #141, both builds: once a workspace's folder was deleted or moved, a path spelled through a link (the
+   * tester's /tmp for a record at /private/tmp) no longer matched the record, so DELETE and PATCH by that path answered
+   * 404 "no workspace <path>" and the tree 400 "<path> is not under any workspace root"; by its stored path the tree
+   * answered 200 with an empty "file", so the page drew the folder as empty. DSH removes and renames a workspace by its
+   * id (workspace.delete, dsh-workspace lib/index.js:461-471; the dialogs, dsh-client-ui-workspace lib/client.js:3784,
+   * :3818, :5192-5197), its status() is missing-dir for a folder that is gone and never changes the record
+   * (lib/index.js:154-160), and its file tree says the folder is gone, by the code workspace-file/not-found
+   * (dsh-api-workspace-files lib/index.js:568; dsh-client-ui-sidebar-files lib/client.js:483-489). Judged here: the
+   * list's status, the tree for the stored path, a moved folder and a typed spelling, rename and delete by id (the
+   * page's route now) and by the stored and typed paths, and the sessions kept.
+   */
+  const h = harness('web-gone')
+  const place = fixtureDir('web-gone')
+  const real = join(place, 'real')
+  const alias = join(place, 'alias')
+  let live
+  try {
+    const { renameSync, rmSync, symlinkSync } = await import('node:fs')
+    const names = ['kept', 'deleted', 'moved', 'typed']
+    for (const name of names) mkdirSync(join(real, name), { recursive: true })
+    symlinkSync(real, alias)
+    const canonical = (name) => join(realpathSync(real), name)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const ids = {}
+    for (const name of names) {
+      const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: join(alias, name) }) })
+      assert.equal(added.status, 200, `${name} is added through the link (${JSON.stringify(added.body)})`)
+      assert.equal(added.body.record.path, canonical(name), 'and stored at its canonical path')
+      ids[name] = added.body.record.id
+    }
+    const started = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: join(alias, 'deleted') }) })
+    assert.equal(started.status, 200, `a session starts in the folder that will be deleted (${JSON.stringify(started.body)})`)
+
+    rmSync(join(real, 'deleted'), { recursive: true, force: true })
+    renameSync(join(real, 'moved'), join(place, 'moved-away'))
+    rmSync(join(real, 'typed'), { recursive: true, force: true })
+
+    const views = Object.fromEntries(((await call('/api/workspaces')).body.workspaces ?? []).map((view) => [view.id, view]))
+    assert.equal(views[ids.kept]?.status, 'ok', `a folder that is there is ok in the list (${JSON.stringify(views[ids.kept])})`)
+    for (const name of ['deleted', 'moved', 'typed']) {
+      assert.equal(views[ids[name]]?.status, 'missing-dir', `${name}: the list still names the workspace and marks its folder missing-dir, DSH's status (${JSON.stringify(views[ids[name]])})`)
+    }
+    assert.deepEqual(views[ids.deleted]?.sessionIds, [started.body.session], 'and its session is still its own')
+
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+    for (const [what, path] of [
+      ['the stored path of a deleted folder', canonical('deleted')],
+      ['the stored path of a moved folder', canonical('moved')],
+      ['a deleted folder spelled through the link', join(alias, 'typed')],
+      ['a folder never made inside a root that is there', join(canonical('kept'), 'never-made')],
+    ]) {
+      const answer = await treeOf(path)
+      assert.equal(answer.status, 404, `${what} is not found, rather than listed empty or refused as outside every root (${answer.status} ${JSON.stringify(answer.body)})`)
+      assert.equal(answer.body?.code, 'workspace-file/not-found', `with DSH's code, for ${what}`)
+      assert.equal(typeof answer.body?.error, 'string', `and a sentence, for ${what}`)
+    }
+    const outside = await treeOf(join(place, 'nowhere', 'deeper'))
+    assert.equal(outside.status, 400, `a folder that is gone outside every root is still refused as outside (${JSON.stringify(outside.body)})`)
+    assert.match(String(outside.body?.error), / is not under any workspace root$/, 'with the sentence for that')
+    const kept = await treeOf(canonical('kept'))
+    assert.equal(kept.status, 200, `a folder that is there still lists (${JSON.stringify(kept.body)})`)
+
+    const byId = await call(`/api/workspaces/${encodeURIComponent(ids.deleted)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Deleted Renamed' }) })
+    assert.equal(byId.status, 200, `a workspace whose folder is gone is renamed by id, the page's route (${JSON.stringify(byId.body)})`)
+    assert.equal(byId.body.title, 'Deleted Renamed')
+    const typed = await call(`/api/workspaces/${encodeURIComponent(join(alias, 'typed'))}`, { method: 'PATCH', body: JSON.stringify({ title: 'Typed Renamed' }) })
+    assert.equal(typed.status, 200, `and by the path a person typed, through the link (${JSON.stringify(typed.body)})`)
+    assert.equal(typed.body.id, ids.typed, 'the same workspace')
+
+    const deletedById = await call(`/api/workspaces/${encodeURIComponent(ids.deleted)}`, { method: 'DELETE' })
+    assert.equal(deletedById.status, 200, `it is deleted by id, the page's route (${JSON.stringify(deletedById.body)})`)
+    assert.equal(deletedById.body.ownedSessions, 1, 'and says it held a session')
+    const movedByPath = await call(`/api/workspaces/${encodeURIComponent(canonical('moved'))}`, { method: 'DELETE' })
+    assert.equal(movedByPath.status, 200, `a moved one by its stored path (${JSON.stringify(movedByPath.body)})`)
+    const typedByPath = await call(`/api/workspaces/${encodeURIComponent(join(alias, 'typed'))}`, { method: 'DELETE' })
+    assert.equal(typedByPath.status, 200, `and one by the path typed through the link (${JSON.stringify(typedByPath.body)})`)
+
+    const left = ((await call('/api/workspaces')).body.workspaces ?? []).filter((view) => view.origin !== 'auto').map((view) => view.id)
+    assert.deepEqual(left, [ids.kept], 'only the workspace whose folder is there is left')
+    const sessions = (await call('/api/sessions')).body.map((meta) => meta.id)
+    assert.ok(sessions.includes(started.body.session), 'and the session of the deleted folder is kept')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(place)
+  }
+})
+
 test("the Web API's tree lists only what a workspace root holds, and refuses a path outside every root as the CLI does", async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**

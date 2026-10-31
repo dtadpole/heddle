@@ -9,7 +9,10 @@
 
 use std::path::Path;
 
-use heddle_config::{Env, canonical_path, depth_of, expand_home, heddle_home, is_under};
+use heddle_config::{
+    Env, canonical_path, canonical_path_through_ancestors, depth_of, expand_home, heddle_home,
+    is_under,
+};
 use indexmap::IndexMap;
 use serde::Deserialize;
 use serde_json::Value;
@@ -18,8 +21,8 @@ use heddle_session::SessionMeta;
 
 use crate::error::WorkspaceError;
 use crate::record::{
-    BootstrapReport, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord, WorkspaceRemoval,
-    WorkspaceStoreShape, WorkspaceView,
+    BootstrapReport, FolderStatus, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord,
+    WorkspaceRemoval, WorkspaceStoreShape, WorkspaceView,
 };
 use heddle_session::clock::{EPOCH_ISO, iso_now};
 
@@ -373,6 +376,10 @@ impl WorkspaceService {
     }
 
     /// One workspace by id, else by canonical path.
+    ///
+    /// A path whose folder is gone is matched through the real path of its deepest existing ancestor as well (#141;
+    /// `find` in `src/workspace/service.ts`): the record was stored canonical while the folder existed, and a spelling
+    /// through a link (`/tmp/x/w` for `/private/tmp/x/w`) no longer resolves once it is deleted or moved.
     pub fn find(&self, id_or_path: &str) -> Option<WorkspaceRecord> {
         let shape = self.read();
         if let Some(record) = shape.workspaces.get(id_or_path) {
@@ -381,11 +388,35 @@ impl WorkspaceService {
         let canonical = canonical_path(Path::new(id_or_path))
             .to_string_lossy()
             .into_owned();
-        shape
-            .workspaces
-            .values()
-            .find(|record| record.path == canonical)
-            .cloned()
+        let at = |path: &str| {
+            shape
+                .workspaces
+                .values()
+                .find(|record| record.path == path)
+                .cloned()
+        };
+        at(&canonical).or_else(|| {
+            let located = canonical_path_through_ancestors(Path::new(id_or_path))
+                .to_string_lossy()
+                .into_owned();
+            (located != canonical).then(|| at(&located)).flatten()
+        })
+    }
+
+    /// Whether a folder is gone, for the tree route (#141; `missingFolder` in `src/workspace/service.ts`): `None`
+    /// when it exists; otherwise where it was — its canonical spelling through its deepest existing ancestor — and
+    /// the root that owns that place, if any. DSH answers a directory that is not there with
+    /// `workspace-file/not-found` (dsh-api-workspace-files lib/index.js:568) and its tree says it is gone
+    /// (dsh-client-ui-sidebar-files lib/client.js:485). A missing folder behind a link out of every root is
+    /// judged where the link lands: outside.
+    pub fn missing_folder(&self, path: &str) -> Option<(String, Option<WorkspaceRecord>)> {
+        let located = canonical_path_through_ancestors(Path::new(path));
+        if located.exists() {
+            return None;
+        }
+        let located = located.to_string_lossy().into_owned();
+        let owner = self.owner(&located);
+        Some((located, owner))
     }
 
     /// Retitle a root by id or path; the path never changes. `Ok(None)` for an unknown root,
@@ -520,8 +551,18 @@ impl WorkspaceService {
 
     /// Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See
     /// [`workspace_views`].
+    ///
+    /// Each carries its folder's `status`, read now: DSH's `Workspace.status()`, uncached and never changing the
+    /// record (dsh-workspace lib/index.js:154-160). A workspace whose folder was deleted or moved stays listed, as
+    /// DSH keeps it, and the page tells it apart (#141).
     pub fn views(&self, all: &[SessionMeta]) -> Vec<WorkspaceView> {
         workspace_views(&self.list(), all)
+            .into_iter()
+            .map(|view| WorkspaceView {
+                status: Some(FolderStatus::of(Path::new(&view.path))),
+                ..view
+            })
+            .collect()
     }
 
     /// The root that owns a folder, adopting the folder itself (`auto`) when nothing above it does.
@@ -598,6 +639,7 @@ pub fn workspace_views(records: &[WorkspaceRecord], all: &[SessionMeta]) -> Vec<
                 created_at: record.created_at.clone(),
                 updated_at: record.updated_at.clone(),
                 session_ids: owned.get(&record.id).cloned().unwrap_or_default(),
+                status: None,
             }
         })
         .collect()
@@ -1038,10 +1080,12 @@ mod tests {
                 "parent",
                 "createdAt",
                 "updatedAt",
-                "sessionIds"
+                "sessionIds",
+                "status"
             ],
-            "the TypeScript route's keys, in its order"
+            "the TypeScript route's keys, in its order, with DSH's status last (#141)"
         );
+        assert_eq!(json["status"], "ok", "a folder that is there is ok");
         assert_eq!(json["parent"], Value::Null);
         assert_eq!(json["origin"], "added");
     }
@@ -1101,6 +1145,152 @@ mod tests {
             meta("session-link", link.to_str().unwrap()),
         ]);
         assert_eq!(views[0].session_ids, vec!["session-upper", "session-link"]);
+    }
+
+    /// A real folder and a link to it — `/tmp` and `/private/tmp` in miniature — beside a fresh record file.
+    #[cfg(unix)]
+    fn linked() -> (
+        tempfile::TempDir,
+        WorkspaceService,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let (dir, service) = service();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let real = std::fs::canonicalize(&real).unwrap();
+        (dir, service, real, alias)
+    }
+
+    /// A workspace whose folder was deleted or moved is still found, renamed and removed by its id, its stored path
+    /// and a spelling through a link (#141): the lexical fallback of `canonical_path` keeps the link once the folder is
+    /// gone, so that spelling named no record. DSH removes and renames by id (dsh-workspace lib/index.js:461-471).
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_whose_folder_is_gone_is_found_by_id_stored_path_and_a_spelling_through_a_link() {
+        let (_dir, service, real, alias) = linked();
+        std::fs::create_dir_all(real.join("w")).unwrap();
+        let typed = alias.join("w").to_string_lossy().into_owned();
+        let record = service.add(&typed, None).unwrap().record;
+        assert_eq!(record.path, real.join("w").to_string_lossy());
+        std::fs::remove_dir_all(real.join("w")).unwrap();
+
+        assert_eq!(
+            service.find(&record.id).map(|found| found.id),
+            Some(record.id.clone())
+        );
+        assert_eq!(
+            service.find(&record.path).map(|found| found.id),
+            Some(record.id.clone())
+        );
+        assert_eq!(
+            service.find(&typed).map(|found| found.id),
+            Some(record.id.clone()),
+            "the path a person typed, through the link, though the folder is gone"
+        );
+        assert!(
+            service
+                .find(&alias.join("never").to_string_lossy())
+                .is_none(),
+            "a folder that is gone and was never registered is no workspace"
+        );
+        let renamed = service.rename(&typed, "Gone").unwrap().unwrap();
+        assert_eq!(renamed.title, "Gone");
+        let removal = service.remove(&typed, &[], true).unwrap();
+        assert_eq!(removal.removed.id, record.id);
+        assert!(service.list().is_empty());
+    }
+
+    /// `GET /api/workspaces` marks a folder that is gone `missing-dir`, DSH's `Workspace.status()`, and reading it
+    /// writes nothing (dsh-workspace lib/index.js:154-160).
+    #[cfg(unix)]
+    #[test]
+    fn the_views_mark_a_folder_that_is_gone_missing_dir_and_leave_the_record_as_it_was() {
+        let (_dir, service, real, _alias) = linked();
+        for name in ["kept", "deleted", "moved", "replaced"] {
+            std::fs::create_dir_all(real.join(name)).unwrap();
+        }
+        let id = |name: &str| {
+            service
+                .add(&real.join(name).to_string_lossy(), None)
+                .unwrap()
+                .record
+                .id
+        };
+        let ids: Vec<String> = ["kept", "deleted", "moved", "replaced"]
+            .into_iter()
+            .map(id)
+            .collect();
+        std::fs::remove_dir_all(real.join("deleted")).unwrap();
+        std::fs::rename(real.join("moved"), real.join("..").join("moved-away")).unwrap();
+        std::fs::remove_dir_all(real.join("replaced")).unwrap();
+        std::fs::write(real.join("replaced"), "a file where the folder was\n").unwrap();
+        let before = std::fs::read_to_string(service.file()).unwrap();
+        let views = service.views(&[]);
+        let status = |id: &str| views.iter().find(|view| view.id == id).unwrap().status;
+        assert_eq!(status(&ids[0]), Some(FolderStatus::Ok));
+        for (index, what) in [(1, "deleted"), (2, "moved"), (3, "no longer a folder")] {
+            assert_eq!(
+                status(&ids[index]),
+                Some(FolderStatus::MissingDir),
+                "{what}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(FolderStatus::MissingDir).unwrap(),
+            "missing-dir"
+        );
+        assert_eq!(std::fs::read_to_string(service.file()).unwrap(), before);
+        assert_eq!(
+            workspace_views(&service.list(), &[])[0].status,
+            None,
+            "the pure views leave the status out"
+        );
+    }
+
+    /// The tree route's question (#141): a folder that is gone under a root is missing there, at its canonical path,
+    /// and one behind a link out of every root is outside.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_is_gone_is_missing_under_its_root_and_outside_behind_a_link_out() {
+        let (_dir, service, real, alias) = linked();
+        std::fs::create_dir_all(real.join("w").join("inner")).unwrap();
+        let outside = real.join("..").join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside = std::fs::canonicalize(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, real.join("w").join("way-out")).unwrap();
+        let record = service
+            .add(&real.join("w").to_string_lossy(), None)
+            .unwrap()
+            .record;
+        let missing = |path: std::path::PathBuf| {
+            service
+                .missing_folder(&path.to_string_lossy())
+                .map(|(at, owner)| (at, owner.map(|owner| owner.id)))
+        };
+        let text = |path: std::path::PathBuf| path.to_string_lossy().into_owned();
+        assert_eq!(missing(real.join("w").join("inner")), None);
+        assert_eq!(missing(alias.join("w")), None, "nor one through a link");
+        assert_eq!(
+            missing(alias.join("w").join("never-made")),
+            Some((
+                text(real.join("w").join("never-made")),
+                Some(record.id.clone())
+            ))
+        );
+        assert_eq!(
+            missing(real.join("w").join("way-out").join("never-made")),
+            Some((text(outside.join("never-made")), None)),
+            "judged where the link lands"
+        );
+        std::fs::remove_dir_all(real.join("w")).unwrap();
+        assert_eq!(
+            missing(alias.join("w")),
+            Some((text(real.join("w")), Some(record.id.clone()))),
+            "the root's own folder, gone, is still the root's"
+        );
     }
 
     /// A store whose `$HEDDLE_HOME` is a temp folder, so first use makes its folder there.

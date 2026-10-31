@@ -151,7 +151,9 @@ test('GET /api/workspaces names each workspace\'s parent and the sessions whose 
     const repo = byId.get(fixture.repo.id)
     const inner = byId.get(fixture.inner.id)
     assert.ok(repo !== undefined && inner !== undefined, 'both registered workspaces are listed')
-    assert.deepEqual(Object.keys(repo), ['id', 'path', 'title', 'origin', 'parent', 'createdAt', 'updatedAt', 'sessionIds'], 'in the one shape both servers write')
+    /** `status` is DSH's Workspace.status(), 'ok' or 'missing-dir' (#141; dsh-workspace lib/index.js:154-160). */
+    assert.deepEqual(Object.keys(repo), ['id', 'path', 'title', 'origin', 'parent', 'createdAt', 'updatedAt', 'sessionIds', 'status'], 'in the one shape both servers write')
+    assert.equal(repo.status, 'ok', 'and a folder that is there is ok')
     assert.equal(repo.parent, null, 'a top-level workspace has no parent')
     assert.equal(inner.parent, fixture.repo.id, 'the nested one names the workspace above it')
     assert.equal(repo.origin, 'added')

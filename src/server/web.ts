@@ -962,6 +962,21 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const wanted = url.searchParams.get('path')
+    /**
+     * A folder that is gone (#141) is judged before it is read: under a root it is `404` with DSH's
+     * `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the folder
+     * is gone instead of listing it empty; outside every root it is the `400` below. It is placed through the real path
+     * of what still exists, so the spelling a person typed (`/tmp/x/w` for `/private/tmp/x/w`) is the same folder.
+     */
+    const missing = wanted !== null && wanted.length > 0 ? workspaces.missingFolder(wanted) : undefined
+    if (missing !== undefined) {
+      if (missing.owner === undefined) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `${missing.path} is not under any workspace root` })}\n`)
+      } else {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no entry at "${missing.path}"`, code: 'workspace-file/not-found' })}\n`)
+      }
+      return
+    }
     if (wanted !== null && wanted.length > 0 && workspaces.owner(wanted) === undefined) {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
