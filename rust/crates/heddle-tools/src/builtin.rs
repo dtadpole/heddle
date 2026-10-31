@@ -505,11 +505,37 @@ impl Tool for BashTool {
                 };
             }
             let mode = context.mode();
-            let ShellLaunch { argv, confined } =
-                match launch_shell(sandbox.as_ref(), &command, &context) {
-                    Ok(launch) => launch,
-                    Err(refusal) => return Ok(*refusal),
+            let launch = match launch_shell(sandbox.as_ref(), &command, &context) {
+                Ok(launch) => launch,
+                Err(refusal) => return Ok(*refusal),
+            };
+            // With the jobs row attached and promoting, the call runs as a job (DSH's `promoteOnTimeout`): a command
+            // that outlives its wall time keeps running in the background instead of being killed. A registration
+            // the row refuses (a session at its job cap) falls through to the foreground run and its wall-time kill.
+            if let Some(background) = attached.filter(|background| background.promotes()) {
+                let render_sandbox = Arc::clone(&sandbox);
+                let render_confined = launch.confined.clone();
+                let run = crate::background::ForegroundRun {
+                    args: args.clone(),
+                    context: context.clone(),
+                    sandbox: Arc::clone(&sandbox),
+                    launch: launch.clone(),
+                    limit_ms: limit,
+                    render: Box::new(move |end: ShellEnd| {
+                        shell_result(
+                            render_sandbox.as_ref(),
+                            &end,
+                            mode,
+                            render_confined.as_ref(),
+                            output_limit,
+                        )
+                    }),
                 };
+                if let Some(answered) = background.run_foreground(run).await {
+                    return answered;
+                }
+            }
+            let ShellLaunch { argv, confined } = launch;
             run_command(
                 sandbox.as_ref(),
                 &argv,
@@ -554,13 +580,6 @@ async fn run_command(
     let child = process.spawn()?;
     let leader = child.id();
 
-    let facts = || match confined {
-        None => sandbox_facts(mode, false),
-        Some(confined) => {
-            json!({ "mode": mode, "enforcement": confined.enforcement, "denied": false })
-        }
-    };
-
     let limit = Duration::from_millis(limit_ms);
     let cancel = context.cancel.clone();
     let output = {
@@ -582,7 +601,7 @@ async fn run_command(
         }
     };
 
-    match output {
+    let end = match output {
         None => {
             // The child was killed for its wall time or by the caller's Stop: dropping it killed the shell
             // (`kill_on_drop`), and the group signal stops whatever the shell had started, which outlives the
@@ -593,60 +612,102 @@ async fn run_command(
                 }
             }
             let stopped = context.is_cancelled();
-            let message = if stopped {
-                "the command was stopped before it finished".to_owned()
-            } else {
-                format!("the command exceeded {limit_ms}ms and was killed")
-            };
-            let code = if stopped {
-                codes::INTERRUPTED
-            } else {
-                codes::TIMEOUT
-            };
-            let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
-            Ok(ToolResult::refused(code, message).with_data(data))
-        }
-        Some(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let trimmed = truncate_output_at(&format!("{stdout}{stderr}"), output_limit);
-            let code = output.status.code().unwrap_or(1);
-            let outcome = match confined {
-                None => SandboxOutcome::Exited,
-                Some(confined) => sandbox.classify_outcome(code, &stderr, Some(confined)),
-            };
-            let kept = || ToolResult::ok(trimmed.clone());
-            match outcome {
-                SandboxOutcome::RunnerFailure { detail } => Ok(kept()
-                    .with_error(
-                        codes::SANDBOX_UNAVAILABLE,
-                        // The sandbox crate's sentence, which 75's shell-confinement checks match.
-                        heddle_sandbox::runner_failure_message(mode, &detail),
-                    )
-                    .with_data(serde_json::Map::from_iter([(
-                        "sandbox".to_owned(),
-                        json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": false, "runnerFailed": true }),
-                    )]))),
-                SandboxOutcome::Denied => Ok(kept()
-                    .with_error(
-                        codes::SANDBOX,
-                        heddle_sandbox::shell_denial_message(mode),
-                    )
-                    .with_data(serde_json::Map::from_iter([(
-                        "sandbox".to_owned(),
-                        json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": true }),
-                    )]))),
-                SandboxOutcome::Exited if code != 0 => Ok(kept()
-                    .with_error(codes::EXIT, format!("the command exited {code}"))
-                    .with_data(serde_json::Map::from_iter([("sandbox".to_owned(), facts())]))),
-                SandboxOutcome::Exited => Ok(ToolResult::ok(trimmed).with_data(
-                    serde_json::Map::from_iter([
-                        ("exitCode".to_owned(), json!(code)),
-                        ("sandbox".to_owned(), facts()),
-                    ]),
-                )),
+            ShellEnd {
+                stopped,
+                timed_out: !stopped,
+                limit_ms,
+                ..ShellEnd::default()
             }
         }
+        Some(output) => ShellEnd {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: output.status.code(),
+            stopped: false,
+            timed_out: false,
+            limit_ms,
+        },
+    };
+    Ok(shell_result(sandbox, &end, mode, confined, output_limit))
+}
+
+/// What a foreground command reported when it ended, before it becomes `bash`'s answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellEnd {
+    pub stdout: String,
+    pub stderr: String,
+    /// The exit code; `None` when a signal ended it (classified and reported as 1).
+    pub code: Option<i32>,
+    /// The call's Stop ended it.
+    pub stopped: bool,
+    /// Its wall time ended it.
+    pub timed_out: bool,
+    pub limit_ms: u64,
+}
+
+/// `bash`'s answer for a command that ended: the stop or the wall time, else the combined output cut to
+/// `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
+/// sandbox facts. Shared by the foreground run and the jobs row's promoting run (`heddle-jobs`), so a call answers
+/// the same however it was run.
+pub fn shell_result(
+    sandbox: &dyn SandboxGate,
+    end: &ShellEnd,
+    mode: SandboxMode,
+    confined: Option<&crate::upstream::ConfinedArgv>,
+    output_limit: usize,
+) -> ToolResult {
+    let facts = || match confined {
+        None => sandbox_facts(mode, false),
+        Some(confined) => {
+            json!({ "mode": mode, "enforcement": confined.enforcement, "denied": false })
+        }
+    };
+    if end.stopped || end.timed_out {
+        let (code, message) = if end.stopped {
+            (
+                codes::INTERRUPTED,
+                "the command was stopped before it finished".to_owned(),
+            )
+        } else {
+            (
+                codes::TIMEOUT,
+                format!("the command exceeded {}ms and was killed", end.limit_ms),
+            )
+        };
+        let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
+        return ToolResult::refused(code, message).with_data(data);
+    }
+    let trimmed = truncate_output_at(&format!("{}{}", end.stdout, end.stderr), output_limit);
+    let code = end.code.unwrap_or(1);
+    let outcome = match confined {
+        None => SandboxOutcome::Exited,
+        Some(confined) => sandbox.classify_outcome(code, &end.stderr, Some(confined)),
+    };
+    let kept = || ToolResult::ok(trimmed.clone());
+    match outcome {
+        SandboxOutcome::RunnerFailure { detail } => kept()
+            .with_error(
+                codes::SANDBOX_UNAVAILABLE,
+                // The sandbox crate's sentence, which 75's shell-confinement checks match.
+                heddle_sandbox::runner_failure_message(mode, &detail),
+            )
+            .with_data(serde_json::Map::from_iter([(
+                "sandbox".to_owned(),
+                json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": false, "runnerFailed": true }),
+            )])),
+        SandboxOutcome::Denied => kept()
+            .with_error(codes::SANDBOX, heddle_sandbox::shell_denial_message(mode))
+            .with_data(serde_json::Map::from_iter([(
+                "sandbox".to_owned(),
+                json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": true }),
+            )])),
+        SandboxOutcome::Exited if code != 0 => kept()
+            .with_error(codes::EXIT, format!("the command exited {code}"))
+            .with_data(serde_json::Map::from_iter([("sandbox".to_owned(), facts())])),
+        SandboxOutcome::Exited => ToolResult::ok(trimmed).with_data(serde_json::Map::from_iter([
+            ("exitCode".to_owned(), json!(code)),
+            ("sandbox".to_owned(), facts()),
+        ])),
     }
 }
 

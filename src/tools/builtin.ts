@@ -107,6 +107,98 @@ export interface BashBackground {
   readonly property: { readonly type: 'boolean'; readonly description: string }
   /** Start the command as a background job and answer the tool result. */
   readonly start: (args: Record<string, unknown>, context: ToolRunContext) => Promise<ToolResult>
+  /**
+   * Run a foreground call as a job, DSH's `promoteOnTimeout` (`dsh-tool-bash`: with a registry, every call registers
+   * its process as a job at its start). It answers `render`'s result when the command ends within `limitMs`, and the
+   * promoted answer when the command outlives it and keeps running as a job. `undefined` means the job could not be
+   * registered, and the call runs here in the foreground, with the wall-time kill, as DSH falls back. Absent when the
+   * row does not promote.
+   */
+  readonly runForeground?: (run: ForegroundRun) => Promise<ToolResult | undefined>
+}
+
+/** One foreground call handed to {@link BashBackground.runForeground}. */
+export interface ForegroundRun {
+  readonly args: Record<string, unknown>
+  readonly context: ToolRunContext
+  /** The confined argv, from {@link launchShell}: the job runs exactly what the foreground would have. */
+  readonly launch: ShellLaunch
+  /** The call's wall time, already validated and capped ({@link bashWallTime}). */
+  readonly limitMs: number
+  /** `bash`'s own answer for a command that ended ({@link shellResult}, bound to this call). */
+  readonly render: (end: ShellEnd) => ToolResult
+}
+
+/** What a foreground command reported when it ended, before it becomes `bash`'s answer. */
+export interface ShellEnd {
+  readonly stdout: string
+  readonly stderr: string
+  /** The exit code; `null` when a signal ended it. */
+  readonly code: number | null
+  /** The call's Stop ended it. */
+  readonly stopped: boolean
+  /** Its wall time ended it. */
+  readonly timedOut: boolean
+  readonly limitMs: number
+}
+
+/**
+ * `bash`'s answer for a command that ended: the combined output cut to `outputLimit`, then the stop, the wall time,
+ * the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the sandbox facts. Shared by
+ * the foreground run and the jobs row's promoting run, so a call answers the same however it was run.
+ */
+export function shellResult(end: ShellEnd, launch: ShellLaunch, mode: ToolRunContext['mode'], outputLimit: number): ToolResult {
+  const { stdout, stderr, code } = end
+  const { confined } = launch
+  const combined = stdout + stderr
+  const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
+  /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
+  const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
+  /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
+  if (end.stopped) {
+    return {
+      output: trimmed,
+      error: { code: 'INTERRUPTED', message: 'the command was stopped before it finished' },
+      data: { sandbox: { ...sandboxFacts, denied: false } },
+    }
+  }
+  if (end.timedOut) {
+    return {
+      output: trimmed,
+      error: { code: 'TIMEOUT', message: `the command exceeded ${end.limitMs}ms and was killed` },
+      data: { sandbox: { ...sandboxFacts, denied: false } },
+    }
+  }
+  const outcome = confined === null ? ({ kind: 'exited' } as const) : classifyOutcome({ exitCode: code ?? 1, stderr, confined })
+  /**
+   * A runner failure means the command **never ran**, so it is reported as a sandbox problem and outranks
+   * any denial sentence in the output. An ordinary denial says which mode refused the effect.
+   */
+  if (outcome.kind === 'runner-failure') {
+    return {
+      output: trimmed,
+      error: {
+        code: 'SANDBOX_UNAVAILABLE',
+        message: `the sandbox runner failed under '${mode}' mode — the command did not run: ${outcome.detail}`,
+      },
+      data: { sandbox: { ...sandboxFacts, denied: false, runnerFailed: true } },
+    }
+  }
+  if (outcome.kind === 'denied') {
+    return {
+      output: trimmed,
+      error: { code: 'SANDBOX', message: `[sandbox: file access denied under ${mode} mode]` },
+      data: { sandbox: { ...sandboxFacts, denied: true } },
+    }
+  }
+  if (code !== 0) {
+    return {
+      output: trimmed,
+      error: { code: 'EXIT', message: `the command exited ${code}` },
+      data: { sandbox: { ...sandboxFacts, denied: false } },
+    }
+  }
+  return { output: trimmed, data: { exitCode: code, sandbox: { ...sandboxFacts, denied: false } } }
 }
 
 const backgrounds = new WeakMap<object, BashBackground>()
@@ -287,7 +379,19 @@ export function builtinTools(
 
       const launch = launchShell(sandbox, command, context)
       if ('refusal' in launch) return launch.refusal
-      const { argv, confined } = launch
+      const { argv } = launch
+      const render = (end: ShellEnd): ToolResult => shellResult(end, launch, mode, outputLimit)
+
+      /**
+       * With the jobs row attached and promoting, the call runs as a job (DSH's `promoteOnTimeout`): a command that
+       * outlives its wall time keeps running in the background instead of being killed. A registration the row
+       * refuses (a session at its job cap) falls through to the foreground run and its wall-time kill.
+       */
+      const runForeground = backgroundFor(sandbox)?.runForeground
+      if (runForeground !== undefined) {
+        const answered = await runForeground({ args, context, launch, limitMs: limit, render })
+        if (answered !== undefined) return answered
+      }
       // The working directory is the call's folder — the session's workspace, resolved by the loop — not the
       // directory the process was launched in. The confinement, when there is one, is the wrapped argv's: the
       // whole process tree is under the kernel profile, not only the command this tool spawns.
@@ -330,60 +434,7 @@ export function builtinTools(
         })
         child.on('close', (code) => {
           clearTimeout(timer)
-          const combined = stdout + stderr
-          const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
-          /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
-          const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
-          /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
-          if (stopped) {
-            resolve({
-              output: trimmed,
-              error: { code: 'INTERRUPTED', message: 'the command was stopped before it finished' },
-              data: { sandbox: { ...sandboxFacts, denied: false } },
-            })
-            return
-          }
-          if (timedOut) {
-            resolve({
-              output: trimmed,
-              error: { code: 'TIMEOUT', message: `the command exceeded ${limit}ms and was killed` },
-              data: { sandbox: { ...sandboxFacts, denied: false } },
-            })
-            return
-          }
-          const outcome = confined === null ? ({ kind: 'exited' } as const) : classifyOutcome({ exitCode: code ?? 1, stderr, confined })
-          /**
-           * A runner failure means the command **never ran**, so it is reported as a sandbox problem and outranks
-           * any denial sentence in the output. An ordinary denial says which mode refused the effect.
-           */
-          if (outcome.kind === 'runner-failure') {
-            resolve({
-              output: trimmed,
-              error: {
-                code: 'SANDBOX_UNAVAILABLE',
-                message: `the sandbox runner failed under '${mode}' mode — the command did not run: ${outcome.detail}`,
-              },
-              data: { sandbox: { ...sandboxFacts, denied: false, runnerFailed: true } },
-            })
-            return
-          }
-          if (outcome.kind === 'denied') {
-            resolve({
-              output: trimmed,
-              error: { code: 'SANDBOX', message: `[sandbox: file access denied under ${mode} mode]` },
-              data: { sandbox: { ...sandboxFacts, denied: true } },
-            })
-            return
-          }
-          if (code !== 0) {
-            resolve({
-              output: trimmed,
-              error: { code: 'EXIT', message: `the command exited ${code}` },
-              data: { sandbox: { ...sandboxFacts, denied: false } },
-            })
-            return
-          }
-          resolve({ output: trimmed, data: { exitCode: code, sandbox: { ...sandboxFacts, denied: false } } })
+          resolve(render({ stdout, stderr, code, stopped, timedOut, limitMs: limit }))
         })
       })
     },
