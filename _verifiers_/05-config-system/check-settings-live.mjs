@@ -102,3 +102,38 @@ test('a settings write to the model row applies to the next turn without a resta
     removeDir(home)
   }
 })
+
+test('a settings write of the default model and effort is the next new session\'s, without a restart (A104)', async () => {
+  const home = isolatedHome('settings-live-default')
+  const double = await chatDouble({ content: 'ok' })
+  let server
+  try {
+    const config = join(home, 'heddle.json')
+    const levels = { default: 'low', levels: [{ id: 'low', name: 'Low', value: 'low' }, { id: 'high', name: 'High', value: 'high' }] }
+    writeFileSync(config, JSON.stringify({
+      default: 'gateway',
+      exclude: ['scripted'],
+      endpoints: [{ name: 'gateway', kind: 'openai-chat', baseUrl: double.baseUrl, model: 'flash', stream: true, models: [{ id: 'flash', name: 'Flash', reasoning: levels }, { id: 'pro', name: 'Pro', reasoning: levels }] }],
+    }))
+    const profile = scratchProfile(home)
+    server = await startServer(['--profile', profile, '--sandbox-root', home], { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config })
+
+    const before = await call(server, 'GET', '/api/settings/model')
+    const written = await call(server, 'POST', '/api/settings/model', { update: { defaultModel: 'pro', defaultEffort: 'high' }, expectedRevision: before.body.revision })
+    assert.equal(written.status, 200, `the write is accepted\n${JSON.stringify(written.body).slice(0, 300)}`)
+    assert.equal(written.body.applyError, undefined, 'and the running tree took it')
+
+    const listing = await call(server, 'GET', '/api/endpoints')
+    assert.deepEqual([listing.body.defaultModel, listing.body.defaultEffort], ['pro', 'high'], 'the endpoint listing names the written default selection at once')
+    // A fresh composer sends the listing's default selection, as the page does (A104's 0005).
+    const turn = await call(server, 'POST', '/api/turn', { prompt: 'which model answers?', model: listing.body.defaultModel, reasoningEffort: listing.body.defaultEffort })
+    assert.equal(turn.status, 200, `the turn ran\n${JSON.stringify(turn.body).slice(0, 300)}`)
+    const first = JSON.parse(double.requests[0]?.body ?? '{}')
+    assert.equal(first.model, 'pro', 'the new session runs on the written default model')
+    assert.equal(first.reasoning_effort, 'high', 'and the written default effort')
+  } finally {
+    server?.kill()
+    await double.close()
+    removeDir(home)
+  }
+})
