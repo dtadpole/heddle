@@ -4,13 +4,14 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { heddleCommand, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The interface language (#80), slice 3, section 10: the words the shared blocks draw for the tree. SessionArchive's
  * notice and confirmation, SessionIdCopy's item, the tree's empty states and the pin marker keep DSH's English for their
  * own tests; the page hands them its language. With 中文 chosen: the pinned marker is 已置顶, the row menu's last item is
- * 复制 Session ID, and archiving from the row says 会话已归档，可 with 撤销 — DSH's own zh strings.
+ * 复制 Session ID, and archiving from the row says 会话已归档，可 with 撤销 — DSH's own zh strings. Archiving a session
+ * whose turn is still running asks first, and that dialog (title, work list, Cancel, the action) is Chinese throughout.
  */
 
 const CAPABILITY = 'the tree in the interface language'
@@ -132,5 +133,68 @@ test('the tree\'s shared words follow the interface language', async (context) =
     browser.close()
     server.kill()
     removeDir(home)
+  }
+})
+
+test('the stop-and-archive question is asked in the interface language, title, work and buttons alike', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const home = isolatedHome('locale-blocks-archive')
+  const work = fixtureDir('locale-blocks-archive-work')
+  const { config, script } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  writeFileSync(script, `${JSON.stringify({ steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } }, { text: 'slept' }] }, null, 2)}\n`)
+  const server = await startServer(['--endpoint', 'scripted', '--session-root', join(home, 'sessions'), '--sandbox-root', work], { HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  let long
+  try {
+    const base = new URL(server.url)
+    const token = base.searchParams.get('token')
+    // The tree lists a session under its registered workspace.
+    const registered = await fetch(new URL(`/api/workspaces?token=${token}`, base), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: work }) })
+    assert.ok(registered.ok, `the work folder is registered (${registered.status})`)
+    long = fetch(new URL(`/api/turn?token=${token}`, base), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'a long job', folder: work }) })
+      .then((response) => response.text())
+      .catch(() => '')
+    let running
+    for (let attempt = 0; attempt < 100 && running === undefined; attempt += 1) {
+      const sessions = await (await fetch(new URL(`/api/sessions?token=${token}`, base))).json()
+      running = sessions.find((entry) => entry.running === true)?.id
+      if (running === undefined) await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+    }
+    assert.ok(running, 'the long turn is running')
+    await browser.send('Network.enable', {})
+    await browser.send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'zh-CN,zh;q=0.9' } })
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`document.documentElement.getAttribute('lang') === 'zh-CN' && document.querySelector('#tree li[data-row-key="session:${running}"]') !== null`, 20_000), 'a Chinese browser gets the Chinese page, with the running row')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree li[data-row-key="session:${running}"]')
+      ;[...row.querySelectorAll('.menu [role="menuitem"]')].find((item) => item.textContent.trim() === '归档会话').click()
+      return true
+    })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('session-archive').open`, 10_000), 'archiving a running session asks first')
+    const dialog = await browser.evaluate(`({
+      title: document.getElementById('session-archive-title').textContent,
+      list: document.getElementById('session-archive-activity').getAttribute('aria-label'),
+      work: [...document.querySelectorAll('#session-archive-activity li')].map((entry) => entry.textContent),
+      cancel: [...document.querySelectorAll('#session-archive [data-ws-close]')].map((button) => (button.classList.contains('ws-close') ? button.getAttribute('aria-label') : button.textContent.trim())),
+      action: document.getElementById('session-archive-confirm').textContent,
+      pending: document.getElementById('session-archive-status').textContent,
+      desc: document.getElementById('session-archive-desc').textContent,
+    })`)
+    assert.equal(dialog.title, '停止并归档此会话？', "DSH's question")
+    assert.equal(dialog.list, '将被停止的工作')
+    assert.deepEqual(dialog.work, ['进行中的回合', '1 个后台任务：sleep 40'], 'the work, in DSH\'s words and order')
+    assert.deepEqual(dialog.cancel, ['关闭', '取消'], 'the close and Cancel buttons')
+    assert.equal(dialog.action, '停止并归档')
+    assert.equal(dialog.pending, '正在停止并归档…')
+    assert.match(dialog.desc, /^“.*”仍有正在进行的工作。归档会先停止这些工作/, 'and the description')
+    await browser.evaluate(`[...document.querySelectorAll('#session-archive [data-ws-close]')].find((button) => button.textContent.trim() === '取消').click()`)
+    assert.equal(await browser.evaluate(`document.getElementById('session-archive').open`), false, 'Cancel closes it')
+  } finally {
+    browser.close()
+    server.kill()
+    await Promise.race([long, new Promise((resolvePromise) => setTimeout(resolvePromise, 2000))])
+    removeDir(home)
+    removeDir(work)
   }
 })

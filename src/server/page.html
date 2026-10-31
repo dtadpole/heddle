@@ -3995,16 +3995,16 @@
 </dialog>
 <dialog id="session-archive" class="ws-dialog" aria-labelledby="session-archive-title" aria-describedby="session-archive-desc">
   <div class="ws-head">
-    <h2 id="session-archive-title">Stop and archive this session?</h2>
-    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+    <h2 id="session-archive-title" data-i18n="archive.confirm.title">Stop and archive this session?</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </div>
   <p id="session-archive-desc" class="ws-desc"></p>
-  <ul id="session-archive-activity" aria-label="Work that will be stopped"></ul>
-  <p id="session-archive-status" class="ws-status" role="status" hidden>Stopping and archiving…</p>
+  <ul id="session-archive-activity" aria-label="Work that will be stopped" data-i18n-aria-label="archive.confirm.activity"></ul>
+  <p id="session-archive-status" class="ws-status" role="status" data-i18n="archive.confirm.pending" hidden>Stopping and archiving…</p>
   <p id="session-archive-error" class="ws-error" role="alert" hidden></p>
   <div class="ws-actions">
-    <button type="button" data-ws-close>Cancel</button>
-    <button type="button" id="session-archive-confirm" class="ws-danger">Stop and archive</button>
+    <button type="button" data-ws-close data-i18n="dialog.cancel">Cancel</button>
+    <button type="button" id="session-archive-confirm" class="ws-danger" data-i18n="archive.confirm.action">Stop and archive</button>
   </div>
 </dialog>
 <div id="archive-notice" role="status" aria-live="polite" hidden></div>
@@ -4097,6 +4097,8 @@ const MESSAGES = Object.freeze({
     'archive.confirm.listSeparator': ', ',
     'archive.confirm.action': 'Stop and archive',
     'archive.confirm.pending': 'Stopping and archiving\u2026',
+    'archive.failed': 'could not stop and archive that session',
+    'archive.failedReason': 'could not stop and archive that session: {reason}',
     'sessionId.menu': 'Copy Session ID',
     'sessionId.copied': 'Session ID copied',
     'sessionId.failed': 'Copy failed. Try again.',
@@ -4280,6 +4282,8 @@ const MESSAGES = Object.freeze({
     'archive.confirm.listSeparator': '、',
     'archive.confirm.action': '停止并归档',
     'archive.confirm.pending': '正在停止并归档…',
+    'archive.failed': '无法停止并归档该会话',
+    'archive.failedReason': '无法停止并归档该会话：{reason}',
     'sessionId.menu': '复制 Session ID',
     'sessionId.copied': 'Session ID 已复制',
     'sessionId.failed': '复制失败，请重试',
@@ -14015,7 +14019,7 @@ document.getElementById('session-archive-confirm').addEventListener('click', asy
     const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
     settle(false)
     if (!result.ok) {
-      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      dialogError('session-archive-error', result.body?.error ?? t('archive.failed'))
       return
     }
     stopArchiveTarget = null
@@ -14023,7 +14027,7 @@ document.getElementById('session-archive-confirm').addEventListener('click', asy
     showArchiveNotice('stoppedAndArchived', target.node)
   } catch (error) {
     settle(false)
-    dialogError('session-archive-error', 'could not stop and archive that session: ' + (error && error.message))
+    dialogError('session-archive-error', t('archive.failedReason', { reason: error && error.message }))
   }
 })
 
