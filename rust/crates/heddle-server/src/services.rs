@@ -158,6 +158,9 @@ pub enum ForkOutcome {
         at_seq: u64,
         last_seq: Option<u64>,
     },
+    /// Refused with the store's own sentence — the source's folder is gone (#56). Answered `400 { error, code }`
+    /// (`session/folder-missing`), as #106's unwritable branch is.
+    Refused(ServiceError),
     Forked(CreatedSession),
 }
 
@@ -577,22 +580,42 @@ pub trait TurnInterrupter: Send + Sync {
     fn interrupt(&self, session: &str) -> bool;
 }
 
-/// Work a session holds besides its turns, which an archive is refused by unless the caller agrees to stop it: DSH's
-/// `workspace/session-activity` waterfall and `workspace/session-stop` (`dsh-workspace` archive,
-/// `lib/index.js:512-540`). The binary supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`).
+/// Work a session holds besides the turns and subagents the server counts itself, which an archive is refused by
+/// unless the caller agrees to stop it: DSH's other `workspace/session-activity` providers and their
+/// `workspace/session-stop` listeners (`dsh-workspace` `archiveSession`, `lib/index.js:527-541`). The binary
+/// supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`) and the schedule row
+/// (`dsh-schedule/lib/index.js:2043-2064`).
 pub trait SessionActivity: Send + Sync {
-    /// The live work that blocks archiving `session`, in provider order (DSH's activity entries).
+    /// The live work that blocks archiving `session`, each item under its kind. The server lists the items of
+    /// the `job` and `schedule` kinds in DSH's listener order (`heddle_session::session_activity`); it counts
+    /// turns and subagents itself.
     fn active(&self, session: &str) -> Vec<ActivityItem>;
-    /// Stop it, once the archive is written: a background job is killed with `session archived`.
-    fn stop(&self, session: &str);
+    /// Stop it, once the archive is written: a background job is killed with `session archived`, a reminder is
+    /// removed. The server awaits it before answering, as DSH's registry awaits every stop listener
+    /// (`dsh-workspace/lib/index.js:540`, `:621-628`) — a reminder's removal waits its turn in the schedule
+    /// service's queue (`stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
+    fn stop(&self, session: &str) -> BoxFuture<'static, ()>;
 }
 
-/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`. Turns are counted by the server itself today;
-/// the kind lets them come through the same port later.
+/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityKind {
     Turn,
     Job,
+    Subagent,
+    Schedule,
+}
+
+impl ActivityKind {
+    /// The kind as DSH spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Job => "job",
+            Self::Subagent => "subagent",
+            Self::Schedule => "schedule",
+        }
+    }
 }
 
 /// One piece of live work an archive is refused by (DSH's activity item: `{ id, label }` under a `kind`).
@@ -601,6 +624,17 @@ pub struct ActivityItem {
     pub kind: ActivityKind,
     pub id: String,
     pub label: String,
+}
+
+/// The questions a model asks a person (`ask_user_question`), as the three routes see them.
+///
+/// The binary adapts `heddle-questions`, whose answers are already the TypeScript route's exact status and body;
+/// the server only matches the path. A late answer comes back in the body for the page to deliver.
+pub trait QuestionService: Send + Sync {
+    /// `GET /api/questions?session=<id>[&all=1]`: the status and the body.
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String);
+    /// `POST /api/questions/<id>` (or its `/hold`): the status and the body.
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String);
 }
 
 /// One Lead session's team as the view shows it — the same state the tools see.
@@ -656,11 +690,12 @@ pub struct Harness {
     pub approvals: Option<Arc<dyn ApprovalService>>,
     pub goals: Option<Arc<dyn GoalService>>,
     pub todos: Option<Arc<dyn TodoService>>,
+    pub questions: Option<Arc<dyn QuestionService>>,
     pub team: Option<Arc<dyn TeamService>>,
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
-    /// Work besides turns that an archive stops or is refused by; `None`: turns are the only activity.
+    /// Work besides turns and subagents that an archive stops or is refused by; `None`: no such row is loaded.
     pub activity: Option<Arc<dyn SessionActivity>>,
     /// The interface language the optional `locale` row stores (issue #80): the page is served with its
     /// `<html lang>`; `None` follows each browser's `Accept-Language`.
@@ -694,6 +729,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -742,6 +778,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -923,6 +960,11 @@ impl HarnessBuilder {
 
     pub fn todos(mut self, service: Arc<dyn TodoService>) -> Self {
         self.harness.todos = Some(service);
+        self
+    }
+
+    pub fn questions(mut self, service: Arc<dyn QuestionService>) -> Self {
+        self.harness.questions = Some(service);
         self
     }
 

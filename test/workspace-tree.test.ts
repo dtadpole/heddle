@@ -40,6 +40,15 @@ interface Tree {
   overflow: (total: number, shown: number, baseline?: number) => 'more' | 'less' | null
   overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
+  SEARCH_LIMIT: number
+  search: (
+    workspaces: unknown[],
+    sessions: unknown[],
+    query: string,
+    options?: Record<string, unknown>,
+  ) => { items: { meta: { id: string }; workspace: string }[]; hasMore: boolean }
+  chainTo: (groups: Group[], id: string) => Group[]
+  revealMark: (sessions: { id: string }[], id: string, watermark?: number) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
   placeholder: (meta: unknown) => boolean
   rowOffersActions: (meta: unknown) => boolean
@@ -493,6 +502,96 @@ test('the page asks newSessionWorkspace with the whole index, kept before the ar
   assert.match(body('async function startNewSession() {'), /const workspace = newSessionWorkspace\(\)/, 'the header and the Automation tasks page\'s New both ask it')
 })
 
+/**
+ * The sidebar search, DSH's local half (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169`): a
+ * case-insensitive substring of the session's **title or its workspace's name**, newest first, at most
+ * `SESSION_SEARCH_RESULT_LIMIT` = 20 rows (dsh-api-session-controller `lib/client.js:357`) with a bit saying more matched.
+ */
+const hits = (answer: { items: { meta: { id: string } }[] }) => answer.items.map((item) => item.meta.id)
+
+test('search matches a title or a workspace name, case-insensitively, and never the id', () => {
+  const workspaces = [
+    workspace('w-alpha', '/code/alphaproj', { sessionIds: ['s-kestrel', 's-notes'] }),
+    workspace('w-beta', '/code/b', { title: 'Beta Project', sessionIds: ['s-beta'] }),
+  ]
+  const sessions = [
+    session('s-kestrel', 3, { title: 'Kestrel migration plan', cwd: '/code/alphaproj' }),
+    session('s-notes', 2, { title: 'notes', cwd: '/code/alphaproj' }),
+    session('s-beta', 1, { title: 'Weekly sync', cwd: '/code/b' }),
+    session('s-loose', 4, { title: 'loose ends', cwd: '/tmp/scratchpad' }),
+  ]
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'KESTREL')), ['s-kestrel'], 'a title fragment, in any case')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, '  alphaPROJ ')), ['s-kestrel', 's-notes'], 'a workspace name finds every session in it')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'beta project')), ['s-beta'], 'by the workspace title, not its folder')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'scratchpad')), ['s-loose'], 'a session outside every workspace reads as its folder name')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 's-kestrel')), [], 'the id is not a name')
+  assert.deepEqual(tree.search(workspaces, sessions, '   '), { items: [], hasMore: false }, 'a blank query is no search')
+  const [first] = tree.search(workspaces, sessions, 'kestrel').items
+  assert.equal(first?.workspace, 'alphaproj', 'and each hit says which workspace it is in')
+  assert.equal(tree.search(workspaces, sessions, 'beta').items[0]?.workspace, 'Beta Project')
+})
+
+test('search follows the tree: subagent sessions never, archived per the filter, newest first', () => {
+  const workspaces = [workspace('w', '/w', { sessionIds: ['s-old', 's-new', 's-arch', 's-child'] })]
+  const sessions = [
+    session('s-old', 1, { title: 'plan a' }),
+    session('s-new', 9, { title: 'plan b' }),
+    session('s-arch', 5, { title: 'plan c', archived: true }),
+    session('s-child', 7, { title: 'plan d', origin: 'subagent' }),
+  ]
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'plan')), ['s-new', 's-old'], 'hide is the default, and a child is never a hit')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'plan', { archived: 'show' })), ['s-new', 's-arch', 's-old'])
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'plan', { archived: 'only' })), ['s-arch'])
+  const pinned = [session('s-pin', 1, { title: 'plan p', pinned: true }), session('s-late', 2, { title: 'plan q' })]
+  assert.deepEqual(hits(tree.search([], pinned, 'plan')), ['s-late', 's-pin'], 'recency alone orders hits; a pin does not lead them')
+})
+
+test('search lists at most twenty hits, and says when more matched', () => {
+  assert.equal(tree.SEARCH_LIMIT, 20)
+  const many = Array.from({ length: 22 }, (_, index) => session(`s-${String(index).padStart(2, '0')}`, index, { title: `capword item ${index + 1}` }))
+  const answer = tree.search([], many, 'capword')
+  assert.equal(answer.items.length, 20, 'capped at twenty')
+  assert.equal(answer.hasMore, true, 'with the bit that asks for a narrower query')
+  assert.equal(answer.items[0]?.meta.id, 's-21', 'the newest first')
+  const exact = tree.search([], many.slice(0, 20), 'capword')
+  assert.deepEqual([exact.items.length, exact.hasMore], [20, false], 'twenty matches exactly is not more')
+})
+
+test('opening a hit reveals its row: the groups down to it, and a watermark that reaches it', () => {
+  const workspaces = [workspace('w-child', '/r/c', { parent: 'w-root', sessionIds: ['s-deep'] }), workspace('w-root', '/r', { sessionIds: ['s-top'] })]
+  const groups = tree.deriveGroups(workspaces, [session('s-deep', 1), session('s-top', 2)])
+  assert.deepEqual(tree.chainTo(groups, 's-deep').map((group) => group.key), ['w-root', 'w-child'], 'every group from the top to the owner')
+  assert.deepEqual(tree.chainTo(groups, 's-top').map((group) => group.key), ['w-root'])
+  assert.deepEqual(tree.chainTo(groups, 's-missing'), [], 'nothing when no group draws it')
+  const rows = Array.from({ length: 60 }, (_, index) => session(`s-${index}`, index))
+  assert.equal(tree.revealMark(rows, 's-2', undefined), tree.INITIAL, 'a row already in view keeps the watermark')
+  assert.equal(tree.revealMark(rows, 's-57', 5), 58, 'a reveal reaches past fifty, which the automatic raise does not')
+  assert.equal(tree.revealMark(rows, 's-7', 15), 15, 'and never lowers a watermark a reader raised')
+  /** The watermark counts conversations (#54): an open New session placeholder ahead of the row takes none of its places. */
+  const behindBlank = [session('s-blank', 59, { turns: 0 }), ...rows]
+  assert.equal(tree.revealMark(behindBlank, 's-57', 5), 58, 'the placeholder ahead of it adds nothing to the reveal')
+  assert.equal(tree.revealMark(behindBlank, 's-blank', 5), 5, 'and a placeholder, drawn whatever the watermark, raises nothing')
+})
+
+test('search never lists a New session placeholder, open or not, even by its workspace\'s name', () => {
+  /**
+   * DSH's `deriveSearchResults` skips every blank session before it matches, the open one too (`summary.blank ||
+   * !sessionVisible(...)`, dsh-client-ui-workspace `lib/client.js:1185`), and the host half takes the same rows (`:1200`).
+   * A first visit opens a fresh New session in a workspace, so a search for that workspace's name would otherwise list
+   * it. A zero-turn session a person titled is not a placeholder (`placeholder`), and stays a hit.
+   */
+  const sessions = [
+    session('s-talked', 3, { title: 'plan' }),
+    session('s-blank-open', 4, { turns: 0 }),
+    session('s-blank-old', 2, { turns: 0 }),
+    session('s-named', 1, { turns: 0, title: 'named before its first turn' }),
+  ]
+  const workspaces = [workspace('w-kestrel', '/code/kestrel', { sessionIds: sessions.map((meta) => meta.id) })]
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'kestrel')), ['s-talked', 's-named'], 'by the workspace name: the conversations, no placeholder')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'kestrel', { current: 's-blank-open' })), ['s-talked', 's-named'], 'not even the open one')
+  assert.deepEqual(hits(tree.search(workspaces, sessions, 'named')), ['s-named'], 'a titled zero-turn session is found by its title')
+})
+
 test('the first-use workspace reads as Default workspace while it keeps its automatic title', () => {
   /**
    * DSH's workspaceDisplayTitle (dsh-api-workspace-controller lib/types/default-workspace.js): the stored title stays
@@ -604,6 +703,15 @@ test('a session row\'s tooltip is its display title and no other row has one —
   }
   assert.equal(tree.rowLabel(row('workspace')), 'repo', 'a workspace row reads its label')
   assert.equal(tree.rowTooltip(null), undefined)
+  /**
+   * A title with nothing visible in it is no title: the row reads Untitled, as the session's label and the search do
+   * (developer-ten's review of stack-2); DSH cleans titles to one trimmed line, so it never shows a blank one.
+   */
+  const blankTitle = { id: 's-5', turns: 2, cwd: work, title: '   ' }
+  const spaced = row('session', { label: tree.sessionLabel(blankTitle), session: blankTitle })
+  assert.equal(tree.sessionLabel(blankTitle), 'Untitled')
+  assert.equal(tree.rowLabel(spaced), 'Untitled', 'a whitespace-only title reads Untitled on the row')
+  assert.equal(tree.rowTooltip(spaced), 'Untitled', 'and in its tooltip')
 })
 
 test('Enter or Space opens a tree row only when pressed on the row itself, never on a control inside it (#98)', () => {
@@ -623,6 +731,14 @@ test('Enter or Space opens a tree row only when pressed on the row itself, never
   assert.equal(tree.rowKeyOpens({ key: ' ', target: row }, row), true, 'and so does Space')
   for (const key of ['a', 'Tab', 'ArrowDown', 'Escape']) assert.equal(tree.rowKeyOpens({ key, target: row }, row), false, `${key} does not open a row`)
   assert.equal(tree.rowKeyOpens(null, row), false)
+  /**
+   * The page asks it of the tree item, the row's one Tab stop (F4), and a workspace's item holds its child rows' items:
+   * Enter on a child bubbles through the parent's item and is the child's alone.
+   */
+  const parent = { role: 'treeitem', label: 'workspace' }
+  const child = { role: 'treeitem', label: 'session' }
+  assert.equal(tree.rowKeyOpens({ key: 'Enter', target: child }, parent), false, "Enter on a child item does not open its parent's row")
+  assert.equal(tree.rowKeyOpens({ key: 'Enter', target: child }, child), true, 'it opens the child')
 })
 
 test('the header hides its title while the session is blank and then follows its title; the window title is DSH\'s (#24)', () => {

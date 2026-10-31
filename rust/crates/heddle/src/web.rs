@@ -133,11 +133,32 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
         harness.interrupter = Some(Arc::new(LiveTurns { turns }));
     }
-    // The jobs row: a session's live background jobs block its archive and are stopped by `stop: true`.
+    // The rows behind the archive admission: the jobs row (a session's live background jobs) and the schedule row
+    // (its active reminders). Each blocks a plain archive and is stopped by `stop: true` once the archive is written;
+    // the server places their families in DSH's listener order itself (`heddle_session::session_activity`).
+    let mut rows: Vec<Arc<dyn heddle_server::services::SessionActivity>> = Vec::new();
     if let Some(jobs) = boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs") {
-        harness.activity = Some(Arc::new(JobActivity {
+        rows.push(Arc::new(JobActivity {
             jobs: jobs.registry.clone(),
         }));
+    }
+    if let Some(schedule) = boot
+        .services
+        .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+    {
+        rows.push(Arc::new(ScheduleActivity {
+            service: Arc::clone(&schedule.service),
+        }));
+    }
+    if !rows.is_empty() {
+        harness.activity = Some(Arc::new(RowActivities(rows)));
+    }
+    // The questions row: the page's question card reads and answers through /api/questions.
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_questions::QuestionService>>("questions")
+    {
+        harness.questions = Some(Arc::new(Questions { service }));
     }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
@@ -511,6 +532,12 @@ fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands>
         heddle_home: host.home.clone(),
         // The directory `compose_uploads` gives the turn route: a command line's attachments are read as a turn's.
         upload_dir: heddle_web_files::uploads::upload_directory(&host.home),
+        // `/compact` is refused while a turn of the session runs, as DSH's is (#133).
+        turn_running: services
+            .get::<heddle_agent::TurnRegistry>("turns")
+            .map(|turns| {
+                Arc::new(move |id: &str| turns.is_running(id)) as heddle_commands::TurnRunning
+            }),
     })
     .with_contributed(contributed);
     for refusal in commands.refused() {
@@ -1281,6 +1308,23 @@ impl heddle_server::services::GoalService for Goals {
     }
 }
 
+/// `heddle-questions` behind the server's port: its answers are already the TypeScript route's bytes.
+struct Questions {
+    service: Arc<heddle_questions::QuestionService>,
+}
+
+impl heddle_server::services::QuestionService for Questions {
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String) {
+        let answer = heddle_questions::get_questions(Some(&self.service), session, all);
+        (answer.status, answer.body)
+    }
+
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String) {
+        let answer = heddle_questions::post_question(Some(&self.service), id, hold, body);
+        (answer.status, answer.body)
+    }
+}
+
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
@@ -1315,8 +1359,67 @@ impl heddle_server::services::SessionActivity for JobActivity {
             .collect()
     }
 
-    fn stop(&self, session: &str) {
+    /// Each live job is killed with `session archived` when this is called; the kill is a request, answered at
+    /// once (the job settles when its process ends), so there is nothing left to await.
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
         heddle_jobs::http::stop_session_jobs(&self.jobs, session);
+        Box::pin(async {})
+    }
+}
+
+/// The schedule row as the server's archive admission — DSH's `workspace/session-activity` and
+/// `workspace/session-stop` listeners of `dsh-schedule` (`lib/index.js:2043-2064`), through the service's
+/// public `list` and `stop_session_tasks` (`scheduleActivity` / `stopSessionSchedules` in the TypeScript
+/// build's `src/session/activity.ts`).
+struct ScheduleActivity {
+    service: Arc<heddle_schedule::ScheduleService>,
+}
+
+impl heddle_server::services::SessionActivity for ScheduleActivity {
+    /// The session's active reminders, each labelled by its title (DSH's `{ id: record.id, label:
+    /// record.title }`).
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        self.service
+            .list(session)
+            .into_iter()
+            .map(|record| heddle_server::services::ActivityItem {
+                kind: heddle_server::services::ActivityKind::Schedule,
+                id: record.id,
+                label: record.title,
+            })
+            .collect()
+    }
+
+    /// Remove every active reminder of the session inside the service's queue (DSH's `stopSessionTasks`); a
+    /// failure is reported, never a reason to keep the session visible (`dsh-workspace/lib/index.js:621-628`).
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
+        let service = Arc::clone(&self.service);
+        let session = session.to_owned();
+        Box::pin(async move {
+            if let Err(error) = service.stop_session_tasks(&session).await {
+                service.warn(&format!(
+                    "workspace: stopping session '{session}' for archive failed: {error}"
+                ));
+            }
+        })
+    }
+}
+
+/// Every row's archive admission as the server's one port: their items together, and their stops asked at once
+/// and awaited together, as DSH's registry asks every `workspace/session-stop` listener in parallel
+/// (`dsh-workspace/lib/index.js:621-628`).
+struct RowActivities(Vec<Arc<dyn heddle_server::services::SessionActivity>>);
+
+impl heddle_server::services::SessionActivity for RowActivities {
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        self.0.iter().flat_map(|row| row.active(session)).collect()
+    }
+
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
+        let stops: Vec<_> = self.0.iter().map(|row| row.stop(session)).collect();
+        Box::pin(async move {
+            futures::future::join_all(stops).await;
+        })
     }
 }
 

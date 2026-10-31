@@ -6,8 +6,8 @@
 //! stays on). The wait never runs out (`timeout: -1`), so a `pending` answer cannot happen; if it did, it is read as a
 //! dismissal — the safe outcome, because it leaves plan mode on. A failed ask (a stop) is passed on as it came.
 //!
-//! The binary has no question service yet, so nothing builds this channel today and `exit_plan_mode` refuses with
-//! DSH's sentence; a question row hands [`questions_review_channel`] to [`crate::PlanService::provide_review_channel`].
+//! The binary builds this channel over its question service when the `questions` row is loaded and hands it to
+//! [`crate::PlanService::provide_review_channel`]; without that row `exit_plan_mode` refuses with DSH's sentence.
 
 use std::sync::Arc;
 
