@@ -69,9 +69,11 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, the `Workspace` grouping
-  drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id and no title in the
-  header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written;
+  starting in the workspace row the person opened rather than the open session's, and in the open session's own
+  workspace when that session is archived and its row is not drawn, not in the last remembered folder (#119), the
+  `Workspace` grouping drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id
+  and no title in the header, then the row, the header and the window title (`<title> — Heddle`) following its title
+  as it is written;
   and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
   workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
   new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh

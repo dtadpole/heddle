@@ -160,17 +160,18 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
   /**
    * The order itself lives in the tree's pure block since #134 (`WorkspaceTree.newSessionWorkspace`), where
-   * test/workspace-tree.test.ts judges it case by case; the page hands it the reader's context.
+   * test/workspace-tree.test.ts judges it case by case; the page hands it the reader's context and, for the open
+   * session's workspace, the whole index (#119).
    */
   assert.match(
     page,
-    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{ chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder \}\)/,
-    'the page asks it with the rows the tree drew and the reader\'s context',
+    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{\s*chosen: chosenWorkspace,\s*current,\s*selected: selectedPath,\s*active: activeFolder,\s*workspaces: knownWorkspaces,\s*sessions: \[\.\.\.sessionMetas\.values\(\)\],\s*\}\)/,
+    'the page asks it with the rows the tree drew, the reader\'s context and the whole index',
   )
   assert.match(
     page,
-    /if \(chosen !== null && typeof chosen === 'object' && chosen\.during === current\) \{[\s\S]*?const byChoice = list\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = list\.find/,
-    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace',
+    /if \(chosen !== null && typeof chosen === 'object' && chosen\.during === current\) \{[\s\S]*?const byChoice = list\.find[\s\S]*?if \(current !== null\) \{\s*const home = sessionWorkspace\(workspaces, sessions, current\)[\s\S]*?const byCurrent = list\.find/,
+    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace from the whole index (#119)',
   )
   assert.match(page, /if \(typeof selected === 'string' && !selected\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selected\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
