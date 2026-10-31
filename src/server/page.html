@@ -1948,6 +1948,18 @@
   #access:disabled { cursor: default; opacity: .55; }
   #access:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #access .mode-icon, #access .chevron { flex: none; width: 14px; height: 14px; }
+  /**
+   * A mode chip, drawn through window.heddlePage.setModeChip (src/commands/menu.js): DSH's blue "Plan" chip while a
+   * session is in plan mode. The access chip's shape, in the accent colour; one at a time, right after #access.
+   */
+  .mode-chip {
+    flex: none; display: inline-flex; align-items: center; gap: 4px; height: 28px;
+    padding: 0 8px; font-size: 13px; font-weight: 500; line-height: 20px;
+    background: rgba(38, 148, 254, .14); color: var(--accent); border: 0; border-radius: 8px; cursor: pointer;
+  }
+  .mode-chip:hover { background: rgba(38, 148, 254, .22); }
+  .mode-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .mode-chip .mode-icon { flex: none; width: 14px; height: 14px; }
   #access .chevron { opacity: .8; }
   #access[aria-busy='true'] .chevron { opacity: .35; }
   /**
@@ -3291,7 +3303,7 @@
         message, not as a file plus some text.
       -->
       <div id="attach-cards" aria-label="Pending files" hidden></div>
-      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
+      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands" autofocus></textarea>
       <!--
         The control row, inside the card and in DSH's order: `+` and the access mode on the left, the model
         seat on the right, then the one action button. The button is Send when nothing runs and Stop while a
@@ -6220,6 +6232,8 @@ async function showSession(id) {
   jobsSessionChanged()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
   applySessionAccess(null)
+  /** So does plan mode's chip, re-read on every show so a change missed while away is not lost. */
+  void slashReady.then((commands) => commands?.sessionShown(id))
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
@@ -6278,6 +6292,16 @@ async function showSession(id) {
      * recorded in the DOM as a visible note so the failure is not silent.
      */
     for (const turn of body.turns ?? []) {
+      /** A command's row is held in place now and drawn by the menu module once it has loaded. */
+      if (turn.kind === 'command') {
+        const holder = document.createElement('div')
+        holder.className = 'turn command hc-command'
+        holder.dataset.kind = 'command'
+        holder.dataset.commandId = String(turn.commandId)
+        log.append(holder)
+        void slashReady.then((commands) => commands?.drawTurn(turn))
+        continue
+      }
       try {
         add(turn.kind, turn.text, false, turn.label, turn)
       } catch (error) {
@@ -6488,6 +6512,11 @@ events.addEventListener('session', (message) => {
     }
   }
   if (current && payload.session !== current) return
+  /** A slash command's row, whichever window ran it (src/commands/menu.js). */
+  if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
+    void slashReady.then((commands) => commands?.draw(event))
+    return
+  }
   /**
    * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
    * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.
@@ -6861,6 +6890,88 @@ const runningSessions = new Set()
 
 const composer = document.getElementById('prompt')
 const field = composer.elements.prompt
+/** A feature's placeholder (window.heddlePage.setPlaceholder): below the steer hint, above the default. */
+let placeholderOverride = null
+
+/**
+ * The slash-command menu (src/commands/menu.js, developer-three, D-057), imported after the page so the composer never
+ * waits for it. Until it has loaded nothing is claimed, so a line typed in that instant is an ordinary message.
+ */
+/**
+ * What the page lends a feature module — one named surface (developer-ten) whose choices are the composer's
+ * (developer-twelve), agreed 2026-10-29: a row appended through the page's own path, so tail-following and session
+ * switches treat it like any other `#log` row, and the three controls a command opens instead of typing — the model
+ * seat, the file picker and the access chip. Ids move when the composer is restyled; this surface does not.
+ */
+window.heddlePage = {
+  addRow(kind, node) {
+    node.classList.add('turn', kind)
+    node.dataset.kind = kind
+    log.append(node)
+    followChatTail()
+  },
+  openModelMenu: () => document.getElementById('model-trigger').click(),
+  openFilePicker: () => document.getElementById('attach-file').click(),
+  openAccessMenu: () => document.getElementById('access').click(),
+  /** One mode chip after the access chip; the same id re-applies, another replaces it, null removes it. */
+  setModeChip(chip) {
+    const current = document.querySelector('#prompt-tools .mode-chip')
+    if (chip === null || chip === undefined) {
+      current?.remove()
+      return
+    }
+    const button = current ?? document.createElement('button')
+    button.type = 'button'
+    button.className = 'mode-chip'
+    button.id = `mode-chip-${chip.id}`
+    button.title = chip.title
+    button.setAttribute('aria-label', chip.ariaLabel)
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    icon.setAttribute('class', 'mode-icon')
+    icon.setAttribute('viewBox', '0 0 16 16')
+    icon.setAttribute('aria-hidden', 'true')
+    icon.innerHTML = '<path d="M3 3.5h10M3 8h10M3 12.5h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'
+    const label = document.createElement('span')
+    label.textContent = chip.label
+    button.replaceChildren(icon, label)
+    button.onclick = () => chip.onClick()
+    if (current === null) document.getElementById('access').after(button)
+  },
+  /** A placeholder below the steer hint and above the default; null restores the default. */
+  setPlaceholder(text) {
+    placeholderOverride = typeof text === 'string' && text.length > 0 ? text : null
+    renderComposerState()
+  },
+}
+let slashCommands = null
+const slashReady = import('/commands/menu.js')
+  .then((module) => {
+    slashCommands = module.install({
+      field,
+      anchor: document.getElementById('composer-card'),
+      sessionId: () => (composerKey === QUEUE_KEY_NONE ? null : composerKey),
+      ensureSession: async () => {
+        await startNewSession()
+        return composerKey === QUEUE_KEY_NONE ? null : composerKey
+      },
+      sendAsPrompt: (text, attachments = []) => (anyRunning() ? enqueue(text, 'queue', attachments) : void sendNow(text, attachments)),
+      pendingAttachments: () => pendingAttachments.length,
+      takeAttachments: () => takeAttachments(),
+      addRow: (node) => window.heddlePage.addRow('command', node),
+      notice: (text) => add('denied', text),
+      openModelMenu: window.heddlePage.openModelMenu,
+      openFilePicker: window.heddlePage.openFilePicker,
+      openAccessMenu: window.heddlePage.openAccessMenu,
+      setModeChip: window.heddlePage.setModeChip,
+      setPlaceholder: window.heddlePage.setPlaceholder,
+    })
+    if (current !== null) void slashCommands.sessionShown(current)
+    return slashCommands
+  })
+  .catch((error) => {
+    console.warn('the slash-command menu did not load', error)
+    return null
+  })
 const sendButton = document.getElementById('send')
 const stopButton = document.getElementById('stop')
 const attachButton = document.getElementById('attach')
@@ -7155,6 +7266,14 @@ function submitDraft(gesture) {
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
+    return
+  }
+  /** A slash command runs on the host and is never a message; a line it does not claim goes on as one. */
+  if (slashCommands !== null && slashCommands.claims(text)) {
+    field.value = ''
+    growComposer()
+    updateSendDisabled()
+    void slashCommands.submit(text)
     return
   }
   field.value = ''
@@ -7854,7 +7973,7 @@ function renderComposerState() {
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
   field.placeholder = canSteerQueue
     ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : 'Message or run a task, / commands, @ files or sessions'
+    : (placeholderOverride ?? 'Message or run a task, / commands')
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
