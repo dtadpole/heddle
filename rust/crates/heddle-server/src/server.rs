@@ -1130,6 +1130,20 @@ async fn title_session(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     let title = title.to_owned();
+    // A title with nothing visible left once cleaned is refused, as DSH's rename refuses it
+    // (`dsh-session-title` lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838); the
+    // store cleans what it accepts (`heddle_session::title_text`). An unknown session is still a `404`
+    // first, as DSH resolves the session before it judges the title.
+    if heddle_session::title_text::clean_session_title(&title).is_empty() {
+        if !state.harness().sessions.exists(id.as_str()) {
+            return respond::no_session(id.as_str());
+        }
+        return respond::error_with_code(
+            StatusCode::BAD_REQUEST,
+            heddle_session::title_text::TITLE_INVALID_MESSAGE,
+            heddle_session::title_text::TITLE_INVALID_CODE,
+        );
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     if let Some(folder) = folder.as_ref()
         && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
