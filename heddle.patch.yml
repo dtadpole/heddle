@@ -20,6 +20,12 @@
     - id: locale
       name: ./src/plugins/locale.ts
 
+    # Appearance and typography (DSH's dsh-client-ui-theme): the theme preference (light, dark or system) and the text,
+    # code and terminal font sizes and font lists, written by the settings API as the `ui-theme` namespace. The served
+    # page carries them, so the first paint already uses them.
+    - id: ui-theme
+      name: ./src/plugins/ui-theme.ts
+
     # Sessions: the event log a turn is recorded in. The store lives under $HEDDLE_HOME/sessions
     # (~/.heddle/sessions when HEDDLE_HOME is unset), the plugin's own default, so a run with its own home
     # keeps its own sessions; a root written here would ignore HEDDLE_HOME (#74). --session-root restates it.

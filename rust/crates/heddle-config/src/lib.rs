@@ -67,6 +67,7 @@ mod retry;
 mod schema;
 mod settings;
 mod template;
+mod theme;
 mod validate;
 mod value;
 
@@ -117,6 +118,10 @@ pub use settings::{
     handle_settings_request, is_secret_key, plan_settings_write, settings_target,
 };
 pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
+pub use theme::{
+    DEFAULT_THEME_PREFERENCE, FONT_FAMILY_FIELDS, FONT_SIZE_SPECS, FontSizeSpec, LiveTheme,
+    THEME_PREFERENCES, ThemeSettings, normalize_font_family, theme_schema, theme_settings,
+};
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
     ValidationResult, read_component_manifest, validate_rows,
