@@ -1715,6 +1715,15 @@ test('a turn into an archived session is accepted and blocked before any model r
     const after = await meta()
     assert.equal(after?.turns, turnsBefore, 'the session records the same number of turns')
     assert.equal(after?.archived, true, 'and stays archived')
+    /**
+     * #139: read back, the blocked turn is no failure. DSH's chat shows a failure only for an error, a sign-out abort or
+     * an interrupted end (endFailure, dsh-client-ui-chat lib/client.js:10475-10487). Both builds hung "the turn failed:
+     * unknown error" on the previous, finished answer, because the blocked turn's record carries no message.
+     */
+    const view = await (await fetch(origin + `/api/sessions/${id}`, { headers: { cookie } })).json()
+    const endedLines = (view.turns ?? []).flatMap((turn) => turn.ended ?? [])
+    assert.deepEqual(endedLines.filter((line) => /turn failed/i.test(String(line))), [], `the transcript marks no answer as failed\nsaw: ${JSON.stringify(view.turns)}`)
+    assert.equal((view.turns ?? []).filter((turn) => turn.kind === 'assistant').at(-1)?.text, 'the endpoint answered', 'and its last answer is the one before the archive')
 
     /** The command line's --resume --turn into the same session meets the same gate. */
     live.kill()
@@ -1810,6 +1819,15 @@ test('a goal round into an archived session blocks its goal as DSH does (prompt-
     removeDir(work)
   }
 })
+
+/**
+ * A session's record file, beside its log in either layout: `<folder>/<id>.json` next to `<folder>/<id>.v2.jsonl.zstd`, or
+ * `meta.json` in the old layout's own `<root>/<id>/` directory. Both builds file it there.
+ */
+function recordFile(root, id) {
+  const log = transcriptFile(join(root, id))
+  return basename(dirname(log)) === id ? join(dirname(log), 'meta.json') : join(dirname(log), `${id}.json`)
+}
 
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
@@ -2167,8 +2185,8 @@ test('a folder opens and closes with the same control, including a leaf with not
            * Reveal the row's controls first: the tail swaps them in for the age on hover/focus, so a quiet row has no control
            * box at all and "the menu is to the right of the name" could not be judged from one.
            */
-          /** The row is the tree item's one Tab stop since #92; its focus is what the focus-within rule reveals the controls on. */
-          row.focus()
+          /** The tree item is the row's one Tab stop (#92, F4); its focus is what the focus-within rule reveals the controls on. */
+          row.closest('li').focus()
           const buttons = [...row.querySelectorAll('button')]
           /**
            * Found by what the control **says**, so a renamed class or a new wrapper cannot break it.
@@ -4571,8 +4589,8 @@ test("a session row's controls appear on hover, and a search replaces the tree w
          * Focus the **row**, not one of its controls: the controls are not rendered until the row is focused, so a control cannot
          * be the thing that receives focus first. A row is a focusable treeitem, which is the keyboard path a person takes.
          */
-        /** The row element, the tree item's one Tab stop since #92 (the item itself is no longer focusable). */
-        target.querySelector(':scope > .row').focus()
+        /** The tree item, the row's one Tab stop (#92, F4: the item carries the role and the states, the row div is no stop). */
+        target.focus()
         await wait(200)
         const focused = {
           display: getComputedStyle(target.querySelector(':scope > .row .row-tools')).display,
@@ -5801,7 +5819,7 @@ test('the interactive inventory is cursor-bearing, hit-testable, unclipped and g
           const li = document.querySelector('#tree li[data-kind="session"]')
           if (li === null) return null
           /** The tail hides the controls until the row is hovered or focused; reveal them the keyboard way. */
-          li.querySelector(':scope > .row')?.focus()
+          li.focus()
           const tools = li.querySelector('.row-tools')
           const buttons = [...(tools?.querySelectorAll(':scope > .menu-wrap > button, :scope > .session-actions > button') ?? [])]
           const iconButtons = ['#sidebar-search', '#add-workspace', '#session-more button', '#view-options button']
@@ -6043,6 +6061,20 @@ test('pin, archive and fork refuse what the reference refuses, and record their 
     assert.equal(noTurn.status, 409, 'a session with no completed turn cannot be forked')
     assert.equal((await noTurn.json()).code, 'unavailable', 'and says why')
 
+    /**
+     * The fork reads a body (its optional atSeq), and a body that is not a JSON object is refused before anything is
+     * cut: TypeScript's readJson answers 400 "the body must be a JSON object", as DSH's gateway refuses args that are not
+     * a plain object (dsh-api-gateway lib/index.js:1746). The Rust build read null, [], 5 and "x" as {} and forked.
+     */
+    const before = (await metas()).length
+    for (const body of [null, [], 5, 'x']) {
+      const wrong = await call(`/api/sessions/${withTurn}/fork`, body)
+      const text = await wrong.text()
+      assert.equal(wrong.status, 400, `a fork body of ${JSON.stringify(body)} is refused\n${text}`)
+      assert.equal(text.trim(), 'the body must be a JSON object', `in the TypeScript build's words\n${text}`)
+    }
+    assert.equal((await metas()).length, before, 'and no refused body forked anything')
+
     /** A session with a turn forks, and the child records its parent — the provenance the reference keeps. */
     const forked = await call(`/api/sessions/${withTurn}/fork`, {})
     assert.equal(forked.status, 200, `a session with a completed turn forks\n${await forked.clone().text()}`)
@@ -6099,27 +6131,57 @@ test('archiving a session with running work is refused with the work named, and 
     pending.push(stream)
     const running = await until(async () => (await metas()).find((meta) => meta.running === true))
     assert.ok(running, 'the turn is running')
+    /**
+     * The turn reads as running a moment before its bash call is registered as a job, and a plain archive asked in that
+     * moment is refused with the turn alone (seen in 2 of 3 full no-UI runs on Rust). Wait, bounded, until the
+     * 'sleep 40' job is listed, so the refusal below can be judged in its exact order.
+     */
+    const sessionJobs = async () =>
+      (await (await fetch(new URL(`/api/jobs?session=${encodeURIComponent(running.id)}`, live.url), { headers: { cookie } })).json()).jobs ?? []
+    const job = await until(async () => (await sessionJobs()).find((one) => one.label === 'sleep 40' && one.status === 'running'))
+    assert.ok(job, `the turn's bash call is registered as a running job\nsaw: ${JSON.stringify(await sessionJobs())}`)
     const refused = await post(`/api/sessions/${running.id}/flags`, { archived: true })
     assert.equal(refused.status, 409, 'a running session is not archived quietly')
     const refusal = await refused.json()
     assert.equal(refusal.code, 'active', `and the refusal says why\n${JSON.stringify(refusal)}`)
     /**
      * DSH's list names every family of work. The turn's running bash call is a job as well: dsh-tool-bash registers every
-     * call's process with `ctx.jobs` as it starts, and a foreground call waits on that job (dsh-tool-bash
-     * lib/index.js:210-216), so the refusal names the turn and the job 'sleep 40'. Judged as a set, family by family with
-     * its labels: DSH's order is turn, job, subagent, schedule (each listener prepends its own entry, and they register
-     * in that order; dsh-workspace lib/types/types.d.ts:28-35), and the server's order, with the schedule family, is
-     * fixed in hd/developer-eight-archive-activity (R-developer-eight-13).
+     * call's process as an owned job as it starts (promoteOnTimeout; dsh-tool-bash lib/index.js:386-410), so the refusal
+     * names the turn and the job 'sleep 40'. Judged in DSH's exact order — turn, job, subagent, schedule: each listener
+     * puts its family before the rest, and the turn's is registered first (src/session/activity.ts). Stack-2 judged this
+     * list as a set until this branch fixed the server's order.
      */
-    const families = (refusal.activity ?? []).map((entry) => [entry.kind, (entry.items ?? []).map((item) => item.label)])
     assert.deepEqual(
-      [...families].sort(([left], [right]) => String(left).localeCompare(String(right))),
-      [['job', ['sleep 40']], ['turn', []]],
-      `and names the work, DSH's activity list: the turn and its bash call's job\n${JSON.stringify(refusal)}`,
+      (refusal.activity ?? []).map((entry) => [entry.kind, (entry.items ?? []).map((item) => item.label)]),
+      [
+        ['turn', []],
+        ['job', ['sleep 40']],
+      ],
+      `and names the work, DSH's activity list, in DSH's order\n${JSON.stringify(refusal)}`,
     )
+    assert.deepEqual(refusal.jobs, refusal.activity[1].items, "the jobs row's own field lists the same job")
     const untouched = (await metas()).find((meta) => meta.id === running.id)
     assert.equal(untouched?.running, true, 'the refusal stops nothing')
     assert.notEqual(untouched?.archived, true, 'and archives nothing')
+    /**
+     * stop: true stops the work only once the archive is written, as DSH writes the archive set and then asks the
+     * workspace/session-stop listeners (dsh-workspace lib/index.js:527-541): a write that fails stops nothing. Both
+     * builds stopped the turn first, so a refused write killed it and archived nothing (developer-ten's F1 on stack-2).
+     * The write is made to fail the way the store refuses one: the record is marked archived on disk, as another writer
+     * could leave it, and { archived: true, pinned: true } asks to pin an archived session. The turn writes no record
+     * during its bash step, so the mark holds until it is taken back.
+     */
+    const record = recordFile(join(h.home, 'sessions'), running.id)
+    writeFileSync(record, `${JSON.stringify({ ...JSON.parse(readFileSync(record, 'utf8')), archived: true }, null, 2)}\n`)
+    const refusedWrite = await post(`/api/sessions/${running.id}/flags`, { archived: true, pinned: true, stop: true })
+    const refusedBody = await refusedWrite.json()
+    assert.equal(refusedWrite.status, 409, `a stop-and-archive whose write is refused\n${JSON.stringify(refusedBody)}`)
+    assert.equal(refusedBody.code, 'archived', `is refused by the store\n${JSON.stringify(refusedBody)}`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const stillRunning = (await metas()).find((meta) => meta.id === running.id)
+    assert.equal(stillRunning?.running, true, `and stops nothing: the turn still runs\nsaw: ${JSON.stringify(stillRunning)}`)
+    const { archived: _marked, ...unmarked } = JSON.parse(readFileSync(record, 'utf8'))
+    writeFileSync(record, `${JSON.stringify(unmarked, null, 2)}\n`)
     const stopped = await post(`/api/sessions/${running.id}/flags`, { archived: true, stop: true })
     assert.equal(stopped.status, 200, 'stop: true is the caller agreeing to stop it')
     assert.equal((await stopped.json()).archived, true, 'and the session is archived')
@@ -6158,6 +6220,127 @@ test('archiving a session with running work is refused with the work named, and 
     assert.equal(childStopped.status, 200, 'stop: true archives the parent')
     const childEnded = await until(() => readTranscript(join(h.home, 'sessions', child.id)).some((event) => event.type === 'turn/completed'))
     assert.ok(childEnded, "and the stop reached the subagent: its turn ended long before its 40-second step would have")
+  } finally {
+    live?.kill()
+    await Promise.allSettled(pending)
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('an active reminder keeps a session from a quiet archive: the refusal names it after the turn and the jobs, and stop: true removes it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * R-developer-eight-13. DSH's schedule plugin is a `workspace/session-activity` provider too (`dsh-schedule`
+   * lib/index.js:2043-2064): a session with an active reminder answers `{kind: 'schedule', items: [{id, label: title}]}`,
+   * so even an idle session is refused a plain archive, and with `stopActivity` its `workspace/session-stop` listener
+   * removes every active reminder of the session (`stopSessionTasks`, :2273-2292). The families come in DSH's listener
+   * order — turn, job, subagent, schedule — so a running turn that has started a background job and set a reminder is
+   * refused with the turn, then its jobs, then the reminder, and stop: true kills the job with "session archived"
+   * (dsh-jobs lib/index.js:32-36) and removes the reminder. Judged over HTTP alone: the scripted model creates the work
+   * with schedule_create and bash, the reminder and job routes read it back, and the flags route is asked to archive.
+   */
+  const h = harness('archive-reminder')
+  let live
+  const pending = []
+  try {
+    const script = join(h.home, 'script.json')
+    const setScript = (steps) => writeFileSync(script, `${JSON.stringify({ steps }, null, 2)}\n`)
+    const remind = (title) => ({ toolCall: { name: 'schedule_create', arguments: { prompt: `remember ${title}`, title, after_seconds: 3600 } } })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    assert.ok(cookie.length > 0, 'the server issued a cookie')
+    const post = (path, body) =>
+      fetch(new URL(path, live.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const get = async (path) => (await fetch(new URL(path, live.url), { headers: { cookie } })).json()
+    const metas = async () => get('/api/sessions')
+    const reminders = async (session) => (await get(`/api/schedule/list?session=${encodeURIComponent(session)}`)).reminders ?? []
+    const until = async (probe, ms = 15_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; ) {
+        const value = await probe()
+        if (value) return value
+        await new Promise((done) => setTimeout(done, 200))
+      }
+      return undefined
+    }
+
+    /** An idle session whose only work is a reminder an hour away. */
+    setScript([remind('Stand-up'), { text: 'reminder set' }])
+    const turnText = await (await post('/api/turn', { prompt: 'remind me about the stand-up', folder: h.work })).text()
+    const idle = /"session":"(session-[^"]+)"/.exec(turnText)?.[1]
+    assert.ok(idle, `the turn names its session\n${turnText.slice(0, 400)}`)
+    const [reminder] = await reminders(idle)
+    assert.equal(reminder?.title, 'Stand-up', `the scripted turn created the reminder\nsaw: ${JSON.stringify(await reminders(idle))}`)
+    assert.equal((await metas()).find((meta) => meta.id === idle)?.running, false, 'and its turn has ended')
+
+    const refused = await post(`/api/sessions/${idle}/flags`, { archived: true })
+    const refusal = await refused.json()
+    assert.equal(refused.status, 409, `an idle session with an active reminder is not archived quietly\n${JSON.stringify(refusal)}`)
+    assert.equal(refusal.code, 'active', 'and the refusal says why')
+    assert.deepEqual(refusal.activity, [{ kind: 'schedule', items: [{ id: reminder.id, label: 'Stand-up' }] }], `and names the reminder by its title, DSH's schedule family\n${JSON.stringify(refusal)}`)
+    assert.equal((await reminders(idle)).length, 1, 'the refusal removes nothing')
+    assert.notEqual((await metas()).find((meta) => meta.id === idle)?.archived, true, 'and archives nothing')
+
+    const stopped = await post(`/api/sessions/${idle}/flags`, { archived: true, stop: true })
+    assert.equal(stopped.status, 200, 'stop: true is the caller agreeing to stop it')
+    assert.equal((await stopped.json()).archived, true, 'and the session is archived')
+    assert.deepEqual(await reminders(idle), [], "and its reminder is gone, as DSH's stopSessionTasks removes it")
+
+    /**
+     * A running turn that has set a reminder and started a background job, and is still in a foreground bash step
+     * (itself a job from its start): the refusal lists the turn, then both jobs in the order they started, then the
+     * reminder. It runs in a folder of its own, because a folder holds one session and the first one is archived now.
+     */
+    const second = join(h.work, 'review')
+    mkdirSync(second, { recursive: true })
+    setScript([
+      remind('Review'),
+      { toolCall: { name: 'bash', arguments: { command: 'sleep 60', run_in_background: true } } },
+      { toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } },
+      { text: 'slept' },
+    ])
+    pending.push(post('/api/turn', { prompt: 'set a review reminder, start a job, then wait', folder: second }).then((response) => response.text()))
+    const jobs = async (session) => (await get(`/api/jobs?session=${encodeURIComponent(session)}`)).jobs ?? []
+    const busy = await until(async () => {
+      const meta = (await metas()).find((one) => one.id !== idle && one.running === true)
+      if (meta === undefined || (await reminders(meta.id)).length !== 1) return undefined
+      return (await jobs(meta.id)).filter((job) => job.status === 'running').length === 2 ? meta : undefined
+    })
+    const seen = async () =>
+      JSON.stringify(
+        await Promise.all(
+          (await metas()).map(async (meta) => ({ id: meta.id, running: meta.running, archived: meta.archived, reminders: (await reminders(meta.id)).map((one) => one.title), jobs: (await jobs(meta.id)).map((job) => [job.label, job.status]) })),
+        ),
+      )
+    assert.ok(busy, `a turn is running, has set its reminder and has two jobs running\nsaw: ${await seen()}`)
+    const [review] = await reminders(busy.id)
+    const [background, foreground] = await jobs(busy.id)
+    assert.deepEqual([background.label, foreground.label], ['sleep 60', 'sleep 40'], 'the background job, then the foreground call')
+    const all = await (await post(`/api/sessions/${busy.id}/flags`, { archived: true })).json()
+    assert.deepEqual(
+      all.activity,
+      [
+        { kind: 'turn' },
+        { kind: 'job', items: [{ id: background.id, label: 'sleep 60' }, { id: foreground.id, label: 'sleep 40' }] },
+        { kind: 'schedule', items: [{ id: review.id, label: 'Review' }] },
+      ],
+      `the turn, then the jobs, then the reminder: DSH's listener order\n${JSON.stringify(all)}`,
+    )
+    const stopAll = await post(`/api/sessions/${busy.id}/flags`, { archived: true, stop: true })
+    assert.equal(stopAll.status, 200, 'stop: true archives the running session')
+    assert.deepEqual(await reminders(busy.id), [], 'and removes its reminder')
+    const killed = await until(async () => {
+      const job = (await jobs(busy.id)).find((one) => one.id === background.id)
+      return job?.status === 'killed' ? job : undefined
+    })
+    assert.ok(killed, `and kills its background job\nsaw: ${JSON.stringify(await jobs(busy.id))}`)
+    assert.match(String(killed.detail), /session archived$/, "with DSH's reason, session archived")
+    const ended = await until(async () => (await metas()).find((meta) => meta.id === busy.id)?.running === false)
+    assert.ok(ended, 'and stops its turn')
   } finally {
     live?.kill()
     await Promise.allSettled(pending)
@@ -6535,14 +6718,14 @@ test('a written session moves to the top of its folder, its age follows, and a r
         const padding = parseFloat(getComputedStyle(row).paddingRight)
         const slot = row.querySelector('.row-right > .pin-slot')
         const marker = slot.getBoundingClientRect()
-        /** Focus the row (the item's one Tab stop since #92): the controls replace the age and the marker in the same right-aligned flow. */
-        row.focus()
+        /** Focus the tree item (the row's one Tab stop, #92, F4): the controls replace the age and the marker in the same right-aligned flow. */
+        pinnedRow.focus()
         await wait(120)
         const pin = [...row.querySelectorAll('.row-right > .row-tools > .session-actions > button')].find((button) => (button.getAttribute('aria-label') || '').toLowerCase().includes('pin'))
         const pinBox = pin === null || pin === undefined ? null : pin.getBoundingClientRect()
         const markerOnHover = getComputedStyle(slot).display
         const pinGlyphs = [...row.querySelectorAll('svg')].filter((svg) => svg.closest('.row-tools') !== null || svg.closest('.pin-slot') !== null).length
-        row.blur()
+        pinnedRow.blur()
         return JSON.stringify({
           contentRight: Math.round(rowBox.right - padding),
           markerRight: Math.round(marker.right),
@@ -6619,7 +6802,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
           paths: markerPaths,
           tailQuad,
         }
-        pinnedRow.querySelector(':scope > .row').focus()
+        pinnedRow.focus()
         await wait(150)
         const control = pinnedRow.querySelector('.row-right > .row-tools > .session-actions > .pin-action')
         const controlSvg = control.querySelector('svg')
@@ -6629,7 +6812,7 @@ test('a written session moves to the top of its folder, its age follows, and a r
           filled: [...controlSvg.querySelectorAll('path')].filter((path) => getComputedStyle(path).fill !== 'none').length,
           markerDisplay: getComputedStyle(slot).display,
         }
-        pinnedRow.querySelector(':scope > .row').blur()
+        pinnedRow.blur()
         const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim().toLowerCase()
         return JSON.stringify({ marker, hovered, accent })
       })()`),
