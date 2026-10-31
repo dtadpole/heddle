@@ -1,9 +1,9 @@
 ---
 title: Status of the Rust port
 created: 2026-10-24T05:50:00Z
-modified: 2026-10-31T06:17:00Z
+modified: 2026-10-31T06:31:00Z
 level: L3
-version: 1.26.0
+version: 1.27.0
 description: The per-part status of the Rust port, written only from a verifier run against the binary, with its command.
 status: unverified
 grounded_in:
@@ -17,7 +17,7 @@ Written only from a verifier run **against the binary**, with the command and th
 ([`ULTIMATE_GOAL.md`](ULTIMATE_GOAL.md), *How the state is maintained*). Unjudged (exit 3) is not passing. The checks
 behind these figures are in [`status-notes.md`](status-notes.md).
 
-**Run 2026-10-30, in `~/heddle--int-backend`, on `main` at `ea2eab09` (a run that names no profile boots the shipped default, and the shipped session root follows HEDDLE_HOME; a stopped request is not offered to agent/request-error; before them, on `9dd1533e`, a failed read_file names its file with DSH's codes; write_file reports UTF-8 bytes; an outside tool may declare itself concurrency-safe; a preview cut inside a character keeps the whole characters before it; session titles are cleaned as DSH cleans them; before them, on `820c9d31`, a fork is seeded with its source's log; the Rust preview carries its HTML sanitiser; a model or effort switch made during a turn reaches its next request, with the request hooks run once; before them, on `2dbe2dcb`, every turn ends in the log, a failed or stopped one included; an Anthropic route caches the prompt; the compaction summary is a structured checkpoint; the Web API's tree lists only what is under a workspace root; before them, on `1a49107d`, a prompt sent to a busy session waits for the running turn, on `cb69f420`, a turn's answer is its last non-empty round; a Chat Completions stream asks for its usage; a Stop or the bash wall time kills the command's whole process group, and timeoutMs follows DSH's rule, capped; before them, on `170d773d`, a whitespace-only prompt is refused, on `0f0e9db0` a mid-step message is placed when the step closes and content search, on `5e257430` the summary budget, and on `24d250f3` six backend merges; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
+**Run 2026-10-30, in `~/heddle--int-backend`, on `main` at `a76749be` (the first message on a fresh install names how to configure a model; before it, on `ea2eab09`, a run that names no profile boots the shipped default, and the shipped session root follows HEDDLE_HOME; a stopped request is not offered to agent/request-error; before them, on `9dd1533e`, a failed read_file names its file with DSH's codes; write_file reports UTF-8 bytes; an outside tool may declare itself concurrency-safe; a preview cut inside a character keeps the whole characters before it; session titles are cleaned as DSH cleans them; before them, on `820c9d31`, a fork is seeded with its source's log; the Rust preview carries its HTML sanitiser; a model or effort switch made during a turn reaches its next request, with the request hooks run once; before them, on `2dbe2dcb`, every turn ends in the log, a failed or stopped one included; an Anthropic route caches the prompt; the compaction summary is a structured checkpoint; the Web API's tree lists only what is under a workspace root; before them, on `1a49107d`, a prompt sent to a busy session waits for the running turn, on `cb69f420`, a turn's answer is its last non-empty round; a Chat Completions stream asks for its usage; a Stop or the bash wall time kills the command's whole process group, and timeoutMs follows DSH's rule, capped; before them, on `170d773d`, a whitespace-only prompt is refused, on `0f0e9db0` a mid-step message is placed when the step closes and content search, on `5e257430` the summary budget, and on `24d250f3` six backend merges; part 70's browser checks under the integrators' browser slot), with the machine's endpoint file validated, against the previous `main`'s per-check baseline:**
 
 ```bash
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml    # exit 0
@@ -26,8 +26,8 @@ HEDDLE_BIN="$PWD/rust/target/release/heddle" node _tools_/verify-runner/lane.mjs
   60-hooks 70-workspaces-sessions 75-permission-sandbox 98-model-endpoints
 ```
 
-**200 checks: 199 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 0
-gained `check-default-profile.mjs` (five checks). On `9dd1533e`, part 4
+**203 checks: 202 pass, 0 fail, 1 unjudged; none that passed on the previous `main` stopped passing.** Part 0
+gained `check-unscripted-fixture.mjs` (three checks); on `ea2eab09` it gained `check-default-profile.mjs` (five). On `9dd1533e`, part 4
 gained `check-read-errors.mjs` (three checks) and `check-write-report.mjs`. Part 5's `check-parallel-tools.mjs` was
 rewritten without named pipes: its two old claims are retired, and three take their place (a bounded handshake that
 forces completion order, the serial run, read_file batching). Part 70 gained a preview-cut check and two title checks.
@@ -51,7 +51,7 @@ list.
 
 | Part | Verifier, in `_verifiers_/` | On the binary |
 |---|---|---|
-| 0 configuration | `05-config-system` | **passes** — 19 of 19 |
+| 0 configuration | `05-config-system` | **passes** — 22 of 22 |
 | 1 LLM backends | `10-llm-backends` | 17 pass, 1 unjudged (publisher route, live) |
 | 2 streaming | `20-streaming` | **passes** — 5 of 5 |
 | 3 context | `30-context-management` | **passes** — 11 of 11 |
