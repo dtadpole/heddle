@@ -102,6 +102,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/workspaces"),
     ("PATCH", "/api/workspaces/{id}"),
     ("DELETE", "/api/workspaces/{id}"),
+    ("POST", "/api/workspaces/insertBefore"),
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{id}"),
     ("GET", "/api/goal"),
@@ -393,6 +394,10 @@ impl ServerBuilder {
             .route("/api/workspaces", get(list_workspaces).post(add_workspace))
             .route("/api/workspaces/{id}", patch(rename_workspace))
             .route("/api/workspaces/{id}", delete(remove_workspace))
+            .route(
+                "/api/workspaces/insertBefore",
+                post(insert_workspace_before),
+            )
             .route("/api/approvals", get(list_approvals))
             .route("/api/approvals/{id}", post(answer_approval))
             .route("/api/goal", get(get_goal).post(post_goal))
@@ -1371,6 +1376,36 @@ async fn remove_workspace(
     match workspaces.remove(&id, &sessions) {
         Ok(outcome) => respond::json(StatusCode::OK, &outcome),
         Err(error) => service_refusal(error, StatusCode::CONFLICT),
+    }
+}
+
+/// Move a workspace in the stored order — DSH's `workspace/insertBefore` (dsh-api-workspace-controller
+/// lib/index.js:262-269), web.ts's `POST /api/workspaces/insertBefore`: `{workspaceId, beforeWorkspaceId?}`
+/// (an id or a path each), answered `{workspaceIds}`, the complete order; a workspace or anchor not in the
+/// order is `404 workspace/not-found` with DSH's sentence.
+async fn insert_workspace_before(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let Some(id) = body.non_empty("workspaceId") else {
+        return respond::error(StatusCode::BAD_REQUEST, "a workspaceId is required");
+    };
+    let before = match body.get("beforeWorkspaceId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(before)) if !before.is_empty() => Some(before.as_str()),
+        Some(_) => {
+            return respond::error(
+                StatusCode::BAD_REQUEST,
+                "beforeWorkspaceId must be a workspace id",
+            );
+        }
+    };
+    match workspaces.insert_before(id, before) {
+        Ok(order) => respond::json(StatusCode::OK, &json!({"workspaceIds": order})),
+        Err(error) if error.code.as_deref() == Some("workspace/not-found") => {
+            service_refusal(error, StatusCode::NOT_FOUND)
+        }
+        Err(error) => service_refusal(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -2476,6 +2511,157 @@ mod tests {
             first["sessionIds"].as_array().map(Vec::len),
             Some(1),
             "the route hands the registry the store's sessions: {body}"
+        );
+    }
+
+    /// A registry double for the reorder route: an order of three ids, moved as DSH's `insertBefore` does,
+    /// recording what the route handed it.
+    #[derive(Default)]
+    struct OrderWorkspaces {
+        asked: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl crate::services::WorkspaceService for OrderWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn insert_before(
+            &self,
+            id: &str,
+            before: Option<&str>,
+        ) -> Result<Vec<String>, ServiceError> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), before.map(str::to_owned)));
+            let order = ["w-1", "w-2", "w-3"];
+            for key in std::iter::once(id).chain(before) {
+                if !order.contains(&key) {
+                    return Err(crate::services::workspace_not_found(key));
+                }
+            }
+            let mut moved: Vec<String> = order
+                .iter()
+                .filter(|each| **each != id)
+                .map(|each| (*each).to_owned())
+                .collect();
+            let at = before
+                .and_then(|anchor| moved.iter().position(|each| each == anchor))
+                .unwrap_or(moved.len());
+            moved.insert(at, id.to_owned());
+            Ok(moved)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_reorder_route_answers_the_complete_order_and_dshs_not_found() {
+        // Without the plugin: the same refusal every workspace route gives.
+        let (router, _) = app("workspaces-order-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _) = post_json(
+            &router,
+            "/api/workspaces/insertBefore",
+            &cookie,
+            r#"{"workspaceId":"w-1"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let registry = Arc::new(OrderWorkspaces::default());
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-order")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let post = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            async move {
+                let (status, bytes) =
+                    post_json(&router, "/api/workspaces/insertBefore", &cookie, body).await;
+                (status, String::from_utf8(bytes).unwrap())
+            }
+        };
+
+        // Before an anchor: `{workspaceIds}`, the complete order, as web.ts writes it.
+        let (status, text) = post(r#"{"workspaceId":"w-3","beforeWorkspaceId":"w-1"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            text,
+            "{\n  \"workspaceIds\": [\n    \"w-3\",\n    \"w-1\",\n    \"w-2\"\n  ]\n}\n"
+        );
+        // No anchor, or a null one, appends.
+        let (_, text) = post(r#"{"workspaceId":"w-1"}"#).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["workspaceIds"],
+            json!(["w-2", "w-3", "w-1"])
+        );
+        let (status, _) = post(r#"{"workspaceId":"w-1","beforeWorkspaceId":null}"#).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // An unknown workspace or anchor: 404 with DSH's code and sentence, naming the one missing.
+        let (status, text) = post(r#"{"workspaceId":"w-9","beforeWorkspaceId":"w-1"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            text,
+            "{\"error\":\"Workspace \\\"w-9\\\" not found\",\"code\":\"workspace/not-found\"}\n"
+        );
+        let (status, text) = post(r#"{"workspaceId":"w-1","beforeWorkspaceId":"w-8"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(text.contains(r#"Workspace \"w-8\" not found"#), "{text}");
+
+        // A request without a workspace, or with an anchor that is not an id, is refused before the
+        // registry is asked.
+        let asked = registry.asked.lock().unwrap().len();
+        for body in [
+            r#"{}"#,
+            r#"{"workspaceId":""}"#,
+            r#"{"workspaceId":3}"#,
+            r#"{"workspaceId":"w-1","beforeWorkspaceId":7}"#,
+            r#"{"workspaceId":"w-1","beforeWorkspaceId":""}"#,
+        ] {
+            let (status, text) = post(body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {text}");
+        }
+        assert_eq!(registry.asked.lock().unwrap().len(), asked);
+        assert_eq!(
+            registry.asked.lock().unwrap()[0],
+            ("w-3".to_owned(), Some("w-1".to_owned()))
         );
     }
 

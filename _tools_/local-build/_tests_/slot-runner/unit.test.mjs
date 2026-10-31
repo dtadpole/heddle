@@ -1,5 +1,17 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
@@ -52,13 +64,13 @@ function env(sb, extra = {}) {
   }
 }
 
-function run(sb, args, extra = {}) {
-  return spawnSync('/bin/sh', [RUN, ...args], { cwd: CWD, env: env(sb, extra), encoding: 'utf8' })
+function run(sb, args, extra = {}, cwd = CWD) {
+  return spawnSync('/bin/sh', [RUN, ...args], { cwd, env: env(sb, extra), encoding: 'utf8' })
 }
 
-function start(sb, args, extra = {}) {
+function start(sb, args, extra = {}, cwd = CWD) {
   const child = spawn('/bin/sh', [RUN, ...args], {
-    cwd: CWD,
+    cwd,
     env: env(sb, extra),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
@@ -327,4 +339,126 @@ test('a held fake cargo exits once its hold folder is removed, so a failed test 
   const result = await held.done
   assert.equal(result.code, 0, result.stderr)
   assert.ok(Date.now() - began < 5000, `the holder exited ${Date.now() - began} ms after its folder went`)
+})
+
+// A git worktree stand-in with a tracked, an untracked, an ignored and a target-side Rust
+// file, every one dated 2020, so a touch by the runner shows as a recent mtime.
+const OLD = new Date('2020-01-01T00:00:00Z')
+function tree(sb, name) {
+  const dir = join(sb.dir, name)
+  mkdirSync(join(dir, 'src'), { recursive: true })
+  mkdirSync(join(dir, 'target'), { recursive: true })
+  spawnSync('git', ['init', '-q'], { cwd: dir })
+  writeFileSync(join(dir, '.gitignore'), 'target/\nsrc/ignored.rs\n')
+  for (const f of ['src/lib.rs', 'src/new.rs', 'src/ignored.rs', 'target/out.rs']) writeFileSync(join(dir, f), '// x\n')
+  spawnSync('git', ['add', 'src/lib.rs'], { cwd: dir })
+  const files = (...names) => names.map((f) => join(dir, f))
+  const age = () => {
+    for (const f of files('src/lib.rs', 'src/new.rs', 'src/ignored.rs', 'target/out.rs')) utimesSync(f, OLD, OLD)
+  }
+  const touched = (f) => statSync(join(dir, f)).mtimeMs > OLD.getTime() + 1000
+  age()
+  return { dir: realpathSync(dir), age, touched }
+}
+
+test('a shared CARGO_TARGET_DIR: a switch of tree touches its Rust sources, the same tree again does not', (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const b = tree(sb, 'tree-b')
+  const td = join(sb.dir, 'shared-target')
+  const stampOf = () => readFileSync(join(td, '.local-build-tree'), 'utf8').trim()
+
+  const first = run(sb, ['build'], { CARGO_TARGET_DIR: td }, a.dir)
+  assert.equal(first.status, 0, first.stderr)
+  assert.match(first.stderr, /last built from an unrecorded tree; touched 2 Rust sources in /)
+  assert.ok(a.touched('src/lib.rs') && a.touched('src/new.rs'), 'tracked and untracked sources are touched')
+  assert.ok(!a.touched('src/ignored.rs') && !a.touched('target/out.rs'), 'ignored files and build output are not')
+  assert.equal(stampOf(), a.dir)
+  assert.ok(!existsSync(join(td, '.local-build-lock')), 'the lock goes with the command')
+
+  a.age()
+  const again = run(sb, ['test'], { CARGO_TARGET_DIR: td }, a.dir)
+  assert.equal(again.status, 0, again.stderr)
+  assert.doesNotMatch(again.stderr, /touched/)
+  assert.ok(!a.touched('src/lib.rs'), 'the tree that built last is not rebuilt')
+
+  const other = run(sb, ['check'], { CARGO_TARGET_DIR: td }, b.dir)
+  assert.equal(other.status, 0, other.stderr)
+  assert.ok(other.stderr.includes(`last built from ${a.dir}; touched 2 Rust sources in ${b.dir}`), other.stderr)
+  assert.ok(b.touched('src/lib.rs') && b.touched('src/new.rs'))
+  assert.equal(stampOf(), b.dir)
+
+  const failed = run(sb, ['build'], { CARGO_TARGET_DIR: td, FAKE_RC: '101' }, a.dir)
+  assert.equal(failed.status, 101, 'cargo\'s status is kept')
+  assert.ok(!existsSync(join(td, '.local-build-lock')), 'a failed command releases the lock too')
+})
+
+test('a relative CARGO_TARGET_DIR is the caller\'s, and no target, fmt or the opt-out leave everything alone', (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const td = join(sb.dir, 'shared-target')
+
+  assert.equal(run(sb, ['build'], {}, a.dir).status, 0)
+  assert.equal(run(sb, ['fmt', '--check'], { CARGO_TARGET_DIR: td }, a.dir).status, 0)
+  assert.equal(run(sb, ['build'], { CARGO_TARGET_DIR: td, LOCAL_BUILD_TREE_GUARD: '0' }, a.dir).status, 0)
+  assert.ok(!a.touched('src/lib.rs'), 'nothing was touched')
+  assert.ok(!existsSync(td), 'and the target was never created')
+
+  const rel = run(sb, ['build'], { CARGO_TARGET_DIR: '../shared-target' }, a.dir)
+  assert.equal(rel.status, 0, rel.stderr)
+  assert.ok(rel.stderr.includes(`${a.dir}/../shared-target was last built`), 'the message names the target in full')
+  assert.equal(readFileSync(join(td, '.local-build-tree'), 'utf8').trim(), a.dir)
+  assert.ok(a.touched('src/lib.rs'))
+})
+
+test('two trees run one at a time into one target, and the second touches only after the first ends', async (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const b = tree(sb, 'tree-b')
+  const td = join(sb.dir, 'shared-target')
+  const release = join(sb.dir, 'release')
+  const first = start(sb, ['build'], { CARGO_TARGET_DIR: td, FAKE_HOLD: release }, a.dir)
+  const deadline = Date.now() + 10000
+  while (!logLines(sb).some((l) => l.startsWith('+')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50))
+  const cargoPid = logLines(sb).find((l) => l.startsWith('+')).slice(1)
+  const owner = readFileSync(join(td, '.local-build-lock', 'owner'), 'utf8').trim().split(' ')
+  assert.equal(owner[2], cargoPid, 'the lock records the cargo it waits for')
+  assert.equal(owner.slice(3).join(' '), a.dir)
+
+  const second = start(sb, ['build'], { CARGO_TARGET_DIR: td }, b.dir)
+  await new Promise((r) => setTimeout(r, 2500))
+  assert.equal(logLines(sb).filter((l) => l.startsWith('+')).length, 1, 'the second cargo waits for the lock')
+  assert.ok(!b.touched('src/lib.rs'), 'and touches nothing while the first still builds')
+  const releasedAt = Date.now()
+  writeFileSync(release, '')
+  const [ra, rb] = await Promise.all([first.done, second.done])
+  assert.equal(ra.code, 0, ra.stderr)
+  assert.equal(rb.code, 0, rb.stderr)
+  assert.ok(rb.stderr.includes(`waiting for the build in ${a.dir} to finish`), rb.stderr)
+  const events = logLines(sb).filter((l) => l.startsWith('+') || l.startsWith('-')).map((l) => l[0])
+  assert.deepEqual(events, ['+', '-', '+', '-'], 'one cargo at a time')
+  assert.ok(statSync(join(b.dir, 'src/lib.rs')).mtimeMs >= releasedAt, 'the touch came after the first build ended')
+})
+
+test('a dead holder\'s lock is reclaimed; a live one makes the run wait, then give up with 75', (t) => {
+  const sb = sandbox(t)
+  const a = tree(sb, 'tree-a')
+  const td = join(sb.dir, 'shared-target')
+  const lock = join(td, '.local-build-lock')
+  const now = Math.floor(Date.now() / 1000)
+  mkdirSync(lock, { recursive: true })
+  writeFileSync(join(lock, 'owner'), `999999 ${now} 0 /x/gone\n`)
+  const reclaimed = run(sb, ['build'], { CARGO_TARGET_DIR: td, LOCAL_BUILD_WAIT_SECONDS: '10' }, a.dir)
+  assert.equal(reclaimed.status, 0, reclaimed.stderr)
+  assert.ok(a.touched('src/lib.rs'))
+  assert.ok(!existsSync(lock))
+
+  writeFileSync(sb.log, '')
+  mkdirSync(lock)
+  writeFileSync(join(lock, 'owner'), `${process.pid} ${now} 0 /x/live\n`)
+  const blocked = run(sb, ['build'], { CARGO_TARGET_DIR: td, LOCAL_BUILD_WAIT_SECONDS: '2' }, a.dir)
+  assert.equal(blocked.status, 75, blocked.stderr)
+  assert.match(blocked.stderr, /stayed locked by \/x\/live/)
+  assert.deepEqual(args(sb), [], 'cargo never ran')
+  assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), `${process.pid} ${now} 0 /x/live\n`, 'a live lock is untouched')
 })

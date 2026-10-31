@@ -183,9 +183,31 @@ export function describeEndpoints(
 ): { readonly endpoints: readonly Record<string, unknown>[]; readonly default: string | null } {
   const present = nominated !== undefined && endpoints.some((endpoint) => endpoint.name === nominated)
   return {
-    endpoints: endpoints.map(describeEndpoint),
+    endpoints: endpoints.map(describePageEndpoint),
     default: present && nominated !== undefined ? nominated : null,
   }
+}
+
+/** The fields of `describeEndpoint` a page reads to list and pick models. */
+export const PAGE_ENDPOINT_FIELDS: readonly string[] = [
+  'name',
+  'kind',
+  'model',
+  'models',
+  'reasoning',
+  'capabilities',
+  'inputModalities',
+  'contextWindow',
+  'contextWindowSource',
+  'credential',
+]
+
+/**
+ * `describeEndpoint` cut to `PAGE_ENDPOINT_FIELDS`: a browser is told what it needs to list and pick models, and not
+ * the gateway address, proxy, project, region or header names the operator's own CLI listing shows.
+ */
+export function describePageEndpoint(endpoint: EndpointConfig): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(describeEndpoint(endpoint)).filter(([field]) => PAGE_ENDPOINT_FIELDS.includes(field)))
 }
 
 /** A credential-free summary of an endpoint, safe to log or print. */
@@ -213,9 +235,9 @@ export function describeEndpoint(endpoint: EndpointConfig): Record<string, unkno
     ...(endpoint.contextWindow !== undefined
       ? { contextWindow: endpoint.contextWindow, contextWindowSource: 'config' }
       : {}),
-    // Presence, never the value.
-    ...(endpoint.apiKey !== undefined ? { credential: 'set' } : {}),
-    ...(endpoint.apiKeyFile !== undefined ? { credentialFile: endpoint.apiKeyFile } : {}),
+    // Presence, never the value, for a key and a key file alike: a key file's path names the account that holds
+    // it, and DSH lets only declared credential metadata cross, never a path (`dsh-api-settings-controller`).
+    ...(endpoint.apiKey !== undefined || endpoint.apiKeyFile !== undefined ? { credential: 'set' } : {}),
     ...(endpoint.headers !== undefined ? { headers: Object.keys(endpoint.headers) } : {}),
   }
 }

@@ -5,11 +5,12 @@
  */
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -290,6 +291,96 @@ test('a resumed session carries the earlier turns', async (context) => {
   }
 })
 
+/**
+ * A local chat endpoint that streams each answer as **several deltas**, one SSE frame per fragment, and keeps every
+ * request body it was sent.
+ *
+ * The scripted endpoint cannot stand in here: it yields a step's whole text as one text-delta, so a session it wrote
+ * holds one delta per answer and the defect below cannot appear. A provider splits an answer wherever its stream does,
+ * and this double does the same on purpose.
+ */
+async function fragmentingChatDouble(answers) {
+  const requests = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
+        response.writeHead(404, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: 'no model list' }))
+        return
+      }
+      requests.push(body)
+      const fragments = answers[Math.min(requests.length, answers.length) - 1]
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      for (const content of fragments) {
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
+      }
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}/ds`,
+    requests,
+    close: () =>
+      new Promise((resolvePromise) => {
+        server.close(() => resolvePromise())
+        server.closeAllConnections()
+      }),
+  }
+}
+
+test('a resumed session sends an earlier streamed answer back as one piece of text, not one line per fragment', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Live-testing draft developer-five-2, measured on both builds: an answer that streamed as several deltas was derived
+   * from the log as one text part per delta, and the chat adapter joins text parts with a newline, so every later
+   * request handed the model its own earlier answer broken wherever the stream split it ("value\n-\n6"). DSH assembles a
+   * stream per block (dsh-llm BlockAssembler.push appends every text delta of a block to one partial), so the model
+   * gets its answer back as it wrote it. The first answer here streams as four fragments; the second turn's request is
+   * read off the wire.
+   */
+  const fragments = ['The word ', 'you asked ', 'me to remember is lo', 'om.']
+  const double = await fragmentingChatDouble([fragments, ['noted']])
+  const h = harness('whole-answer')
+  const config = httpConfig({ home: h.home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: h.home, HEDDLE_CONFIG: config }
+  try {
+    const first = await runCli([...h.args, '--turn', 'remember the word loom'], { env })
+    assert.equal(first.code, 0, `the first turn ran\n${first.stdout}${first.stderr}`)
+    const id = sessionsUnder(join(h.home, 'sessions'))[0]
+    assert.ok(id, 'the first run created a session')
+    const deltas = readTranscript(join(h.home, 'sessions', id)).filter(
+      (event) => event.type === 'assistant/chunk' && event.chunk?.type === 'text-delta',
+    )
+    assert.deepEqual(
+      deltas.map((event) => event.chunk.text),
+      fragments,
+      'the answer reached the session as the four fragments it streamed in, one logged delta each (the log is unchanged)',
+    )
+
+    const second = await runCli([...h.args, '--turn', 'what was the word', '--resume', id], { env })
+    assert.equal(second.code, 0, `the resumed turn ran\n${second.stdout}${second.stderr}`)
+    assert.equal(double.requests.length, 2, 'each turn made one model call')
+    const sent = parseJson(double.requests[1])
+    const answers = (sent?.messages ?? []).filter((message) => message.role === 'assistant')
+    assert.deepEqual(
+      answers.map((message) => message.content),
+      [fragments.join('')],
+      `the second request carries the first answer once, whole, with no line break where the stream split it\nsent: ${JSON.stringify(answers)}`,
+    )
+  } finally {
+    await double.close()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('the record is appended to, never rewritten', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
   const h = harness('append')
@@ -486,6 +577,50 @@ test('a sibling folder whose path shares a prefix is not a member', async (conte
     removeDir(h.home)
     removeDir(h.work)
     removeDir(sibling)
+  }
+})
+
+test('a letter-case variant of a registered folder is that workspace, and a session started there lists under it', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('case')
+  /**
+   * One folder is one workspace however it is spelled. DSH stores `fs.realpath` of the path and compares strings
+   * (`dsh-workspace/README.md:93`, "one record per canonical path"); the native `realpath` answers with the spelling
+   * the disk stores, so on a case-insensitive volume — macOS by default — `proj` and `PROJ` are one record. The same
+   * canon is why a symlink to a registered folder collides with it rather than becoming a second workspace: that is
+   * DSH's rule too, not a gap. Skipped on a case-sensitive volume, where the two spellings are two folders.
+   */
+  const proj = join(h.work, 'proj')
+  const variant = join(h.work, 'PROJ')
+  try {
+    mkdirSync(proj, { recursive: true })
+    if (!skipUnless(context, existsSync(variant), 'this volume is case-sensitive, so the two spellings are two folders')) return
+    const first = await runCli(adminArgs(h, ['workspace', 'add', proj, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `registering the folder worked\n${first.stdout}${first.stderr}`)
+    assert.equal(parseJson(first.stdout).created, true, 'and created its workspace')
+
+    const again = await runCli(adminArgs(h, ['workspace', 'add', variant, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(again.code, 0, `registering the other spelling is not an error\n${again.stdout}${again.stderr}`)
+    const record = parseJson(again.stdout)
+    assert.equal(record.created, false, `it reports the workspace already there\nsaw: ${JSON.stringify(record)}`)
+    assert.equal(record.path, proj, 'under the spelling the disk stores')
+
+    const created = await runCli(adminArgs(h, ['session', 'new', variant, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(created.code, 0, `a session starts at the other spelling\n${created.stdout}${created.stderr}`)
+    const session = parseJson(created.stdout).session
+
+    const workspaces = await workspacesOf(h)
+    const spellings = workspaces.filter((workspace) => String(workspace.path).toLowerCase() === proj.toLowerCase())
+    assert.deepEqual(
+      spellings.map((workspace) => workspace.path),
+      [proj],
+      `one folder is one workspace\nsaw: ${workspaces.map((workspace) => workspace.path).join(', ')}`,
+    )
+    assert.ok((spellings[0]?.sessions ?? []).includes(session), `and the session started at ${variant} lists under it`)
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
   }
 })
 
@@ -1915,6 +2050,103 @@ test('a session title of only control or escape characters is refused on rename,
   }
 })
 
+test('a workspace moved before another keeps its place across a restart, as DSH workspace/insertBefore does', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's drag-to-reorder of workspaces (C37) stores the order with the host: workspace/insertBefore takes the moved
+   * workspace and an optional anchor, lands it before the anchor or last without one, and answers the complete order
+   * (dsh-workspace lib/index.js:473-499; dsh-api-workspace-controller lib/index.js:262-269). A workspace or anchor it
+   * does not hold is workspace/not-found with the sentence Workspace "id" not found (index.js:358-360); a new workspace
+   * still goes first (dsh-workspace lib/index.js:402). Judged over the route the page's drop calls, then again after
+   * the server restarts, in the command line's listing, and in the record file, whose shape must not change so the
+   * other build keeps reading it.
+   */
+  const h = harness('web-reorder')
+  const folders = ['one', 'two', 'three'].map((name) => fixtureDir(`web-reorder-${name}`))
+  const late = fixtureDir('web-reorder-four')
+  let live
+  try {
+    const boot = async () => {
+      live = await startServer(
+        ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+        h.env,
+      )
+      const origin = new URL(live.url).origin
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      return async (path, init = {}) => {
+        const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+        const text = await response.text()
+        let body
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+        return { status: response.status, body }
+      }
+    }
+    let call = await boot()
+    const move = (body) => call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify(body) })
+    const ids = {}
+    for (const [index, folder] of folders.entries()) {
+      const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: folder }) })
+      assert.equal(added.status, 200, `a folder is added (${JSON.stringify(added.body)})`)
+      ids[['one', 'two', 'three'][index]] = added.body.record.id
+    }
+    const named = Object.fromEntries(Object.entries(ids).map(([name, id]) => [id, name]))
+    const order = (list) => list.map((id) => named[id]).filter((name) => name !== undefined)
+    const listed = async () => order(((await call('/api/workspaces')).body.workspaces ?? []).map((view) => view.id))
+    assert.deepEqual(await listed(), ['three', 'two', 'one'], 'a new workspace goes first')
+
+    const first = await move({ workspaceId: ids.one, beforeWorkspaceId: ids.three })
+    assert.equal(first.status, 200, `a workspace is moved before another (${JSON.stringify(first.body)})`)
+    assert.deepEqual(order(first.body.workspaceIds ?? []), ['one', 'three', 'two'], 'and the answer is the complete order')
+    assert.deepEqual(await listed(), ['one', 'three', 'two'], 'which the workspace list now reads')
+    const last = await move({ workspaceId: ids.three })
+    assert.equal(last.status, 200, `without an anchor it goes last (${JSON.stringify(last.body)})`)
+    assert.deepEqual(await listed(), ['one', 'two', 'three'])
+    const itself = await move({ workspaceId: ids.two, beforeWorkspaceId: ids.two })
+    assert.equal(itself.status, 200, 'itself as the anchor is not an error')
+    assert.deepEqual(order(itself.body.workspaceIds ?? []), ['one', 'two', 'three'], 'and moves nothing')
+
+    for (const [what, body, missingId] of [
+      ['an unknown workspace', { workspaceId: 'w-nowhere', beforeWorkspaceId: ids.one }, 'w-nowhere'],
+      ['an unknown anchor', { workspaceId: ids.one, beforeWorkspaceId: 'w-nowhere' }, 'w-nowhere'],
+    ]) {
+      const refused = await move(body)
+      assert.equal(refused.status, 404, `${what} is not found (${JSON.stringify(refused.body)})`)
+      assert.equal(refused.body.code, 'workspace/not-found', `with DSH's code for ${what}`)
+      assert.equal(refused.body.error, `Workspace "${missingId}" not found`, `and DSH's sentence for ${what}`)
+    }
+    const nameless = await move({})
+    assert.equal(nameless.status, 400, `a move that names no workspace is refused (${JSON.stringify(nameless.body)})`)
+    assert.deepEqual(await listed(), ['one', 'two', 'three'], 'and no refusal moved anything')
+
+    live.kill()
+    live = undefined
+    call = await boot()
+    assert.deepEqual(await listed(), ['one', 'two', 'three'], 'the order is the host\'s: it holds across a restart')
+    const cli = await workspacesOf(h)
+    assert.deepEqual(order(cli.map((record) => record.id)), ['one', 'two', 'three'], 'and the command line lists it too')
+
+    const file = JSON.parse(readFileSync(join(h.home, 'workspaces.json'), 'utf8'))
+    assert.deepEqual(Object.keys(file), ['version', 'workspaceIds', 'workspaces'], 'the record file keeps its keys')
+    assert.deepEqual(order(file.workspaceIds), ['one', 'two', 'three'], 'and keeps the order in workspaceIds, where both builds read it')
+
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: late }) })
+    assert.equal(added.status, 200, `a fourth folder is added (${JSON.stringify(added.body)})`)
+    const views = ((await call('/api/workspaces')).body.workspaces ?? []).map((view) => view.id)
+    assert.equal(views[0], added.body.record.id, 'a new workspace still goes first')
+    assert.deepEqual(order(views), ['one', 'two', 'three'], 'before the moved order, which stays as it was')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    for (const folder of [...folders, late]) removeDir(folder)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -2454,6 +2686,62 @@ test("a double-click on a session's title opens DSH's Rename session dialog, pre
     assert.equal(JSON.parse(readFileSync(definitionFile, 'utf8')).title, 'renamed by a double-click', 'and the definition follows')
   } finally {
     browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a session's first prompt is titled by the session's own model, not by the cut prompt", async (context) => {
+  /**
+   * R-developer-eight-12 (DSH parity C6). DSH mounts dsh-session-title with its first-prompt model provider in the base
+   * profile: on a session's first prompt the fallback name (the prompt's leading words) appears at once, then the session's
+   * own route is asked for a title (purpose session-title, the turn's endpoint and model) and the answer replaces the
+   * fallback. Heddle titled a session with the prompt cut to 48 characters and asked nothing. The scripted endpoint answers
+   * the title call with its session-title step, so the generated title is known here; the turn takes the untagged step.
+   * The title lands without delaying the turn, so it is read until it arrives rather than once.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  const h = harness('auto-title')
+  const generated = 'Northern revenue year on year'
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  scriptedConfig({ home: h.home, steps: [{ purpose: 'session-title', text: `**${generated}**\nA title for your request.` }, { text: 'a scripted answer' }] })
+  const folder = join(h.work, 'ws-title')
+  mkdirSync(folder, { recursive: true })
+  let live
+  try {
+    const made = await runCli(adminArgs(h, ['session', 'new', folder, '--json']), { env: h.env, cwd: h.work })
+    assert.equal(made.code, 0, `the session was created\n${made.stdout}${made.stderr}`)
+    const created = parseJson(made.stdout)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const turn = await fetch(new URL('/api/turn', live.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ session: created.session, prompt }),
+    })
+    const stream = await turn.text()
+    assert.equal(turn.status, 200, `the first turn ran\n${stream}`)
+    assert.match(stream, /a scripted answer/, 'the turn was answered by the turn step, not the title step')
+
+    const titleNow = async () => {
+      const response = await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })
+      const listed = await response.json()
+      return listed.find((meta) => meta.id === created.session)?.title
+    }
+    let title = await titleNow()
+    for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+      await new Promise((done) => setTimeout(done, 250))
+      title = await titleNow()
+    }
+    assert.notEqual(title, 'Please summarise the quarterly revenue figures…', 'the title is not the first prompt cut short')
+    assert.equal(title, generated, `the first line of the model's answer, its emphasis removed, is the session's title\nsaw: ${JSON.stringify(title)}`)
+    assert.equal((await sessionsOf(h)).find((meta) => meta.id === created.session)?.title, generated, 'and the store holds it')
+  } finally {
     live?.kill()
     removeDir(h.home)
     removeDir(h.work)

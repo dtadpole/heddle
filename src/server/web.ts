@@ -1294,6 +1294,44 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * Move a workspace in the stored order — DSH's `workspace/insertBefore` (dsh-api-workspace-controller lib/index.js:
+   * 262-269), what dropping a dragged workspace row asks for.
+   *
+   * `{workspaceId, beforeWorkspaceId?}` (an id or a path each): before the anchor, or last without one. The answer is
+   * DSH's `{workspaceIds}`, the complete order; a workspace or anchor not in it is `404` with DSH's
+   * `workspace/not-found` and sentence. The order lives with the host, in the record file, so it holds across a
+   * reload, a restart and the other build.
+   */
+  if (url.pathname === '/api/workspaces/insertBefore' && request.method === 'POST') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    if (typeof body.workspaceId !== 'string' || body.workspaceId.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a workspaceId is required' })}\n`)
+      return
+    }
+    const before = body.beforeWorkspaceId
+    if (before !== undefined && before !== null && (typeof before !== 'string' || before.length === 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'beforeWorkspaceId must be a workspace id' })}\n`)
+      return
+    }
+    try {
+      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
+    } catch (error) {
+      const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
+      if (!missing) throw error
+      const id = String((error as { workspaceId?: unknown }).workspaceId)
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `Workspace "${id}" not found`, code: 'workspace/not-found' })}\n`)
+    }
+    return
+  }
+
+  /**
    * Fork a session — `Fork session` in its menu, DSH's item.
    *
    * The answer carries the new session's id, name and definition so the page can redraw the tree; the view is
