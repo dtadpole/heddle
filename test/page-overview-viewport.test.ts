@@ -11,10 +11,11 @@ const begin = page.indexOf('/* overview-viewport:begin */')
 const end = page.indexOf('/* overview-viewport:end */')
 assert.ok(begin !== -1 && end > begin, 'page.html fences overview-viewport')
 type Viewport = { from: number; to: number } | null
-const helpers = new Function(`${page.slice(begin, end)}; return { zoomViewport, panViewport, viewportDomain }`)() as {
+const helpers = new Function(`${page.slice(begin, end)}; return { zoomViewport, panViewport, viewportDomain, viewportMinSpan }`)() as {
   zoomViewport: (viewport: Viewport, anchor: number, deltaY: number, minSpan: number) => Viewport
   panViewport: (viewport: Viewport, anchorFrom: number, deltaFraction: number) => Viewport
   viewportDomain: (viewport: Viewport, screenFraction: number) => number
+  viewportMinSpan: (durationActual: boolean, totalMs: number, records: number) => number
 }
 const close = (actual: number | undefined, expected: number, message?: string) => assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${message ?? ''} (${actual} vs ${expected})`)
 
@@ -49,4 +50,12 @@ test('a right-button drag pans a zoomed viewport within the domain, and an unzoo
 test('a point on the strip maps to the domain through the viewport', () => {
   assert.equal(helpers.viewportDomain(null, 0.3), 0.3)
   close(helpers.viewportDomain({ from: 0.5, to: 0.75 }, 0.5), 0.625)
+})
+
+test("the narrowest zoom is DSH's: 20 ms of recorded time, or four records in the equal mode; a short domain cannot zoom", () => {
+  assert.equal(helpers.viewportMinSpan(true, 2000, 50), 0.01, '20 ms of a 2 s domain')
+  assert.equal(helpers.viewportMinSpan(false, 2000, 50), 0.08, 'four of 50 records')
+  assert.equal(helpers.viewportMinSpan(true, 15, 50), 1, 'a domain under 20 ms cannot zoom')
+  assert.equal(helpers.viewportMinSpan(false, 2000, 3), 1, 'nor can three records')
+  assert.equal(helpers.zoomViewport(null, 0.5, 0, 0.01), null, 'and a wheel with no vertical delta changes nothing')
 })

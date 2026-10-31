@@ -2765,7 +2765,8 @@
     border-radius: 0;
     border-bottom: .5px solid var(--line);
     background: var(--surface);
-    overflow: hidden;
+    /* clip, not hidden: a hidden box is still a scroll container, so focusing a zoomed bar outside the view scrolled it. */
+    overflow: clip;
     padding: 2px 0 4px;
     cursor: crosshair;
   }
@@ -6711,6 +6712,11 @@ function panViewport(viewport, anchorFrom, deltaFraction) {
   return { from: start, to: start + span }
 }
 
+/** The narrowest zoom, as DSH's: 20 ms of recorded time, or four records in the equal mode; 1 means it cannot zoom. */
+function viewportMinSpan(durationActual, totalMs, records) {
+  return durationActual ? Math.min(1, 20 / Math.max(totalMs, 1)) : Math.min(1, 4 / Math.max(records, 1))
+}
+
 function viewportDomain(viewport, screenFraction) {
   if (viewport === null || viewport === undefined) return screenFraction
   return viewport.from + screenFraction * (viewport.to - viewport.from)
@@ -6776,6 +6782,8 @@ function renderTimeline(timeline_, data = {}) {
         element.dataset.lane = lane
         element.dataset.turn = String(bar.turn)
         element.dataset.kind = bar.kinds.join(' ')
+        element.dataset.x0 = String(bar.x0)
+        element.dataset.x1 = String(bar.x1)
         element.style.left = (bar.x0 * 100).toFixed(3) + '%'
         element.style.width = (Math.max(bar.x1 - bar.x0, 0.004) * 100).toFixed(3) + '%'
         if (bar.running) element.dataset.running = 'true'
@@ -6819,7 +6827,7 @@ function renderTimeline(timeline_, data = {}) {
    * strip shows only the viewport (DSH's projected domain); the strip's overflow clips the rest. The narrowest zoom is
    * DSH's: 20 ms of recorded time, or four records in the equal mode.
    */
-  const minSpan = trajectory.durationActual ? Math.min(1, 20 / Math.max(total, 1)) : Math.min(1, 4 / Math.max(records.length, 1))
+  const minSpan = viewportMinSpan(trajectory.durationActual, total, records.length)
   let focusDomain = null
   const drawFocus = () => {
     const viewport = trajectory.viewport
@@ -6830,6 +6838,10 @@ function renderTimeline(timeline_, data = {}) {
     }
     const left = (focusDomain.from - (viewport?.from ?? 0)) / span
     const right = (focusDomain.to - (viewport?.from ?? 0)) / span
+    if (right <= 0 || left >= 1) {
+      focusBox.style.display = 'none'
+      return
+    }
     focusBox.style.display = 'block'
     focusBox.style.left = (Math.max(left, 0) * 100).toFixed(2) + '%'
     focusBox.style.width = (Math.max(Math.min(right, 1) - Math.max(left, 0), 0) * 100).toFixed(2) + '%'
@@ -6843,6 +6855,11 @@ function renderTimeline(timeline_, data = {}) {
       track.style.right = viewport === null ? '' : 'auto'
     }
     wrapper.dataset.zoomed = viewport === null ? 'false' : 'true'
+    /** Only a bar inside the viewport is a tab stop, so Tab never lands on a bar the strip does not show. */
+    for (const bar of wrapper.querySelectorAll('.tr-bar')) {
+      const inside = viewport === null || (Number(bar.dataset.x1) >= viewport.from && Number(bar.dataset.x0) <= viewport.to)
+      bar.tabIndex = inside ? 0 : -1
+    }
     drawFocus()
   }
   applyViewport()
@@ -6916,6 +6933,8 @@ function renderTimeline(timeline_, data = {}) {
   }
   timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
   timeline.onwheel = (wheelEvent) => {
+    /** A wheel that cannot zoom (no vertical delta, a pinch with Ctrl, a domain too short to zoom) is the page's. */
+    if (wheelEvent.deltaY === 0 || wheelEvent.ctrlKey || minSpan >= 0.999) return
     wheelEvent.preventDefault()
     trajectory.viewport = zoomViewport(trajectory.viewport, fractionAt(wheelEvent.clientX), wheelEvent.deltaY, minSpan)
     applyViewport()
@@ -6940,7 +6959,14 @@ function renderTimeline(timeline_, data = {}) {
     drawFocus()
     capture(pointerEvent)
   }
+  const endGestures = () => {
+    pan = null
+    dragging = false
+  }
+  timeline.onpointercancel = endGestures
+  timeline.onlostpointercapture = endGestures
   timeline.onpointermove = (pointerEvent) => {
+    if (pan !== null && (pointerEvent.buttons & 2) === 0) pan = null
     if (pan !== null) {
       if (Math.abs(pointerEvent.clientX - pan.x) >= 3) pan.moved = true
       if (pan.viewport === null) return
@@ -6983,7 +7009,11 @@ function wireTrajectoryToolbar() {
     button.addEventListener('click', () => {
       trajectory[key] = !trajectory[key]
       button.setAttribute('aria-pressed', trajectory[key] ? 'true' : 'false')
-      if (key === 'durationActual') renderTimeline(trajectory.timeline, trajectory.data)
+      if (key === 'durationActual') {
+        /** Record slots and recorded time are different domains, with different floors: a zoom does not carry over. */
+        trajectory.viewport = null
+        renderTimeline(trajectory.timeline, trajectory.data)
+      }
       else renderRows()
     })
   }
