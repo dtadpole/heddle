@@ -1,9 +1,9 @@
 ---
 title: Load check report lines
 created: 2026-10-24T05:01:48Z
-modified: 2026-10-31T01:02:49Z
+modified: 2026-10-31T01:20:28Z
 level: L2
-version: 1.3.0
+version: 1.4.0
 description: A sample load-check report and what each of its lines shows.
 status: unverified
 grounded_in:
@@ -14,19 +14,19 @@ grounded_in:
 
 ```text
 load-check 2026-10-22T20:20:04-0700 (10 cores)
-disk     59.9 GB free of 228 GB on /System/Volumes/Data [ok] (warn < 26 GB, stop < 20 GB)
+disk     59.9 GB free of 228 GB on /System/Volumes/Data [ok] (warn < 26 GB, stop < 20 GB: D-064)
 load     14.31 14.06 11.24 = 1.43/core [context] (system warn >= 1.5/core, stop >= 2/core; verdict follows team)
 team     2.7 core(s) = 0.27/core [ok] (warn >= 1/core, stop >= 1.3/core; 46 process(es))
 other    Google Chrome Helper (Renderer) 51%, WindowServer 48%, Google Chrome Helper 39%, node 37%, Muse 14%
-memory   41% free [ok] (D-061: warn < 30%, stop < 25%)
-swap     9100M used of 10240M = 89%, 1140M free [warn] (D-063: warn < 1280M free, stop < 1024M free)
+memory   41% free [ok] (D-064: warn < 30%, stop < 25%)
+swap     9700M used of 10240M = 95%, 540M free [detail] (not a gate: D-064)
 slots    3 of 3: 1 busy, 1 stale, 1 free
          slot 0 busy pid=3521 cargo=3499 age=260s cwd=~/heddle--developer-six/rust
          slot 2 stale pid=14877 cargo=0 age=4s cwd=~/heddle--developer-ten
 worktrees 1 with a process
          ~/heddle--developer-six 3 proc 210% cpu: cargo, rustc
 builds   1 cargo, 2 rustc, 0 other [ok] (cap 9 rustc = 3 slots x 3 jobs)
-verdict  warn: swap: 1140M free, at least 1024M: one start at a time (D-063), slots: 1 stale
+verdict  warn: slots: 1 stale
 ```
 
 ## What each line shows
@@ -38,8 +38,8 @@ verdict  warn: swap: 1140M free, at least 1024M: one start at a time (D-063), sl
   worktree, plus any cargo/rustc process.
 - **other** — the five busiest non-team processes with their share, so a warn on the system line is
   explained at a glance.
-- **memory** — `memory_pressure` free, D-061's gate.
-- **swap** — used of total and free; the verdict follows D-063's relative backstop (free), and the percent is detail.
+- **memory** — `memory_pressure` free, a D-064 gate (disk is the other).
+- **swap** — used of total and free, detail only: swap is no gate (D-064).
 - **slots** — each build slot's owner file, read directly: `busy` when the owner shell or its cargo is alive,
   `stale` when neither is, `unclaimed` when the directory has no owner file yet.
 - **worktrees** — processes whose working directory is under `~/heddle--<seat>`, grouped by seat, sorted by

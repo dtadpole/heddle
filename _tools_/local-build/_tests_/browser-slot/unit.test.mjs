@@ -15,8 +15,8 @@ function sandbox(t) {
 }
 
 function envFor(root, extra = {}) {
-  // healthy memory by default, so the suite never depends on this Mac's swap
-  const env = { ...process.env, LOCAL_BUILD_SLOT_ROOT: root, BROWSER_SLOT_POLL_MS: '50', BROWSER_SLOT_FAKE_FREE_PCT: '50', BROWSER_SLOT_FAKE_SWAP_MB: '1000', BROWSER_SLOT_FAKE_SWAP_TOTAL_MB: '10240', ...extra }
+  // healthy memory and disk by default, so the suite never depends on this Mac's readings
+  const env = { ...process.env, LOCAL_BUILD_SLOT_ROOT: root, BROWSER_SLOT_POLL_MS: '50', BROWSER_SLOT_FAKE_FREE_PCT: '50', BROWSER_SLOT_FAKE_DISK_GB: '100', ...extra }
   delete env.HD_SEAT
   return env
 }
@@ -194,7 +194,7 @@ test('status names the holder, browser.next and the queue in serving order', (t)
   writeFileSync(join(root, 'browser.next'), 'developer-five (coordinator)\n')
   const r = bs(root, ['status'])
   assert.equal(r.status, 0)
-  assert.match(r.out, /cap {5}1 slot\(s\); memory free 50%, swap 1000M used of 10240M \(9240M free\): new holders allowed/)
+  assert.match(r.out, /cap {5}1 slot\(s\); memory free 50%, disk 100\.0 GiB free: new holders allowed/)
   assert.match(r.out, /slot 1  developer-nine ui gate 05:00:00 {2}\(16m\d\ds, pid \d+ gone; over 10 minutes; stale, cleared on the next take\)/)
   assert.match(r.out, /next {4}developer-five \(browser\.next\)/)
   assert.match(r.out, /queue {3}1\. developer-five .*\n {8}2\. developer-two/)
@@ -241,36 +241,27 @@ test('a hand-made browser.lock2 holds the integrator slot', (t) => {
   assert.equal(take(root, 'integrator-one').status, 75)
 })
 
-test('no new holder while memory is short: free under 25% (D-061), or swap free under 1024M (D-063)', (t) => {
+test('no new holder while memory free is under 25% or disk free under 20 GiB; swap is no gate (D-064)', (t) => {
   const root = sandbox(t)
   const low = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '24' })
   assert.equal(low.status, 75)
-  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-061\)/)
-  const tight = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '9217' })
-  assert.equal(tight.status, 75)
-  assert.match(tight.out, /no new holder: swap free 1023M < 1024M \(D-063\)/)
-  assert.match(
-    bs(root, ['status'], { BROWSER_SLOT_FAKE_SWAP_MB: '9300' }).out,
-    /swap 9300M used of 10240M \(940M free\): no new holder, swap free 940M < 1024M/,
-  )
-  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '9216' }).status, 0, 'exactly 1024M free admits')
-  bs(root, ['release', '--seat', 'developer-one'])
-  const grown = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '9500', BROWSER_SLOT_FAKE_SWAP_TOTAL_MB: '12288' })
-  assert.equal(grown.status, 0, 'macOS grew swap: the line follows the total, where a fixed 7680M or 9216M line would block')
+  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-064\)/)
+  const full = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_DISK_GB: '19.9' })
+  assert.equal(full.status, 75)
+  assert.match(full.out, /no new holder: disk free 19\.9 GiB < 20 GiB \(D-064\)/)
+  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_DISK_GB: '12' }).out, /disk 12\.0 GiB free: no new holder, disk free 12\.0 GiB < 20 GiB/)
+  const edge = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_DISK_GB: '20' })
+  assert.equal(edge.status, 0, 'exactly 25% memory and 20 GiB disk admit; swap is not read at all')
 })
 
 test('browser-cap can move the memory lines without a code change', (t) => {
   const root = sandbox(t)
-  cap(root, '1 min-free=50 swap-stop=7000') // swap-stop pins an absolute line instead of the relative one
+  cap(root, '1 min-free=50 disk-min=30 swap-stop=7000') // an old swap key is ignored (D-064)
   const free = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '44' })
   assert.match(free.out, /memory free 44% < 50%/)
-  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_SWAP_MB: '7100' })
-  assert.match(swap.out, /swap 7100M used >= 7000M \(browser-cap swap-stop\)/)
-  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_SWAP_MB: '6999' }).status, 0)
-  bs(root, ['release', '--seat', 'developer-one'])
-  cap(root, '1 swap-free-min=2048')
-  const wider = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '8500' })
-  assert.match(wider.out, /swap free 1740M < 2048M \(D-063\)/)
+  const disk = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_DISK_GB: '25' })
+  assert.match(disk.out, /disk free 25\.0 GiB < 30 GiB/)
+  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_DISK_GB: '30' }).status, 0)
 })
 
 test('forcing a release with two holders names the slot; a holder over a lowered cap is shown and released', (t) => {

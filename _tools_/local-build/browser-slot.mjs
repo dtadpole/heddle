@@ -42,12 +42,11 @@ const VERSION_FILE = path.join(ROOT, 'browser-slot.version')
 // A free slot the first waiter has not taken for this long may go to the next waiter whose gate passes.
 const HEAD_GRACE_S = number('BROWSER_SLOT_HEAD_GRACE_SECONDS', 60)
 const freeSince = (n) => path.join(ROOT, `browser.free-since${n}`)
-// memory_pressure free under 25% admits no one (D-061, the primary gate). The swap backstop is relative (D-063):
-// no one is admitted while swap free (vm.swapusage total minus used) is under 1024M, so it follows macOS growing
-// swap. browser-cap may move the lines ("min-free=25 swap-free-min=1024"), or pin an absolute "swap-stop=<MB used>"
-// instead; the environment overrides both (tests).
+// D-064: a new holder needs memory_pressure free >= 25% and disk free >= 20 GiB on the volume of the slot folder.
+// Swap is no gate (macOS keeps stale pages there and grows it on demand); browser-cap's old swap keys are ignored.
+// browser-cap may move the lines ("min-free=25 disk-min=20"); the environment overrides both (tests).
 const MIN_FREE_PCT = 25
-const SWAP_FREE_MIN_MB = 1024
+const MIN_DISK_GB = 20
 
 export const lockDir = (n) => path.join(ROOT, n === 1 ? 'browser.lock' : `browser.lock${n}`)
 
@@ -61,9 +60,8 @@ export function config() {
   const reserve = (text.match(/reserve=([a-z0-9-]+)/) || [])[1] || null
   const key = (name, fallback) => Number((text.match(new RegExp(`${name}=(\\d+)`)) || [])[1]) || fallback
   const minFree = number('BROWSER_SLOT_MIN_FREE_PCT', key('min-free', MIN_FREE_PCT))
-  const swapStop = number('BROWSER_SLOT_SWAP_STOP_MB', key('swap-stop', null)) // absolute override, off by default
-  const swapFreeMin = number('BROWSER_SLOT_SWAP_FREE_MIN_MB', key('swap-free-min', SWAP_FREE_MIN_MB))
-  return { count, reserve: count >= 2 ? reserve : null, minFree, swapStop, swapFreeMin }
+  const minDisk = number('BROWSER_SLOT_MIN_DISK_GB', key('disk-min', MIN_DISK_GB))
+  return { count, reserve: count >= 2 ? reserve : null, minFree, minDisk }
 }
 
 export const roleOf = (seat, role) => role || (seat.startsWith('integrator-') ? 'integrator' : 'developer')
@@ -86,7 +84,7 @@ function slotNumbers(cfg) {
   return [...Array.from({ length: cfg.count }, (_, i) => i + 1), ...extra.sort((a, b) => a - b)]
 }
 
-/** No new holder while memory_pressure reports under 25% free (D-061), or swap free is under 1024M (D-063). */
+/** D-064: no new holder while memory_pressure reports under 25% free, or the slot folder's volume has under 20 GiB. */
 export function memoryGate(cfg = config()) {
   const fake = (name) => (env[name] !== undefined && env[name] !== '' ? Number(env[name]) : undefined)
   let free = fake('BROWSER_SLOT_FAKE_FREE_PCT')
@@ -94,26 +92,17 @@ export function memoryGate(cfg = config()) {
     const m = (spawnSync('memory_pressure', [], { encoding: 'utf8' }).stdout || '').match(/free percentage:\s*(\d+)%/)
     free = m ? Number(m[1]) : null
   }
-  let used = fake('BROWSER_SLOT_FAKE_SWAP_MB')
-  let total = fake('BROWSER_SLOT_FAKE_SWAP_TOTAL_MB') ?? null
-  if (used === undefined) {
-    const text = spawnSync('sysctl', ['-n', 'vm.swapusage'], { encoding: 'utf8' }).stdout || ''
-    const u = text.match(/used\s*=\s*([\d.]+)M/)
-    const t = text.match(/total\s*=\s*([\d.]+)M/)
-    used = u ? Number(u[1]) : null
-    total = t ? Number(t[1]) : null
+  let disk = fake('BROWSER_SLOT_FAKE_DISK_GB')
+  if (disk === undefined) {
+    // df -k: the last line's fourth field is the available KiB of the volume holding the slot folder
+    const lines = (spawnSync('df', ['-k', fs.existsSync(ROOT) ? ROOT : os.homedir()], { encoding: 'utf8' }).stdout || '').trim().split('\n')
+    const kb = Number((lines.at(-1) || '').split(/\s+/)[3])
+    disk = lines.length > 1 && Number.isFinite(kb) ? kb / 1024 / 1024 : null
   }
-  const swapFree = used !== null && total !== null ? total - used : null
-  const reading =
-    `memory free ${free ?? '?'}%, swap ${used === null ? '?' : Math.round(used)}M used` +
-    (swapFree === null ? '' : ` of ${Math.round(total)}M (${Math.round(swapFree)}M free)`)
-  if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-061)` }
-  if (cfg.swapStop !== null) {
-    if (used !== null && used >= cfg.swapStop)
-      return { ok: false, reading, why: `swap ${Math.round(used)}M used >= ${cfg.swapStop}M (browser-cap swap-stop)` }
-  } else if (swapFree !== null && swapFree < cfg.swapFreeMin) {
-    return { ok: false, reading, why: `swap free ${Math.round(swapFree)}M < ${cfg.swapFreeMin}M (D-063)` }
-  }
+  const reading = `memory free ${free ?? '?'}%, disk ${disk === null ? '?' : disk.toFixed(1)} GiB free`
+  if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-064)` }
+  if (disk !== null && disk < cfg.minDisk)
+    return { ok: false, reading, why: `disk free ${disk.toFixed(1)} GiB < ${cfg.minDisk} GiB (D-064)` }
   return { ok: true, reading, why: '' }
 }
 

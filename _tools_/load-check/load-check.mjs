@@ -23,19 +23,16 @@ export const WARN = 1
 export const STOP = 2
 
 export const THRESHOLDS = {
-  diskStopGb: 20, // working model: stop and report below 20 GB free
+  diskStopGb: 20, // D-064 and the working model: nothing new starts below 20 GiB free
   diskWarnGb: 26, // working model: remove release artifacts below 26 GB free
   loadWarnPerCore: 1.5,
   loadStopPerCore: 2.0,
   teamWarnPerCore: 1.0,
   teamStopPerCore: 1.3,
-  // D-061: memory_pressure free is the gate (under 25% nothing new starts). D-063: macOS swap is sticky and grows,
-  // so the backstop is relative: swap free (total minus used) under 1024M is a stop, under 1280M a warn. The
-  // percent of total swap is printed as detail only.
+  // D-064: memory_pressure free and disk are the gates (under 25% free memory nothing new starts). Swap is no
+  // gate: macOS keeps stale pages there and grows it on demand, so it is printed as detail only.
   memWarnPct: 30,
   memStopPct: 25,
-  swapFreeWarnMb: 1280,
-  swapFreeStopMb: 1024,
   slots: 3,
 }
 
@@ -55,8 +52,6 @@ export function thresholdsFrom(env = process.env) {
     teamStopPerCore: number('LOAD_CHECK_TEAM_STOP_PER_CORE', THRESHOLDS.teamStopPerCore),
     memWarnPct: number('LOAD_CHECK_MEM_WARN_PCT', THRESHOLDS.memWarnPct),
     memStopPct: number('LOAD_CHECK_MEM_STOP_PCT', THRESHOLDS.memStopPct),
-    swapFreeWarnMb: number('LOAD_CHECK_SWAP_FREE_WARN_MB', THRESHOLDS.swapFreeWarnMb),
-    swapFreeStopMb: number('LOAD_CHECK_SWAP_FREE_STOP_MB', THRESHOLDS.swapFreeStopMb),
     slots: number('LOAD_CHECK_SLOTS', THRESHOLDS.slots),
   }
 }
@@ -257,20 +252,13 @@ export function assess({ disk, load, ncpu, swap, memory = null, slots, processes
     split.teamPerCore >= thresholds.teamStopPerCore ? STOP : split.teamPerCore >= thresholds.teamWarnPerCore ? WARN : OK
 
   const swapPct = pct(swap.usedMb, swap.totalMb)
-  const swapFree = swap.totalMb - swap.usedMb
-  const swapVerdict =
-    swapFree < thresholds.swapFreeStopMb ? STOP : swapFree < thresholds.swapFreeWarnMb ? WARN : OK
-  const swapDetail =
-    swapVerdict === STOP
-      ? `${Math.round(swapFree)}M free < ${thresholds.swapFreeStopMb}M, nothing new starts (D-063)`
-      : `${Math.round(swapFree)}M free, at least ${thresholds.swapFreeStopMb}M: one start at a time (D-063)`
   const memFreePct = memory ? memory.freePct : null
   const memVerdict =
     memFreePct === null ? OK : memFreePct < thresholds.memStopPct ? STOP : memFreePct < thresholds.memWarnPct ? WARN : OK
   const memDetail =
     memVerdict === STOP
-      ? `${memFreePct}% free < ${thresholds.memStopPct}%, nothing new starts (D-061)`
-      : `${memFreePct}% free, under ${thresholds.memWarnPct}%: one start at a time (D-061)`
+      ? `${memFreePct}% free < ${thresholds.memStopPct}%, nothing new starts (D-064)`
+      : `${memFreePct}% free, under ${thresholds.memWarnPct}%: one start at a time (D-064)`
 
   const stale = slots.filter((s) => s.state === 'stale' || s.state === 'unclaimed')
   const slotVerdict = stale.length > 0 ? WARN : OK
@@ -287,14 +275,13 @@ export function assess({ disk, load, ncpu, swap, memory = null, slots, processes
     ['disk', diskVerdict, `${diskFreeGb.toFixed(1)} GB free`],
     ['load', loadVerdict, `team ${split.teamPerCore.toFixed(2)}/core, system ${systemLoadPerCore.toFixed(2)}/core${topOther}`],
     ['memory', memVerdict, memDetail],
-    ['swap', swapVerdict, swapDetail],
     ['slots', slotVerdict, stale.length ? `${stale.length} stale` : `${busy} busy`],
     ['builds', buildVerdict, `${builds.rustc} rustc > ${cap}`],
   ]) {
     if (verdict !== OK) findings.push(`${name}: ${detail}`)
   }
 
-  const verdict = Math.max(diskVerdict, loadVerdict, memVerdict, swapVerdict, slotVerdict, buildVerdict)
+  const verdict = Math.max(diskVerdict, loadVerdict, memVerdict, slotVerdict, buildVerdict)
   return {
     verdict,
     findings,
@@ -309,7 +296,6 @@ export function assess({ disk, load, ncpu, swap, memory = null, slots, processes
     memFreePct,
     memVerdict,
     swapPct,
-    swapVerdict,
     busy,
     stale: stale.length,
     slotVerdict,
@@ -326,7 +312,7 @@ export function format({ at, disk, load, ncpu, swap, slots, processes, threshold
   lines.push(`load-check ${at} (${ncpu} cores)`)
   lines.push(
     `disk     ${a.diskFreeGb.toFixed(1)} GB free of ${gib(disk.totalKb).toFixed(0)} GB on ${disk.mount} ${mark(a.diskVerdict)}` +
-      ` (warn < ${thresholds.diskWarnGb} GB, stop < ${thresholds.diskStopGb} GB)`,
+      ` (warn < ${thresholds.diskWarnGb} GB, stop < ${thresholds.diskStopGb} GB: D-064)`,
   )
   lines.push(
     `load     ${load.map((n) => n.toFixed(2)).join(' ')} = ${a.systemLoadPerCore.toFixed(2)}/core [context]` +
@@ -341,11 +327,10 @@ export function format({ at, disk, load, ncpu, swap, slots, processes, threshold
     : 'none'
   lines.push(`other    ${otherText}`)
   if (a.memFreePct !== null)
-    lines.push(`memory   ${a.memFreePct}% free ${mark(a.memVerdict)} (D-061: warn < ${thresholds.memWarnPct}%, stop < ${thresholds.memStopPct}%)`)
+    lines.push(`memory   ${a.memFreePct}% free ${mark(a.memVerdict)} (D-064: warn < ${thresholds.memWarnPct}%, stop < ${thresholds.memStopPct}%)`)
   lines.push(
     `swap     ${Math.round(swap.usedMb)}M used of ${Math.round(swap.totalMb)}M = ${a.swapPct}%, ` +
-      `${Math.round(swap.totalMb - swap.usedMb)}M free ${mark(a.swapVerdict)}` +
-      ` (D-063: warn < ${thresholds.swapFreeWarnMb}M free, stop < ${thresholds.swapFreeStopMb}M free)`,
+      `${Math.round(swap.totalMb - swap.usedMb)}M free [detail] (not a gate: D-064)`,
   )
   const free = slots.filter((s) => s.state === 'free').length
   lines.push(`slots    ${slots.length} of ${thresholds.slots}: ${a.busy} busy, ${a.stale} stale, ${free} free`)
