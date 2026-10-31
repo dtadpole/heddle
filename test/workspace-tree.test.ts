@@ -49,6 +49,7 @@ interface Tree {
   forkRefusal: (body: unknown) => string
   ARCHIVED_NOT_OPENABLE: string
   opensOnClick: (node: unknown) => boolean
+  rowKeyOpens: (event: unknown, row: unknown) => boolean
   rowStatus: (facts?: { pending?: string; running?: boolean; completed?: boolean }) => { state: string; label: string; trailingLabel?: string }
   completionUnread: (unread: boolean, change: { wasRunning?: boolean; running?: boolean; viewing?: boolean }) => boolean
   storedTitle: (meta: unknown) => string | undefined
@@ -433,6 +434,25 @@ test('a session row\'s tooltip is its display title and no other row has one —
   }
   assert.equal(tree.rowLabel(row('workspace')), 'repo', 'a workspace row reads its label')
   assert.equal(tree.rowTooltip(null), undefined)
+})
+
+test('Enter or Space opens a tree row only when pressed on the row itself, never on a control inside it (#98)', () => {
+  /**
+   * DSH's row controls are plain buttons with no key handler above them: its rows carry an `onClick` only
+   * (dsh-client-ui-workspace lib/client.js:1965-1970, :2273-2282) and each control stops its own click (:2015-2017,
+   * :2033-2035, :2323-2327). The page's focusable row took Enter and Space from every control inside it, so Archive,
+   * Pin, the `…` and New session in opened the session or folded the workspace instead (#98).
+   */
+  assert.equal(typeof tree.rowKeyOpens, 'function', 'the block decides which keys open a row')
+  const row = { className: 'row' }
+  for (const control of [{ label: 'Archive session' }, { label: 'Pin session' }, { label: 'actions for s' }, { label: 'New session in ws' }]) {
+    assert.equal(tree.rowKeyOpens({ key: 'Enter', target: control }, row), false, `Enter on ${control.label} is the control's, not the row's`)
+    assert.equal(tree.rowKeyOpens({ key: ' ', target: control }, row), false, `and so is Space on ${control.label}`)
+  }
+  assert.equal(tree.rowKeyOpens({ key: 'Enter', target: row }, row), true, 'Enter on the row opens it')
+  assert.equal(tree.rowKeyOpens({ key: ' ', target: row }, row), true, 'and so does Space')
+  for (const key of ['a', 'Tab', 'ArrowDown', 'Escape']) assert.equal(tree.rowKeyOpens({ key, target: row }, row), false, `${key} does not open a row`)
+  assert.equal(tree.rowKeyOpens(null, row), false)
 })
 
 test('the header hides its title while the session is blank and then follows its title; the window title is DSH\'s (#24)', () => {
