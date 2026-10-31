@@ -1875,6 +1875,10 @@ test('a message the server took is not put back or resent when the connection dr
    * Enter sent it again as a duplicate turn. DSH restores a draft only for a failed submission. The drop is made
    * deterministic in the page: the turn's response stream errors as a lost connection does, right after the answer's
    * text has been read, while the model double still holds the stream open.
+   *
+   * Since #128 the page sends its turns detached: the server answers `202 {session, turn}` once the prompt is in the
+   * log, and the answer and the verdict come over the event stream. The same drop then hits that answer's body, after
+   * the server took the message, and the claim is unchanged: not put back, not reported unsent, not sent twice.
    */
   const server = await startServer('dropped-end', { holdOpenMs: 4000 })
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -1886,6 +1890,10 @@ test('a message the server took is not put back or resent when the connection dr
       window.fetch = async (input, init) => {
         const response = await real(input, init)
         if (!String(input).includes('/api/turn') || response.body === null) return response
+        if ((response.headers.get('content-type') ?? '').includes('application/json')) {
+          const lost = new ReadableStream({ pull(controller) { controller.error(new TypeError('Failed to fetch')) } })
+          return new Response(lost, { status: response.status, statusText: response.statusText, headers: response.headers })
+        }
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let seen = ''
