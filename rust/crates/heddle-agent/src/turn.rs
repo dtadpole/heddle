@@ -447,7 +447,9 @@ async fn run_turn_body(
             // The record names the request this step sends, not the one the turn started with (issue #14): the
             // server's running-turn rule on the `model/request` waterfall moves a step to the session's current
             // endpoint, model and level, and a record written from the turn's options logged a step that went to
-            // the new model under the old one. DSH's request header names what was actually used.
+            // the new model under the old one. DSH's request header names what was actually used. The request is
+            // resolved once: the record (route and counts) and the call both take that answer, and the call goes out
+            // through `stream_resolved`, which does not run the waterfall again.
             let request = runtime.model.resolve(asked).map_err(TurnError::Model)?;
             runtime.session.model_request(
                 session,
@@ -455,12 +457,8 @@ async fn run_turn_body(
                     endpoint: request.endpoint.clone(),
                     model: request.model.clone(),
                     reasoning_effort: request.reasoning_effort.clone(),
-                    messages: prepared.messages.len(),
-                    tools: prepared
-                        .tools
-                        .iter()
-                        .map(|tool| tool.name.clone())
-                        .collect(),
+                    messages: request.messages.len(),
+                    tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
                     estimated_tokens: report.estimated_tokens,
                     threshold_tokens: report.threshold_tokens,
                     pruned: report.pruned,
@@ -470,7 +468,7 @@ async fn run_turn_body(
                 },
             )?;
 
-            let mut stream = runtime.model.stream(request, cancel.clone());
+            let mut stream = runtime.model.stream_resolved(request, cancel.clone());
             let mut failure: Option<ModelError> = None;
             while let Some(item) = stream.next().await {
                 match item {
@@ -1186,6 +1184,9 @@ pub(crate) mod tests {
         /// `(endpoint, model, level)` a selection policy moves every call to, as the server's running-turn rule
         /// does on the `model/request` waterfall; `None` sends each request as it was built.
         moves_to: Option<(String, String, String)>,
+        /// How many times the loop resolved a request, and how many resolved requests it streamed.
+        resolves: std::sync::atomic::AtomicUsize,
+        resolved_streams: std::sync::atomic::AtomicUsize,
     }
 
     impl ScriptedModel {
@@ -1195,6 +1196,8 @@ pub(crate) mod tests {
                 requests: Mutex::new(Vec::new()),
                 on_stream: None,
                 moves_to: None,
+                resolves: Default::default(),
+                resolved_streams: Default::default(),
             })
         }
 
@@ -1204,6 +1207,8 @@ pub(crate) mod tests {
                 requests: Mutex::new(Vec::new()),
                 on_stream: None,
                 moves_to: Some((endpoint.into(), model.into(), level.into())),
+                resolves: Default::default(),
+                resolved_streams: Default::default(),
             })
         }
 
@@ -1213,6 +1218,8 @@ pub(crate) mod tests {
                 requests: Mutex::new(Vec::new()),
                 on_stream: Some(hook),
                 moves_to: None,
+                resolves: Default::default(),
+                resolved_streams: Default::default(),
             })
         }
 
@@ -1244,12 +1251,24 @@ pub(crate) mod tests {
         }
 
         fn resolve(&self, mut request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+            self.resolves
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some((endpoint, model, level)) = &self.moves_to {
                 request.endpoint.clone_from(endpoint);
                 request.model = Some(model.clone());
                 request.reasoning_effort = Some(level.clone());
             }
             Ok(request)
+        }
+
+        fn stream_resolved(
+            &self,
+            request: GenerateRequest,
+            cancel: Option<CancellationToken>,
+        ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+            self.resolved_streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.stream(request, cancel)
         }
 
         fn default_endpoint(&self) -> Option<String> {
@@ -1792,6 +1811,48 @@ pub(crate) mod tests {
         assert_eq!(record.fields["endpoint"], "other");
         assert_eq!(record.fields["model"], "model-two");
         assert_eq!(record.fields["reasoningEffort"], "low");
+    }
+
+    #[tokio::test]
+    async fn each_round_resolves_its_request_once_and_streams_that_request() {
+        // Issue #14: the request hooks run once per call; the loop streams the very request it recorded.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "list_dir", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![answering_tool("list_dir", "a")]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "list, then answer"),
+        )
+        .await
+        .unwrap();
+        let ordering = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(
+            model.resolves.load(ordering),
+            2,
+            "one resolution per model call"
+        );
+        assert_eq!(
+            model.resolved_streams.load(ordering),
+            2,
+            "each call streamed its resolved request"
+        );
+        assert_eq!(model.requests().len(), 2);
     }
 
     #[tokio::test]
