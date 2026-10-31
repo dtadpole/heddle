@@ -383,6 +383,9 @@ test('on a desktop the right sidebar never squeezes the conversation, whatever t
   const key = (name) => browser.evaluate(`document.getElementById('gutter-left').dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(name)}, bubbles: true }))`)
   const resize = (width) => browser.send('Emulation.setDeviceMetricsOverride', { width, height: 800, deviceScaleFactor: 1, mobile: false })
   try {
+    // 1100 pixels: the widest left sidebar leaves no room for a 300-pixel track beside 400 of conversation, whether it
+    // stops at the page's 48rem or at DSH's 420 pixels (1100 - 420 - 400 = 280), and the default and the minimum do.
+    await resize(1100)
     // A reader who once dragged the left sidebar to its widest: the page restores that width on every visit.
     await browser.goto(server.url)
     await browser.waitFor(`document.body.dataset.ready === 'true'`, 15_000)
@@ -393,7 +396,7 @@ test('on a desktop the right sidebar never squeezes the conversation, whatever t
     await browser.evaluate(`document.getElementById('browser-open').click()`)
     await settle()
     const widest = await browser.evaluate(COLUMNS)
-    assertBudget(widest, 'opened beside a 48rem left sidebar at 1280 pixels')
+    assertBudget(widest, 'opened beside the widest left sidebar at 1100 pixels')
     assert.equal(widest.fixed, true, `with no room for a 300-pixel track beside 400 of conversation, the pane covers ${JSON.stringify(widest)}`)
 
     await key('Home')
@@ -410,9 +413,9 @@ test('on a desktop the right sidebar never squeezes the conversation, whatever t
     await settle()
     const standard = await browser.evaluate(COLUMNS)
     assertBudget(standard, 'beside the default left sidebar')
-    assert.equal(standard.fixed, false, `the default left sidebar leaves room for a track at 1280 pixels ${JSON.stringify(standard)}`)
+    assert.equal(standard.fixed, false, `the default left sidebar leaves room for a track at 1100 pixels ${JSON.stringify(standard)}`)
 
-    for (const width of [1100, 1000, 800]) {
+    for (const width of [1280, 1000, 800]) {
       await resize(width)
       await settle()
       assertBudget(await browser.evaluate(COLUMNS), `in a window resized to ${width} pixels`)
