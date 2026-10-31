@@ -424,7 +424,14 @@ test('archiving from the row with a background job running opens DSH\'s stop-and
     assert.equal(job.detail, 'signal: SIGTERM; session archived')
     assert.equal((await metaOf())?.archived, true, 'the session is archived')
     await browser.waitFor(`${row} === null`, 10_000)
-    assert.equal(await browser.evaluate(`document.getElementById('tree-note')?.textContent ?? ''`), '', 'no refusal sentence is left in the note line')
+    /**
+     * The session was the open one, so archiving it lets it go, as DSH's archiveSession and clearArchivedCurrent do
+     * (#139's B1): nothing is open, and the note may name where the next message starts a new conversation. No refusal
+     * sentence is left in it.
+     */
+    await browser.waitFor(`document.getElementById('session-title').textContent === 'No session'`, 10_000)
+    const note = await browser.evaluate(`document.getElementById('tree-note')?.textContent ?? ''`)
+    assert.ok(note === '' || note.startsWith('a new conversation in '), `no refusal sentence is left in the note line\nsaw: ${JSON.stringify(note)}`)
   } finally {
     await browser.close()
     await server.close()

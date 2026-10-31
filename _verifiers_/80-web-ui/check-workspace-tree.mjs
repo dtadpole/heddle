@@ -406,24 +406,22 @@ test('New session starts in the workspace row the person opened, not in the open
   }
 })
 
-test('New session starts where the open session lives when that session is archived and its row is not drawn, not in the last remembered folder (#119)', async (context) => {
+test('an open session another client archives is let go, as DSH\'s clearArchivedCurrent lets it go, and New session then starts where it lived, not in the last remembered folder (#119, B1)', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
-   * DSH's New session starts in the open session's workspace, found in its whole workspace list by the account that names
-   * the session (dsh-client-ui-workspace lib/client.js:1503-1508), and archiving keeps that account (dsh-workspace
-   * lib/index.js:232-233; README "Archive filtering alone changes neither saved positions nor account membership"). #119:
-   * the page looked the open session up among the drawn groups only, so with an archived session open under Hide archived
-   * it missed and the session started in the last remembered folder — on the shared server another person's project.
+   * DSH never keeps an archived session open: `clearArchivedCurrent` (dsh-client-ui-workspace lib/client.js:1638-1643),
+   * run on every change of its workspace or session list (:1576-1578), clears the main view when the open session is
+   * archived, whoever archived it (`clearMain`, :1644-1650). #139's B1 (developer-ten, f0442783): heddle kept it open and
+   * writable, and a message sent into it was blocked by the server's gate and lost. Here another client archives the open
+   * session in B, and the page lets it go at its next read of the session list, which a rename pushed by the server
+   * prompts ('sessions', both builds).
    *
-   * The newer session in A is opened first (by its saved selection, then its row, which aims the prompt box at A), then
-   * the archived session in B by id. A page holds an archived session open once a person archives the session they have
-   * open (heddle keeps it on screen, where DSH's `clearArchivedCurrent` empties the view); an archived row does not open
-   * (`guardedOpen`), and a load does not reopen an archived saved session (restoreChoice, after DSH's restoreSelection).
-   * So B, archived first, is opened through the page's verifier seam `showSession(id)`, the call a search hit makes,
-   * which leaves the prompt box aimed at A as a session opened from search and then archived does. A is registered last,
-   * so it is drawn first, and both fallbacks the bug used — the remembered folder and the first drawn workspace — point
-   * at A.
+   * #119: New session used to start in the last remembered folder, on a shared server another person's project, when the
+   * open session was archived. That session is no longer open, and the page keeps the prompt box aimed at the folder it
+   * lived in, so New session starts in B. A is registered last, so it is drawn first, and the prompt box is aimed at A by
+   * a click on A's session before B is opened through the page's verifier seam `showSession(id)` (the call a search hit
+   * makes, which aims nothing): both fallbacks the bug used, the remembered folder and the first drawn workspace, are A.
    */
   const home = isolatedHome('tree-archived-target')
   const first = fixtureDir('tree-archived-target-a')
@@ -443,21 +441,19 @@ test('New session starts where the open session lives when that session is archi
     }
     const b = await register(second)
     const a = await register(first)
-    const putAway = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: b.path, title: 'put away in b' }) })
-    assert.equal(putAway.status, 200, `a session in B (${JSON.stringify(putAway.body)})`)
-    const inB = putAway.body.session
-    const archived = await api(server.url, cookie, `/api/sessions/${inB}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
-    assert.equal(archived.status, 200, `the session in B is archived (${JSON.stringify(archived.body)})`)
+    const inBMade = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: b.path, title: 'work in b' }) })
+    assert.equal(inBMade.status, 200, `a session in B (${JSON.stringify(inBMade.body)})`)
+    const inB = inBMade.body.session
     await new Promise((done) => setTimeout(done, 20))
     const newer = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: a.path, title: 'newer work in a' }) })
     assert.equal(newer.status, 200, `a newer session in A (${JSON.stringify(newer.body)})`)
     const inA = newer.body.session
     const listed = (await api(server.url, cookie, '/api/workspaces')).body.workspaces
     assert.deepEqual(listed.filter((entry) => entry.origin === 'added').map((entry) => entry.path), [a.path, b.path], 'A is first in the registry, so the tree draws it first')
-    assert.deepEqual(listed.find((entry) => entry.id === b.id)?.sessionIds, [inB], 'and B still accounts for its archived session')
 
     const workspaceRow = (record) => `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
     const openId = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
     const cwdOf = async (id) => {
       const sessions = (await api(server.url, cookie, '/api/sessions')).body
       return (Array.isArray(sessions) ? sessions : []).find((meta) => meta.id === id)?.cwd ?? null
@@ -465,9 +461,9 @@ test('New session starts where the open session lives when that session is archi
     const state = () =>
       browser.evaluate(`JSON.stringify({
         open: ${openId},
+        saved: ${saved},
         title: document.getElementById('session-title')?.textContent ?? null,
         note: document.getElementById('tree-note')?.textContent ?? null,
-        archived: localStorage.getItem('heddle.tree.archived.v1'),
         rows: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => [li.dataset.sessionId, li.getAttribute('aria-selected')]),
       })`)
     const until = async (expression, what, timeoutMs = 10_000) => {
@@ -489,13 +485,21 @@ test('New session starts where the open session lives when that session is archi
     await until(`${openId} === ${JSON.stringify(inA)}`, 'the session in A is the selected row')
     await new Promise((done) => setTimeout(done, 1_000))
 
-    /** Then the archived session in B, by id; under Hide archived its row is not drawn. */
+    /** Then the session in B, by id, through the seam that aims nothing. */
     await browser.evaluate(`showSession(${JSON.stringify(inB)}).then(() => true)`)
-    await until(`document.getElementById('session-title').textContent.includes('put away in b')`, 'the archived session in B is open')
+    await until(`document.getElementById('session-title').textContent.includes('work in b') && ${saved} === ${JSON.stringify(inB)}`, 'the session in B is open')
     await new Promise((done) => setTimeout(done, 1_000))
-    const before = JSON.parse(await state())
-    assert.equal(before.archived ?? 'hide', 'hide', `the tree hides archived sessions\nsaw: ${JSON.stringify(before)}`)
-    assert.equal(before.rows.some(([id]) => id === inB), false, `so the open archived session has no row\nsaw: ${JSON.stringify(before)}`)
+
+    /** Another client archives it, then renames another session, and the server's push makes the page read the list. */
+    const archived = await api(server.url, cookie, `/api/sessions/${inB}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(archived.status, 200, `another client archives the session in B (${JSON.stringify(archived.body)})`)
+    const renamed = await api(server.url, cookie, `/api/sessions/${inA}/title`, { method: 'POST', body: JSON.stringify({ title: 'newer work in a, renamed' }) })
+    assert.equal(renamed.status, 200, `and renames the session in A (${JSON.stringify(renamed.body)})`)
+    await until(
+      `document.getElementById('session-title').textContent === 'No session' && ${saved} === null`,
+      'the page lets the archived session go: nothing is open, and nothing is kept to reopen (DSH clearArchivedCurrent)',
+      15_000,
+    )
 
     await browser.evaluate(`document.getElementById('new-session').click()`)
     await until(
@@ -505,11 +509,7 @@ test('New session starts where the open session lives when that session is archi
     )
     const made = await browser.evaluate(openId)
     const cwd = await cwdOf(made)
-    assert.equal(
-      cwd,
-      b.path,
-      `New session starts in B, where the open archived session lives, not in A (the remembered folder and the first drawn workspace)\nA: ${a.path}\nsaw: ${await state()}`,
-    )
+    assert.equal(cwd, b.path, `New session starts in B, where the archived session lived, not in A (the remembered folder and the first drawn workspace)\nA: ${a.path}\nsaw: ${await state()}`)
     await until(`${workspaceRow(b)}.closest('li').querySelector('li[data-session-id="${made}"]') !== null`, 'and the new session is drawn under B')
   } finally {
     await browser.close()

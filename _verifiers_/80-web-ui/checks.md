@@ -69,8 +69,9 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, and in the open session's own
-  workspace when that session is archived and its row is not drawn, not in the last remembered folder (#119), the
+  starting in the workspace row the person opened rather than the open session's, an open session another client
+  archives let go as DSH's `clearArchivedCurrent` lets it go, with New session then starting where it lived, not in
+  the last remembered folder (#119, #139 B1), the
   `Workspace` grouping drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id
   and no title in the header, then the row, the header and the window title (`<title> — Heddle`) following its title
   as it is written;
@@ -114,7 +115,10 @@ grounded_in:
   which can be pressed across its whole width (nothing lies over the menu), and from **search**, where the archived
   result carries `Unarchive session` and choosing it says it cannot be opened without clearing the query; a quiet
   archive's undo notice; and a running session's archive asking first in DSH's dialog, listing the work the server
-  named, Cancel leaving it running, Stop and archive stopping and archiving it, and undo restoring it.
+  named, Cancel leaving it running, Stop and archive stopping and archiving it, and undo restoring it; and the open
+  session, archived from its own row or by another client, let go (nothing open, nothing kept to reopen) as DSH's
+  `archiveSession` and `clearArchivedCurrent` let it go, the next message running as a new conversation in its
+  workspace rather than vanishing into the archived session (#139 B1).
 - [`check-archived-session.mjs`](check-archived-session.mjs) — an archived session row, drawn under *All
   conversations*, carries DSH's "Archived sessions cannot be opened. Unarchive it to view." as its accessible
   description, and clicking it says so and opens nothing, while a live row still opens (`dsh-client-ui-workspace`

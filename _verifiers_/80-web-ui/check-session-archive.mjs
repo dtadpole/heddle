@@ -15,7 +15,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
  * to view.") without clearing the query or navigating. Archiving a session with running work asks first: the Host
  * refuses the plain archive and names the work, and the stop-and-archive dialog lists it ("The turn in progress", and
  * its running bash call as "1 background job: sleep 40"),
- * Cancel leaves it running, and Stop and archive stops it, archives it and shows a notice with `undo`.
+ * Cancel leaves it running, and Stop and archive stops it, archives it and shows a notice with `undo`. An archived
+ * session is never the open one: archiving the open session, here or from another client, lets it go (DSH's
+ * `archiveSession` and `clearArchivedCurrent`), and the next message starts a new conversation in its workspace (#139 B1).
  *
  * The row menu is judged where it was found wanting: on 29 Oct its right part lay under the conversation panel
  * ("Renai", "Unarc"), so a click on the right of an item missed. Every item is hit-tested at its right edge here.
@@ -315,5 +317,102 @@ test('an archived session is restored from Archived only and from search, and a 
     browser.close()
     await server.close()
     await Promise.allSettled(pending)
+  }
+})
+
+test('archiving the open session lets it go, from its own row and from another client, and the next message starts a new conversation in its workspace instead of vanishing (#139 B1)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH never keeps an archived session open (dsh-client-ui-workspace lib/client.js): `archiveSession` clears the main view
+   * when the session it archived is the open one (:1532-1535), and `clearArchivedCurrent` (:1638-1643), which
+   * `watchNavigation`'s reconcile runs on every change of the workspace or session list (:1576-1578), clears it whoever
+   * archived it; `clearMain` (:1644-1650) empties the saved selection. #139's B1 (developer-ten, f0442783): heddle kept
+   * the archived session open with its composer writable; a message sent into it was accepted, blocked by the server's
+   * archived-session gate before any step, never written, and gone from the field, with nothing on screen to say so.
+   */
+  const server = await startServer('open')
+  const browser = await openBrowser({ width: 1440, height: 900 })
+  try {
+    const cookie = await cookieFor(server.url)
+    writeFileSync(server.script, `${JSON.stringify({ steps: Array.from({ length: 4 }, () => ({ text: 'an answer' })) })}\n`)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    assert.equal(added.status, 200, `the workspace is registered (${JSON.stringify(added.body)})`)
+    const label = added.body.record.title
+    const workspacePath = added.body.record.path
+    const made = async (title) => {
+      const answer = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: server.work, title }) })
+      assert.equal(answer.status, 200, `created ${title} (${JSON.stringify(answer.body)})`)
+      await new Promise((done) => setTimeout(done, 20))
+      return answer.body.session
+    }
+    const heron = await made('heron notes')
+    const plover = await made('plover notes')
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+    const metaOf = async (id) => (await listed()).find((meta) => meta.id === id)
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const field = `document.querySelector('#prompt textarea')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        title: document.getElementById('session-title')?.textContent ?? null,
+        saved: ${saved},
+        note: document.getElementById('tree-note')?.textContent ?? null,
+        placeholder: ${field}?.placeholder ?? null,
+        disabled: ${field}?.disabled ?? null,
+        draft: ${field}?.value ?? null,
+        log: [...document.querySelectorAll('#log > *')].map((node) => node.textContent.trim()).slice(-3),
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+
+    /** This page archives the open session from its own row. */
+    await browser.gotoSession(server.url, heron)
+    await until(`document.getElementById('session-title').textContent === 'heron notes'`, 'the saved session opens')
+    const archive = `document.querySelector('#tree li[data-kind="session"][data-session-id="${heron}"] > .row button[aria-label="Archive session"]')`
+    await until(`${archive} !== null`, "the open session's row offers Archive session")
+    await browser.evaluate(`${archive}.click()`)
+    for (let attempt = 0; attempt < 50 && (await metaOf(heron))?.archived !== true; attempt += 1) await new Promise((done) => setTimeout(done, 100))
+    assert.equal((await metaOf(heron))?.archived, true, 'the session is archived')
+    await until(`document.getElementById('session-title').textContent === 'No session' && ${saved} === null`, "the page lets it go, as DSH's archiveSession does: nothing open, nothing kept to reopen")
+    await until(`document.getElementById('tree-note').textContent === ${JSON.stringify(`a new conversation in ${label}`)}`, 'and the next message is aimed at a new conversation in its workspace')
+    const after = JSON.parse(await state())
+    assert.equal(after.disabled, false, `the composer takes a message\nsaw: ${JSON.stringify(after)}`)
+    assert.notEqual(after.placeholder, 'Session unavailable')
+    assert.notEqual(after.placeholder, 'Choose a workspace to start')
+
+    /** The next message is a new conversation in the same workspace, and the archived session stays as it was. */
+    const before = (await listed()).map((meta) => meta.id)
+    await browser.evaluate(`(() => { const box = ${field}; box.value = 'where does this go'; box.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await until(`document.getElementById('send').disabled === false`, 'Send is offered for the draft')
+    await browser.evaluate(`document.getElementById('send').click()`)
+    let ran = null
+    for (let attempt = 0; attempt < 60 && ran === null; attempt += 1) {
+      ran = (await listed()).find((meta) => !before.includes(meta.id) && (meta.turns ?? 0) > 0) ?? null
+      if (ran === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(ran !== null, `the message ran, in a new session, rather than vanishing into the archived one\nsaw: ${await state()}`)
+    assert.equal(ran.cwd, workspacePath, 'in the same workspace')
+    assert.equal((await metaOf(heron))?.turns ?? 0, 0, 'and the archived session took nothing')
+
+    /** Another client archives the open session; the page lets it go at its next read of the list. */
+    await browser.gotoSession(server.url, plover)
+    await until(`document.getElementById('session-title').textContent === 'plover notes'`, 'the other session opens')
+    const archived = await api(server.url, cookie, `/api/sessions/${plover}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(archived.status, 200, `another client archives it (${JSON.stringify(archived.body)})`)
+    /** The flags route pushes nothing; a rename does ('sessions', both builds), and the page reads the list on it. */
+    const renamed = await api(server.url, cookie, `/api/sessions/${ran.id}/title`, { method: 'POST', body: JSON.stringify({ title: 'renamed by another client' }) })
+    assert.equal(renamed.status, 200, `and renames another session (${JSON.stringify(renamed.body)})`)
+    await until(`document.getElementById('session-title').textContent === 'No session' && ${saved} === null`, "the page lets it go too, as DSH's clearArchivedCurrent does")
+  } finally {
+    browser.close()
+    await server.close()
   }
 })
