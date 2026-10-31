@@ -45,10 +45,12 @@ SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-genera
 (R-developer-eight-19).
 
 [`activity.ts`](activity.ts) names the **running work** a plain archive is refused for, in DSH's
-`workspace/session-activity` shape: the session's own turn, and its running subagent descendants found by
-lineage (parent plus subagent origin, any depth). The Web route's `409` carries it and the page's
-stop-and-archive dialog lists it (R-developer-eight-13). DSH's jobs have no runtime here; its reminders landed on
-main (`src/schedule/`) after this walk, and reporting them is a follow-up.
+`workspace/session-activity` shape and DSH's listener order: the session's own turn, its live background jobs (the
+jobs row's `sessionJobActivity` / `stopSessionJobs`), its running subagent descendants found by lineage (parent plus
+subagent origin, any depth), and its active reminders (the schedule row's `list` and `stopSessionTasks`);
+`rowActivity` reads the two rows and `stopRowActivity` stops them after the archive is written. The
+Web route's `409` carries it and the page's stop-and-archive dialog lists it (R-developer-eight-13); the order's
+derivation from DSH's code is in the file's header and in [`../../SESSION_ACTIONS.md`](../../SESSION_ACTIONS.md).
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
