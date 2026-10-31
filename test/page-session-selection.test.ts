@@ -17,6 +17,12 @@ const seatStart = page.indexOf('function selectionForSeat(')
 const seatSource = page.slice(seatStart, page.indexOf('\n}', seatStart) + 2)
 const failureStart = page.indexOf('function historyFailureText(')
 const failureSource = page.slice(failureStart, page.indexOf('\n}', failureStart) + 2)
+const scrollSource = page.slice(page.indexOf('/* chat-scroll:begin */'), page.indexOf('/* chat-scroll:end */'))
+function helperSource(name: string): string {
+  const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
+  assert.ok(start >= 0, `the page defines ${name}`)
+  return page.slice(start, page.indexOf('\n}', start) + 2)
+}
 assert.ok(start >= 0 && selectStart >= 0 && adoptStart >= 0, 'the page defines both session entry points and the model publication guard')
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -45,7 +51,8 @@ function harness() {
     syncSelectionToSession() {}, paintScheduleHeader() {}, followChatTail() {},
     renderScheduleCards() {}, renderScheduleDrawer() {}, refreshScheduleList() {}, refreshScheduleCatalog() {},
     refreshSessions: async () => {}, refreshGoal: async () => {}, refreshTodo: async () => {}, showLedger: async () => {},
-    log: { replaceChildren: () => rows.splice(0), append: (note: { textContent: string }) => rows.push(note.textContent) },
+    log: { get childElementCount() { return rows.length }, scrollTop: 0, dataset: {}, replaceChildren: () => rows.splice(0), append: (note: { textContent: string }) => rows.push(note.textContent) },
+    requestAnimationFrame: (callback: () => void) => callback(),
     add: (_kind: string, text: string) => rows.push(text),
     document: { getElementById: (id: string) => id === 'session-title' ? title : branch, createElement: () => ({ className: '', textContent: '', setAttribute() {} }) },
     fetch: async (url: string) => {
@@ -73,6 +80,14 @@ function harness() {
     function applySessionModel(endpoint, model, effort) {
       seat = chosenEndpoint = endpoint; chosenModel = model; chosenEffort = effort;
     }
+    let sessionLoading = null, chatFollowing = true;
+    ${scrollSource}
+    const chatScrollMemory = ChatScrollMemory.create();
+    ${helperSource('rememberChatScroll')}
+    ${helperSource('restoreChatScroll')}
+    ${helperSource('keptToDraw')}
+    function drawSessionEvent() {}
+    ${helperSource('drawKeptEvents')}
     ${adoptSource}
     ${failureSource}
     ${source}

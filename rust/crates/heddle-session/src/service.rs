@@ -20,7 +20,7 @@ use serde_json::Value;
 use crate::clock::iso_now;
 use crate::definition::{
     CreatedDefinition, DefinitionOptions, ensure_sessions_folder, existing_session_names,
-    write_session_definition,
+    require_folder, write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -349,6 +349,12 @@ impl SessionService {
                 }
             }
         }
+        // The child's definition goes into the source's folder, so a folder that is gone refuses the fork
+        // ([`SessionError::MissingFolder`]) before anything is written, instead of being recreated with a
+        // `_sessions_` drawer in it (#56). DSH's fork creates no directory either: its workspace attach refuses a
+        // cwd that does not resolve (dsh-api-session-controller lib/index.js:902-909, dsh-workspace
+        // lib/index.js:111-122). Checked after DSH's own refusals and before the store forks, so no child is left.
+        require_folder(source.cwd())?;
         let Some(handle) = self.store.fork_at(
             id,
             ForkAttribution {
@@ -412,6 +418,10 @@ impl SessionService {
 
     /// Record a user turn whose content may carry attachments. Empty content records nothing. The first
     /// message names a session that has no title yet, from its text parts only.
+    ///
+    /// The name is written in the same meta write that counts the turn ([`SessionStore::user_message_named`]), so a
+    /// session list read meanwhile on another thread never shows the turn on an untitled session. The TypeScript build
+    /// writes the two one after the other, synchronously, which no request can come between.
     pub fn user_content(
         &self,
         handle: &SessionHandle,
@@ -422,7 +432,7 @@ impl SessionService {
             return Ok(());
         }
         let title = title_from(&text_of(&content));
-        self.store.message(
+        self.store.user_message_named(
             handle,
             Message {
                 role: Role::User,
@@ -430,17 +440,8 @@ impl SessionService {
                 content,
                 source,
             },
+            &title,
         )?;
-        let meta = self.list().into_iter().find(|meta| meta.id() == handle.id);
-        if let Some(meta) = meta {
-            let unnamed = meta
-                .title()
-                .map(|title| title.trim().is_empty())
-                .unwrap_or(true);
-            if unnamed && !title.is_empty() {
-                self.store.rename(&handle.id, &title)?;
-            }
-        }
         Ok(())
     }
 
@@ -1066,6 +1067,65 @@ mod tests {
         );
     }
 
+    /// A first message's turn and the name it gives land in **one** meta write, so no reader ever sees the turn counted
+    /// on an untitled session. The web server lists sessions on another thread, without the store's lock, while a
+    /// delegated child records its first message on the child's own task: with the count and the name written one
+    /// after the other, a list in between showed the child with `turns: 1` and no `title` (80's check-subagents, three
+    /// failures in six on the Rust build; Node runs no request between the TypeScript build's two synchronous writes).
+    #[test]
+    fn a_first_message_counts_its_turn_and_names_the_session_in_one_write() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let fresh = || OpenAtOptions {
+            fresh: true,
+            ..OpenAtOptions::default()
+        };
+        let folder_path = folder.path().to_str().unwrap();
+        // Other sessions in the store, as a server holds them: naming used to list every one between the two writes.
+        for _ in 0..20 {
+            service.open_at(folder_path, fresh()).unwrap();
+        }
+        let mut untitled = Vec::new();
+        for round in 0..40 {
+            let handle = service.open_at(folder_path, fresh()).unwrap();
+            let meta = handle.meta.clone();
+            let ready = Arc::new(std::sync::Barrier::new(2));
+            let reader = {
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    ready.wait();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                    // The first record that counts the turn, as a session list polling the store would read it.
+                    while std::time::Instant::now() < deadline {
+                        let Ok(text) = std::fs::read_to_string(&meta) else {
+                            continue;
+                        };
+                        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                            continue;
+                        };
+                        if value["turns"].as_u64().unwrap_or(0) >= 1 {
+                            return Some(value.get("title").cloned());
+                        }
+                    }
+                    None
+                })
+            };
+            ready.wait();
+            service
+                .user(&handle, "child task for the sidebar", None)
+                .unwrap();
+            let seen = reader.join().unwrap().expect("the turn was counted");
+            if seen != Some(json!("child task for the sidebar")) {
+                untitled.push((round, seen));
+            }
+        }
+        assert!(
+            untitled.is_empty(),
+            "a reader saw the first turn counted before the session was named, in {} of 40 rounds: {untitled:?}",
+            untitled.len()
+        );
+    }
+
     #[test]
     fn resume_that_names_nothing_says_so() {
         let (_dir, service) = service();
@@ -1563,5 +1623,68 @@ mod tests {
         let message = events.iter().find(|event| event.kind == "message").unwrap();
         assert_eq!(message.kind, "message");
         assert!(message.to_line().contains("\"source\":{\"kind\":\"goal\""));
+    }
+
+    /// A session with one completed turn in `folder`, so a fork has something to cut at.
+    fn answered_session(service: &SessionService, folder: &str) -> SessionHandle {
+        let handle = service.open_at(folder, OpenAtOptions::default()).unwrap();
+        service
+            .user(&handle, "a conversation worth continuing", None)
+            .unwrap();
+        service
+            .store()
+            .message(
+                &handle,
+                Message {
+                    role: Role::Assistant,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: "the answer".to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        service
+            .store()
+            .append(&handle, NewEvent::new("turn/completed"), Default::default())
+            .unwrap();
+        handle
+    }
+
+    /// #56: a fork of a session whose folder was deleted answered with a child and recreated the folder with a
+    /// `_sessions_` drawer in it. DSH's fork creates no directory; its workspace attach refuses a cwd that does
+    /// not resolve. The fork is refused naming the folder by its name, with `session/folder-missing`, the folder
+    /// stays gone, and no child is left — for the default cut and for an explicit one.
+    #[test]
+    fn a_fork_in_a_folder_that_is_gone_is_refused_and_nothing_comes_back() {
+        let (_dir, service) = service();
+        let parent = branch();
+        let folder = parent.path().join("w");
+        std::fs::create_dir(&folder).unwrap();
+        let canonical = canonical_path(&folder).to_str().unwrap().to_string();
+        let source = answered_session(&service, &canonical);
+        let before = service.list().len();
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        let error = service.fork(&source.id).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "This workspace's folder no longer exists: \"w\""
+        );
+        assert_eq!(error.code(), Some("session/folder-missing"));
+        let error = service.fork_at(&source.id, Some(0)).unwrap_err();
+        assert_eq!(error.code(), Some("session/folder-missing"));
+        assert!(!folder.exists(), "the deleted folder is not recreated");
+        assert_eq!(service.list().len(), before, "and no child is left");
+
+        // A file standing where the folder was is refused the same way, and nothing is made inside it.
+        std::fs::write(&folder, "not a folder any more\n").unwrap();
+        let error = service.fork(&source.id).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "This workspace's folder no longer exists: \"w\""
+        );
+        assert!(folder.is_file());
     }
 }
