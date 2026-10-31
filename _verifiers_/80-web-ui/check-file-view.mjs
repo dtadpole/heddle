@@ -24,7 +24,8 @@ const CAPABILITY = 'the Web UI'
 async function startServer(label, steps = [{ text: 'an answer' }]) {
   const home = isolatedHome(`file-view-${label}`)
   const work = fixtureDir(`file-view-${label}-work`)
-  const { config } = scriptedConfig({ home, steps })
+  /** An answer that names the work folder itself (an absolute link) is written once that folder is known. */
+  const { config } = scriptedConfig({ home, steps: typeof steps === 'function' ? steps(work) : steps })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config } },
@@ -647,6 +648,74 @@ test('a file link in a chat answer opens the file in the preview, and does not l
     })()`).then(JSON.parse)
     assert.equal(remote.prevented, false, 'a remote link is left to the browser')
     assert.equal(remote.target, '_blank', 'which opens it in its own tab')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The line at the top of the preview: a code file's first visible numbered row, or the plain-text line under the
+ * panel's top edge. Read in the browser, so it judges what the reader sees rather than a scroll offset.
+ */
+const TOP_LINE = `(() => {
+  const body = document.getElementById('file-body')
+  const box = body.getBoundingClientRect()
+  if (body.dataset.renderer === 'code') {
+    const row = [...body.querySelectorAll('.line')].find((line) => line.getBoundingClientRect().bottom > box.top + 2)
+    return row === undefined ? 0 : Number(row.querySelector('.ln')?.textContent ?? 0)
+  }
+  const caret = document.caretRangeFromPoint(box.left + 12, box.top + 6)
+  if (caret === null || !body.contains(caret.startContainer)) return 0
+  /** A point in the panel's own top padding lands on the panel, before its text: that is the first line. */
+  if (caret.startContainer === body) return caret.startOffset === 0 ? 1 : 0
+  if (caret.startContainer.nodeType !== Node.TEXT_NODE) return 0
+  return caret.startContainer.data.slice(0, caret.startOffset).split('\\n').length
+})()`
+
+test('a chat link to #L120 or #L80-L90 opens the file at that line, and an absolute link opens its file at the top', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('chat-lines', (work) => [
+    { text: `See [the notes](notes.txt#L120), [the same notes](${work}/notes.txt) and [the code](src/app.ts#L80-L90).` },
+  ])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    mkdirSync(join(server.work, 'src'), { recursive: true })
+    writeFileSync(join(server.work, 'src', 'app.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where are the notes', folder: server.work, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    const before = await browser.evaluate('location.href')
+    const follow = async (href, text) => {
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+      const find = `[...document.querySelectorAll('#log .turn.assistant a[href]')].find((link) => link.getAttribute('href') === ${JSON.stringify(href)})`
+      assert.ok(await browser.waitFor(`${find} !== undefined`, 10_000), `the answer carries the link ${href}`)
+      await browser.evaluate(`${find}.click()`)
+      assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes(${JSON.stringify(text)})`, 10_000), `${href} opens in the preview`)
+      await new Promise((done) => setTimeout(done, 300))
+      assert.equal(await browser.evaluate('location.href'), before, `${href} leaves the page where it is`)
+      return Number(await browser.evaluate(TOP_LINE))
+    }
+
+    const atLine = await follow('notes.txt#L120', 'line 200 of the notes')
+    assert.ok(Math.abs(atLine - 120) <= 1, `#L120 shows line 120 at the top of a plain-text file (top line ${atLine})`)
+    const atTop = await follow(`${server.work}/notes.txt`, 'line 200 of the notes')
+    assert.equal(atTop, 1, 'an absolute link with no line opens its file at the top, even after a line link scrolled it')
+    const inCode = await follow('src/app.ts#L80-L90', 'value200')
+    assert.ok(Math.abs(inCode - 80) <= 1, `#L80-L90 shows line 80 at the top of a code file (top line ${inCode})`)
   } finally {
     browser.close()
     await server.close()
