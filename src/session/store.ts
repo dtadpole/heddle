@@ -826,6 +826,14 @@ function releaseWriterLock(path: string): void {
 export class SessionStore {
   readonly root: string
   private readonly onEvent: ((handle: SessionHandle, event: SessionEvent) => void) | undefined
+
+  /**
+   * Where a written title is announced. DSH records every title change as the session's title, and every view of the
+   * session follows it (inventory-shell S16). Heddle keeps the title in the meta record rather than in the log, so no
+   * log event carries it. This hook is how the Web UI hears a title written by the first message or the title model,
+   * and not only a person's rename (#33).
+   */
+  private readonly onRenamed: ((id: SessionId, title: string) => void) | undefined
   /**
    * Parsed events per session, and whether that session's transcript is compressed.
    *
@@ -880,6 +888,11 @@ export class SessionStore {
     root: string = defaultSessionRoot(),
     options: {
       readonly onEvent?: (handle: SessionHandle, event: SessionEvent) => void
+      /**
+       * Told about every title this store writes, with the title now stored (`''` when cleared): a person's rename, the
+       * first message's fallback, a fork's name and the title model's answer alike (#33).
+       */
+      readonly onRenamed?: (id: SessionId, title: string) => void
       /** Receives the line naming a log the store leaves out ({@link skippedLogLine}); defaults to standard error. */
       readonly warn?: (message: string) => void
     } = {},
@@ -888,6 +901,7 @@ export class SessionStore {
     // literal `~` directory beside the project is the wrong place to put it.
     this.root = resolve(root.startsWith('~') ? join(homedir(), root.slice(1)) : root)
     this.onEvent = options.onEvent
+    this.onRenamed = options.onRenamed
     this.warn = options.warn ?? ((message) => void process.stderr.write(`${message}\n`))
   }
 
@@ -973,6 +987,8 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    // After the write, as with `onEvent`: a listener never announces a title the record does not hold.
+    this.onRenamed?.(id, next.title ?? '')
     return next
   }
 

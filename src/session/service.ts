@@ -83,7 +83,10 @@ export class SessionService extends Service {
   constructor(
     ctx: Context,
     config: Config = {},
-    options: { readonly onEvent?: (handle: SessionHandle, event: import('./store.ts').SessionEvent) => void } = {},
+    options: {
+      readonly onEvent?: (handle: SessionHandle, event: import('./store.ts').SessionEvent) => void
+      readonly onRenamed?: (id: SessionId, title: string) => void
+    } = {},
   ) {
     super(ctx, 'session')
     this.store = new SessionStore(config.root ?? defaultSessionRoot(), options)

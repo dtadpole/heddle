@@ -64,6 +64,14 @@ pub const LEGACY_TRANSCRIPT_NAME: &str = "session.jsonl";
 /// the `session/event` hook (`{ session: handle.id, event }`).
 pub type EventListener = Arc<dyn Fn(&SessionHandle, &SessionEvent) + Send + Sync>;
 
+/// Told about every title the store writes, after the write, with the session id and the title now stored (`""` when
+/// cleared): a person's rename, the first message's fallback, a fork's name and the title model's answer alike (#33).
+///
+/// DSH records each title change, and every view of the session follows it (inventory-shell S16). Heddle keeps the title
+/// in the meta record rather than in the log, so no [`EventListener`] event carries it; the boot wires this one to the
+/// Web UI's `session/renamed` push (`onRenamed` in `src/session/store.ts`).
+pub type RenameListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// The default store root: `heddle_home(env)/sessions` — `$HEDDLE_HOME/sessions`, else
 /// `~/.heddle/sessions`.
 pub fn default_session_root(env: &Env) -> String {
@@ -350,6 +358,8 @@ pub struct SessionStore {
     /// Where a skipped log is reported ([`skipped_log_line`]); standard error unless [`SessionStore::set_warn`] names a
     /// collector.
     warn: Mutex<Option<Warn>>,
+    /// Where a written title is announced ([`SessionStore::on_renamed`]); nobody until the boot names a listener.
+    renamed: Mutex<Option<RenameListener>>,
 }
 
 /// Receives the line naming a log the store leaves out.
@@ -485,6 +495,7 @@ impl SessionStore {
             titles: Arc::new(SessionTitles::default()),
             headers: Mutex::new(HashMap::new()),
             warn: Mutex::new(None),
+            renamed: Mutex::new(None),
         }
     }
 
@@ -498,6 +509,7 @@ impl SessionStore {
             titles: Arc::new(SessionTitles::default()),
             headers: Mutex::new(HashMap::new()),
             warn: Mutex::new(None),
+            renamed: Mutex::new(None),
         }
     }
 
@@ -509,6 +521,25 @@ impl SessionStore {
     /// Send the line naming a skipped log ([`skipped_log_line`]) to `warn` instead of standard error.
     pub fn set_warn(&self, warn: Warn) {
         *self.warn.lock().unwrap_or_else(PoisonError::into_inner) = Some(warn);
+    }
+
+    /// Announce every title this store writes from now on to `listener` ([`RenameListener`]). A second call replaces
+    /// the first.
+    pub fn on_renamed(&self, listener: RenameListener) {
+        *self.renamed.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
+    }
+
+    /// Tell the rename listener, if any, about a title just written. Called with the meta lock released, as the event
+    /// listener is, so a listener may read the store.
+    fn announce_title(&self, meta: &SessionMeta) {
+        let listener = self
+            .renamed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(listener) = listener {
+            listener(meta.id(), meta.title().unwrap_or(""));
+        }
     }
 
     /// Whether a session's log can be read at all, judged by its first record ([`read_log_header`]), and reported once
@@ -683,8 +714,14 @@ impl SessionStore {
     /// `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80
     /// UTF-8 bytes; one with nothing visible left clears, as a blank one does (the route refuses it).
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
-        let _meta = self.meta_guard();
-        self.rename_locked(id, title)
+        let renamed = {
+            let _meta = self.meta_guard();
+            self.rename_locked(id, title)?
+        };
+        if let Some(meta) = &renamed {
+            self.announce_title(meta);
+        }
+        Ok(renamed)
     }
 
     /// Write a generated title only while the session still carries `expected` — the name the call started from.
@@ -695,14 +732,20 @@ impl SessionStore {
         expected: &str,
         title: &str,
     ) -> Result<bool, SessionError> {
-        let _meta = self.meta_guard();
-        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
-            return Ok(false);
+        let renamed = {
+            let _meta = self.meta_guard();
+            let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+                return Ok(false);
+            };
+            if current.title().unwrap_or("") != expected {
+                return Ok(false);
+            }
+            self.rename_locked(id, title)?
         };
-        if current.title().unwrap_or("") != expected {
-            return Ok(false);
+        if let Some(meta) = &renamed {
+            self.announce_title(meta);
         }
-        Ok(self.rename_locked(id, title)?.is_some())
+        Ok(renamed.is_some())
     }
 
     /// `rename` with the meta lock already held.
