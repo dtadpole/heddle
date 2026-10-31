@@ -1,9 +1,9 @@
 ---
 title: Local build slots
 created: 2026-10-24T05:01:03Z
-modified: 2026-10-31T03:50:00Z
+modified: 2026-10-31T04:20:00Z
 level: L2
-version: 1.2.0
+version: 1.3.0
 description: What a build slot guarantees on the shared Mac, from the job cap and small targets to dead-owner reclaim and the bounded wait, and where the runner stops.
 status: unverified
 grounded_in:
@@ -27,6 +27,8 @@ What a build slot guarantees to the cargo command inside it, and what the runner
   when both pids are gone. Every command sweeps dead slots before it takes one, so a build whose shell was
   killed is reclaimed on the next run (its cargo, if it survived, keeps the slot until it exits). A slot whose
   stamp is more than an hour old is reclaimed when no slot is free.
+- **First come, first served.** Waiting runs hold tickets and are served in arrival order, not by whoever polls
+  first; the coordinator can put one waiter first ([queue.md](queue.md)).
 - **A bounded wait.** Thirty minutes by default (`LOCAL_BUILD_WAIT_SECONDS`), then the run exits with a message
   and the no-free-slot code (see [status-and-exit-codes.md](status-and-exit-codes.md)), so a seat reports back
   instead of hanging.
