@@ -57,6 +57,8 @@ pub enum Builtin {
     TodoTool,
     /// `src/plugins/turns.ts`.
     Turns,
+    /// `src/plugins/locale.ts`: the interface language a person chose (issue #80).
+    Locale,
     /// `src/plugins/presets.ts`: the agent presets (inventory A96).
     Presets,
     /// `src/plugins/team.ts`.
@@ -231,6 +233,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         Some("turns"),
         &[],
         "heddle-agent",
+    ),
+    spec(
+        Builtin::Locale,
+        "plugins/locale",
+        "locale",
+        "locale",
+        Some("locale"),
+        &[],
+        "heddle-config",
     ),
     spec(
         Builtin::Presets,
@@ -441,6 +452,9 @@ impl Catalog for BuiltinCatalog {
             }
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
+            }
+            ComponentRef::Builtin(Builtin::Locale) => {
+                Some(Box::new(crate::adapters::LocaleComponent))
             }
             ComponentRef::Builtin(Builtin::Presets) => {
                 Some(Box::new(crate::adapters::PresetsComponent))

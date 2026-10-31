@@ -14,6 +14,12 @@
     - id: console
       name: ./src/plugins/console-exporter.ts
 
+    # The interface language (DSH's dsh-client-locale): the person's choice, en or zh, written by the
+    # settings API as `locale.preference`. Without one, each browser gets the first supported language
+    # it asks for, else English.
+    - id: locale
+      name: ./src/plugins/locale.ts
+
     # Sessions: the event log a turn is recorded in. The store lives under $HEDDLE_HOME/sessions
     # (~/.heddle/sessions when HEDDLE_HOME is unset), the plugin's own default, so a run with its own home
     # keeps its own sessions; a root written here would ignore HEDDLE_HOME (#74). --session-root restates it.

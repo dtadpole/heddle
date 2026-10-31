@@ -21,6 +21,7 @@ import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
+import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
@@ -515,7 +516,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page())
+      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -3166,8 +3167,19 @@ export function markedPage(html: string): string {
  * which on screen look identical. (It happened: the live daemon served a stale deployment checkout while the source
  * and the checks were already correct, and a row's geometry read as "not implemented".)
  */
-function page(): string {
-  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8'))
+function page(lang = 'en'): string {
+  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')).replace('<html lang="en">', `<html lang="${lang}">`)
+}
+
+/**
+ * The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one the
+ * browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`, as DSH
+ * writes it. The page's marker stays the file's own, so a language never reads as a different build.
+ */
+export function pageLanguage(ctx: Context, acceptLanguage: string | string[] | undefined): string {
+  const header = Array.isArray(acceptLanguage) ? acceptLanguage.join(',') : acceptLanguage
+  const locale = ctx.get('locale') as { forRequest(header: string | undefined): Locale } | undefined
+  return documentLanguage(locale?.forRequest(header) ?? negotiateLocale(undefined, acceptedLanguages(header)))
 }
 
 /** The addresses a person could reach this server on, for a LAN-aware message. */

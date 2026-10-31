@@ -571,6 +571,9 @@ pub struct Harness {
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// The interface language the optional `locale` row stores (issue #80): the page is served with its
+    /// `<html lang>`; `None` follows each browser's `Accept-Language`.
+    pub locale: Option<heddle_config::LocalePreference>,
     /// The agent presets (inventory A96), from the optional `presets` row: `GET /api/presets` answers them, and a
     /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
     /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
@@ -604,6 +607,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            locale: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -650,6 +654,7 @@ impl Harness {
             attachments: None,
             markdown: None,
             stats: None,
+            locale: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -845,6 +850,12 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    /// The interface language the profile's `locale` row stores (issue #80).
+    pub fn locale(mut self, preference: heddle_config::LocalePreference) -> Self {
+        self.harness.locale = Some(preference);
         self
     }
 
