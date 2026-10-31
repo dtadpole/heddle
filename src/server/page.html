@@ -9277,6 +9277,10 @@ async function showFile(node) {
    */
   renderRing('file')
   fileHead.textContent = node.path
+  // Loading and errors belong to the new selection, never beneath the previous HTML frame (Refs #113).
+  fileHtml.hidden = true
+  fileBody.hidden = false
+  fileBody.dataset.renderer = 'text'
   fileBody.textContent = 'reading…'
   await showView('file')
   try {
