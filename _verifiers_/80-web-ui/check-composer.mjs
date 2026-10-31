@@ -1370,7 +1370,9 @@ test('a pending image is delivered to a vision route as image content', async (c
     assert.match(String(image.image_url.url), /^data:image\/png;base64,/, 'as a data URL of the declared media type')
     assert.equal(Buffer.from(String(image.image_url.url).split(',')[1] ?? '', 'base64').length, bytes.length, 'with the whole stored file')
     assert.ok(user.content.some((part) => part.type === 'text' && part.text === 'describe this image'), 'beside the prompt text')
-    assert.ok(!JSON.stringify(sent).includes(server.home), 'and the stored path is not what the provider was told')
+    // The stored file sits under <home>/uploads. The whole home is not the test: an empty install now works in
+    // <home>/default-workspace, so the request's cwd and runtime context name the home on purpose.
+    assert.ok(!JSON.stringify(sent).includes(join(server.home, 'uploads')), 'and the stored path is not what the provider was told')
 
     const rows = await browser.evaluate(`(async () => (await (await fetch('/api/sessions')).json()).map((row) => row.id).slice(0, 1))()`)
     assert.equal(rows.length, 1, 'the turn created a session')
