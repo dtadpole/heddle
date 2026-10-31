@@ -107,7 +107,11 @@ test('the tree rows\' own controls follow the interface language', async (contex
     await browser.send('Network.enable', {})
     await browser.send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'en-US,en;q=0.9' } })
     await browser.goto(server.url)
-    assert.ok(await browser.waitFor(`document.body.dataset.ready === 'true' && ${ROWS}.workspace !== null && ${ROWS}.session !== null`, 20_000), 'the page is up with both rows')
+    // The tree may draw a row before its controls (stack 11 redraws as the lists arrive), so wait for the controls.
+    assert.ok(
+      await browser.waitFor(`document.body.dataset.ready === 'true' && (${ROWS}.workspace ?? []).includes('New session in locale-ws') && (${ROWS}.session ?? []).includes('Pin session')`, 20_000).catch(() => false),
+      `the page is up with both rows and their controls (${JSON.stringify(await browser.evaluate(ROWS))})`,
+    )
     const english = await browser.evaluate(ROWS)
     assert.ok(english.workspace.includes('actions for locale-ws') && english.workspace.includes('New session in locale-ws'), english.workspace.join(' | '))
     assert.ok(english.session.includes('Pin session') && english.session.includes('Archive session'), english.session.join(' | '))
