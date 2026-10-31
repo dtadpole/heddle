@@ -2154,6 +2154,149 @@ test('a new session is filed under its workspace, and an old one keeps the shape
   }
 })
 
+/**
+ * A server of the blank-session checks below: a scratch home, the work folder registered as a workspace, and a caller that
+ * holds the cookie the launch URL mints.
+ */
+async function blankSessionServer(h) {
+  const live = await startServer(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+    { ...h.env, HOME: h.home },
+  )
+  const origin = new URL(live.url).origin
+  const handshake = await fetch(live.url, { redirect: 'manual' })
+  const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+  const call = async (path, init = {}) => {
+    const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    const text = await response.text()
+    let body
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = text
+    }
+    return { status: response.status, body }
+  }
+  const post = (path, body) => call(path, { method: 'POST', body: JSON.stringify(body) })
+  const added = await post('/api/workspaces', { path: h.work })
+  assert.equal(added.status, 200, `the folder is a workspace (${JSON.stringify(added.body)})`)
+  return { live, call, post, branch: realpathSync(h.work) }
+}
+
+test('a New session request never lands in an empty session another client made, even one it names', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH's sidebar New session and its chord mint a fresh Session on every press (startSession with no options, then
+   * connectBlank with no reuse: dsh-client-ui-workspace lib/client.js:1403-1406 and 1520); the older blank is only hidden
+   * (sessionVisible, :964-966). On a shared server an empty session in the list can be another client's: the coordinator's
+   * request of 2026-10-29 reports a turn landing in one. So the session route makes a new session for every request, and a
+   * request that names a listed empty session (what an earlier page sent) is not handed that session.
+   */
+  const h = harness('blank-two-clients-api')
+  let server
+  try {
+    server = await blankSessionServer(h)
+    const { post, call, branch } = server
+    const first = await post('/api/sessions', { branch })
+    assert.equal(first.status, 200, `client A's New session starts a session (${JSON.stringify(first.body)})`)
+    const plain = await post('/api/sessions', { branch })
+    assert.equal(plain.status, 200, `client B's New session answers (${JSON.stringify(plain.body)})`)
+    assert.notEqual(plain.body.session, first.body.session, 'and is a session of its own')
+    const naming = await post('/api/sessions', { branch, session: first.body.session })
+    assert.equal(naming.status, 200, `a New session naming A's empty session still answers (${JSON.stringify(naming.body)})`)
+    assert.notEqual(naming.body.session, first.body.session, "and is not handed A's session")
+    assert.notEqual(naming.body.definition, first.body.definition, 'nor its definition')
+    const listed = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    assert.equal(new Set(listed.map((meta) => meta.id)).size, 3, `three requests, three sessions\nsaw: ${JSON.stringify(listed.map((meta) => meta.id))}`)
+    assert.equal(listed.find((meta) => meta.id === first.body.session)?.turns ?? 0, 0, "and A's session is as A left it")
+  } finally {
+    server?.live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('two clients pressing New session in the same folder get two different sessions, and each sees only its own blank', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The coordinator's case (2026-10-29): on a shared server the page's New session reopened an empty session another client
+   * had made, and a turn landed in it. DSH mints a fresh Session on every press of New session or its chord
+   * (dsh-client-ui-workspace lib/client.js:1403-1406, 1520) and shows a blank row only while it is the open session
+   * (sessionVisible, :959-966). Two browsers are two clients: each presses the page's own New session control.
+   */
+  const h = harness('blank-two-clients')
+  const elsewhere = fixtureDir('blank-two-clients-elsewhere')
+  let server
+  let clientA
+  let clientB
+  try {
+    server = await blankSessionServer(h)
+    const { live, call, branch } = server
+    /** One press of the panel's New session; resolves with the selected session before and after, and the session rows. */
+    const press = `(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const selected = () => document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null
+      for (let attempt = 0; attempt < 60 && document.querySelector('#tree li[data-kind="workspace"]') === null; attempt += 1) await wait(150)
+      await wait(300)
+      const before = selected()
+      document.getElementById('new-session').click()
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        await wait(150)
+        const now = selected()
+        if (now !== null && now !== before) break
+      }
+      await wait(700)
+      return JSON.stringify({ before, after: selected(), rows: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId), note: document.getElementById('tree-note')?.textContent ?? '' })
+    })()`
+    const rows = `JSON.stringify([...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId))`
+
+    clientA = await openBrowser()
+    await clientA.goto(live.url)
+    await clientA.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const a = JSON.parse(await clientA.evaluate(press, 20_000))
+    assert.ok(typeof a.after === 'string' && a.after !== a.before, `client A's New session opens a session\nsaw: ${JSON.stringify(a)}`)
+
+    clientB = await openBrowser()
+    await clientB.goto(live.url)
+    await clientB.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    const b = JSON.parse(await clientB.evaluate(press, 20_000))
+    assert.ok(typeof b.after === 'string', `client B's New session opens a session\nsaw: ${JSON.stringify(b)}`)
+    assert.notEqual(b.after, a.after, `client B's New session is not client A's session\nA: ${JSON.stringify(a)}\nB: ${JSON.stringify(b)}`)
+    const again = JSON.parse(await clientB.evaluate(press, 20_000))
+    assert.ok(typeof again.after === 'string' && again.after !== b.after && again.after !== a.after, `a second press makes another, as DSH's does\nsaw: ${JSON.stringify(again)}`)
+
+    const listed = (await call('/api/sessions')).body.filter((meta) => meta.cwd === branch)
+    const ids = new Set(listed.map((meta) => meta.id))
+    assert.ok([a.after, b.after, again.after].every((id) => ids.has(id)), `the server holds all three sessions\nsaw: ${JSON.stringify([...ids])}`)
+    assert.equal(listed.find((meta) => meta.id === a.after)?.turns ?? 0, 0, "and client A's is still empty, waiting for A")
+
+    /**
+     * Each client's rows: only its own open blank, never the other's nor an older one of its own. A turn elsewhere makes both
+     * pages redraw their trees from the server, so the rows below are drawn from the same list.
+     */
+    const turn = await server.post('/api/turn', { prompt: 'a turn somewhere else, so both trees redraw', folder: elsewhere })
+    assert.equal(turn.status, 200, `a turn elsewhere runs (${String(JSON.stringify(turn.body)).slice(0, 300)})`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const rowsA = JSON.parse(await clientA.evaluate(rows))
+    const rowsB = JSON.parse(await clientB.evaluate(rows))
+    assert.ok(rowsA.includes(a.after), `client A still sees its own blank\nsaw: ${JSON.stringify(rowsA)}`)
+    assert.ok(!rowsA.includes(b.after) && !rowsA.includes(again.after), `and none of client B's\nsaw: ${JSON.stringify(rowsA)}`)
+    assert.deepEqual(
+      rowsB.filter((id) => [a.after, b.after, again.after].includes(id)),
+      [again.after],
+      `client B sees its open blank only: not A's, not its own older one\nsaw: ${JSON.stringify(rowsB)}`,
+    )
+  } finally {
+    await clientA?.close()
+    await clientB?.close()
+    server?.live.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(elsewhere)
+  }
+})
+
 test('the panel follows the selection: a session offers two views, a file one, and a folder changes nothing', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
@@ -3749,16 +3892,23 @@ test('content search finds a phrase inside an answer, ranked and quoted the way 
 })
 
 test('View options groups the sessions the two ways DSH offers: the tree, or one list', async (context) => {
-  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const h = harness('session-grouping')
   let live
   let browser
   try {
     await conventionsFixture(h)
+    /**
+     * Two conversations, each with a turn. Empty ones would not do: DSH draws a blank session as a row only while it is
+     * the open one (sessionVisible, dsh-client-ui-workspace lib/client.js:959-966), in the tree and in the list alike, and
+     * this page follows it, so two blanks would be one row whichever grouping is chosen. What is judged here is the grouping.
+     */
     for (const name of ['one', 'two']) {
       const made = await runCli(adminArgs(h, ['session', 'new', join(h.work, '_tools_', name), '--json']), { env: h.env, cwd: h.work })
       assert.equal(made.code, 0, made.stderr)
+      const turn = await runCli(adminArgs(h, ['--turn', `a conversation in ${name}`]), { env: h.env, cwd: join(h.work, '_tools_', name) })
+      assert.equal(turn.code, 0, turn.stderr)
     }
     live = await startServer(
       ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],

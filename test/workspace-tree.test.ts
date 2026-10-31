@@ -33,9 +33,12 @@ interface Tree {
   flatten: (groups: Group[]) => Group[]
   containsSession: (group: Group, id: string | null, deep?: boolean) => boolean
   shownCount: (sessions: unknown[], watermark: number, options?: Record<string, unknown>) => number
+  watermarkRows: (sessions: { id: string }[], watermark: number) => { rows: { id: string }[]; hidden: number; conversations: number }
   nextWatermark: (total: number, shown: number) => number
-  overflow: (total: number, shown: number) => 'more' | 'less' | null
+  overflow: (total: number, shown: number, baseline?: number) => 'more' | 'less' | null
+  overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
+  hiddenBlank: (meta: unknown, current: unknown) => boolean
   rowStatus: (facts?: { pending?: string; running?: boolean; completed?: boolean }) => { state: string; label: string; trailingLabel?: string }
   completionUnread: (unread: boolean, change: { wasRunning?: boolean; running?: boolean; viewing?: boolean }) => boolean
 }
@@ -116,6 +119,44 @@ test('a subagent\'s session is hidden, and the archive filter has DSH\'s three s
   assert.deepEqual(ids(tree.deriveGroups(workspaces, sessions, { archived: 'only' })[0]), ['s-archived'])
 })
 
+test('only the open New session placeholder is a row, and it leads; a titled, pinned or running zero-turn session stays', () => {
+  /**
+   * DSH's `sessionVisible` (dsh-client-ui-workspace lib/client.js:959-966): among blank sessions only the current one is
+   * visible. New session makes a fresh blank on every press, so the older ones, and another client's, must not be rows.
+   */
+  const workspaces = [
+    workspace('w', '/w', { sessionIds: ['s-talked', 's-blank-old', 's-blank-new', 's-pinned', 's-titled', 's-blank-other', 's-pinned-blank', 's-running'] }),
+  ]
+  const sessions = [
+    session('s-blank-new', 9, { turns: 0 }),
+    session('s-running', 6, { turns: 0, running: true }),
+    session('s-talked', 5),
+    session('s-titled', 4, { turns: 0, title: 'named on purpose' }),
+    session('s-pinned', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
+    session('s-pinned-blank', 2, { turns: 0, pinned: true, pinnedAt: '2026-10-28T08:00:00.000Z' }),
+    session('s-blank-old', 1, { turns: 0 }),
+    session('s-blank-other', 0, { turns: 0, cwd: '/w/other' }),
+  ]
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: 's-talked' })[0]),
+    ['s-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'with an ordinary session open, no placeholder is a row, in any folder, newest or not',
+  )
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: 's-blank-old' })[0]),
+    ['s-blank-old', 's-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'the open placeholder is the only one shown, and it leads, ahead of the pins',
+  )
+  assert.deepEqual(
+    ids(tree.deriveGroups(workspaces, sessions, { current: null })[0]),
+    ['s-pinned', 's-pinned-blank', 's-running', 's-talked', 's-titled'],
+    'with nothing open, no placeholder is a row',
+  )
+  assert.equal(ids(tree.deriveGroups(workspaces, sessions)[0]).length, 8, 'a caller that names no open session sees every row, as before')
+  assert.equal(tree.hiddenBlank(sessions[0], 's-talked'), true, 'the flat list asks the same rule')
+  assert.equal(tree.hiddenBlank(sessions[0], 's-blank-new'), false)
+})
+
 test('archived only drops a workspace with nothing archived, and its child rises to the nearest shown level', () => {
   const workspaces = [workspace('w-child', '/r/c', { parent: 'w-root', sessionIds: ['s-old'] }), workspace('w-root', '/r', { sessionIds: ['s-live'] })]
   const sessions = [session('s-old', 1, { archived: true }), session('s-live', 2)]
@@ -149,6 +190,39 @@ test('Show more: five rows, raised to the last running or open session within fi
   assert.equal(tree.overflow(4, 4), null, 'a short list has no control')
   assert.equal(tree.overflow(12, 5), 'more')
   assert.equal(tree.overflow(12, 12), 'less', 'after the last batch the control folds it back')
+})
+
+test('Show more counts conversations: the open New session is drawn on top of five, and the control names how many it hides', () => {
+  /**
+   * DSH's `watermarkRows` (dsh-client-ui-workspace lib/client.js:2807-2819) shows every blank row plus the first
+   * `watermark` non-blank rows, and its control reads `Show {n} more sessions` with the hidden count (`:3325`, `:4897`).
+   * #54: the page took the five places over the whole list, blank or not, and its control said only `Show more`.
+   */
+  const blank = session('s-blank', 59, { turns: 0 })
+  const talked = Array.from({ length: 12 }, (_, index) => session(`s-${12 - index}`, 40 - index))
+  const list = [blank, ...talked]
+  const mark = tree.shownCount(list, tree.INITIAL, { current: 's-blank' })
+  assert.equal(mark, 5, 'the open placeholder does not raise the watermark, nor take a place under it')
+  const drawn = tree.watermarkRows(list, mark)
+  assert.deepEqual(
+    drawn.rows.map((meta) => meta.id),
+    ['s-blank', 's-12', 's-11', 's-10', 's-9', 's-8'],
+    'the placeholder and the five newest conversations',
+  )
+  assert.equal(drawn.hidden, 7, 'seven conversations stay behind the control')
+  assert.equal(drawn.conversations, 12)
+  assert.equal(tree.overflow(drawn.conversations, mark), 'more')
+  assert.equal(tree.overflowLabel('more', drawn.hidden), 'Show 7 more sessions', "DSH's words, with the count")
+  const next = tree.nextWatermark(drawn.conversations, mark)
+  assert.equal(tree.watermarkRows(list, next).hidden, 2, 'a click shows five more')
+  const all = tree.nextWatermark(drawn.conversations, next)
+  assert.equal(tree.watermarkRows(list, all).hidden, 0, 'and the last batch shows the rest')
+  assert.equal(tree.overflow(drawn.conversations, all), 'less')
+  assert.equal(tree.overflowLabel('less', 0), 'Show less')
+  assert.equal(tree.overflow(5, 5), null, 'five conversations and a placeholder need no control')
+  assert.equal(tree.overflow(12, 12, 12), null, 'nor do rows the open conversation already raised into view')
+  const raised = tree.shownCount(talked, tree.INITIAL, { current: 's-2' })
+  assert.equal(raised, 11, 'an open conversation further down still raises the watermark to itself')
 })
 
 test('a group knows whether it, or a group under it, holds the open session', () => {
