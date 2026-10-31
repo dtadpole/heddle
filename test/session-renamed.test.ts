@@ -49,3 +49,24 @@ test("every title the store writes is announced after the write: the first messa
     { id, title: '', stored: undefined },
   ])
 })
+
+test('a rename listener that throws is logged, and the title it announced still lands', () => {
+  /** developer-eight's review: the first-message fallback renames inside userContent, which a throwing listener failed. */
+  const sessions = new SessionService(new Context(), { root: join(scratch, 'throwing') }, {
+    onRenamed: () => {
+      throw new Error('listener down')
+    },
+  })
+  const handle = sessions.start({ cwd: scratch })
+  const written: string[] = []
+  const write = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: string | Uint8Array) => (written.push(String(chunk)), true)) as typeof process.stderr.write
+  try {
+    assert.doesNotThrow(() => sessions.user(handle, PROMPT), 'the message is recorded')
+    assert.doesNotThrow(() => sessions.rename(handle.id, 'named by a person'), 'and a rename returns')
+  } finally {
+    process.stderr.write = write
+  }
+  assert.equal(sessions.list().find((meta) => meta.id === handle.id)?.title, 'named by a person', 'each title landed')
+  assert.equal(written.filter((line) => line.includes('a rename listener failed') && line.includes('listener down')).length, 2, 'and each failure was logged')
+})
