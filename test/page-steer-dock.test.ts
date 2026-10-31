@@ -247,3 +247,22 @@ test('#31: a view that drew the steer before its 200 leaves one row, and the cla
   dock.claim('X', 's2')
   assert.equal(dock.queue('X').length, 0, 'every copy retires on its claim')
 })
+
+test('#31: two views asked before the 200, served out of order around the queueing, cannot retire the waiting row', async () => {
+  // developer-twelve's combined race: view A is asked first but served after the steer was queued (it lists it);
+  // view B is asked second but served before (empty) and answers last.
+  for (const how of ['composer', 'row', 'batch'] as const) {
+    const dock = harness()
+    if (how !== 'composer') dock.push('X', 'row')
+    const sent = how === 'composer' ? dock.deliverSteered('row') : how === 'row' ? dock.steerItem('row') : dock.steerQueue()
+    const askedA = dock.ask()
+    const askedB = dock.ask()
+    dock.reconcile('X', { turns: [], pendingSteers: [{ steerId: 's1', text: 'row' }] }, askedA)
+    dock.answer({ status: 200, steerId: 's1' })
+    await sent
+    dock.reconcile('X', { turns: [], pendingSteers: [] }, askedB)
+    assert.deepEqual(shape(dock.queue('X')), ['row:steering'], `${how}: the still-waiting steer keeps its one row`)
+    dock.claim('X', 's1')
+    assert.equal(dock.queue('X').length, 0, `${how}: and its claim retires it`)
+  }
+})

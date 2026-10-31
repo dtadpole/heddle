@@ -6504,9 +6504,13 @@ function retireSteer(session, steerId) {
 function settleSteered(queue, key, id, steerId) {
   const at = queue.findIndex((entry) => entry.id === id)
   if (at === -1) return
-  const drawn = steerId !== '' && queue.some((entry, index) => index !== at && entry.steerId === steerId)
-  if (steerId === '' || claimedFor(key).has(steerId) || drawn) queue.splice(at, 1)
-  else {
+  const drawn = steerId === '' ? undefined : queue.find((entry, index) => index !== at && entry.steerId === steerId)
+  if (steerId === '' || claimedFor(key).has(steerId) || drawn !== undefined) {
+    queue.splice(at, 1)
+    // The surviving row takes this answer's tick: the answer proves the steer was queued before any view asked for
+    // from now on, so an older view's silence can no longer retire it (developer-twelve's combined GET/POST race).
+    if (drawn !== undefined) drawn.acceptedAt = ++steerClock
+  } else {
     queue[at].status = 'steering'
     queue[at].steerId = steerId
     queue[at].acceptedAt = ++steerClock
@@ -6520,9 +6524,11 @@ function settleSteered(queue, key, id, steerId) {
  *
  * - The view's claimed user rows (`steerId`) join the known claims, and every row they name retires.
  * - A waiting steer (`pendingSteers`) that is not known claimed and has no row gets one, once.
- * - A row the view does not list retires only when the view was asked for after the row was accepted: the server
- *   queues a steer before it answers, so such a view would list it if it still waited. An older view's silence
- *   proves nothing and is ignored.
+ * - A row the view does not list retires only when the view was asked for after the row was accepted, where
+ *   "accepted" is the tick at which this page got proof the steer was queued: its 200, or the answer of a view that
+ *   listed it. A view asked for after that proof was served after the queueing, so it would list the steer if it still
+ *   waited. The order views were asked in says nothing about the order they were served in, so a view's own ask tick
+ *   is never a row's acceptance.
  *
  * Called when a session is opened and after the event stream reconnects, so a claim missed while the stream was down,
  * a reload, or a second tab all end with the dock DSH's queue would show.
@@ -6557,7 +6563,8 @@ function reconcileSteers(session, body, askedAt) {
       attachments: [],
       status: 'steering',
       steerId: entry.steerId,
-      acceptedAt: typeof askedAt === 'number' ? askedAt : undefined,
+      // Proof of queueing arrived now, with this answer: not when the view was asked for.
+      acceptedAt: ++steerClock,
     })
     changed = true
   }

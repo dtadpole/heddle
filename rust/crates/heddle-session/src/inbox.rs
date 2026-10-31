@@ -177,7 +177,10 @@ pub fn has_pending_step(store: &SessionStore, handle: &SessionHandle) -> Result<
 /// So no steer is queued after the loop stopped looking and before the turn ends. Measured window before
 /// (developer-ten's review): a steer accepted between the loop's last check and the server's running count
 /// dropping waited in the inbox until the person sent something else. In memory only, keyed by session id (a
-/// gate belongs to a live turn of this process). `steerGates` in `src/session/inbox.ts` is the twin.
+/// gate belongs to a live turn of this process). `steerGates` in `src/session/inbox.ts` is the twin; it is kept
+/// per store, this one is global by design, which is the same because session ids are UUIDs (developer-eight's
+/// review). The one lock serializes gate checks across sessions, which is cheap at today's volume; a per-session
+/// lock would keep the same guarantee if it ever matters.
 static STEER_GATES: std::sync::Mutex<std::collections::BTreeSet<String>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
