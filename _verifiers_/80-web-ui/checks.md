@@ -45,7 +45,10 @@ grounded_in:
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
-  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections; its
+  search matching a title or a workspace name, twenty at most, revealing a chosen hit, and, while `/api/sessions`
+  fails, listing the rows the tree holds rather than "No matching sessions", then reading again on the next search
+  (#58).
 
 ## What it deliberately does not judge
 

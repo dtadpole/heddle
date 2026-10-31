@@ -11073,21 +11073,43 @@ async function toggle(node, li) {
  * Held until `refreshSessions` says the set changed, because a keystroke should not refetch three endpoints, and
  * rebuilt rather than patched when it does change — a stale index would answer a search with sessions that no
  * longer exist and miss the ones that do.
+ *
+ * Only reads that **arrived** are held (#58). A failed one — no network, or `/api/sessions` answering an error — was
+ * kept as an empty index, so the search said `No matching sessions` beside a tree full of them and went on saying it
+ * after the network was back. DSH's title and workspace matches cannot fail that way: they are computed over the
+ * session list the client already holds (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169-1187`),
+ * and only the content request can fail (its README, Search). So a failed read is not kept, the next search asks again,
+ * and this search runs over what the page already holds: the sessions the tree is drawn with, else the last index that
+ * arrived. With neither it is `null`, and the search says it could not run rather than that nothing matched.
  */
 let searchIndex = null
+/** The last index whose reads all arrived, for a failed read to fall back to; `refreshSessions` does not drop it. */
+let heldIndex = null
+
+/** The tree's own rows as an index — what the reader sees beside the search box — or `null` when it draws none. */
+function treeIndex() {
+  if (groupingMode === 'list') return null
+  const sessions = []
+  const workspaces = []
+  for (const group of WorkspaceTree.flatten(treeGroups)) {
+    sessions.push(...group.sessions)
+    if (group.workspace !== null) workspaces.push({ ...group.workspace, sessionIds: group.sessions.map((meta) => meta.id) })
+  }
+  return sessions.length === 0 ? null : { sessions, roots: heldIndex?.roots ?? [], workspaces }
+}
 
 async function loadSearchIndex() {
   if (searchIndex !== null) return searchIndex
-  const [sessions, treeBody, workspaceBody] = await Promise.all([
-    fetch('/api/sessions').then((response) => (response.ok ? response.json() : [])).catch(() => []),
-    fetch('/api/tree').then((response) => (response.ok ? response.json() : { children: [] })).catch(() => ({ children: [] })),
-    fetch('/api/workspaces').then((response) => (response.ok ? response.json() : { workspaces: [] })).catch(() => ({ workspaces: [] })),
-  ])
+  /** A body, `null` for an answer that is not 2xx, `undefined` for a request that got no answer. */
+  const read = (url) => fetch(url).then((response) => (response.ok ? response.json() : null)).catch(() => undefined)
+  const [sessions, treeBody, workspaceBody] = await Promise.all([read('/api/sessions'), read('/api/tree'), read('/api/workspaces')])
+  if (!Array.isArray(sessions) || treeBody === undefined || workspaceBody === undefined) return treeIndex() ?? heldIndex
   searchIndex = {
-    sessions: Array.isArray(sessions) ? sessions : [],
-    roots: (treeBody.children ?? []).map((node) => ({ path: node.path, title: node.label })),
+    sessions,
+    roots: (treeBody?.children ?? []).map((node) => ({ path: node.path, title: node.label })),
     workspaces: Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : [],
   }
+  heldIndex = searchIndex
   return searchIndex
 }
 
@@ -11131,9 +11153,18 @@ async function applySearch() {
   }
   const index = await loadSearchIndex()
   if (generation !== searchGeneration) return
-  const { items, hasMore } = WorkspaceTree.search(index.workspaces, index.sessions, query, { archived: archiveMode })
   treeList.hidden = true
   results.hidden = false
+  if (index === null) {
+    /** Nothing read and nothing held: the search did not run, which is not the same as finding nothing (#58). */
+    results.replaceChildren()
+    note.hidden = false
+    note.textContent = 'Search could not run: the session list did not load'
+    more.hidden = true
+    more.textContent = ''
+    return
+  }
+  const { items, hasMore } = WorkspaceTree.search(index.workspaces, index.sessions, query, { archived: archiveMode })
   results.replaceChildren(
     ...items.map(({ meta, workspace }) => {
       const button = document.createElement('button')
@@ -11228,6 +11259,10 @@ async function renderFlatList() {
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
+  if (index === null) {
+    setNote('could not read the sessions')
+    return
+  }
   const visible = index.sessions.filter((meta) => {
     const archived = meta.archived === true
     if (archiveMode === 'only') return archived

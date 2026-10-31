@@ -349,3 +349,84 @@ test('the sidebar search finds a title or a workspace name, lists twenty at most
     for (const dir of [home, root, other]) removeDir(dir)
   }
 })
+
+/**
+ * A failed read is not an empty store (#58). DSH's title and workspace matches are computed over the session list the
+ * client already holds (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169-1187`), so a network failure
+ * cannot make them say nothing matched; only the content request can fail (its README, Search). The page used to keep a
+ * failed `/api/sessions` read as an empty index: `No matching sessions` beside a tree listing the sessions, and again
+ * after the network was back, until something re-read the session list.
+ *
+ * The browser's own `fetch` is switched to fail `/api/sessions` the way a lost network does, for one search, then back.
+ */
+test('a search while /api/sessions fails lists the rows the tree holds, and the same search afterwards reads the sessions again', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('tree-search-offline')
+  const root = fixtureDir('tree-search-offline-repo')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    for (const title of ['Kestrel plan', 'Kestrel notes', 'weekly sync']) {
+      const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root, title }) })
+      assert.equal(made.status, 200, `created ${title} (${JSON.stringify(made.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+    }
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor('document.querySelectorAll(\'#tree li[data-kind="session"]\').length >= 3', 15_000)
+
+    /** While `__sessionsDown` is set, the page's `/api/sessions` requests fail as a request with no network does. */
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.__sessionsDown = true
+      window.__sessionReads = 0
+      window.fetch = (input, init) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href)
+        if (url.pathname === '/api/sessions' && (init?.method ?? 'GET') === 'GET') {
+          window.__sessionReads += 1
+          if (window.__sessionsDown) return Promise.reject(new TypeError('Failed to fetch'))
+        }
+        return real(input, init)
+      }
+      return true
+    })()`)
+
+    const searchFor = async (query) => {
+      await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+      await new Promise((done) => setTimeout(done, 800))
+      return JSON.parse(await browser.evaluate(`JSON.stringify({
+        treeHidden: document.getElementById('tree').hidden,
+        hits: [...document.querySelectorAll('#search-results .hit')].map((hit) => hit.querySelector('.hit-title').textContent),
+        note: document.getElementById('search-note').hidden ? null : document.getElementById('search-note').textContent,
+      })`))
+    }
+
+    const offline = await searchFor('kestrel')
+    await browser.evaluate('(() => { window.__sessionsDown = false; return true })()')
+    const online = await searchFor('kestrel')
+    const reads = await browser.evaluate('window.__sessionReads')
+    assert.deepEqual(
+      { offline, online },
+      {
+        offline: { treeHidden: true, hits: ['Kestrel notes', 'Kestrel plan'], note: null },
+        online: { treeHidden: true, hits: ['Kestrel notes', 'Kestrel plan'], note: null },
+      },
+      `during the failure the search lists the tree's matching rows with no "No matching sessions", and the same search after it finds them from a fresh read (page reads of /api/sessions: ${reads})`,
+    )
+    assert.ok(reads >= 2, `the failed read was not kept: the search after it asked again (page reads of /api/sessions: ${reads})`)
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
+  }
+})
