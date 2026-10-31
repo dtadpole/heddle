@@ -36,6 +36,7 @@ interface Tree {
   nextWatermark: (total: number, shown: number) => number
   overflow: (total: number, shown: number) => 'more' | 'less' | null
   sessionOrder: (left: unknown, right: unknown) => number
+  flatList: (sessions: unknown[], options?: Record<string, unknown>) => { id: string }[]
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -138,6 +139,35 @@ test('pinned sessions lead, and each part is by last update alone: pin time does
   const order = [...sessions].sort(tree.sessionOrder).map((meta) => meta.id)
   /** An archived row carries no pin (DSH keeps the two sets exclusive), so it sorts by its age among the rest. */
   assert.deepEqual(order, ['s-pin-untimed', 's-pin-new', 's-pin-old', 's-archived-pin', 's-recent', 's-older'])
+})
+
+/**
+ * R-developer-eight-17 (DSH parity C13): `In one list` ordered pins by when the sessions were created, so two pins read
+ * in one order in the tree and in the other order in the flat list. DSH fronts a new pin in the group and in the flat list
+ * alike (`dsh-client-ui-workspace` `pinSessionOrder`), so the flat list takes the tree's rule: the newest pin first, then
+ * the last write, newest first.
+ */
+test('the flat list orders like the tree: the newest pin first, then the most recently updated', () => {
+  const sessions = [
+    /** Created first, written last: an unpinned row that leads the rest by its last write, not its creation. */
+    { ...session('s-written-last', 1), updated: '2026-10-28T10:59:00.000Z' },
+    /** Created before the other pin, pinned after it: the later pin leads. */
+    session('s-pin-later', 2, { pinned: true, pinnedAt: '2026-10-28T11:30:00.000Z' }),
+    session('s-pin-earlier', 3, { pinned: true, pinnedAt: '2026-10-28T11:00:00.000Z' }),
+    session('s-untouched', 4),
+    session('s-archived', 5, { archived: true }),
+  ]
+  const workspaces = [workspace('w', '/w', { sessionIds: sessions.map((meta) => meta.id) })]
+  const treeOrder = ids(tree.deriveGroups(workspaces, sessions)[0])
+  const flatOrder = tree.flatList(sessions).map((meta) => meta.id)
+  assert.deepEqual(flatOrder, ['s-pin-later', 's-pin-earlier', 's-written-last', 's-untouched'], 'the later pin first, then by last write; archived hidden')
+  assert.deepEqual(flatOrder, treeOrder, 'and the same order the tree draws for the same sessions')
+  assert.deepEqual(
+    tree.flatList(sessions, { archived: 'show' }).map((meta) => meta.id),
+    ['s-pin-later', 's-pin-earlier', 's-written-last', 's-archived', 's-untouched'],
+    'show lists the archived row by its age among the rest',
+  )
+  assert.deepEqual(tree.flatList(sessions, { archived: 'only' }).map((meta) => meta.id), ['s-archived'], 'only lists the archived rows')
 })
 
 test('Show more: five rows, raised to the last running or open session within fifty, five more per click', () => {

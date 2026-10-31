@@ -11447,8 +11447,11 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
 })
 
 /**
- * DSH's `In one list`: every session in one flat column, newest first, pinned first — the same order the tree uses
- * inside a branch, without the folders.
+ * DSH's `In one list`: every session in one flat column, pinned first, in **the tree's rule for the selected order**
+ * (`WorkspaceTree.flatRows`, the same `arrange` and `rowsOf` a group uses), so the two views cannot drift apart again
+ * (C13): under Last updated each part goes by its latest prompt, pin time aside; under Manual by the flat list's own
+ * saved sequence, which a pin fronts as it fronts the group's (DSH `deriveFlat` / `pinOrderAccounts`,
+ * dsh-client-ui-workspace/lib/client.js:1146-1154, 1343-1345). Each row's age is the stamp Last updated sorts by.
  *
  * It is a **reading** list rather than a second tree: a row opens its session, and the hover controls that need a
  * session's definition folder stay on the tree's rows, where that folder is known. A flat row that offered a rename it
