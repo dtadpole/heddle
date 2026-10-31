@@ -44,6 +44,9 @@ pub mod names {
     pub const CANCELLED: &str = "cancelled";
     /// A turn that failed, on its own response.
     pub const ERROR: &str = "error";
+    /// A detached turn's verdict on `/api/events`, `{turn, outcome, session, …}`. `outcome` is `done`,
+    /// `cancelled` or `error`, and the other fields are those frames' own, without the answer's text (#128).
+    pub const TURN: &str = "turn";
 }
 
 /// One SSE frame: a name and its data, already serialized to one line of JSON, and the id the hub gave it

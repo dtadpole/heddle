@@ -1,8 +1,8 @@
 ---
 title: The heddle-server crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T05:45:53Z
-version: 0.4.5
+modified: 2026-10-31T11:40:38Z
+version: 0.4.6
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -26,7 +26,8 @@ The Rust port of the HTTP server, the token, the live stream and the page it ser
 builder with the whole `CORE_ROUTES` table driven through `tower::ServiceExt` with a doubled `Harness`.
 `cargo test -p heddle-server` is green (144 tests). The door is judged over a real socket as
 well as through `tower::ServiceExt`, and `/api/turn` is judged end to end: its session events and
-its `done` frame in one streamed response.
+its `done` frame in one streamed response, or, with `detach: true` (what the page sends, #128), a `202
+{session, turn}` at acceptance and the verdict as a numbered `turn` frame on `/api/events`.
 
 The routes answer through the `services` traits, so the crate builds and is tested before the service
 crates exist.

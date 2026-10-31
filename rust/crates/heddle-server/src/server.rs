@@ -63,7 +63,7 @@ use crate::runs::{RunRegistry, iso_time};
 use crate::selection::{SessionSelection, session_request_selection, turn_selection};
 use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
-    ServiceError, SessionMeta, StartSession,
+    ServiceError, SessionMeta, SessionService, StartSession,
 };
 use crate::stream::{self, EventHub, SseFrame, names, sse_response};
 use crate::token::{
@@ -2111,6 +2111,34 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let runner = state.harness().turns.clone();
     let sessions = state.harness().sessions.clone();
+    if body.bool("detach") == Some(true) {
+        // Detached (#128): the answer is `202 {session, turn}` now, and the turn's verdict goes out on
+        // `/api/events` as a `turn` frame. A browser allows six connections per host, shared by every tab,
+        // and a turn that holds its own response open for minutes holds one of them, so five running turns
+        // stalled every other request of the page. The verdict goes through the hub's log after every event
+        // the turn published, so it is replayed to a page that reconnects and never arrives before the
+        // answer it closes. Without `detach` the response streams as before.
+        let turn_id = stream::new_client_id();
+        let hub = state.events().clone();
+        let turn_session = session.clone();
+        let verdict_turn = turn_id.clone();
+        tokio::spawn(async move {
+            let outcome = runner.run_turn(request).await;
+            drop(guard);
+            let (outcome_name, mut verdict, failure) =
+                turn_verdict(outcome, cancel.is_cancelled(), &turn_session, false);
+            verdict.insert("turn".into(), Value::String(verdict_turn));
+            verdict.insert("outcome".into(), Value::String(outcome_name.to_owned()));
+            hub.push(names::TURN, &Value::Object(verdict));
+            if let Some(message) = failure {
+                record_turn_failure(sessions.as_ref(), &turn_session, message);
+            }
+        });
+        return respond::json(
+            StatusCode::ACCEPTED,
+            &json!({"session": session, "turn": turn_id}),
+        );
+    }
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
@@ -2155,57 +2183,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         // stream had taken the text (16db838) made a page more likely to handle `done` mid-answer, which is
         // the window in which page.html's renderSettledAnswers overwrites a growing row (80 check-chat-view
         // #16): measured on a cold-browser harness, 5 failures in 200 with the wait and 1 in 200 without.
-        let stopped = || {
-            SseFrame::new(
-                names::CANCELLED,
-                &json!({"session": stream_session, "message": "stopped"}),
-            )
-        };
-        match outcome {
-            None => {}
-            Some(Ok(outcome)) => {
-                if cancel.is_cancelled() {
-                    let _ = sender.send(stopped());
-                } else {
-                    let mut done = Map::new();
-                    done.insert("session".into(), Value::String(stream_session));
-                    done.insert("text".into(), Value::String(outcome.text));
-                    done.insert("finishReason".into(), Value::String(outcome.finish_reason));
-                    done.insert("rounds".into(), Value::from(outcome.rounds));
-                    done.insert("denials".into(), Value::Array(outcome.denials));
-                    if let Some(ended) = outcome.ended {
-                        done.insert(
-                            "ended".into(),
-                            Value::Array(ended.into_iter().map(Value::String).collect()),
-                        );
-                    }
-                    if let Some(usage) = outcome.usage {
-                        done.insert("usage".into(), usage);
-                    }
-                    let _ = sender.send(SseFrame::new(names::DONE, &Value::Object(done)));
-                }
-            }
-            Some(Err(error)) => {
-                if cancel.is_cancelled() {
-                    let _ = sender.send(stopped());
-                } else {
-                    let _ = sender.send(SseFrame::new(
-                        names::ERROR,
-                        &json!({"session": stream_session, "message": error.message.clone()}),
-                    ));
-                    // Recorded as well, so the failure reaches every client and every later read
-                    // (R-developer-six-2, DSH's api-session/error); web.ts appends the same `turn/failed`.
-                    if let Err(failure) = sessions.record(
-                        &stream_session,
-                        "turn/failed",
-                        json!({"message": error.message}),
-                    ) {
-                        eprintln!(
-                            "heddle web: the failed turn could not be recorded: {}",
-                            failure.message
-                        );
-                    }
-                }
+        if let Some(outcome) = outcome {
+            let (name, frame, failure) =
+                turn_verdict(outcome, cancel.is_cancelled(), &stream_session, true);
+            let _ = sender.send(SseFrame::new(name, &Value::Object(frame)));
+            if let Some(message) = failure {
+                record_turn_failure(sessions.as_ref(), &stream_session, message);
             }
         }
     });
@@ -2213,6 +2196,60 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         receiver.recv().await.map(|frame| (frame, receiver))
     });
     sse_response(stream)
+}
+
+/// The frame a turn ends with, `(name, data, failure)`: `done` with what the loop returned, `cancelled` for a
+/// stopped turn (including a loop that noticed the abort and returned a result), or `error`, whose message
+/// comes back as `failure` for the caller to record as `turn/failed`. `with_text` is false for a detached
+/// turn's verdict on `/api/events`, which already carried the answer as the session's own events, so the
+/// stream's log does not keep a second copy (web.ts's `turnVerdict` is the same rule).
+fn turn_verdict(
+    outcome: Result<crate::services::TurnOutcome, ServiceError>,
+    cancelled: bool,
+    session: &str,
+    with_text: bool,
+) -> (&'static str, Map<String, Value>, Option<String>) {
+    let mut frame = Map::new();
+    frame.insert("session".into(), Value::String(session.to_owned()));
+    if cancelled {
+        frame.insert("message".into(), Value::String("stopped".into()));
+        return (names::CANCELLED, frame, None);
+    }
+    match outcome {
+        Ok(outcome) => {
+            if with_text {
+                frame.insert("text".into(), Value::String(outcome.text));
+            }
+            frame.insert("finishReason".into(), Value::String(outcome.finish_reason));
+            frame.insert("rounds".into(), Value::from(outcome.rounds));
+            frame.insert("denials".into(), Value::Array(outcome.denials));
+            if let Some(ended) = outcome.ended {
+                frame.insert(
+                    "ended".into(),
+                    Value::Array(ended.into_iter().map(Value::String).collect()),
+                );
+            }
+            if let Some(usage) = outcome.usage {
+                frame.insert("usage".into(), usage);
+            }
+            (names::DONE, frame, None)
+        }
+        Err(error) => {
+            frame.insert("message".into(), Value::String(error.message.clone()));
+            (names::ERROR, frame, Some(error.message))
+        }
+    }
+}
+
+/// Record a failed turn as `turn/failed`, so the failure reaches every client and every later read
+/// (R-developer-six-2, DSH's api-session/error); web.ts appends the same record.
+fn record_turn_failure(sessions: &dyn SessionService, session: &str, message: String) {
+    if let Err(failure) = sessions.record(session, "turn/failed", json!({"message": message})) {
+        eprintln!(
+            "heddle web: the failed turn could not be recorded: {}",
+            failure.message
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3986,6 +4023,170 @@ mod tests {
             .id
             .clone();
         assert!(!state.runs().is_running(&session));
+    }
+
+    /// A turn runner that publishes one delta, then waits until the test releases it, so a detached turn can be
+    /// watched while it is still running (#128).
+    struct HeldTurns {
+        hub: Arc<std::sync::OnceLock<EventHub>>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl TurnRunner for HeldTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let hub = Arc::clone(&self.hub);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                let publish = |event: Value| {
+                    if let Some(hub) = hub.get() {
+                        hub.publish_session_event(&request.session, &event);
+                    }
+                };
+                publish(
+                    json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "held"}}),
+                );
+                release.notified().await;
+                publish(json!({"type": "turn/completed"}));
+                Ok(TurnOutcome {
+                    text: "held".into(),
+                    finish_reason: "stop".into(),
+                    rounds: 1,
+                    denials: vec![json!({"tool": "bash", "code": "denied", "message": "no"})],
+                    ended: Some(vec!["max-rounds".into()]),
+                    usage: None,
+                })
+            })
+        }
+    }
+
+    /// A browser allows six connections per host across all its tabs, so a turn that keeps its response open
+    /// holds one for as long as it runs (#128). Detached, the turn answers `202 {session, turn}` while it is
+    /// still running, and its verdict is a numbered `turn` frame on `/api/events`, after the turn's own events
+    /// and without the answer's text.
+    #[tokio::test]
+    async fn a_detached_turn_answers_at_acceptance_and_its_verdict_follows_its_events() {
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut held = harness();
+        held.turns = Arc::new(HeldTurns {
+            hub: Arc::clone(&hub),
+            release: Arc::clone(&release),
+        });
+        let builder = ServerBuilder::new(
+            held,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached")),
+                ..ServerOptions::default()
+            },
+        );
+        let _ = hub.set(builder.events());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, bytes) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            post_json(
+                &router,
+                "/api/turn",
+                &cookie,
+                r#"{"prompt":"go","detach":true}"#,
+            ),
+        )
+        .await
+        .expect("the answer came while the turn was still running");
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let session = body["session"].as_str().expect("the session").to_owned();
+        let turn = body["turn"].as_str().expect("the turn id").to_owned();
+        assert!(!turn.is_empty());
+        assert!(state.runs().is_running(&session), "accepted and running");
+
+        release.notify_one();
+        let mut seen = Vec::new();
+        let verdict = loop {
+            let (event, data, id) = next_pushed(&mut pushed).await;
+            match event.as_str() {
+                "turn" => {
+                    assert!(id.is_some(), "numbered, so a reconnect replays it");
+                    break data;
+                }
+                "session" => seen.push(data["event"]["type"].as_str().unwrap_or("").to_owned()),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            seen,
+            vec!["assistant/chunk", "turn/completed"],
+            "the verdict follows the turn's own events"
+        );
+        assert_eq!(verdict["turn"], json!(turn));
+        assert_eq!(verdict["outcome"], json!("done"));
+        assert_eq!(verdict["session"], json!(session));
+        assert_eq!(verdict["denials"][0]["tool"], json!("bash"));
+        assert_eq!(verdict["ended"], json!(["max-rounds"]));
+        assert!(verdict.get("text").is_none(), "{verdict}");
+        assert!(!state.runs().is_running(&session));
+    }
+
+    /// A detached turn that fails pushes an `error` verdict with the failure, and records `turn/failed` as the
+    /// streaming route does.
+    #[tokio::test]
+    async fn a_detached_turn_that_fails_pushes_an_error_verdict_and_is_recorded() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, state) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session, "detach": true}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let verdict = loop {
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            if event == "turn" {
+                break data;
+            }
+        };
+        assert_eq!(verdict["outcome"], json!("error"));
+        assert_eq!(verdict["session"], json!(session));
+        assert_eq!(verdict["message"], json!("upstream answered 502"));
+        for _ in 0..100 {
+            if !sessions.recorded.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            sessions.recorded.lock().unwrap().clone(),
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
+        );
     }
 
     #[tokio::test]
