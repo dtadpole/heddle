@@ -28,6 +28,7 @@ import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { queueSteer } from '../session/inbox.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
@@ -1931,13 +1932,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Recording the message is the delivery.
+     * Queueing the message in the next-step inbox is the delivery (#31), as DSH's steer is
+     * (`send(message, 'next-step', true)`).
      *
-     * `ctx.session.user` writes the same event the composer's own turn would have written, so the appending
-     * is measured by the loop's next round and streamed to every reader by the one write path — there is no
-     * second channel a steer could travel on without becoming a second truth.
+     * The running loop writes it at its next step boundary, which is after the result of any tool call still
+     * running, so the log never holds a user message between a call and its result. Measured before, when the
+     * route wrote the message at once: a steer sent during a shell call sat between the call and its output, and
+     * the page drew it above the tool row. A turn that ends with the steer still pending takes another step
+     * for it, and a stopped turn leaves it for the next turn to claim before its prompt.
      */
-    ctx.session.userContent(handle, [{ type: 'text', text: prompt }, ...steerAttachments])
+    queueSteer(ctx.session.store, handle, [{ type: 'text', text: prompt }, ...steerAttachments])
     respond(response, 200, 'application/json', `${JSON.stringify({ accepted: true, session: id }, null, 2)}\n`)
     return
   }

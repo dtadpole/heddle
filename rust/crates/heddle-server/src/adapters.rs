@@ -257,6 +257,20 @@ impl SessionService for StoreSessions {
             .map_err(failure)
     }
 
+    fn queue_steer(&self, id: &str, content: Vec<Value>) -> Result<(), ServiceError> {
+        let handle = self
+            .handle(id)
+            .ok_or_else(|| ServiceError::new(format!("no session {id}")))?;
+        let parts = content
+            .into_iter()
+            .map(serde_json::from_value::<heddle_session::ContentPart>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ServiceError::new(format!("a content part is malformed: {error}")))?;
+        heddle_session::inbox::queue_steer(self.service.store(), &handle, parts, None)
+            .map(|_| ())
+            .map_err(|error| ServiceError::new(error.to_string()))
+    }
+
     fn folder(&self, id: &str) -> Option<PathBuf> {
         let handle = self.handle(id)?;
         self.service.folder(&handle).map(PathBuf::from)

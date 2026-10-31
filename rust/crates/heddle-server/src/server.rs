@@ -1219,7 +1219,8 @@ async fn steer_session(
     }
     let mut content = vec![json!({"type": "text", "text": prompt})];
     content.extend(attachments);
-    match state.harness().sessions.user_content(id.as_str(), content) {
+    // Queued, not written: the running loop writes it at its next step boundary (#31).
+    match state.harness().sessions.queue_steer(id.as_str(), content) {
         Ok(()) => respond::json(
             StatusCode::OK,
             &json!({"accepted": true, "session": id.to_string()}),
