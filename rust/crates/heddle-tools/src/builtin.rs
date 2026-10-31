@@ -248,6 +248,30 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     )
 }
 
+/// DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and
+/// normalised unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model
+/// can tell which of several reads failed (live-testing issue #4: this build named no file at all).
+fn requested_display_path(cwd: &std::path::Path, path: &str) -> String {
+    let raw = if std::path::Path::new(path).is_absolute() {
+        path.to_owned()
+    } else {
+        format!("{}/{path}", cwd.display())
+    };
+    if raw.split(['/', '\\']).any(|part| part == "..") {
+        return raw;
+    }
+    let normalised: String = raw
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .flat_map(|part| ["/", part])
+        .collect();
+    if normalised.is_empty() {
+        "/".to_owned()
+    } else {
+        normalised
+    }
+}
+
 fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
     let read = Arc::clone(&sandbox);
     tool_fn(
@@ -276,6 +300,30 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     ));
                 }
                 let target = sandbox.assert_readable(&path, context.mode())?;
+                // A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
+                // `resolveRegularReadTarget`), not reported as the platform's raw error (live-testing issue #4).
+                let shown = requested_display_path(&context.cwd, &path);
+                match tokio::fs::metadata(&target).await {
+                    Ok(info) if info.is_file() => {}
+                    Ok(_) => {
+                        return Ok(ToolResult::refused(
+                            codes::FS_NOT_REGULAR_FILE,
+                            format!("cannot read \"{shown}\": not a regular file"),
+                        ));
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        return Ok(ToolResult::refused(
+                            codes::FS_NOT_FOUND,
+                            format!("cannot read \"{shown}\": not found"),
+                        ));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
                 let text = tokio::fs::read_to_string(&target).await?;
                 let data = serde_json::Map::from_iter([
                     ("path".to_owned(), json!(target)),
@@ -836,6 +884,87 @@ mod tests {
             .unwrap();
         assert_eq!(result.error.as_ref().unwrap().code, codes::EXIT);
         assert!(result.output.contains("out") && result.output.contains("err"));
+    }
+
+    #[test]
+    fn requested_display_path_is_dshs_spelling() {
+        let cwd = std::path::Path::new("/work");
+        assert_eq!(
+            requested_display_path(cwd, "notes/missing.txt"),
+            "/work/notes/missing.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "./notes//missing.txt"),
+            "/work/notes/missing.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "/elsewhere/./x.txt"),
+            "/elsewhere/x.txt"
+        );
+        assert_eq!(
+            requested_display_path(cwd, "../outside/x.txt"),
+            "/work/../outside/x.txt",
+            "a walk up is kept as written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_file_is_fs_not_found_and_names_the_file() {
+        // Live-testing issue #4: the raw OS error named no file.
+        let root = tempdir();
+        let read = tool("read_file", sandbox(root.path()));
+        for path in ["notes/missing.txt", "plain.txt/inner"] {
+            std::fs::write(root.path().join("plain.txt"), "x").unwrap();
+            let result = read
+                .run(
+                    args(json!({ "path": path })),
+                    context_in(root.path(), SandboxMode::DangerFullAccess),
+                )
+                .await
+                .unwrap();
+            let error = result.error.as_ref().expect("refused");
+            assert_eq!(error.code, codes::FS_NOT_FOUND, "{path}");
+            assert_eq!(
+                error.message,
+                format!(
+                    "cannot read \"{}/{path}\": not found",
+                    root.path().display()
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_directory_is_fs_not_regular_file_and_a_file_still_reads() {
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("notes")).unwrap();
+        std::fs::write(root.path().join("notes/here.txt"), "hello").unwrap();
+        let read = tool("read_file", sandbox(root.path()));
+        let result = read
+            .run(
+                args(json!({ "path": "notes" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_REGULAR_FILE);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot read \"{}/notes\": not a regular file",
+                root.path().display()
+            )
+        );
+        let result = read
+            .run(
+                args(json!({ "path": "notes/here.txt" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none());
+        assert_eq!(result.output, "hello");
     }
 
     #[tokio::test]
