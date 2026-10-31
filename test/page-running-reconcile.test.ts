@@ -39,6 +39,8 @@ function harness(): Page {
     let searchIndex = null;
     let current = 'X', composerKey = 'X';
     const runningSessions = new Set();
+    // The page keeps one queue per session; X holds one, so a recovery has something to pump.
+    const queues = new Map([['X', []], ['Y', []]]);
     const runningSince = new Map();
     let runningTick = 0;
     const runningMarkedAt = new Map();
@@ -96,4 +98,17 @@ test('#122: a sessions read issued before a turn was marked running cannot end t
   assert.equal(at.running('X'), true, 'the turn that started after the read was issued stays running')
   assert.deepEqual(Array.from(at.pumped), [], 'nothing is pumped mid-turn')
   assert.equal(at.settled, 0, 'and no live row is settled')
+})
+
+test('#122: a recovery pumps every session that holds a queue, not only the composer’s', { timeout: 5000 }, async () => {
+  const at = harness()
+  at.mark('X')
+  at.mark('Y')
+  const read = at.refresh()
+  at.answer([
+    { id: 'X', running: false },
+    { id: 'Y', running: false },
+  ])
+  await read
+  assert.deepEqual(Array.from(at.pumped).sort(), ['X', 'Y'], 'the queue of the session the person left is sent too')
 })

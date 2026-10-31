@@ -5560,7 +5560,9 @@ async function refreshSessions() {
         settleChat()
         void renderSettledAnswers()
       }
-      if (id === composerKey) void pumpQueue(composerKey)
+      // Every session that holds a queue is pumped, not only the composer's: a page keeps one queue per session, and
+      // a message queued in a session the person has since left must not stay stranded (developer-ten, developer-twelve).
+      if (queues.has(id)) void pumpQueue(id)
     }
     if (ended.length > 0) renderComposerState()
   }
