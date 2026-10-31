@@ -6849,6 +6849,7 @@ async function setDefaultPreset(id) {
   for (const button of document.querySelectorAll('#settings-presets button')) button.disabled = true
   note.hidden = true
   note.textContent = ''
+  delete note.dataset.key
   const say = (text) => {
     note.textContent = text
     note.hidden = false
@@ -6862,7 +6863,11 @@ async function setDefaultPreset(id) {
     const body = await response.json().catch(() => null)
     if (!response.ok) say(body !== null && typeof body.error === 'string' ? body.error : `the server answered ${response.status}`)
     else if (body !== null && typeof body.applyError === 'string') say(body.applyError)
-    else if (body !== null && body.applies === 'restart') say(t('presets.restart'))
+    else if (body !== null && body.applies === 'restart') {
+      say(t('presets.restart'))
+      // The page's own sentence follows a later language change; a server's words stay as they came.
+      note.dataset.key = 'presets.restart'
+    }
   } catch (error) {
     say((error && error.message) || String(error))
   }
@@ -6914,6 +6919,8 @@ document.getElementById('preset-select')?.addEventListener('change', (changeEven
   stagedPreset = chosen === presetRoster?.default ? null : chosen
 })
 window.addEventListener('heddle:locale', () => {
+  const presetsNote = document.getElementById('settings-presets-note')
+  if (presetsNote !== null && presetsNote.dataset.key !== undefined) presetsNote.textContent = t(presetsNote.dataset.key)
   paintPresetSeat()
   paintSessionPreset(shownPreset)
   paintPresetSettings()
