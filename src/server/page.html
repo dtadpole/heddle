@@ -9305,7 +9305,9 @@ async function showFile(node) {
      */
     if (body.renderer === 'html') {
       fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}  ·  preview`
-      await showHtml(body.path, await (await fetch('/api/html?path=' + encodeURIComponent(body.path))).json())
+      const htmlBody = await (await fetch('/api/html?path=' + encodeURIComponent(body.path))).json()
+      if (ticket !== fileFetches) return
+      await showHtml(body.path, htmlBody, ticket)
       return
     }
     fileHtml.hidden = true
@@ -9375,7 +9377,7 @@ function loadPurifier() {
   return purifierPromise
 }
 
-async function showHtml(path, body) {
+async function showHtml(path, body, ticket) {
   let purifier = globalThis.DOMPurify
   if (purifier === undefined) {
     try {
@@ -9384,6 +9386,8 @@ async function showHtml(path, body) {
       purifier = undefined
     }
   }
+  // A later selection owns the pane even if this older sanitizer load succeeds or fails.
+  if (ticket !== fileFetches) return
   if (purifier === undefined) {
     fileHtml.hidden = true
     fileBody.hidden = false
