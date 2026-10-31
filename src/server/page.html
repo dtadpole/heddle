@@ -5645,8 +5645,9 @@ async function showSession(id) {
   if (current !== id) chooseWorkspace(null)
   current = id
   paintEmptyState()
-  /** A reload comes back here (`SessionRules.startupSession`), and a one-shot child's composer is a record. */
-  rememberCurrent(id)
+  /** Kept the moment it opens, as DSH's `replaceMain` writes its selection, so a reload comes back here (`restoreSelection`). */
+  rememberCurrent()
+  /** A one-shot subagent's child shows DSH's read-only record in the composer's place. */
   paintComposerAccess()
   /** Opening a session is what reads its completion (DSH's `reconcileStatus`, `client.js:965`). */
   if (unreadSessions.delete(id)) paintRunningMarks()
@@ -5680,8 +5681,8 @@ async function showSession(id) {
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
       applySessionAccess(null)
-      /** Nothing to come back to on a reload, and nothing open to lock. */
-      rememberCurrent(null)
+      /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
+      rememberCurrent()
       paintComposerAccess()
       return
     }
@@ -5734,27 +5735,6 @@ async function showSession(id) {
   }
   await refreshGoal()
   await refreshTodo()
-}
-
-/**
- * The open session, remembered across a reload — DSH keeps its selection in a persisted store (`dsh.sessions.current`,
- * dsh-client-ui-workspace `lib/client.js:1369`). Storage that refuses (a private window, a full quota) leaves the page
- * starting the way it did before: on the newest session the sidebar shows.
- */
-function savedCurrent() {
-  try {
-    return localStorage.getItem(SessionRules.CURRENT_KEY)
-  } catch (error) {
-    return null
-  }
-}
-function rememberCurrent(id) {
-  try {
-    if (typeof id === 'string' && id.length > 0) localStorage.setItem(SessionRules.CURRENT_KEY, id)
-    else localStorage.removeItem(SessionRules.CURRENT_KEY)
-  } catch (error) {
-    // nothing to remember into; the next start falls back to the newest session
-  }
 }
 
 /** Each session's record as `/api/sessions` last listed it — what tells the composer that the open one is a one-shot child. */
@@ -5887,7 +5867,7 @@ async function refreshSessions() {
     }
   }
   /**
-   * The newest session is selected when nothing is yet.
+   * The newest conversation is opened when nothing is open.
    *
    * Without this the page starts attached to nothing: the tree appears, the log stays empty even though
    * sessions exist, and a prompt sent from that state creates a NEW session instead of continuing the one
@@ -5897,19 +5877,69 @@ async function refreshSessions() {
    *
    * The list itself is drawn from the tree — this walk only needs to know which session is newest, and it
    * deliberately asks for **every** session rather than only the ad-hoc ones: a page that started with no
-   * selection because all its sessions happened to be registered would be the same bug again.
-   *
-   * A reload comes back to the session that was open — DSH's startup restoration (`restoreSelection`,
-   * dsh-client-ui-workspace `lib/client.js:1605`), which `SessionRules.startupSession` states. Phase A measured the
-   * version before it opening `sessions[0]` on every reload: the newest session, which was a subagent's child the
-   * sidebar hides, while the session a person had open was gone (R-developer-eight-26, -28 and -2).
+   * selection because all its sessions happened to be registered would be the same bug again. Newest **row**, though:
+   * `restoreChoice` skips a subagent's child and an archived session, which the tree does not draw. It used to take
+   * `sessions[0]`, and a reload opened a hidden child that had just finished (C28). A load asks `restoreSelection`
+   * first, which reopens the session that was open.
    */
-  if (current !== null) return
-  const select = SessionRules.startupSession(Array.isArray(sessions) ? sessions : [], savedCurrent())
-  if (select !== null) {
-    current = select
-    await showSession(select)
+  if (current !== null || !Array.isArray(sessions)) return
+  const choice = WorkspaceTree.restoreChoice(null, [], sessions)
+  if (choice.kind === 'newest') {
+    current = choice.id
+    await showSession(choice.id)
   }
+}
+
+/** Keep the open session, or that nothing is open, where `restoreSelection` reads it back (`WorkspaceTree.SELECTION_KEY`). */
+function rememberCurrent() {
+  try {
+    localStorage.setItem(WorkspaceTree.SELECTION_KEY, WorkspaceTree.selectionRecord(current))
+  } catch (error) {
+    /* A browser with no storage still opens sessions; only the reload's memory of the open one is lost. */
+  }
+}
+
+/**
+ * Open what a page load should open: the session that was open before the reload, DSH's `restoreSelection`
+ * (`dsh-client-ui-workspace` `lib/client.js:1574-1628`), decided by `WorkspaceTree.restoreChoice`.
+ *
+ * The saved session reopens, a saved New session placeholder included; a saved session that is gone starts a fresh
+ * session in the most recently active workspace, without unfolding a workspace the person folded (a remembered collapse
+ * survives the reload, C33); with nothing saved, the newest conversation opens, never a hidden subagent child. A list
+ * that cannot be read decides nothing: it falls back to `refreshSessions`, so a failed request never starts a session.
+ */
+async function restoreSelection() {
+  let saved = null
+  try {
+    saved = WorkspaceTree.savedSelection(localStorage.getItem(WorkspaceTree.SELECTION_KEY))
+  } catch (error) {
+    saved = null
+  }
+  const read = async (path) => {
+    try {
+      const response = await fetch(path)
+      return response.ok ? await response.json() : null
+    } catch (error) {
+      return null
+    }
+  }
+  const [workspaceBody, sessions] = await Promise.all([read('/api/workspaces'), read('/api/sessions')])
+  if (!Array.isArray(sessions)) {
+    await refreshSessions()
+    return
+  }
+  const workspaces = Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : []
+  const choice = WorkspaceTree.restoreChoice(saved, workspaces, sessions)
+  if (choice.forget === true) rememberCurrent()
+  if (choice.kind === 'saved' || choice.kind === 'newest') {
+    await showSession(choice.id)
+    return
+  }
+  if (choice.kind === 'start') {
+    await startSessionAt({ path: choice.path, reveal: false })
+    if (current !== null) return
+  }
+  await refreshSessions()
 }
 
 /**
@@ -7112,7 +7142,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          */
         if (target === null) {
           current = payload.session
-          rememberCurrent(payload.session)
+          rememberCurrent()
           chooseWorkspace(null)
           adoptSession(payload.session)
           /** The pending send belongs to the session it just created; the row follows it. */
@@ -10607,8 +10637,16 @@ async function startSessionAt(node) {
   }
   setNote('')
   activeFolder = node.path
-  expanded.add(node.path)
-  rememberExpanded()
+  /**
+   * A press opens the workspace so the new row is seen. A reload's fallback (`restoreSelection` passes a node with
+   * `reveal: false`) leaves the folding as the person left it: DSH's restore opens its session with `"preserve"`
+   * (`lib/client.js:1627`), not the `"reveal"` a press uses (`:1489`, `:1673`), and a folded workspace stays folded with
+   * its folder tinted as the one holding the open session (C33).
+   */
+  if (node.reveal !== false) {
+    expanded.add(node.path)
+    rememberExpanded()
+  }
   if (typeof body.definition === 'string') learnDefinition(body.session, body.definition.replace(/\/session\.json$/, ''))
   /** The new session's row is the selected one; the tree keys a session row by its id. */
   chooseSelected('session:' + body.session)
@@ -11358,14 +11396,12 @@ Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSes
 
 /* session-rules:begin */
 /**
- * Which sessions the sidebar lists, which one a page opens at startup, and which open session may be written to — DSH's
- * rules for subagent children and for the startup selection, kept pure (no DOM, no fetch, no page state) so
- * `test/session-rules.test.ts` loads this block out of the page and judges it in Node, as the workspace tree's is.
+ * Which sessions the sidebar lists and which open session may be written to — DSH's rules for subagent children, kept
+ * pure (no DOM, no fetch, no page state) so `test/session-rules.test.ts` loads this block out of the page and judges it
+ * in Node, as the workspace tree's is. Which session a page load opens is the tree block's `restoreChoice` (DSH's
+ * `restoreSelection`), which never opens a hidden child on its own and does reopen a saved one.
  */
 const SessionRules = (() => {
-  /** Where the page remembers the open session across a reload — DSH persists its selection as `dsh.sessions.current`. */
-  const CURRENT_KEY = 'heddle.session.current.v1'
-
   /**
    * A subagent child's mode, DSH's `address.mode` (dsh-client-ui-subagent `selectReadOnlySubagent`, `lib/client.js:944`):
    * `'one-shot'` for a delegated child, because heddle's `delegate` runs it for one task and settles it, so no follow-up
@@ -11388,23 +11424,6 @@ const SessionRules = (() => {
   }
 
   /**
-   * The session a page opens when it starts — DSH's `restoreSelection` (`lib/client.js:1605-1628`): the saved selection
-   * when the store still lists it, a subagent child included, because DSH restores a saved child's address too
-   * (`:1607`); not when it is archived, because DSH clears an archived current (`clearArchivedCurrent`, `:1638`).
-   * Without a usable saved one it is the first session `/api/sessions` lists that the sidebar shows and the archive does
-   * not hold — heddle's newest-session start, which never lands on a hidden child. `null` when there is none.
-   */
-  function startupSession(sessions, saved) {
-    const metas = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string')
-    if (typeof saved === 'string' && saved.length > 0) {
-      const remembered = metas.find((meta) => meta.id === saved)
-      if (remembered !== undefined && remembered.archived !== true) return remembered.id
-    }
-    const newest = sidebarSessions(metas).find((meta) => meta.archived !== true)
-    return newest === undefined ? null : newest.id
-  }
-
-  /**
    * Whether the composer is DSH's read-only record for this session: a one-shot child only. A continuable child keeps
    * Send and Stop (`selectReadOnlySubagent` answers `null` for it while its parent is available, `lib/client.js:949`).
    */
@@ -11412,7 +11431,7 @@ const SessionRules = (() => {
     return subagentMode(meta) === 'one-shot'
   }
 
-  return { CURRENT_KEY, subagentMode, sidebarSessions, startupSession, composerReadOnly }
+  return { subagentMode, sidebarSessions, composerReadOnly }
 })()
 /* session-rules:end */
 
@@ -11445,6 +11464,9 @@ function workspaceDisplayTitle(title) {
  *   placeholder, which takes none of the places; a raise is kept until `Show less` or a fold; the control reads
  *   `Show {n} more sessions` and each click adds 5. The number lives with the page, never in storage, as DSH's
  *   watermark does.
+ * - **Reload**: the open session is kept in storage and a load reopens it (`restoreChoice`, DSH's `restoreSelection`);
+ *   a saved session that is gone starts a fresh one in the most recently active workspace, and nothing ever opens a
+ *   hidden subagent child on its own.
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -11579,6 +11601,118 @@ const WorkspaceTree = (() => {
     return { gone: false, text: said ?? fallback }
   }
 
+  /** Whether a workspace is one a person registered: an adopted root (`origin: 'auto'`) is not a group. */
+  function registered(entry) {
+    return entry !== undefined && entry !== null && entry.origin !== 'auto'
+  }
+
+  /** The nearest registered workspace above one, following `parent` through `byId`; a cycle in bad data ends the walk. */
+  function registeredAboveIn(entry, byId) {
+    const seen = new Set([entry.id])
+    let next = entry.parent === null || entry.parent === undefined ? undefined : byId.get(entry.parent)
+    while (next !== undefined && !seen.has(next.id)) {
+      if (registered(next)) return next
+      seen.add(next.id)
+      next = next.parent === null || next.parent === undefined ? undefined : byId.get(next.parent)
+    }
+    return undefined
+  }
+
+  /**
+   * The open session, kept across a reload the way DSH keeps it: one `localStorage` entry holding `{ sessionId }`,
+   * written each time the main view opens a session and emptied to `{}` when it is cleared (`dsh-client-ui-workspace`
+   * `lib/client.js:1369`, `:1644-1650`, `:1662-1665`; DSH's client store mirrors every write of a persisted store to
+   * `localStorage` and reads it back at start, `dsh-web-frontend` `dist/assets/index-CN7NIWNw.js:120`, `yI`). The key is
+   * per origin, so every tab of one server shares it, as DSH's does.
+   */
+  const SELECTION_KEY = 'heddle.sessions.current'
+
+  /** The entry this page writes for the open session `id`, or `{}` when nothing is open. */
+  function selectionRecord(id) {
+    return JSON.stringify(typeof id === 'string' && id.length > 0 ? { sessionId: id } : {})
+  }
+
+  /** The session id a stored entry names, or null for an entry that is missing, empty, or not one this page wrote. */
+  function savedSelection(raw) {
+    if (typeof raw !== 'string') return null
+    try {
+      const value = JSON.parse(raw)
+      return value !== null && typeof value === 'object' && typeof value.sessionId === 'string' && value.sessionId.length > 0 ? value.sessionId : null
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * The workspace a fresh session starts in when nothing names one: DSH's `recentWorkspace` (`lib/client.js:1694-1710`),
+   * the workspace whose sessions were written last, else, with no session, the one created last; a tie keeps registry
+   * order. Only a registered workspace is a place a session starts, and an adopted root's sessions count for the registered
+   * workspace above it, where `deriveGroups` draws them. Undefined when no workspace is registered.
+   */
+  function recentWorkspace(workspaces, sessions) {
+    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
+    const metas = new Map((Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object').map((meta) => [meta.id, meta]))
+    const byId = new Map(list.map((entry) => [entry.id, entry]))
+    const latest = new Map()
+    for (const entry of list) {
+      const home = registered(entry) ? entry : registeredAboveIn(entry, byId)
+      if (home === undefined) continue
+      for (const id of Array.isArray(entry.sessionIds) ? entry.sessionIds : []) {
+        const meta = metas.get(id)
+        const at = meta === undefined ? Number.NaN : Date.parse(stamp(meta))
+        if (Number.isFinite(at)) latest.set(home.id, Math.max(latest.get(home.id) ?? Number.NEGATIVE_INFINITY, at))
+      }
+    }
+    let selected
+    let selectedTime = Number.NEGATIVE_INFINITY
+    for (const entry of list) {
+      if (!registered(entry)) continue
+      let time = latest.get(entry.id) ?? Number.NEGATIVE_INFINITY
+      if (time === Number.NEGATIVE_INFINITY) time = Date.parse(String(entry.createdAt ?? ''))
+      if (!Number.isFinite(time)) time = Number.NEGATIVE_INFINITY
+      if (selected === undefined || time > selectedTime) {
+        selected = entry
+        selectedTime = time
+      }
+    }
+    return selected
+  }
+
+  /**
+   * What a page load opens: DSH's `restoreSelection` (`lib/client.js:1605-1628`) under heddle's rules. `saved` is the id
+   * `savedSelection` read (or null), `workspaces` and `sessions` the answers of `/api/workspaces` and `/api/sessions`
+   * (newest first). The answer is `{ kind, id?, path?, forget? }`:
+   *
+   * - `saved` — the saved session is listed and not archived, so it is reopened (`:1611-1616`). A saved New session
+   *   placeholder is reopened too, by its own id and with its record read again, never replaced by a fresh one (DSH's
+   *   `restoreBlank` reloads the blank's projections and reconnects the same id, `:1451-1458`, `:1619`). A subagent's
+   *   child the person opened (search, `In one list`) is theirs to come back to, as DSH restores a saved subagent view
+   *   (`:1607-1609`).
+   * - `start` with `path` — the saved session is gone, so a fresh session starts in the most recently active workspace
+   *   (`:1620`, then `connectWorkspace`, `:1626`, which creates one, `:1406`); `forget` empties the stale entry.
+   * - `newest` — nothing is saved (a first visit, or a cleared selection): the newest session that is a row, so never a
+   *   subagent's child, which the tree hides (`visible`), and never an archived one. DSH starts a fresh session here too;
+   *   this page keeps opening the newest conversation, because a page attached to nothing beside a tree of sessions was a
+   *   measured failure (`refreshSessions`). An archived saved session lands here with `forget`: DSH reopens it and its
+   *   `clearArchivedCurrent` at once empties the main view and the entry (`:1578`, `:1638-1650`), which is a load with
+   *   nothing saved.
+   * - `none` — nothing to open; with `forget`, the stale entry is emptied all the same.
+   */
+  function restoreChoice(saved, workspaces, sessions) {
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
+    const newest = () => {
+      const row = metas.find((meta) => visible(meta, 'hide'))
+      return row === undefined ? { kind: 'none' } : { kind: 'newest', id: row.id }
+    }
+    if (typeof saved !== 'string' || saved.length === 0) return newest()
+    const meta = metas.find((entry) => entry.id === saved)
+    if (meta !== undefined && meta.archived !== true) return { kind: 'saved', id: saved }
+    if (meta !== undefined) return { ...newest(), forget: true }
+    const target = recentWorkspace(workspaces, metas)
+    if (target !== undefined && typeof target.path === 'string') return { kind: 'start', path: target.path, forget: true }
+    return { ...newest(), forget: true }
+  }
+
   /**
    * The groups to draw, in order: `[{key, workspace, label, path, depth, children, sessions}]`.
    *
@@ -11594,18 +11728,7 @@ const WorkspaceTree = (() => {
     /** With `current` given (the open session's id, or null), a placeholder other than the open one is not a row (`hiddenBlank`). */
     const shown = (meta) => !hiddenBlank(meta, options.current) && visible(meta, archived)
     const byId = new Map(list.map((entry) => [entry.id, entry]))
-    const registered = (entry) => entry !== undefined && entry.origin !== 'auto'
-    /** The nearest registered workspace above one, following `parent`; a cycle in bad data ends the walk. */
-    const registeredAbove = (entry) => {
-      const seen = new Set([entry.id])
-      let next = entry.parent === null || entry.parent === undefined ? undefined : byId.get(entry.parent)
-      while (next !== undefined && !seen.has(next.id)) {
-        if (registered(next)) return next
-        seen.add(next.id)
-        next = next.parent === null || next.parent === undefined ? undefined : byId.get(next.parent)
-      }
-      return undefined
-    }
+    const registeredAbove = (entry) => registeredAboveIn(entry, byId)
     const groups = new Map()
     for (const entry of list) {
       if (!registered(entry)) continue
@@ -11812,6 +11935,7 @@ const WorkspaceTree = (() => {
     INITIAL,
     STEP,
     REACH,
+    SELECTION_KEY,
     basename,
     sessionOrder,
     visible,
@@ -11836,6 +11960,10 @@ const WorkspaceTree = (() => {
     completionUnread,
     ARCHIVED_NOT_OPENABLE,
     opensOnClick,
+    selectionRecord,
+    savedSelection,
+    recentWorkspace,
+    restoreChoice,
   }
 })()
 /* workspace-tree:end */
@@ -14267,7 +14395,8 @@ setInterval(() => {
 await loadEndpoints()
 await loadStatus()
 growComposer()
-await refreshSessions()
+/** A reload reopens the session that was open (C28), before the tree is drawn so the tree marks it. */
+await restoreSelection()
 void refreshApprovals()
 document.getElementById('session-search').addEventListener('input', applySearch)
 renderTree()

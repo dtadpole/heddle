@@ -4,14 +4,15 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 /**
- * The sidebar's subagent and startup rules, judged out of the page that runs them.
+ * The sidebar's subagent rules, judged out of the page that runs them.
  *
- * DSH hides a subagent's child from every sidebar listing (`sessionVisible`, dsh-client-ui-workspace `lib/client.js:964`),
- * reopens the saved selection when the page starts (`restoreSelection`, `:1605`), and gives a one-shot child a read-only
- * record instead of a composer (`selectReadOnlySubagent`, dsh-client-ui-subagent `lib/client.js:944`). Phase A measured
- * heddle hiding the child from the tree only: the flat list and the search listed it, a reload opened it as the newest
- * session, and its composer was writable (R-developer-eight-1, -26, -28, -2). The pure block that now decides those lives
- * in `page.html` between two markers and is loaded here.
+ * DSH hides a subagent's child from every sidebar listing (`sessionVisible`, dsh-client-ui-workspace `lib/client.js:964`)
+ * and gives a one-shot child a read-only record instead of a composer (`selectReadOnlySubagent`, dsh-client-ui-subagent
+ * `lib/client.js:944`). Phase A measured heddle hiding the child from the tree only: the flat list and the search listed
+ * it, a reload opened it as the newest session, and its composer was writable (R-developer-eight-1, -26, -28, -2). The
+ * pure block that now decides the listing and the composer lives in `page.html` between two markers and is loaded here.
+ * Which session a reload opens (DSH's `restoreSelection`, `:1605`), a saved child included and never a hidden child on
+ * its own, is the tree block's `restoreChoice`, judged in `test/workspace-tree.test.ts`.
  */
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
@@ -24,10 +25,8 @@ interface Meta {
 }
 
 interface Rules {
-  CURRENT_KEY: string
   subagentMode: (meta: unknown) => 'one-shot' | 'continuable' | null
   sidebarSessions: (sessions: unknown) => Meta[]
-  startupSession: (sessions: unknown, saved: string | null) => string | null
   composerReadOnly: (meta: unknown) => boolean
 }
 
@@ -44,8 +43,8 @@ const listed = [child, teammate, parent, beta, old]
 
 test('the block is in the page, between its markers', () => {
   assert.ok(begin > 0 && end > begin, 'both markers are present, in order')
-  assert.equal(typeof rules.startupSession, 'function')
-  assert.equal(rules.CURRENT_KEY, 'heddle.session.current.v1')
+  assert.equal(typeof rules.sidebarSessions, 'function')
+  assert.equal(typeof rules.composerReadOnly, 'function')
 })
 
 test('a subagent\'s child is never a sidebar row: the flat list and the search read only the others', () => {
@@ -56,16 +55,6 @@ test('a subagent\'s child is never a sidebar row: the flat list and the search r
   )
   assert.deepEqual(rules.sidebarSessions(null), [], 'an answer that is not a list lists nothing')
   assert.deepEqual(rules.sidebarSessions([null, 'x', { title: 'no id' }, parent]).map((meta) => meta.id), ['session-parent'])
-})
-
-test('a reload reopens the saved session, and without one it never lands on a hidden child or an archived session', () => {
-  assert.equal(rules.startupSession(listed, 'session-beta'), 'session-beta', 'the session that was open comes back')
-  assert.equal(rules.startupSession(listed, null), 'session-parent', 'nothing saved: the newest session the sidebar shows, not the newer child')
-  assert.equal(rules.startupSession(listed, 'session-gone'), 'session-parent', 'a saved session the store no longer lists falls back the same way')
-  assert.equal(rules.startupSession(listed, 'session-old'), 'session-parent', 'an archived saved session is not reopened (DSH clears an archived current)')
-  assert.equal(rules.startupSession(listed, 'session-child'), 'session-child', 'a child the person had open is restored, as DSH restores a saved child address')
-  assert.equal(rules.startupSession([child, old], null), null, 'only hidden or archived sessions: nothing is opened')
-  assert.equal(rules.startupSession([], ''), null)
 })
 
 test('a one-shot child\'s composer is read-only; a teammate is continuable and keeps it; anything else is writable', () => {
