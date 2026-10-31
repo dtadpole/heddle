@@ -53,7 +53,9 @@ pub fn kill_process_group(_leader: u32) -> io::Result<()> {
 fn refused(leader: u32) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("refusing to signal process group {leader}: it cannot lead a group a launcher started"),
+        format!(
+            "refusing to signal process group {leader}: it cannot lead a group a launcher started"
+        ),
     )
 }
 
@@ -77,7 +79,11 @@ mod tests {
     fn the_two_pids_that_would_reach_every_process_are_refused() {
         for leader in [0, 1, u32::MAX] {
             let error = kill_process_group(leader).expect_err("refused");
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{leader}: {error}");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidInput,
+                "{leader}: {error}"
+            );
         }
     }
 
@@ -113,7 +119,10 @@ mod tests {
         kill_process_group(shell.id()).expect("the group is signalled");
 
         let status = shell.wait().expect("the shell ends");
-        assert!(!status.success(), "the shell was killed, not finished: {status}");
+        assert!(
+            !status.success(),
+            "the shell was killed, not finished: {status}"
+        );
         let deadline = Instant::now() + Duration::from_secs(5);
         while alive(child) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
