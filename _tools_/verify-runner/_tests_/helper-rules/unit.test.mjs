@@ -276,9 +276,14 @@ test('endChild stops a harness within its bound: SIGTERM first, SIGKILL for one 
   assert.equal(await endChild(polite), 'exited', 'a harness that already exited answers at once')
 
   const stubborn = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] })
-  await new Promise((resolve) => stubborn.stdout.once('data', resolve))
-  const started = Date.now()
-  assert.equal(await endChild(stubborn, { graceMs: 300 }), 'killed', 'one that ignores SIGTERM is killed after the grace')
-  assert.ok(Date.now() - started < 3000, 'and the wait stays bounded')
-  assert.equal(stubborn.signalCode, 'SIGKILL')
+  try {
+    await new Promise((resolve) => stubborn.stdout.once('data', resolve))
+    const started = Date.now()
+    assert.equal(await endChild(stubborn, { graceMs: 300 }), 'killed', 'one that ignores SIGTERM is killed after the grace')
+    assert.ok(Date.now() - started < 3000, 'and the wait stays bounded')
+    assert.equal(stubborn.signalCode, 'SIGKILL')
+  } finally {
+    // A wrong endChild must fail this test, not leave a child that holds the test file open.
+    if (stubborn.exitCode === null && stubborn.signalCode === null) stubborn.kill('SIGKILL')
+  }
 })
