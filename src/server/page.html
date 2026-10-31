@@ -8923,6 +8923,24 @@ function paintRunningMarks() {
 let activeFolder = null
 
 /**
+ * The workspace a person last opened or added in the tree, and the session that was open when they did: `{ path, during }`.
+ *
+ * New session starts where the person acted, as DSH's does: a workspace row's own `+` passes that workspace
+ * (`dsh-client-ui-workspace` `lib/client.js:3233-3236`, then `:1508`, where a named workspace wins over the open session's),
+ * and Add workspace starts a session in the new one at once (`:3936-3938`). Opening workspace B's row after a session in A
+ * is that act here too, because this page has no Session Intent picker that shows and changes the target before the first
+ * prompt (DSH's README, "use the picker in the Session Intent hero to choose a Workspace"): without it a click on B followed
+ * by New session started the session in A, and on a shared server A was another person's project (#25). The choice holds
+ * only while the session it was made beside is still the open one; opening any session gives the decision back to it.
+ */
+let chosenWorkspace = null
+
+/** Remember (or, when `path` is null, forget) the workspace a person just opened or added. */
+function chooseWorkspace(path) {
+  chosenWorkspace = path === null ? null : { path, during: current }
+}
+
+/**
  * The workspace rows the tree last drew, in its order.
  *
  * The tree's own render is the only place that knows them, and the primary action needs one when nothing is selected —
@@ -9955,8 +9973,10 @@ async function startSessionAt(node) {
  * Which workspace a new session should start in.
  *
  * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
- * context exists: the selected row's workspace, then the folder the prompt box was last aimed at, then the first
- * workspace the tree draws. All three are answers to "where am I", and the first one that applies wins.
+ * context exists: the workspace row the person opened or added since the open session was chosen (`chosenWorkspace`),
+ * then the open session's workspace (DSH's `currentWorkspaceId`, `lib/client.js:1505-1508`), then the selected row's
+ * workspace, then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers
+ * to "where am I", and the first one that applies wins.
  */
 function newSessionWorkspace() {
   /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
@@ -9964,7 +9984,12 @@ function newSessionWorkspace() {
     treeTops
       .filter((node) => path === node.path || path.startsWith(node.path + '/'))
       .sort((left, right) => right.path.length - left.path.length)[0] ?? null
-  /** The open session's own workspace comes first: it is the group the reader is looking at. */
+  /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
+  if (chosenWorkspace !== null && chosenWorkspace.during === current) {
+    const byChoice = treeTops.find((node) => node.path === chosenWorkspace.path)
+    if (byChoice !== undefined) return byChoice
+  }
+  /** Then the open session's own workspace: it is the group the reader is looking at. */
   if (current !== null) {
     const byCurrent = treeTops.find((node) => node.group !== undefined && WorkspaceTree.containsSession(node.group, current, false))
     if (byCurrent !== undefined) return byCurrent
@@ -10954,6 +10979,14 @@ function nodeRow(node, depth = 0) {
       await selectSession(node)
       return
     }
+    /**
+     * Opening a workspace row makes it where New session starts (`chosenWorkspace`, #25); folding the chosen one away
+     * gives that back to the open session's workspace.
+     */
+    if (node.kind === 'workspace') {
+      if (li.dataset.open !== 'true') chooseWorkspace(node.path)
+      else if (chosenWorkspace !== null && chosenWorkspace.path === node.path) chooseWorkspace(null)
+    }
     await toggle(node, li)
   }
   row.onkeydown = (event) => {
@@ -11666,6 +11699,8 @@ async function adoptWorkspace(path) {
   if (!response.ok) return body.error ?? 'could not register that folder'
   const added = typeof body.record?.path === 'string' ? body.record.path : path
   activeFolder = added
+  /** The workspace just added is selected, and New session starts there (DSH starts one there at once, `:3936-3938`). */
+  chooseWorkspace(added)
   expanded.add(added)
   rememberExpanded()
   await renderTree()

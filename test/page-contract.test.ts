@@ -157,7 +157,11 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')
   assert.match(page, /let treeTops = \[\]/, 'the tree keeps the workspace rows the action needs')
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
-  assert.match(page, /if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/, 'from the open session\'s workspace first')
+  assert.match(
+    page,
+    /if \(chosenWorkspace !== null && chosenWorkspace\.during === current\) \{[\s\S]*?const byChoice = treeTops\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/,
+    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace',
+  )
   assert.match(page, /if \(selectedPath !== null && !selectedPath\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
   assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
@@ -176,6 +180,20 @@ test('New session asks for a new session every time and names none it found in t
   const body = page.slice(start, page.indexOf('\n}\n', start))
   assert.match(body, /body: JSON\.stringify\(\{ branch: node\.path \}\)/, 'the request names the folder and nothing else')
   assert.doesNotMatch(body, /session: |blankToReuse\(/, 'no session id, found or remembered, rides along')
+})
+
+test('New session starts in the workspace row the person opened or added, not the open session\'s (#25)', () => {
+  /**
+   * DSH starts a session in the workspace a person acted on: a row's `+` names it (dsh-client-ui-workspace
+   * lib/client.js:3233-3236, and a named workspace wins at :1508), and Add workspace starts one there at once
+   * (:3936-3938). This page has no Session Intent picker to show and change the target, so opening workspace B's row
+   * after a session in A must make B the target; the browser check is 80's "New session starts in the workspace row the
+   * person opened". This detects the choice no longer being recorded where the person acts.
+   */
+  assert.match(page, /function chooseWorkspace\(path\) \{\s*chosenWorkspace = path === null \? null : \{ path, during: current \}/, 'a choice remembers the session it was made beside')
+  assert.match(page, /if \(node\.kind === 'workspace'\) \{\s*if \(li\.dataset\.open !== 'true'\) chooseWorkspace\(node\.path\)/, 'opening a workspace row chooses it')
+  const adopt = page.slice(page.indexOf('async function adoptWorkspace(path) {'))
+  assert.match(adopt.slice(0, adopt.indexOf('\n}\n')), /chooseWorkspace\(added\)/, 'and so does adding one')
 })
 
 test('Add workspace and New session say when their request fails, instead of leaving a rejection in the console (#59)', () => {

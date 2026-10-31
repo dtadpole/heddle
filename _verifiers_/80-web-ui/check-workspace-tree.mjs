@@ -287,3 +287,91 @@ test('Show more counts conversations: the open New session sits on top of five, 
     fixture.close()
   }
 })
+
+test('New session starts in the workspace row the person opened, not in the open session\'s (#25)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH starts a session where the person acted: a workspace row's `+` names its workspace, and a named workspace wins
+   * over the open session's (dsh-client-ui-workspace lib/client.js:3233-3236, :1508). This page has no Session Intent
+   * picker to show and change the target before the first prompt, so opening workspace B's row after a session in A is
+   * that act, and the panel's New session and its chord start in B. With no workspace row opened since the session was
+   * chosen, the open session's workspace is the target, as DSH's is. Before the fix both presses started in A (#25).
+   */
+  const home = isolatedHome('tree-target')
+  const first = fixtureDir('tree-target-a')
+  const second = fixtureDir('tree-target-b')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const register = async (path) => {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      return added.body.record
+    }
+    const a = await register(first)
+    const b = await register(second)
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: a.path, title: 'work in a' }) })
+    assert.equal(made.status, 200, `a session in A (${JSON.stringify(made.body)})`)
+    const inA = made.body.session
+
+    const workspaceRow = (record) => `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
+    const openId = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const cwdOf = async (id) => {
+      const listed = (await api(server.url, cookie, '/api/sessions')).body
+      return (Array.isArray(listed) ? listed : []).find((meta) => meta.id === id)?.cwd ?? null
+    }
+    /** Open the session in A from its row, as a person does. */
+    const openA = async () => {
+      await browser.evaluate(`(() => { const row = ${workspaceRow(a)}; if (row.closest('li').dataset.open !== 'true') row.click() })()`)
+      await browser.waitFor(`document.querySelector('#tree li[data-session-id="${inA}"] > .row') !== null`, 10_000)
+      await browser.evaluate(`document.querySelector('#tree li[data-session-id="${inA}"] > .row').click()`)
+      assert.ok(await browser.waitFor(`${openId} === ${JSON.stringify(inA)}`, 10_000), 'the session in A is the open one')
+    }
+    /** Click a workspace row so that it opens (folding it first when it is already open). */
+    const openWorkspace = async (record) => {
+      await browser.evaluate(`(() => { const row = ${workspaceRow(record)}; if (row.closest('li').dataset.open === 'true') row.click() })()`)
+      await browser.evaluate(`${workspaceRow(record)}.click()`)
+      await browser.waitFor(`${workspaceRow(record)}.closest('li').dataset.open === 'true'`, 10_000)
+    }
+    /** Press New session, by the panel's button or by DSH's chord, and answer with the session it opened. */
+    const press = async (how) => {
+      const before = await browser.evaluate(openId)
+      if (how === 'button') await browser.evaluate(`document.getElementById('new-session').click()`)
+      else await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', altKey: true, metaKey: true, bubbles: true }))`)
+      assert.ok(await browser.waitFor(`(() => { const id = ${openId}; return id !== null && id !== ${JSON.stringify(before)} })()`, 15_000), `the ${how} opens a new session`)
+      return browser.evaluate(openId)
+    }
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`${workspaceRow(a)} !== undefined && ${workspaceRow(b)} !== undefined`, 15_000)
+
+    await openA()
+    const plain = await press('button')
+    assert.equal(await cwdOf(plain), a.path, 'with no workspace row opened since, New session starts in the open session\'s workspace')
+
+    await openA()
+    await openWorkspace(b)
+    const byButton = await press('button')
+    assert.equal(await cwdOf(byButton), b.path, 'after opening B\'s row, the button starts the session in B, not in the open session\'s A')
+    assert.ok(
+      await browser.waitFor(`${workspaceRow(b)}.closest('li').querySelector('li[data-session-id="${byButton}"]') !== null`, 10_000),
+      'and it is drawn under B',
+    )
+
+    await openA()
+    await openWorkspace(b)
+    const byChord = await press('chord')
+    assert.equal(await cwdOf(byChord), b.path, 'and so does the chord')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, first, second]) removeDir(dir)
+  }
+})
