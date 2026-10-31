@@ -3247,7 +3247,7 @@
             <span id="model-spinner" hidden></span>
             <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="M4 6.5 8 10.5l4-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
-          <div id="model-menu" role="menu" aria-label="Model and reasoning effort" hidden></div>
+          <div id="model-menu" role="menu" aria-label="Model and reasoning effort" data-i18n-aria-label="model.menuAria" hidden></div>
         </div>
         <button type="button" id="stop" aria-label="Stop generating" title="Stop generating" data-i18n-aria-label="composer.stop" data-i18n-title="composer.stop" hidden>
           <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor"/></svg>
@@ -3508,6 +3508,17 @@ const MESSAGES = Object.freeze({
     'access.confirmAcknowledge': 'I understand the risks and want to continue',
     'access.confirmCancel': 'Cancel',
     'access.confirmEnable': 'Enable Full access',
+    'model.fallback': 'Select model',
+    'model.none': 'no model',
+    'model.notConfigured': '{name} (not configured)',
+    'model.aria': 'Select model, current {model}',
+    'model.ariaEffort': 'Select model, current {model}, reasoning effort {effort}',
+    'model.menuAria': 'Model and reasoning effort',
+    'model.menuModel': 'Model',
+    'model.menuEffort': 'Effort',
+    'model.search': 'Search models…',
+    'model.searchEmpty': 'No matching models.',
+    'model.empty': 'No models available.',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3569,6 +3580,17 @@ const MESSAGES = Object.freeze({
     'access.confirmAcknowledge': '我已了解风险，并愿意继续',
     'access.confirmCancel': '取消',
     'access.confirmEnable': '启用完全权限',
+    'model.fallback': '请选择模型',
+    'model.none': '无模型',
+    'model.notConfigured': '{name}（未配置）',
+    'model.aria': '选择模型，当前 {model}',
+    'model.ariaEffort': '选择模型，当前 {model}，推理等级 {effort}',
+    'model.menuAria': '模型与推理等级',
+    'model.menuModel': '模型',
+    'model.menuEffort': '推理等级',
+    'model.search': '搜索模型…',
+    'model.searchEmpty': '没有匹配的模型。',
+    'model.empty': '暂无可用模型',
   }),
 })
 
@@ -9183,12 +9205,12 @@ function renderModelSeat() {
   const wanted = currentEndpointName()
   chosenEndpoint = wanted
   if (wanted === null) {
-    modelLabel.textContent = 'no model'
+    modelLabel.textContent = t('model.none')
     modelEffort.hidden = true
     modelEffort.textContent = ''
     modelTrigger.disabled = true
-    modelTrigger.setAttribute('aria-label', 'Select model')
-    modelTrigger.title = 'no model'
+    modelTrigger.setAttribute('aria-label', t('model.fallback'))
+    modelTrigger.title = t('model.none')
     return
   }
   modelTrigger.disabled = false
@@ -9199,21 +9221,21 @@ function renderModelSeat() {
      * removed has to say what it is set to; the first symptom otherwise is a turn that refuses and a control
      * that looks perfectly fine.
      */
-    const missing = `${wanted} (not configured)`
+    const missing = t('model.notConfigured', { name: wanted })
     modelLabel.textContent = missing
     modelEffort.hidden = true
     modelEffort.textContent = ''
-    modelTrigger.setAttribute('aria-label', `Select model, current ${missing}`)
+    modelTrigger.setAttribute('aria-label', t('model.aria', { model: missing }))
     modelTrigger.title = missing
     return
   }
   const modelId = selectedModelId(option)
   if (modelMissingFrom(option, modelId)) {
-    modelLabel.textContent = 'Select model'
+    modelLabel.textContent = t('model.fallback')
     modelEffort.hidden = true
     modelEffort.textContent = ''
-    modelTrigger.setAttribute('aria-label', 'Select model')
-    modelTrigger.title = 'Select model'
+    modelTrigger.setAttribute('aria-label', t('model.fallback'))
+    modelTrigger.title = t('model.fallback')
     return
   }
   const label = modelId === null ? wanted : modelTitle(option, modelId)
@@ -9228,10 +9250,13 @@ function renderModelSeat() {
   }
   modelTrigger.setAttribute(
     'aria-label',
-    effort.name === undefined ? `Select model, current ${label}` : `Select model, current ${label}, reasoning effort ${effort.name}`,
+    effort.name === undefined ? t('model.aria', { model: label }) : t('model.ariaEffort', { model: label, effort: effort.name }),
   )
   modelTrigger.title = effort.name === undefined ? label : `${label} · ${effort.name}`
 }
+
+/** A language chosen in Settings redraws the seat at once (#80); an open menu redraws when it next opens. */
+window.addEventListener('heddle:locale', () => renderModelSeat())
 
 /** The selection a turn names: the seat's endpoint, model (when chosen) and enforceable effort. */
 function selectionForTurn() {
@@ -9355,8 +9380,8 @@ function modelSearchRow() {
   const input = document.createElement('input')
   input.type = 'text'
   input.setAttribute('role', 'searchbox')
-  input.setAttribute('aria-label', 'Search models…')
-  input.placeholder = 'Search models…'
+  input.setAttribute('aria-label', t('model.search'))
+  input.placeholder = t('model.search')
   input.value = modelQuery
   input.addEventListener('input', () => {
     modelQuery = input.value
@@ -9396,22 +9421,22 @@ function modelSearchRow() {
 /** Draw the root pane: the Model row, and the Effort row only when the model declares levels. */
 function buildRootPane() {
   modelMenu.setAttribute('role', 'menu')
-  modelMenu.setAttribute('aria-label', 'Model and reasoning effort')
+  modelMenu.setAttribute('aria-label', t('model.menuAria'))
   const name = currentEndpointName()
   const option = configuredEndpoint(name)
   const modelId = option === undefined ? null : selectedModelId(option)
   /** A model the catalogue no longer lists keeps DSH's placeholder here too, and has no Effort row (issue #47). */
   const missingModel = modelMissingFrom(option, modelId)
   const label = option === undefined
-    ? `${name ?? 'no model'} (not configured)`
-    : missingModel ? 'Select model' : modelId === null ? option.name : modelTitle(option, modelId)
-  modelMenu.append(menuCell('Model', label, 'model'))
+    ? t('model.notConfigured', { name: name ?? t('model.none') })
+    : missingModel ? t('model.fallback') : modelId === null ? option.name : modelTitle(option, modelId)
+  modelMenu.append(menuCell(t('model.menuModel'), label, 'model'))
   const effort = option === undefined || missingModel ? { name: undefined } : effectiveEffort(option, modelId)
   /**
    * The Effort row exists only when the selected model publishes reasoning metadata. A model that declares no
    * levels has no row, because a control there would offer values the adapter would refuse to send.
    */
-  if (effort.name !== undefined) modelMenu.append(menuCell('Effort', effort.name, 'effort'))
+  if (effort.name !== undefined) modelMenu.append(menuCell(t('model.menuEffort'), effort.name, 'effort'))
 }
 
 /**
@@ -9484,14 +9509,14 @@ function offeredChoices() {
 /** Draw the model pane: search above four entries, then the endpoint-grouped list. */
 function buildModelPane() {
   modelMenu.setAttribute('role', 'group')
-  modelMenu.setAttribute('aria-label', 'Model and reasoning effort')
+  modelMenu.setAttribute('aria-label', t('model.menuAria'))
   const all = offeredChoices()
   const showSearch = all.length > 4
   if (showSearch) modelMenu.append(modelSearchRow())
   const groups = document.createElement('div')
   groups.className = 'model-groups scrollable'
   groups.setAttribute('role', 'menu')
-  groups.setAttribute('aria-label', 'Model')
+  groups.setAttribute('aria-label', t('model.menuModel'))
   /** Leading and trailing spaces are ignored, and each endpoint's models are ranked on their own (DSH's rule). */
   const query = showSearch ? modelQuery.trim() : ''
   const byEndpoint = new Map()
@@ -9558,7 +9583,7 @@ function buildModelPane() {
     const empty = document.createElement('div')
     empty.className = 'model-empty'
     empty.setAttribute('role', 'status')
-    empty.textContent = all.length === 0 ? 'No models available.' : 'No matching models.'
+    empty.textContent = all.length === 0 ? t('model.empty') : t('model.searchEmpty')
     groups.append(empty)
   }
   modelMenu.append(groups)
@@ -9590,7 +9615,7 @@ function paintHighlight(groups) {
 /** Draw the effort pane: `Default` when the model names no default, then every declared level. */
 function buildEffortPane() {
   modelMenu.setAttribute('role', 'menu')
-  modelMenu.setAttribute('aria-label', 'Model and reasoning effort')
+  modelMenu.setAttribute('aria-label', t('model.menuAria'))
   const option = configuredEndpoint(currentEndpointName())
   const modelId = option === undefined ? null : selectedModelId(option)
   const levels = levelsOf(option, modelId)
