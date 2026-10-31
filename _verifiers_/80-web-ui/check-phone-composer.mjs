@@ -101,9 +101,12 @@ test('at phone width the model chip stays beside the send button and the status 
   try {
     await browser.goto(server.url)
     await browser.waitFor(`document.querySelector('#prompt textarea') !== null`)
-    await browser.evaluate(`fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'hello' }) }).then((r) => r.text())`, 15_000)
+    const answered = String(await browser.evaluate(`fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'hello' }) }).then((r) => r.text())`, 15_000))
+    const session = /"session":"(session-[^"]+)"/.exec(answered)?.[1]
+    assert.ok(session, `the turn named its session\n${answered.slice(0, 200)}`)
     await metrics(PHONE)
-    await browser.goto(server.url)
+    /** The page opens no session on its own (#17): the answered one is opened by name, as check-narrow-layout does. */
+    await browser.gotoSession(server.url, session)
     await browser.waitFor(`document.body.dataset.ready === 'true' && document.getElementById('model-label').textContent === ${JSON.stringify(MODEL)}`, 15_000)
     await browser.evaluate(LONG_SESSION)
     await settle()
