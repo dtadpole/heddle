@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { after, test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, isolatedHome, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The model selector, judged in a browser against DSH's measured control.
@@ -91,6 +91,7 @@ async function startServer(label, options = {}) {
             },
           },
           { id: 'model-two-lite', name: 'Model Two Lite' },
+          ...(options.extraModels ?? []),
         ],
       },
     ],
@@ -132,6 +133,7 @@ async function plainDouble(content) {
       body += chunk
     })
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       requests.push({ url: request.url ?? '', body })
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' })
@@ -181,6 +183,7 @@ async function toolThenPlainDouble(content) {
       body += chunk
     })
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response) // a new session's title request is no turn (#68)
       requests.push({ url: request.url ?? '', body, at: Date.now() })
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(200, { 'content-type': 'application/json' })
@@ -812,6 +815,55 @@ test('the menu is keyboard-operable and a selection restores focus without a rin
   }
 })
 
+test('the model search matches characters in order, prefix first, and opening highlights the current model', async (context) => {
+  /**
+   * DSH's search (issue #51), dsh-client-ui-model-selection: names match case-insensitively "including nonconsecutive
+   * characters in order"; "within each provider, prefix matches come first, followed by alignment score and then
+   * catalog order"; and "opening highlights the current model or the first available row". The page matched only
+   * contiguous text over the name, id and endpoint, in catalogue order, and opened with nothing highlighted.
+   * `Lite Two` is listed **after** `Model Two Lite`, so a prefix-first order is told apart from catalogue order.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('search', { extraModels: [{ id: 'lite-two', name: 'Lite Two' }] })
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  const shown = `JSON.parse(JSON.stringify([...document.querySelectorAll('#model-menu [role="menuitemradio"]')].map((option) => option.innerText)))`
+  const highlighted = `(() => { const row = document.querySelector('#model-menu [role="menuitemradio"][data-highlighted]'); return row === null ? null : row.innerText })()`
+  try {
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('role')`), 'searchbox', 'the model pane focuses its search')
+    assert.equal(await browser.evaluate(highlighted), 'Model One', 'opening highlights the current model')
+
+    await typeText(browser, 'mtl')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    const ordered = await browser.evaluate(shown)
+    assert.ok(ordered.includes('Model Two Lite'), `characters in order match across words (mtl: ${ordered.join(', ')})`)
+    assert.ok(!ordered.includes('Model One'), 'and a name without them in order does not')
+
+    await browser.evaluate(`(() => { const field = document.querySelector('#model-menu input[role="searchbox"]'); field.value = ''; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await typeText(browser, 'lite')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    assert.deepEqual(await browser.evaluate(shown), ['Lite Two', 'Model Two Lite'], 'a prefix match comes before an earlier catalogue entry')
+    assert.equal(await browser.evaluate(highlighted), 'Lite Two', 'editing the query highlights the first result')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400))
+    assert.equal(await browser.evaluate(`${SEAT}.getAttribute('aria-label')`), 'Select model, current Lite Two', 'Enter selects it')
+
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    assert.equal(await browser.evaluate(highlighted), 'Lite Two', 'reopening highlights the model just chosen')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a switch made while a turn runs lands on that turn’s next step', async (context) => {
   /**
    * DSH's running-turn rule, measured on 2026-10-17: the seat stays enabled while a turn streams, and the switch
@@ -853,6 +905,111 @@ test('a switch made while a turn runs lands on that turn’s next step', async (
     assert.ok(await until(() => server.two.turns.length === 1), 'the next step asked the second')
     assert.equal(JSON.parse(server.two.turns[0].body).model, 'model-two', 'with the newly chosen model')
     assert.equal((await sessionsOf(server))[0]?.endpoint, 'double-two', 'and the session records the switch')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a switch made while a turn runs is recorded as the request its next step sent', async (context) => {
+  /**
+   * The log must name what the provider was asked (issue #14). The request half of the running-turn rule held on both
+   * builds: the test above sees the next step reach the newly chosen endpoint. The `model/request` record for that
+   * step still named the selection the turn **started** with, because the loop wrote it from the turn's options
+   * before the session's selection rewrote the call. So a person reading the log, or a tester, saw "the whole turn
+   * stayed on the old model" when it had not. DSH's request header names the provider, model and effort actually
+   * used (`consumeSelection` retires a pending selection on a matching header). No browser: the seat is judged above;
+   * this is the record.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('recorded', { toolFirst: true })
+  try {
+    const cookie = await cookieFor(server.url)
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ prompt: 'list the folder, then answer' }),
+    })
+    assert.equal(turn.status, 200, 'the turn starts')
+    assert.ok(await until(() => server.one.turns.length === 1), 'its first step waits on the first endpoint')
+    const id = (await sessionsOf(server))[0]?.id
+    assert.ok(typeof id === 'string' && id.length > 0, 'the running turn has a session to switch')
+    const switched = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ endpoint: 'double-two', model: 'model-two', reasoningEffort: 'low' }),
+    })
+    assert.equal(switched.status, 200, 'the switch is accepted while the turn runs')
+    server.one.releaseFirst()
+    const stream = await turn.text()
+    const records = stream
+      .split('\n\n')
+      .filter((block) => block.startsWith('event: session\n'))
+      .map((block) => JSON.parse(block.slice(block.indexOf('data: ') + 'data: '.length)).event)
+      .filter((event) => event.type === 'model/request')
+    assert.equal(server.two.turns.length, 1, 'the next step asked the newly chosen endpoint')
+    const sent = JSON.parse(server.two.turns[0].body)
+    assert.equal(sent.model, 'model-two', 'with the newly chosen model')
+    assert.equal(sent.reasoning_effort, 'low', 'and the newly chosen level')
+    assert.equal(records.length, 2, `the turn recorded two model requests (${records.length})`)
+    assert.equal(records[0].endpoint, 'double-one', 'the first record names the endpoint the first step asked')
+    assert.deepEqual(
+      { endpoint: records[1].endpoint, model: records[1].model, reasoningEffort: records[1].reasoningEffort },
+      { endpoint: 'double-two', model: 'model-two', reasoningEffort: 'low' },
+      'the second record names what the second step was actually sent',
+    )
+  } finally {
+    await server.close()
+  }
+})
+
+test('a recorded model the catalogue no longer lists shows DSH’s placeholder and no effort', async (context) => {
+  /**
+   * Issue #47. A session keeps the model it recorded after the configuration drops it, and DSH keeps calling it too
+   * ("a saved selection can still submit requests after its catalog entry disappears", dsh-llm-deepseek). What differs
+   * is the seat: DSH "shows 'Select model' in regular weight and hides the reasoning effort caption" for a saved
+   * selection absent from the catalogue (dsh-client-ui-model-selection), while the page showed the stale raw id as if
+   * it were a choice. A turn that names an unlisted model is the shortest way to such a session: the turn route
+   * passes the id through and records it, as DSH does, and the page opens the newest session.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('removed')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ prompt: 'a session on a model since removed', endpoint: 'double-two', model: 'model-gone' }),
+    })
+    assert.equal(turn.status, 200, 'the turn runs')
+    await turn.text()
+    assert.equal((await sessionsOf(server))[0]?.model, 'model-gone', 'the session records the model the catalogue does not list')
+
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
+    assert.ok(
+      await browser.waitFor(`${SEAT}.getAttribute('aria-label') === 'Select model'`, 10_000),
+      `the seat shows DSH's placeholder (${await browser.evaluate(`${SEAT}.getAttribute('aria-label')`)})`,
+    )
+    assert.equal(await browser.evaluate(`document.getElementById('model-label').textContent`), 'Select model', 'as its label')
+    assert.equal(await browser.evaluate(`getComputedStyle(document.getElementById('model-label')).fontWeight`), '400', 'in regular weight')
+    assert.equal(await browser.evaluate(`document.getElementById('model-effort').hidden`), true, 'with no effort caption')
+    assert.equal((await browser.evaluate(`${SEAT}.innerText`)).includes('model-gone'), false, 'and without the stale id')
+
+    await openMenu(browser)
+    const menu = await browser.evaluate(MENU_READ)
+    assert.deepEqual(menu.cells.map((cell) => cell.text), ['Model|Select model'], 'the root pane keeps the placeholder and has no Effort row')
+    await drill(browser, 'Model')
+    await choose(browser, 'Model Two')
+    assert.equal(
+      await browser.evaluate(`${SEAT}.getAttribute('aria-label')`),
+      'Select model, current Model Two, reasoning effort High',
+      'choosing a listed model brings back its name and caption',
+    )
     assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
   } finally {
     browser.close()

@@ -25,6 +25,8 @@ heddle-context.workspace = true
 heddle-events.workspace = true
 heddle-llm.workspace = true
 heddle-goal.workspace = true
+# The jobs row (`src/plugins/jobs.ts`): background jobs, their tools, background bash and the page's routes.
+heddle-jobs.workspace = true
 heddle-sandbox.workspace = true
 heddle-schedule.workspace = true
 heddle-server.workspace = true

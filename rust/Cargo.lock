@@ -642,6 +642,7 @@ dependencies = [
  "heddle-context",
  "heddle-events",
  "heddle-goal",
+ "heddle-jobs",
  "heddle-llm",
  "heddle-sandbox",
  "heddle-schedule",
@@ -738,6 +739,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-jobs"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "futures",
+ "heddle-agent",
+ "heddle-config",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-session",
+ "heddle-tools",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "heddle-llm"
 version = "0.0.1"
 dependencies = [
@@ -755,6 +777,7 @@ dependencies = [
 name = "heddle-sandbox"
 version = "0.0.1"
 dependencies = [
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

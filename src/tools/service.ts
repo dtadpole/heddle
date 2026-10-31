@@ -55,7 +55,15 @@ export interface ToolResult {
 export interface ToolDefinition {
   readonly spec: ToolSpec
   readonly run: (args: Record<string, unknown>, context: ToolRunContext) => Promise<ToolResult>
+  /**
+   * May run alongside the other parallel-safe calls of one model step (DSH's `isConcurrencySafe`). Absent means
+   * exclusive: the call runs alone, as a barrier between groups, which is the safe default for a tool that writes.
+   */
+  readonly concurrencySafe?: boolean
 }
+
+/** The default for `tools.maxParallelToolCalls`: parallel-safe calls in flight per step (DSH's default). */
+export const DEFAULT_MAX_PARALLEL_TOOL_CALLS = 10
 
 /** One command: a name a person types, and the same execution path as a tool. */
 export interface CommandDefinition {
@@ -82,6 +90,8 @@ export class ToolRegistry extends Service {
   static readonly provide = 'tools'
 
   private readonly tools = new Map<string, ToolDefinition>()
+  /** Parallel-safe calls one step may run at once (`tools.maxParallelToolCalls`); 1 runs every call alone. */
+  maxParallelToolCalls = DEFAULT_MAX_PARALLEL_TOOL_CALLS
   private readonly commands = new Map<string, CommandDefinition>()
   /**
    * Both gates, held as fields rather than constructor parameter properties:
@@ -176,6 +186,11 @@ export class ToolRegistry extends Service {
   /** Whether a tool exists, so a caller can distinguish unknown from refused. */
   has(name: string): boolean {
     return this.tools.has(name)
+  }
+
+  /** Whether a call to `name` may share a step's parallel group; an unknown tool is exclusive (it fails alone). */
+  isConcurrencySafe(name: string): boolean {
+    return this.tools.get(name)?.concurrencySafe === true
   }
 
   /**

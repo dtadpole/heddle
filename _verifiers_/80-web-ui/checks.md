@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-29T04:43:48Z
+modified: 2026-10-31T08:45:00Z
 level: L3
-version: 1.1.0
+version: 1.1.1
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -55,6 +55,16 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
   tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections.
+- [`check-narrow-layout.mjs`](check-narrow-layout.mjs) — a narrow window at DSH parity: below 1024 pixels the
+  sidebar is the 56-pixel rail (`dsh-client-ui-layout`, `SIDEBAR_AUTO_COLLAPSE`), so at phone width (390 x 844, the
+  protocol's device metrics) the conversation keeps a readable width and the composer and its send button stay on
+  screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
+  breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
+  (live-testing draft developer-ten-9).
+- [`check-phone-composer.mjs`](check-phone-composer.mjs) — at phone width (390 x 844) the composer's control row and
+  the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
+  shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
+  composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
 
 ## What it deliberately does not judge
 

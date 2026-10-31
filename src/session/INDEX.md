@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.3.0
+version: 1.4.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -33,6 +33,17 @@ turn that the turn has not taken yet. It is DSH's agent inbox, recorded with DSH
 A steer is queued in the next-step list, the loop writes it at its next step boundary (after any tool result
 still due), a stop keeps it, and the next turn writes it before its own prompt (R-developer-two-5).
 
+A session's **title** is cleaned as DSH cleans an accepted one ([`title-text.ts`](title-text.ts), DSH's
+`normalizeSessionTitle`): escape sequences, controls and invisible or directional characters removed, whitespace
+collapsed, at most 80 UTF-8 bytes. The store applies it to a rename and to a session created with a title, the
+definition writers to the title they record, and the title route refuses one with nothing visible left.
+
+The log is also what **content search** reads ([`search.ts`](search.ts)): DSH's `session.search`, the sessions whose
+current user or assistant messages hold a phrase, ranked and quoted as DSH's SQLite FTS5 index answers. heddle has no
+SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-generate.ts`](unicode61-generate.ts) into
+[`unicode61.ts`](unicode61.ts) and its Rust twin, and the search is a scan that re-reads a log only when it changed
+(R-developer-eight-19).
+
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
 where that happens.
@@ -59,6 +70,15 @@ grow with the square of the session's length, and it is also what made decompres
 it now happens once per session per process. The trade is stated in the code rather than hidden: a
 second process appending to the same session while this one holds it open would not be seen, and
 heddle runs one process per session.
+
+**A turn its writer never finished is closed when the session is next opened for writing**
+([`repair.ts`](repair.ts), issue #5). A server restarted while `bash` ran used to leave the log at the call:
+no result, no answer record, no turn end, and the view drew the call as running for good. As DSH does on
+attach for writing, the first process to take the session's writer lock appends the closers before anything
+else: an `error (INTERRUPTED)` result for each open call, then `assistant/completed` and `turn/completed`
+with `reason: { kind: 'interrupted' }`. A session no live writer holds reads with the same closers added and
+nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
+restart. A turn running in this process holds the lock already and is never closed.
 
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns
