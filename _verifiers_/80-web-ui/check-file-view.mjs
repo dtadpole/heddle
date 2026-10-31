@@ -654,6 +654,50 @@ test('a file link in a chat answer opens the file in the preview, and does not l
   }
 })
 
+test('after a reload restores the session, a relative link in its answer still opens the file from the session folder', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * #41, developer-two's live acceptance run on 8e7dedbd: the link handler resolved a relative link against activeFolder,
+   * which only a row click or a workspace action sets. A reload that restores the saved session opens it by id, so after
+   * a reload the folder was unset or another one, and the browser followed the link away from the page. The link must
+   * mean the session's own folder: here a nested one, with a different README.md at the workspace root.
+   */
+  const server = await startServer('chat-links-reload', [{ text: 'See [the readme](README.md).' }])
+  const browser = await openBrowser()
+  try {
+    const app = join(server.work, 'app')
+    mkdirSync(app, { recursive: true })
+    writeFileSync(join(server.work, 'README.md'), '# Root readme\n\nThe workspace root.\n')
+    writeFileSync(join(app, 'README.md'), '# App readme\n\nThe session folder.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: app }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where is the readme', folder: app, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    assert.equal(await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`), true, 'the session opens, and is kept as the one to restore')
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    const link = 'document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]")'
+    assert.ok(await browser.waitFor(`${link} !== null`, 15_000), 'the reload restores the session and its answer with the link')
+    const before = await browser.evaluate('location.href')
+    await browser.evaluate(`${link}.click()`)
+    assert.ok(await browser.waitFor('document.getElementById("file-body")?.innerText.includes("The session folder.") === true', 10_000), `the link opens the session folder's file (the preview reads ${JSON.stringify(await browser.evaluate('document.getElementById("file-body")?.innerText ?? null'))})`)
+    assert.equal(await browser.evaluate('location.href'), before, 'and the page did not navigate away')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 /**
  * The line at the top of the preview: a code file's first visible numbered row, or the plain-text line under the
  * panel's top edge. Read in the browser, so it judges what the reader sees rather than a scroll offset.
