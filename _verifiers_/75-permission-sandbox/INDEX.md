@@ -78,6 +78,11 @@ a display or a window.
   command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
   started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
   API, no browser.
+- [`check-terminal.mjs`](check-terminal.mjs) — the page's **interactive terminal** (live-testing issue #85), through
+  the API on either build. Its routes are fenced: a foreign Origin or Host, a missing credential and a non-JSON
+  write are refused. A terminal belongs to its session, so no other session can reach it or see its output. Its
+  shell is confined like bash: under workspace-write it writes in the session folder and is refused outside it.
+  It is bounded (`maxTerminals`, then `409`). Close, archive and server shutdown each end its whole process tree.
 
 ## Running it
 
@@ -112,6 +117,11 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
   command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
   started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
   API, no browser.
+- [`check-terminal.mjs`](check-terminal.mjs) — the page's **interactive terminal** (live-testing issue #85), through
+  the API on either build. Its routes are fenced: a foreign Origin or Host, a missing credential and a non-JSON
+  write are refused. A terminal belongs to its session, so no other session can reach it or see its output. Its
+  shell is confined like bash: under workspace-write it writes in the session folder and is refused outside it.
+  It is bounded (`maxTerminals`, then `409`). Close, archive and server shutdown each end its whole process tree.
 
 ## Running it
 
