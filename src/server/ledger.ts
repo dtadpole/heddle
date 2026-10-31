@@ -871,8 +871,27 @@ export interface TimelineSpan {
   readonly running: boolean
 }
 
+/**
+ * One timed record on the overview, as DSH's overview draws it: a bar in its lane, positioned by its own start and end
+ * (fractions of the domain, like a span's). An assistant record whose time-to-first-token is known and within its
+ * duration also carries the split DSH draws inside the bar (TTFT, then decoding); any other record is one plain bar.
+ * A running record ends where it started, on the same clock as its turn's span, so a bar never ends past its span.
+ */
+export interface TimelineRecord {
+  readonly turn: number
+  readonly lane: LedgerLane
+  readonly kind: LedgerKind
+  readonly start: number
+  readonly end: number
+  readonly running: boolean
+  readonly ttftMs?: number
+  readonly decodingMs?: number
+}
+
 export interface Timeline {
   readonly spans: readonly TimelineSpan[]
+  /** Every timed record, ordered by start then turn; the spans above stay the per-turn summary. */
+  readonly records?: readonly TimelineRecord[]
   /** From the earliest recorded start to the latest recorded end, in milliseconds. `0` when nothing is timed. */
   readonly durationMs: number
   readonly startsAt?: string
@@ -881,7 +900,7 @@ export interface Timeline {
 
 /** Project a ledger onto a time axis. */
 export function projectTimeline(ledger: Ledger): Timeline {
-  const timed: { turn: number; start: number; end: number; kind: LedgerKind; running: boolean }[] = []
+  const timed: { turn: number; start: number; end: number; kind: LedgerKind; running: boolean; durationMs?: number; ttftMs?: number }[] = []
 
   for (const turn of ledger.turns) {
     for (const step of turn.steps) {
@@ -891,7 +910,15 @@ export function projectTimeline(ledger: Ledger): Timeline {
         if (Number.isNaN(start)) continue
         /** A finished record ends after its duration; a running one ends where the events end. */
         const end = record.durationMs !== undefined ? start + record.durationMs : start
-        timed.push({ turn: turn.index, start, end, kind: record.kind, running: record.inFlight === true })
+        timed.push({
+          turn: turn.index,
+          start,
+          end,
+          kind: record.kind,
+          running: record.inFlight === true,
+          ...(record.durationMs !== undefined ? { durationMs: record.durationMs } : {}),
+          ...(record.ttftMs !== undefined ? { ttftMs: record.ttftMs } : {}),
+        })
       }
     }
   }
@@ -957,8 +984,31 @@ export function projectTimeline(ledger: Ledger): Timeline {
     })
   }
 
+  /**
+   * One bar per timed record (DSH's overview). The TTFT split rides only on a record whose time-to-first-token is known
+   * and lies within its duration; anything else would draw a split the record cannot support.
+   */
+  const records: TimelineRecord[] = timed
+    .map((entry) => {
+      const split =
+        entry.ttftMs !== undefined && entry.durationMs !== undefined && entry.ttftMs >= 0 && entry.ttftMs <= entry.durationMs
+          ? { ttftMs: entry.ttftMs, decodingMs: entry.durationMs - entry.ttftMs }
+          : {}
+      return {
+        turn: entry.turn,
+        lane: laneOf(entry.kind),
+        kind: entry.kind,
+        start: (entry.start - domainStart) / durationMs,
+        end: (entry.end - domainStart) / durationMs,
+        running: entry.running,
+        ...split,
+      }
+    })
+    .sort((left, right) => left.start - right.start || left.turn - right.turn)
+
   return {
     spans,
+    records,
     durationMs,
     startsAt: new Date(domainStart).toISOString(),
     endsAt: new Date(domainEnd).toISOString(),

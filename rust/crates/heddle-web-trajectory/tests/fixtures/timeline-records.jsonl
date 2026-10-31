@@ -1,0 +1,12 @@
+{"seq":1,"at":"2026-10-31T09:00:00.000Z","type":"message","message":{"role":"user","content":[{"type":"text","text":"list the folder"}]}}
+{"seq":2,"at":"2026-10-31T09:00:00.100Z","type":"model/request","endpoint":"scripted","messages":1}
+{"seq":3,"at":"2026-10-31T09:00:00.400Z","type":"assistant/chunk","chunk":{"type":"tool-call","id":"c1","name":"list_dir","arguments":"{\"path\":\".\"}"}}
+{"seq":4,"at":"2026-10-31T09:00:00.500Z","type":"assistant/completed","text":""}
+{"seq":5,"at":"2026-10-31T09:00:00.900Z","type":"message","message":{"role":"tool","toolCallId":"c1","content":[{"type":"text","text":"a.txt\nb.txt"}]}}
+{"seq":6,"at":"2026-10-31T09:00:01.000Z","type":"model/request","endpoint":"scripted","messages":3}
+{"seq":7,"at":"2026-10-31T09:00:01.300Z","type":"assistant/chunk","chunk":{"type":"text-delta","text":"two files"}}
+{"seq":8,"at":"2026-10-31T09:00:02.200Z","type":"assistant/completed","text":"two files"}
+{"seq":9,"at":"2026-10-31T09:00:02.200Z","type":"turn/completed","rounds":2}
+{"seq":10,"at":"2026-10-31T09:00:03.000Z","type":"message","message":{"role":"user","content":[{"type":"text","text":"and again"}]}}
+{"seq":11,"at":"2026-10-31T09:00:03.100Z","type":"model/request","endpoint":"scripted","messages":5}
+{"seq":12,"at":"2026-10-31T09:00:03.400Z","type":"assistant/chunk","chunk":{"type":"text-delta","text":"still writ"}}
