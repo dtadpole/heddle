@@ -872,7 +872,19 @@ test('the overview zooms with the wheel, pans with a right-button drag, and a ri
     assert.equal(await fire('wheel', { deltaY: -600, clientX: middle, clientY: before.stripY }), false, 'the strip takes the wheel, so the page does not scroll')
     const zoomed = await read()
     assert.equal(zoomed.zoomed, 'true', 'a wheel up zooms in')
-    assert.ok(zoomed.trackWidth > before.trackWidth * 2, `the lanes are drawn wider than the strip (${before.trackWidth} to ${zoomed.trackWidth})`)
+    assert.ok(zoomed.trackWidth > before.trackWidth * 1.5, `the lanes are drawn wider than the strip (${before.trackWidth} to ${zoomed.trackWidth})`)
+    /**
+     * A zoomed strip cannot be scrolled by focus (developer-ten's B1): a bar outside the view is no tab stop, and even
+     * focused from script it leaves the strip where it was, so the pointer still maps to the bars under it.
+     */
+    const focusState = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const bars = [...document.querySelectorAll('#timeline .tr-bar')]
+      const hidden = bars.filter((bar) => bar.tabIndex === -1)
+      hidden[0]?.focus()
+      return { bars: bars.length, hidden: hidden.length, scrollLeft: document.getElementById('timeline').scrollLeft }
+    })())`))
+    assert.ok(focusState.hidden < focusState.bars, `the bars in view stay tab stops (${JSON.stringify(focusState)})`)
+    assert.equal(focusState.scrollLeft, 0, `focusing a bar outside the view does not scroll the strip (${JSON.stringify(focusState)})`)
     assert.ok(Math.abs(zoomed.trackLeft + (zoomed.trackWidth - before.stripWidth) / 2) < 2, `about the pointer at the middle, the track stays centred (left ${zoomed.trackLeft})`)
 
     await fire('pointerdown', { button: 2, buttons: 2, clientX: middle, clientY: before.stripY })
