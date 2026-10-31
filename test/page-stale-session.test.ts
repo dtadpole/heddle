@@ -103,6 +103,8 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       stopButton: { hidden: true },
       field,
       queueOf: () => [],
+      // main's ui-stack: plan mode's placeholder, none here.
+      placeholderOverride: null,
       updateSendDisabled: run<() => void>('updateSendDisabled', { unavailableSession: unavailable, sendButton, anyRunning: () => false, field }),
       refreshRunningStatus: () => {},
       updateStatusBar: () => {},
@@ -112,7 +114,7 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
   assert.equal(field.placeholder, 'Session unavailable', "DSH's placeholder.unavailable")
   assert.equal(sendButton.disabled, true, 'Send is disabled even with a draft')
   state(null, 'hello')
-  assert.equal(field.placeholder, 'Message or run a task, / commands, @ files or sessions')
+  assert.equal(field.placeholder, 'Message or run a task, / commands', "main's default placeholder (ui-stack)")
   assert.equal(sendButton.disabled, false)
 
   const sent: string[] = []
@@ -125,6 +127,11 @@ test('the composer is disabled and reads "Session unavailable", and neither Send
       growComposer: () => {},
       updateSendDisabled: () => {},
       takeAttachments: () => [],
+      // main's Stop pause (3db975b7): a new submission clears the open queue's stopped mark.
+      stoppedQueues: new WeakSet(),
+      // main's ui-stack: no slash command claims a plain message.
+      slashCommands: null,
+      queueOf: () => [],
       resolveSubmitMode: () => 'queue',
       BUSY_ENTER: 'queue',
       anyRunning: () => false,

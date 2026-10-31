@@ -36,11 +36,14 @@
  * `subagent` (the Subagent runtime), and `schedule` (the Schedule plugin)" (`dsh-workspace/lib/types/types.d.ts:28-35`).
  * The order is read from the code, not observed in a running DSH.
  *
- * Heddle reads the turn and the lineage here, and takes the other two families from their rows: the reminders from
- * the schedule row's public `list` and `stopSessionTasks` (`src/schedule/service.ts`, DSH's `list({sessionId})` and
- * `stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`), and the jobs slot from the jobs row's own archive
- * admission.
+ * Heddle reads the turn and the lineage here, and takes the other two families from their rows: the jobs from the jobs
+ * row's own archive admission (`sessionJobActivity` / `stopSessionJobs` in `src/jobs/http.ts`, DSH's `runningJobs`
+ * and its kill with `session archived`), the reminders from the schedule row's public `list` and `stopSessionTasks`
+ * (`src/schedule/service.ts`, DSH's `list({sessionId})` and `stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
  */
+
+import { sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
+import type { JobRegistry } from '../jobs/registry.ts'
 
 /** A family's kind, as DSH spells it. */
 export type ActivityKind = 'turn' | 'job' | 'subagent' | 'schedule'
@@ -170,3 +173,35 @@ export async function stopSessionSchedules(schedule: ScheduleSource | undefined,
     warn(`workspace: stopping session '${sessionId}' for archive failed: ${String(error)}`)
   }
 }
+
+/** The rows whose work is archive activity: the jobs row's registry and the schedule row's service, each optional. */
+export interface RowSources {
+  readonly jobs?: JobRegistry | undefined
+  readonly schedule?: ScheduleSource | undefined
+}
+
+/**
+ * The rows' families, read: the session's live jobs through the jobs row's `sessionJobActivity` and its active
+ * reminders through `scheduleActivity`. Both are empty without their row.
+ */
+export async function rowActivity(rows: RowSources, sessionId: string): Promise<{ jobs: ActivityItem[]; schedules: ActivityItem[] }> {
+  return { jobs: [...sessionJobActivity(rows.jobs, sessionId)], schedules: await scheduleActivity(rows.schedule, sessionId) }
+}
+
+/**
+ * Stop the rows' work once the archive is written, both asked at once and awaited together, as DSH's registry asks
+ * every `workspace/session-stop` listener in parallel (`dsh-workspace/lib/index.js:621-628`): each live job is killed
+ * with `session archived` (`stopSessionJobs`, `dsh-jobs/lib/index.js:32-36`) and the reminders are removed
+ * (`stopSessionSchedules`). A failure is reported, never thrown.
+ */
+export async function stopRowActivity(rows: RowSources, sessionId: string, warn: (message: string) => void): Promise<void> {
+  const killJobs = async (): Promise<void> => {
+    try {
+      stopSessionJobs(rows.jobs, sessionId)
+    } catch (error) {
+      warn(`workspace: stopping session '${sessionId}' for archive failed: ${String(error)}`)
+    }
+  }
+  await Promise.all([killJobs(), stopSessionSchedules(rows.schedule, sessionId, warn)])
+}
+

@@ -10,7 +10,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -1529,6 +1529,164 @@ test('a turn into a one-shot subagent\'s session is refused the way DSH refuses 
   }
 })
 
+test('a turn into an archived session is accepted and blocked before any model request, as DSH\'s gate blocks it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26. DSH's ArchivedSessionGate (dsh-api-session-controller lib/index.js:2508-2541) answers the agent's
+   * pre-step with reject while its session is archived: the prompt is accepted, the turn opens, its claimed input is
+   * dropped, no model request is made and the turn ends blocked (dsh-agent-loop lib/index.js:956-963). Measured before
+   * this gate on both builds: POST /api/turn into an archived session asked the model, answered, and grew the session
+   * from one turn to two while it stayed archived. The endpoint here is an HTTP double, so "no model request reached
+   * the endpoint" is a count of what it received, not a reading of the log alone.
+   */
+  const home = isolatedHome('archived-turn')
+  const work = fixtureDir('archived-turn-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the endpoint answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  /** What a turn must not leave in an archived session's log: an input message, a model call, an answer, a completion. */
+  const answerTypes = new Set(['message', 'model/request', 'assistant/chunk', 'assistant/completed', 'turn/completed'])
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1, 'and asked the endpoint once')
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const meta = async () => (await (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()).find((one) => one.id === id)
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const turnsBefore = (await meta())?.turns
+    assert.equal(turnsBefore, 1, 'with its one turn')
+    const eventsBefore = transcript().length
+
+    const response = await post('/api/turn', { session: id, prompt: 'into the archive' })
+    const text = await response.text()
+    assert.equal(response.status, 200, `the turn is accepted, as DSH accepts the prompt\nsaw: ${response.status} ${text.slice(0, 300)}`)
+    const doneLine = text.split('\n\n').find((frame) => frame.startsWith('event: done\n'))
+    assert.ok(doneLine !== undefined, `the turn ended\nsaw: ${text.slice(0, 600)}`)
+    const done = JSON.parse(doneLine.slice(doneLine.indexOf('data: ') + 'data: '.length))
+    assert.equal(done.finishReason, 'blocked', `it ended blocked\nsaw: ${JSON.stringify(done)}`)
+    assert.equal(done.rounds, 0, 'without a step')
+    assert.equal(done.text, '', 'and without an answer')
+    assert.ok(!text.includes('the endpoint answered'), 'the endpoint\'s answer never streamed')
+    assert.equal(double.requests.length, 1, 'no model request reached the endpoint')
+    const added = transcript().slice(eventsBefore)
+    assert.deepEqual(added.filter((event) => answerTypes.has(event.type)).map((event) => event.type), [], 'no input, model call or answer was appended')
+    assert.deepEqual(
+      added.filter((event) => event.type === 'turn/failed').map((event) => event.reason),
+      [{ kind: 'blocked' }],
+      `the log records the turn as blocked, DSH's turn-end reason\nsaw: ${JSON.stringify(added)}`,
+    )
+    const inserted = added.find((event) => event.type === 'agent/inbox/spliced' && event.target === 'next-turn' && Array.isArray(event.inserted) && event.inserted.length === 1)
+    assert.equal(inserted?.inserted[0]?.content?.[0]?.text, 'into the archive', 'the dropped prompt is recorded as claimed input, as DSH records it')
+    const after = await meta()
+    assert.equal(after?.turns, turnsBefore, 'the session records the same number of turns')
+    assert.equal(after?.archived, true, 'and stays archived')
+
+    /** The command line's --resume --turn into the same session meets the same gate. */
+    live.kill()
+    live = undefined
+    const resumed = await runCli([...args, '--resume', id, '--turn', 'the command line into the archive', '--json'], { env, cwd: work })
+    assert.equal(resumed.code, 0, `the command line's turn is accepted\n${resumed.stdout}${resumed.stderr}`)
+    assert.equal(parseJson(resumed.stdout).finishReason, 'blocked', `and ends blocked\n${resumed.stdout}`)
+    assert.equal(double.requests.length, 1, 'still without a model request')
+    const afterCli = transcript().slice(eventsBefore)
+    assert.deepEqual(afterCli.filter((event) => answerTypes.has(event.type)).map((event) => event.type), [], 'and without an answer')
+    assert.equal(afterCli.filter((event) => event.type === 'turn/failed').length, 2, 'two blocked turns, one per caller')
+    const listed = await runCli([...args, 'sessions', '--json'], { env, cwd: work })
+    assert.equal(parseJson(listed.stdout).find((one) => one.id === id)?.turns, turnsBefore, 'the turn count is unchanged')
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
+test('a goal round into an archived session blocks its goal as DSH does (prompt-rejected), and a resume after the unarchive runs it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26, the goal half. A goal round is a turn, so the archived-session gate refuses its first step before any
+   * model request. DSH's goal-round driver then blocks the goal with "prompt-rejected" and its own sentence
+   * (dsh-goal-round-driver lib/index.js:326-333), so the goal is not run again by itself, and after an unarchive a
+   * resume starts it. Measured before on both builds: the goal stayed active and armed, so the resume was refused as
+   * "already active and armed".
+   */
+  const home = isolatedHome('archived-goal')
+  const work = fixtureDir('archived-goal-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the goal round answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1)
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const goal = async () => (await (await fetch(`${origin}/api/goal?session=${id}`, { headers: { cookie } })).json()).goal
+    const reasonOf = (view) => view?.blockedReason ?? view?.blocked_reason
+    const waitFor = async (condition, what) => {
+      for (const started = Date.now(); Date.now() - started < 15_000; ) {
+        const value = await condition()
+        if (value !== undefined) return value
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+      return assert.fail(`timed out waiting for ${what}; the goal is ${JSON.stringify(await goal())}`)
+    }
+    const goalRounds = () =>
+      transcript().filter((event) => event.type === 'message' && event.message?.source?.kind === 'goal').map((event) => event.message.source.round)
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const created = await post('/api/goal', { session: id, action: 'create', objective: 'finish the report', max_goal_rounds: 1 })
+    assert.equal(created.status, 200, `the goal is created\n${await created.text()}`)
+
+    const blocked = await waitFor(async () => {
+      const current = await goal()
+      return current !== undefined && current.phase !== 'active' ? current : undefined
+    }, 'the refused round to block its goal (without DSH\'s prompt-rejected it stays active and armed)')
+    assert.equal(blocked.phase, 'blocked')
+    assert.deepEqual(reasonOf(blocked), { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' }, 'with DSH\'s code and sentence')
+    assert.equal(double.requests.length, 1, 'the refused round made no model request')
+    assert.deepEqual(goalRounds(), [], 'and admitted no message')
+    assert.deepEqual(transcript().filter((event) => event.type === 'turn/failed').map((event) => event.reason), [{ kind: 'blocked' }], 'one blocked turn, not started again')
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: false })).status, 200, 'the session is unarchived')
+    const resumed = await post('/api/goal', { session: id, action: 'resume', goal_id: blocked.id, revision: blocked.revision })
+    assert.equal(resumed.status, 200, `the blocked goal resumes\n${await resumed.text()}`)
+    const settled = await waitFor(async () => {
+      const current = await goal()
+      return reasonOf(current)?.code === 'round-limit' ? current : undefined
+    }, 'the resumed round to run to its cap')
+    assert.equal(settled.phase, 'blocked')
+    assert.deepEqual(goalRounds(), [1], 'the resume ran round 1')
+    assert.equal(double.requests.length, 2, 'and asked the endpoint for it')
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
@@ -2655,6 +2813,115 @@ test('first use creates or reuses default-workspace under the heddle home, once,
     }
     removeDir(userHome)
     removeDir(chosen)
+  }
+})
+
+test('a folder heddle cannot read is refused with a code, never listed as empty, and New session where heddle cannot write says why without the path (#106)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /** `chmod 000` does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * Issue #106. DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:483-489
+   * and :564-581): a failed level shows one line per code and the transport's own message otherwise, and its file
+   * backend's listing of a folder it may not read fails with "cannot list "<path>": permission denied"
+   * (dsh-fs-local lib/index.js:269) instead of answering no entries. Both builds answered `200` with `children: []`, which
+   * the page drew as "nothing inside". DSH has no code for that failure, so heddle answers its own in DSH's family,
+   * `workspace-file/unreadable`, `400` as heddle's folder picker answers `directory-picker/unreadable`, naming the folder
+   * relative to its workspace (the root by its title).
+   *
+   * New session writes a definition into the branch, so a branch heddle cannot write fails there. TS answered a raw
+   * `500 internal error: EACCES … mkdir '<home>/…'` and Rust a path; both now answer `400` with `session/unwritable` and
+   * a sentence naming the folder by its name, never its absolute path, and record no session for the refused branch.
+   * The modes are restored in `finally`, before the fixture is removed.
+   */
+  const h = harness('unreadable')
+  const root = fixtureDir('unreadable-root')
+  const locked = join(root, 'locked')
+  const { chmodSync } = await import('node:fs')
+  let live
+  try {
+    entry(join(locked, 'held.txt'), 'a file the server cannot list\n')
+    mkdirSync(join(root, 'empty'), { recursive: true })
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const title = added.body.record?.title
+    assert.equal(typeof title, 'string', `the registration answers the root's title (${JSON.stringify(added.body)})`)
+    const canonicalRoot = realpathSync(root)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const empty = await treeOf(join(root, 'empty'))
+    assert.equal(empty.status, 200, `an empty folder still lists (${JSON.stringify(empty.body)})`)
+    assert.deepEqual(empty.body.children, [], 'as asked and empty')
+
+    chmodSync(locked, 0o000)
+    const sub = await treeOf(locked)
+    assert.equal(sub.status, 400, `an unreadable folder is refused, not listed as empty (${sub.status} ${JSON.stringify(sub.body)})`)
+    assert.deepEqual(
+      sub.body,
+      { error: 'cannot list "locked": permission denied', code: 'workspace-file/unreadable' },
+      'with a code and a sentence naming the folder relative to its workspace',
+    )
+    const cliTree = await runCli(adminArgs(h, ['tree', locked, '--json']), { env: h.env, cwd: root })
+    assert.notEqual(cliTree.code, 0, `the CLI refuses it too\n${cliTree.stdout}${cliTree.stderr}`)
+    assert.match(cliTree.stderr, /heddle: cannot list "locked": permission denied/, 'with the same sentence')
+
+    const parent = await treeOf(root)
+    assert.equal(parent.status, 200, `the readable root still lists (${JSON.stringify(parent.body)})`)
+    assert.ok(childOf(parent.body, 'locked'), 'and still names the unreadable folder in it')
+
+    chmodSync(root, 0o000)
+    const whole = await treeOf(root)
+    assert.equal(whole.status, 400, `an unreadable workspace root is refused, not listed as empty (${whole.status} ${JSON.stringify(whole.body)})`)
+    assert.deepEqual(whole.body, { error: `cannot list "${title}": permission denied`, code: 'workspace-file/unreadable' }, 'naming the root by its title')
+    const roots = await call('/api/tree')
+    assert.equal(roots.status, 200, 'the roots still list beside it')
+    const listedRoot = [...(roots.body.children ?? []), ...(roots.body.adHoc ?? [])].find((node) => node.path === canonicalRoot)
+    assert.ok(listedRoot, `the unreadable root is still one of them\n${JSON.stringify(roots.body)}`)
+    assert.equal(listedRoot.children, null, 'with its children not listed (null), never an empty list')
+
+    const created = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root }) })
+    assert.equal(created.status, 400, `New session in a folder heddle cannot write is a refusal, not an internal error (${created.status} ${JSON.stringify(created.body)})`)
+    assert.deepEqual(
+      created.body,
+      { error: `cannot write to "${root.split(sep).pop()}": permission denied`, code: 'session/unwritable' },
+      'with a code and a sentence that names the folder without its path',
+    )
+    for (const leak of [root, canonicalRoot, process.env.HOME].filter((text) => typeof text === 'string' && text.length > 1)) {
+      assert.ok(!JSON.stringify(created.body).includes(leak), `the answer carries no absolute path (${leak})`)
+    }
+    const listed = await call('/api/sessions')
+    const strays = (Array.isArray(listed.body) ? listed.body : []).filter((meta) => meta.cwd === canonicalRoot || meta.cwd === root)
+    assert.deepEqual(strays, [], 'and the refused branch holds no session record')
+  } finally {
+    live?.kill()
+    for (const dir of [root, locked]) {
+      try {
+        chmodSync(dir, 0o755)
+      } catch {
+        // already gone, or never made
+      }
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
   }
 })
 
@@ -5642,7 +5909,11 @@ test('archiving a session with running work is refused with the work named, and 
       { purpose: 'subagent', ...sleepStep },
       { purpose: 'subagent', text: 'the child is done' },
     ])
-    const parentTurn = await (await post('/api/turn', { prompt: 'delegate a slow job', folder: h.work })).text()
+    /**
+     * A fresh session (`new: true`): without it the turn route continues the folder's newest session, which is the one just
+     * archived above, and main's archived-session gate (cc8dec46) rightly blocks a turn into it before any model request.
+     */
+    const parentTurn = await (await post('/api/turn', { prompt: 'delegate a slow job', folder: h.work, new: true })).text()
     const parent = /"session":"(session-[^"]+)"/.exec(parentTurn)?.[1]
     assert.ok(parent, `the parent turn names its session\n${parentTurn.slice(0, 400)}`)
     const child = await until(async () => (await metas()).find((meta) => meta.parentSession === parent && meta.origin === 'subagent'))

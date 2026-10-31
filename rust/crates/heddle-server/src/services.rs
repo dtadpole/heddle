@@ -182,6 +182,12 @@ pub trait SessionService: Send + Sync {
     /// Every session's meta, in the store's order.
     fn list(&self) -> Vec<SessionMeta>;
 
+    /// Append one record to a session's log — the turn route's `turn/failed`, which web.ts writes through
+    /// `ctx.session.store.append`. An implementation that keeps no log writes nothing and answers `Ok`.
+    fn record(&self, _id: &str, _kind: &str, _fields: Value) -> Result<(), ServiceError> {
+        Ok(())
+    }
+
     /// One session's meta.
     fn meta(&self, id: &str) -> Option<SessionMeta> {
         self.list().into_iter().find(|meta| meta.id == id)
@@ -546,15 +552,17 @@ pub trait TurnInterrupter: Send + Sync {
 /// Work a session holds besides the turns and subagents the server counts itself, which an archive is refused by
 /// unless the caller agrees to stop it: DSH's other `workspace/session-activity` providers and their
 /// `workspace/session-stop` listeners (`dsh-workspace` `archiveSession`, `lib/index.js:527-541`). The binary
-/// supplies it from the schedule row (`dsh-schedule/lib/index.js:2043-2064`).
+/// supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`) and the schedule row
+/// (`dsh-schedule/lib/index.js:2043-2064`).
 pub trait SessionActivity: Send + Sync {
     /// The live work that blocks archiving `session`, each item under its kind. The server lists the items of
     /// the `job` and `schedule` kinds in DSH's listener order (`heddle_session::session_activity`); it counts
     /// turns and subagents itself.
     fn active(&self, session: &str) -> Vec<ActivityItem>;
-    /// Stop it, once the archive is written; the server awaits it before answering, as DSH's registry awaits
-    /// every stop listener (`dsh-workspace/lib/index.js:540`, `:621-628`) — a reminder's removal waits its turn
-    /// in the schedule service's queue (`stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
+    /// Stop it, once the archive is written: a background job is killed with `session archived`, a reminder is
+    /// removed. The server awaits it before answering, as DSH's registry awaits every stop listener
+    /// (`dsh-workspace/lib/index.js:540`, `:621-628`) — a reminder's removal waits its turn in the schedule
+    /// service's queue (`stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
     fn stop(&self, session: &str) -> BoxFuture<'static, ()>;
 }
 

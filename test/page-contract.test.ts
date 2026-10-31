@@ -572,3 +572,15 @@ test('a session is labelled through the tree block, never a top-level sessionLab
   assert.deepEqual([...outside.matchAll(/(?<![.\w])sessionLabel\(/g)].map((match) => outside.slice(Math.max(0, match.index - 40), match.index + 20)), [], 'no bare sessionLabel( call outside the block')
   assert.match(page.slice(begin, end), /function sessionLabel\(meta\)/, 'the block defines it')
 })
+
+test('the pin marker is named "Pinned", as DSH names its PinnedIndicator (#109)', () => {
+  /**
+   * DSH's pinned row carries `PinnedIndicator`, labelled with the en string `row.pinned`, "Pinned" (dsh-client-ui-workspace
+   * client.js:2126-2134, :4933). The page named it "pinned" (developer-six, #109). The row has no title= of its own, so
+   * the tree item's accessible name is its content, and this word is part of it.
+   */
+  const row = pageFunction('function nodeRow(node, depth = 0) {')
+  assert.match(row, /pinSlot\.setAttribute\('aria-label', 'Pinned'\)/, 'the marker\'s accessible name')
+  assert.match(row, /pinSlot\.title = 'Pinned'/, 'and its tooltip')
+  assert.doesNotMatch(row, /'pinned'\)|= 'pinned'/, 'no lower-case name is left')
+})

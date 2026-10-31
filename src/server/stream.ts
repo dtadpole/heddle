@@ -21,11 +21,28 @@ export const STREAM_OPEN = ': heddle stream open\n\n'
 /** The event name of the opening frame. */
 export const READY_EVENT = 'ready'
 
-/** The opening frame's data, keys in DSH's order. */
+/**
+ * The opening frame's data, keys in DSH's order, then heddle's follow fields.
+ *
+ * DSH's item is `{ type, clientId, host: { home } }`. heddle adds what its reconnect needs, after those keys:
+ * `cursor`, the id of the newest frame this stream has been given (the page resumes from it); `resumed`, whether
+ * the cursor the client presented was honoured (frames after it follow `ready`); and `heartbeatMs`, so the page
+ * knows how long silence means a dead stream.
+ */
 export interface ReadyFrame {
   readonly type: 'ready'
   readonly clientId: string
   readonly host: { readonly home: string }
+  readonly cursor?: string
+  readonly resumed?: boolean
+  readonly heartbeatMs?: number
+}
+
+/** The follow fields a server adds to `ready`. */
+export interface ReadyFollow {
+  readonly cursor: string
+  readonly resumed: boolean
+  readonly heartbeatMs: number
 }
 
 /**
@@ -39,13 +56,15 @@ export function newClientId(): string {
 }
 
 /** The opening frame's data for one stream. `home` is the Host's home folder, as DSH sends it. */
-export function readyData(clientId: string, home: string = homedir()): ReadyFrame {
-  return { type: 'ready', clientId, host: { home } }
+export function readyData(clientId: string, home: string = homedir(), follow?: ReadyFollow): ReadyFrame {
+  return follow === undefined
+    ? { type: 'ready', clientId, host: { home } }
+    : { type: 'ready', clientId, host: { home }, cursor: follow.cursor, resumed: follow.resumed, heartbeatMs: follow.heartbeatMs }
 }
 
 /** The opening frame as it goes on the wire: `event: ready` and one line of JSON. */
-export function readyFrame(clientId: string, home: string = homedir()): string {
-  return `event: ${READY_EVENT}\ndata: ${JSON.stringify(readyData(clientId, home))}\n\n`
+export function readyFrame(clientId: string, home: string = homedir(), follow?: ReadyFollow): string {
+  return `event: ${READY_EVENT}\ndata: ${JSON.stringify(readyData(clientId, home, follow))}\n\n`
 }
 
 /**
@@ -137,4 +156,108 @@ export class StallWatch {
     }
     return ended
   }
+}
+
+/**
+ * The follow cursor: every frame a stream is given carries an id, and a reconnecting client is given what it
+ * missed.
+ *
+ * DSH resumes a session journal from a cursor (`session/follow`, `RemoteJournalStream`'s reconnect catch-up) and,
+ * where nothing can be resumed, tells its owners to re-read their baselines (`connection/reset`). heddle has one
+ * stream for everything, so it does both on that stream:
+ *
+ * - every published frame gets the id `<epoch>-<seq>`, where `epoch` is random per server start and `seq` counts
+ *   up from 1, and the newest frames are kept in a bounded log;
+ * - a client that reconnects with `Last-Event-ID` (the browser sends it on its own retries) or `?cursor=` (the page
+ *   sends it when it reconnects itself) is given every kept frame after that id, right after `ready`;
+ * - a cursor that cannot be honoured — another epoch (the server restarted), older than the log, malformed, or
+ *   ahead of it — gets a `reset` frame instead, and the client re-reads its baselines.
+ *
+ * Heartbeats and `ready` carry no id: they are about the connection, not the record, and an SSE frame without an id
+ * leaves the browser's last event id where it was.
+ */
+
+/** The event name of the frame that tells a client to re-read its baselines. */
+export const RESET_EVENT = 'reset'
+
+/** The reset frame as it goes on the wire. */
+export function resetFrame(): string {
+  return `event: ${RESET_EVENT}\ndata: {"type":"reset"}\n\n`
+}
+
+/** One kept frame: its sequence number, its wire text (id line included) and its size. */
+interface Kept {
+  readonly seq: number
+  readonly text: string
+}
+
+/** A bounded log of the frames published on the stream, each with its id. */
+export class EventLog {
+  readonly epoch: string
+  private seq = 0
+  private readonly kept: Kept[] = []
+  private keptBytes = 0
+  private readonly maxFrames: number
+  private readonly maxBytes: number
+
+  constructor(options: { readonly epoch?: string; readonly maxFrames?: number; readonly maxBytes?: number } = {}) {
+    this.epoch = options.epoch ?? randomBytes(8).toString('hex')
+    this.maxFrames = options.maxFrames ?? 4096
+    this.maxBytes = options.maxBytes ?? 16 * 1024 * 1024
+  }
+
+  /** The id of the newest frame, or `<epoch>-0` before the first. */
+  get cursor(): string {
+    return `${this.epoch}-${this.seq}`
+  }
+
+  /** Give the next id to a frame, keep it, and return its wire text with the id line first. */
+  record(event: string, data: string): string {
+    this.seq += 1
+    const text = `id: ${this.epoch}-${this.seq}\nevent: ${event}\ndata: ${data}\n\n`
+    this.kept.push({ seq: this.seq, text })
+    this.keptBytes += text.length
+    while (this.kept.length > this.maxFrames || (this.keptBytes > this.maxBytes && this.kept.length > 1)) {
+      this.keptBytes -= this.kept.shift()!.text.length
+    }
+    return text
+  }
+
+  /**
+   * The wire text of every kept frame after `cursor`, oldest first, or `null` when the cursor cannot be honoured:
+   * another epoch, a sequence number the log no longer reaches back to, one it has not reached, or a malformed id.
+   */
+  since(cursor: string): string[] | null {
+    const dash = cursor.lastIndexOf('-')
+    if (dash <= 0) return null
+    const epoch = cursor.slice(0, dash)
+    const seqText = cursor.slice(dash + 1)
+    if (epoch !== this.epoch || !/^\d+$/.test(seqText)) return null
+    const seq = Number(seqText)
+    if (seq > this.seq) return null
+    const oldest = this.kept[0]?.seq ?? this.seq + 1
+    if (seq < oldest - 1) return null
+    return this.kept.filter((frame) => frame.seq > seq).map((frame) => frame.text)
+  }
+}
+
+/**
+ * The replay without questions that no longer wait.
+ *
+ * DSH replays a pending approval or question after a reconnect, never one that was settled meanwhile; replaying an
+ * answered `approval` frame would put a stale card back on the page until something closed it again. A replayed
+ * `approval` frame is kept only while its question is in `waiting` (the approval service's pending ids). Every other
+ * frame, `approval-settled` included, is kept as it is.
+ */
+export function withoutSettledApprovals(frames: readonly string[], waiting: ReadonlySet<string>): string[] {
+  return frames.filter((text) => {
+    if (!/^event: approval$/m.test(text)) return true
+    const data = /^data: (.*)$/m.exec(text)?.[1] ?? ''
+    try {
+      const id = (JSON.parse(data) as { id?: unknown }).id
+      return typeof id === 'string' && waiting.has(id)
+    } catch {
+      return false
+    }
+  })
 }
