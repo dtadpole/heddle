@@ -11271,7 +11271,7 @@ fileBody.addEventListener('click', async (clickEvent) => {
   clickEvent.preventDefault()
   const at = (anchor.getAttribute('href') ?? '').split('#')[1] ?? ''
   await openPath(path)
-  if (at.length > 0) scrollToHeading(at)
+  if (at.length > 0) goToFragment(at)
   else fileBody.scrollTop = 0
 })
 
@@ -11326,6 +11326,19 @@ function chatLinkPath(href, folder) {
   }
   return `/${parts.join('/')}`
 }
+
+/**
+ * The 1-based source line a link's `#fragment` names, or `null` when it names none.
+ *
+ * `#L24` and `#L24-L30` are GitHub's line anchors, the shape a model copies when it points at code, and DSH reads them
+ * the same way: both go to the first line named (dsh-client-ui-chat). Any other fragment is a heading's.
+ */
+function fragmentLine(fragment) {
+  const match = /^L(\d+)(?:-L?\d+)?$/.exec(fragment)
+  if (match === null) return null
+  const line = Number(match[1])
+  return line >= 1 ? line : null
+}
 /* chat-links:end */
 
 /**
@@ -11344,13 +11357,54 @@ log.addEventListener('click', (clickEvent) => {
   clickEvent.preventDefault()
   const fragment = href.split('#')[1] ?? ''
   void openPath(path).then(() => {
-    if (fragment.length > 0) scrollToHeading(fragment)
+    if (fragment.length > 0) goToFragment(fragment)
+    else fileBody.scrollTop = 0
   })
 })
 
 /** Open a file by its path, which is what a link names and what a tree row carries. */
 async function openPath(path) {
   await showFile({ path, label: path.split('/').pop() ?? path, kind: 'file' })
+}
+
+/** Take the reader to what a link's `#fragment` names in the open file: a source line, otherwise a heading. */
+function goToFragment(fragment) {
+  const line = fragmentLine(fragment)
+  if (line === null) scrollToHeading(fragment)
+  else scrollToLine(line)
+}
+
+/**
+ * Bring the open file's 1-based `line` to the top of the preview; a line past the end goes to the last one.
+ *
+ * DSH gives plain text and code source-line anchors and Markdown none (dsh-client-ui-sidebar-documentpreview), so a
+ * rendered document or page is left where it is. Code is drawn one `.line` per source line on both builds. Plain text
+ * is one text node, so the line's start is found by its newlines and a marker placed there for the scroll, then taken
+ * out again so the text the reader copies is unchanged.
+ */
+function scrollToLine(line) {
+  const renderer = fileBody.dataset.renderer
+  if (renderer === 'code') {
+    const rows = fileBody.querySelectorAll('.line')
+    if (rows.length > 0) rows[Math.min(line, rows.length) - 1].scrollIntoView({ block: 'start' })
+    return
+  }
+  if (renderer !== 'text') return
+  const node = fileBody.firstChild
+  if (node === null || node.nodeType !== Node.TEXT_NODE) return
+  let offset = 0
+  for (let at = 1; at < line; at += 1) {
+    const next = node.data.indexOf('\n', offset)
+    if (next === -1 || next + 1 >= node.data.length) break
+    offset = next + 1
+  }
+  const marker = document.createElement('span')
+  const range = document.createRange()
+  range.setStart(node, offset)
+  range.insertNode(marker)
+  marker.scrollIntoView({ block: 'start' })
+  marker.remove()
+  fileBody.normalize()
 }
 
 /**
