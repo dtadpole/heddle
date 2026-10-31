@@ -60,6 +60,10 @@ grounded_in:
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
   card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
   none for Ungrouped; the card closing when the pointer leaves the list.
+- [`check-workspace-drag.mjs`](check-workspace-drag.mjs) — reordering workspaces by drag (DSH's
+  `workspace/insertBefore`, C37): a workspace header dragged onto a sibling's section lands before or after it with
+  the drop line drawn, the host stores the order (`GET /api/workspaces`) and a reload keeps it, while a nested
+  workspace or Ungrouped is not a place a top-level workspace can land.
 
 ## What it deliberately does not judge
 
