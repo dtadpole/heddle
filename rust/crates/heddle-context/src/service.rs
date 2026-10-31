@@ -35,8 +35,6 @@ use crate::types::{ContentPart, Message, Role, ToolSpec, describe_content, text_
 
 /// The configured window when neither the endpoint nor the profile gives one.
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 1_048_576;
-/// The cap on generated tokens for the summarising call.
-pub const DEFAULT_SUMMARIZE_MAX_TOKENS: u64 = 1024;
 
 /// The context row's `config` in a profile, with the plugin schema's defaults.
 ///
@@ -67,8 +65,14 @@ pub struct ContextConfig {
     pub endpoint: Option<String>,
     /// The model a summary is asked of; the endpoint's when unset.
     pub model: Option<String>,
-    /// The cap on the summarising call's output; [`DEFAULT_SUMMARIZE_MAX_TOKENS`].
-    pub summarize_max_tokens: u64,
+    /// The cap on the summarising call's output, when the profile names one.
+    ///
+    /// Unset by default, so the call takes the endpoint's own cap: its `maxOutputTokens`, else the provider's or the
+    /// adapter's default (#15). A fixed 1024 left a reasoning model no room to answer: its thinking spent the budget,
+    /// the summary came back empty, and compaction was refused on every turn. DSH budgets the summary at 65536
+    /// (`dsh-compaction-basic`'s `maxTokens`, from `headroomTokens`), which a route that caps its output lower would
+    /// refuse, so the endpoint's own cap is the default instead of a number.
+    pub summarize_max_tokens: Option<u64>,
 }
 
 impl Default for ContextConfig {
@@ -85,7 +89,7 @@ impl Default for ContextConfig {
             instructions_max_bytes: INSTRUCTIONS_MAX_BYTES,
             endpoint: None,
             model: None,
-            summarize_max_tokens: DEFAULT_SUMMARIZE_MAX_TOKENS,
+            summarize_max_tokens: None,
         }
     }
 }
@@ -813,7 +817,7 @@ impl<S: ContextStore> ContextService<S> {
                 .model
                 .clone()
                 .or_else(|| options.model.map(str::to_string)),
-            max_output_tokens: Some(self.config.summarize_max_tokens),
+            max_output_tokens: self.config.summarize_max_tokens,
         };
         let summarizer: &dyn Summarizer = match options.summarizer {
             Some(summarizer) => summarizer,
@@ -1490,6 +1494,44 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_summary_cap_reaches_the_summarising_call() {
+        let scratch = Scratch::new("prepare-cap");
+        let model = Arc::new(ScriptedModel {
+            summary: "the briefing".to_string(),
+            ..ScriptedModel::default()
+        });
+        let config: ContextConfig = serde_json::from_value(json!({
+            "contextWindow": 900,
+            "instructions": false,
+            "summarizeMaxTokens": 16000
+        }))
+        .expect("the profile's keys parse");
+        let (store, service) =
+            build_service(config, dependencies(scratch.path(), Some(model.clone())));
+        let session = store.open("s");
+        store.message(&session, text_message(Role::System, "be brief"));
+        store.message(&session, text_message(Role::User, "u".repeat(1500)));
+        store.message(&session, text_message(Role::Assistant, "a".repeat(1500)));
+        store.message(&session, text_message(Role::User, "q".repeat(1500)));
+        let report = block_on(service.prepare(
+            &session,
+            &PrepareOptions {
+                cwd: scratch.path(),
+                endpoint: "local",
+                model: None,
+                tools: &[],
+                system: None,
+                summarizer: None,
+                force: false,
+            },
+        ))
+        .expect("the preparation succeeds");
+        assert!(report.compacted, "the run compacted");
+        let calls = model.calls.lock().expect("the model lock is not poisoned");
+        assert_eq!(calls[0].max_output_tokens, Some(16000));
+    }
+
+    #[test]
     fn a_preparation_over_the_trigger_compacts_and_uses_the_injected_model() {
         let scratch = Scratch::new("prepare");
         let model = Arc::new(ScriptedModel {
@@ -1538,7 +1580,10 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].endpoint, "local");
         assert_eq!(calls[0].purpose.as_deref(), Some("compaction"));
-        assert_eq!(calls[0].max_output_tokens, Some(1024));
+        assert_eq!(
+            calls[0].max_output_tokens, None,
+            "the summary names no cap of its own, so the endpoint's applies (#15)"
+        );
         assert!(
             calls[0]
                 .messages
@@ -1656,10 +1701,7 @@ mod tests {
         assert_eq!(config.context_window, Some(super::DEFAULT_CONTEXT_WINDOW));
         assert!(config.instructions);
         assert_eq!(config.instructions_max_bytes, INSTRUCTIONS_MAX_BYTES);
-        assert_eq!(
-            config.summarize_max_tokens,
-            super::DEFAULT_SUMMARIZE_MAX_TOKENS
-        );
+        assert_eq!(config.summarize_max_tokens, None);
         assert!(config.system.is_none());
         assert!(config.policies.is_empty());
         // A configuration document that names one key takes the default for the rest.

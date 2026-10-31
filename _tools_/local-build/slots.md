@@ -1,9 +1,9 @@
 ---
 title: Local build slots
 created: 2026-10-24T05:01:03Z
-modified: 2026-10-24T05:01:03Z
+modified: 2026-10-31T02:30:00Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: What a build slot guarantees on the shared Mac, from the job cap and small targets to dead-owner reclaim and the bounded wait, and where the runner stops.
 status: unverified
 grounded_in:
@@ -33,6 +33,7 @@ What a build slot guarantees to the cargo command inside it, and what the runner
 
 ## Bounds
 
-`run` starts `cargo`, and nothing else: no `cd`, no `git`, no `npm`. The three slots and the job cap are
+`run` starts `cargo`, and nothing else: no `cd` and no `npm`. Its one use of `git` is to list a tree's Rust
+sources when several trees share a `CARGO_TARGET_DIR` ([shared-target.md](shared-target.md)). The three slots and the job cap are
 defaults for the whole Mac, not reservation of a particular core; see [capacity.md](capacity.md) for the
 coordinator's cap file.

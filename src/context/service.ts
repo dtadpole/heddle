@@ -82,8 +82,13 @@ export const Config = Schema.object({
   endpoint: Schema.string(),
   /** The model a summary is asked of; defaults to the endpoint's. */
   model: Schema.string(),
-  /** Cap on generated tokens for the summarising call. */
-  summarizeMaxTokens: Schema.number().default(1024),
+  /**
+   * Cap on generated tokens for the summarising call. Unset by default, so the call takes the endpoint's own cap
+   * (its `maxOutputTokens`, else the provider's or the adapter's default): a fixed 1024 left a reasoning model no
+   * room to answer, the summary came back empty and compaction was refused on every turn (#15). DSH budgets 65536,
+   * which a route that caps its output lower would refuse.
+   */
+  summarizeMaxTokens: Schema.number(),
 })
 
 export interface Config {
@@ -469,7 +474,7 @@ export class ContextService extends Service {
         endpoint,
         ...(model !== undefined ? { model } : {}),
         messages,
-        maxOutputTokens: this.config.summarizeMaxTokens ?? 1024,
+        ...(this.config.summarizeMaxTokens !== undefined ? { maxOutputTokens: this.config.summarizeMaxTokens } : {}),
         purpose: 'compaction',
       })    }
   }
