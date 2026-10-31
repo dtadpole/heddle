@@ -666,11 +666,17 @@ test('a reload reopens the session that was open, never a hidden subagent child,
     assert.equal(first[0]?.id, child.id, `the newest session is the subagent's child, the one a load used to open\nsaw: ${JSON.stringify(first.map((meta) => [meta.title, meta.origin ?? null]))}`)
 
     const title = `(document.getElementById('session-title')?.textContent ?? null)`
+    /**
+     * A New session shows no title in the header, as DSH's does while a session is blank (#24, page-polish): that, with
+     * the saved id, is how a load is seen to have opened the fresh session rather than nothing ("No session").
+     */
+    const blankOpen = `(document.getElementById('session-title')?.hidden === true)`
     const workspaceRow = `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
     const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
     const state = () =>
       browser.evaluate(`JSON.stringify({
         title: ${title},
+        titleHidden: document.getElementById('session-title')?.hidden ?? null,
         saved: localStorage.getItem('heddle.sessions.current'),
         selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
         workspace: (() => { const li = ${workspaceRow}?.closest('li'); return li === undefined || li === null ? null : { open: li.dataset.open ?? null, tinted: li.dataset.containsCurrent ?? null } })(),
@@ -714,7 +720,7 @@ test('a reload reopens the session that was open, never a hidden subagent child,
     const before = (await listed()).map((meta) => meta.id)
     await load()
     await until(
-      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify(before)}.includes(id) && ${title} === id })()`,
+      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify(before)}.includes(id) && ${blankOpen} })()`,
       'a saved session that is gone starts a fresh one, which is open and kept',
     )
     const fresh = await browser.evaluate(saved)
@@ -726,7 +732,7 @@ test('a reload reopens the session that was open, never a hidden subagent child,
 
     /** That New session is saved like any other: the next reload reopens it rather than starting another. */
     await load()
-    await until(`${title} === ${JSON.stringify(fresh)}`, 'a reload reopens the saved New session')
+    await until(`${saved} === ${JSON.stringify(fresh)} && ${blankOpen}`, 'a reload reopens the saved New session')
     assert.equal((await listed()).length, after.length, 'and starts no other session')
   } finally {
     browser.close()
