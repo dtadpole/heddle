@@ -646,6 +646,72 @@ test('a symlink to a folder lists as a folder at its own path, and opening it li
   }
 })
 
+test('a symlink that leads out of every root lists at its own path, and opening it is refused, through the Web API and the CLI', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * The row of a link stays at the link's own path (the check above), so opening it asks for a path inside the root. What
+   * refuses a link whose target no root owns is the containment check on the canonical path, the one the Web API and
+   * the CLI make before they list anything ("the Web API's tree lists only what a workspace root holds"). DSH's list
+   * confines the resolved path to the workspace root the same way (dsh-api-workspace-files list and confine,
+   * workspace-file/outside-workspace). Judged here end to end: the row a person would click, then the click.
+   */
+  const h = harness('symlink-out')
+  const root = fixtureDir('symlink-out-root')
+  const outside = fixtureDir('symlink-out-target')
+  let live
+  try {
+    entry(join(root, 'kept.txt'), 'inside\n')
+    entry(join(outside, 'not-yours.txt'), 'outside\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(outside, join(root, 'out-link'))
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const level = await treeOf(root)
+    assert.equal(level.status, 200, `the root lists (${JSON.stringify(level.body)})`)
+    const link = childOf(level.body, 'out-link')
+    assert.ok(link, `the link is listed\nsaw: ${(level.body.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder outside is still a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.path, join(realpathSync(root), 'out-link'), 'at its own path, inside the root')
+
+    const opened = await treeOf(link.path)
+    const listed = Array.isArray(opened.body?.children) ? opened.body.children.map((node) => node.label).join(', ') : ''
+    assert.equal(opened.status, 400, `opening it through the Web API is refused, not listed (${opened.status}${listed ? `, listed: ${listed}` : ''})`)
+    assert.deepEqual(opened.body, { error: `${realpathSync(outside)} is not under any workspace root` }, 'naming where the link lands')
+
+    const cli = await treeAt(h, link.path, { cwd: root })
+    assert.notEqual(cli.result.code, 0, `opening it through the CLI is refused too\n${cli.result.stdout}`)
+    assert.match(`${cli.result.stdout}${cli.result.stderr}`, /not under any workspace root/, 'with the same rule')
+    assert.doesNotMatch(cli.result.stdout, /not-yours\.txt/, 'and nothing of the target is printed')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+    removeDir(outside)
+  }
+})
+
 test('a type folder is a type, and its badge names it without the underscores', async (context) => {
   if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
