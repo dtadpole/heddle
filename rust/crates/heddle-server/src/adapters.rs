@@ -113,6 +113,7 @@ impl SessionService for StoreSessions {
                 model: options.selection.model,
                 reasoning_effort: options.selection.reasoning_effort,
                 title: options.title,
+                preset: None,
             })
             .map(|handle| handle.id)
             .map_err(failure)
@@ -128,6 +129,7 @@ impl SessionService for StoreSessions {
                     model: options.selection.model,
                     reasoning_effort: options.selection.reasoning_effort,
                     title: options.title,
+                    preset: None,
                 },
             )
             .map(|handle| handle.id)

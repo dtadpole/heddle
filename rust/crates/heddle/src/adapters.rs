@@ -410,6 +410,7 @@ impl SessionPort for SessionView {
                     model: options.model,
                     reasoning_effort: None,
                     title: Some(options.title),
+                    preset: None,
                 },
             )
             .map(handle_of)
@@ -430,6 +431,7 @@ impl SessionPort for SessionView {
                     endpoint: options.endpoint,
                     model: options.model,
                     reasoning_effort: None,
+                    preset: None,
                 },
             )
             .map_err(port_error)?;

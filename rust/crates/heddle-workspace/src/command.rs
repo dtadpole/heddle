@@ -423,6 +423,7 @@ fn session_new(
             endpoint: args.endpoint.clone(),
             model: args.model.clone(),
             reasoning_effort: None,
+            preset: None,
         },
     ) {
         Ok(created) => created,

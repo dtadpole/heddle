@@ -289,6 +289,7 @@ impl SubagentStore for SessionSubagents {
             origin,
             delegation_depth: options.delegation_depth.map(u64::from),
             team_id: options.team_id,
+            preset: None,
             id: options.id,
         };
         self.service.store().create(options).map_err(port_error)
