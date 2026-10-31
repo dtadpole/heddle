@@ -68,8 +68,8 @@ function run(sb, args, extra = {}, cwd = CWD) {
   return spawnSync('/bin/sh', [RUN, ...args], { cwd, env: env(sb, extra), encoding: 'utf8' })
 }
 
-function start(sb, args, extra = {}, cwd = CWD) {
-  const child = spawn('/bin/sh', [RUN, ...args], {
+function start(sb, args, extra = {}, cwd = CWD, script = RUN) {
+  const child = spawn('/bin/sh', [script, ...args], {
     cwd,
     env: env(sb, extra),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -673,4 +673,61 @@ test('a waiter stopped by a signal leaves the queue', async (t) => {
   assert.deepEqual(tickets(sb), [], 'the ticket went with the run')
   writeFileSync(release, '')
   assert.equal((await holder.done).code, 0)
+})
+
+// A held slot that only this test process owns, so a waiter waits until the test removes it.
+function holdSlot(sb, n = 0) {
+  const dir = join(sb.root, `slot-${n}`)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'owner'), `${process.pid} ${Math.floor(Date.now() / 1000)} 0 /x/held\n`)
+  return dir
+}
+
+test('a run that waits through a rewrite of its own script runs the text it started with, and leaves no copy', async (t) => {
+  const sb = sandbox(t)
+  const script = join(sb.dir, 'tools', 'run')
+  mkdirSync(join(sb.dir, 'tools'))
+  writeFileSync(script, readFileSync(RUN))
+  const tmp = join(sb.dir, 'tmp')
+  mkdirSync(tmp)
+  const held = holdSlot(sb)
+  const extra = { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_WAIT_SECONDS: '30', LOCAL_BUILD_DEPS_SWEEP: '0', TMPDIR: tmp, LOCAL_BUILD_HEAD_POLL_SECONDS: '0.2' }
+  const waiter = start(sb, ['check', '-p', 'kept'], extra, CWD, script)
+  await waitForStatus(sb, 'queue: 1 waiting')
+  assert.deepEqual(readdirSync(tmp), [], 'the private copy deleted itself as soon as it ran')
+  // What a worktree sync or an in-place edit does: the same file, other bytes.
+  writeFileSync(script, 'exit 99\n'.repeat(20000))
+  await new Promise((r) => setTimeout(r, 500))
+  rmSync(held, { recursive: true, force: true })
+  const r = await waiter.done
+  assert.equal(r.code, 0, r.stderr)
+  assert.ok(args(sb).includes('kept'), 'cargo ran from the text the run started with')
+  assert.deepEqual(readdirSync(tmp), [])
+  const usage = run(sb, ['status', 'extra'])
+  assert.match(usage.stderr, new RegExp(`usage: ${RUN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} `), 'usage names the script, not its private copy')
+})
+
+test('a raised cap serves a waiting run at once', async (t) => {
+  const sb = sandbox(t)
+  holdSlot(sb)
+  writeFileSync(join(sb.root, 'cap'), '1\n')
+  const waiter = start(sb, ['check'], { LOCAL_BUILD_WAIT_SECONDS: '20', LOCAL_BUILD_HEAD_POLL_SECONDS: '0.2' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  writeFileSync(join(sb.root, 'cap'), '2\n')
+  const r = await waiter.done
+  assert.equal(r.code, 0, r.stderr)
+  assert.match(r.stderr, /local-build: slot 1, cap 2 of 3/)
+})
+
+test('the head polls every second, so it gets a freed slot before a 3 s poller from before the queue', async (t) => {
+  const sb = sandbox(t)
+  const held = holdSlot(sb)
+  const waiter = start(sb, ['check'], { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_POLL_SECONDS: '30', LOCAL_BUILD_WAIT_SECONDS: '60' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  await new Promise((r) => setTimeout(r, 1500))
+  const freed = Date.now()
+  rmSync(held, { recursive: true, force: true })
+  const r = await waiter.done
+  assert.equal(r.code, 0, r.stderr)
+  assert.ok(Date.now() - freed < 10000, `the head took the slot ${Date.now() - freed} ms after it freed, not on the 30 s poll`)
 })

@@ -1,14 +1,15 @@
 ---
 title: Local build queue
 created: 2026-10-31T04:20:00Z
-modified: 2026-10-31T04:20:00Z
+modified: 2026-10-31T05:00:00Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: The first-come-first-served ticket queue of the slot runner, which serves waiting runs in arrival order instead of to whoever polls first, with a 60 s head bypass and a coordinator's one-time priority turn.
 status: unverified
 grounded_in:
   - source: developer-eight's report of 2026-10-31 04:00Z, a cargo run queued over 7 minutes behind integrators' back-to-back commands at cap 1
   - source: the coordinator's request of 2026-10-31 04:02Z for a fair FIFO cargo slot like browser-slot
+  - source: developer-twelve's run failing at 'line 502: eep: command not found' after a 10-minute wait, and the coordinator's request of 2026-10-31 04:32Z for a private copy
 ---
 
 # The queue
@@ -30,7 +31,19 @@ run waited more than seven minutes behind two integrators, though it had arrived
   run is gone, or that has not been touched for 300 s (`LOCAL_BUILD_TICKET_SECONDS`), is dropped by the next
   waiter. A waiter silent for 60 s (`LOCAL_BUILD_HEAD_GRACE_SECONDS`) is passed over: the next waiter may take
   the slot, and the silent one keeps its place if it polls again.
+- **The head polls every second** (`LOCAL_BUILD_HEAD_POLL_SECONDS`), the others every 3 s
+  (`LOCAL_BUILD_POLL_SECONDS`), so the head reaches a freed slot before a copy from before the queue does.
+- **A waiting run reads the cap file on every poll**, so a raised cap serves the queue at once.
 - Only the head breaks an hour-old stamp when every slot is busy.
+
+## A private copy
+
+The shell reads a script while it runs it. A run that waited through a worktree sync, or an edit of `run`,
+resumed at its old byte offset in the new text: developer-twelve's ended in `line 502: eep: command not
+found` (exit 127) after ten minutes in the queue. So `run` first copies itself to
+`$TMPDIR/local-build-run.XXXXXX` and runs that copy, which deletes the file at once. The shell keeps reading
+the open file, the run finishes the text it started with, and nothing is left behind even after a `kill -9`.
+When no copy can be made, it runs in place as before.
 
 ## Priority turn
 
@@ -66,5 +79,6 @@ A waiting run says its place once, and again when it changes:
 
 ## Bounds
 
-A copy of `run` from before the queue takes a free slot without a ticket, ahead of everyone. Sync
-`_tools_/local-build` from main so every seat queues.
+A copy of `run` from before the queue takes a free slot without a ticket, ahead of everyone; at 04:29Z
+developer-three's and integrator-one's did, while d1-par was the head. Sync `_tools_/local-build` from main so
+every seat queues.
