@@ -1,12 +1,12 @@
 ---
 title: Local build
-version: 1.6.0
+version: 1.7.0
 description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once, and queues the seats fairly for the one browser slot.
 grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
   - source: rust/INDEX.md, the build environment of the Rust port
 created: 2026-10-23T03:10:31Z
-modified: 2026-10-29T15:11:15Z
+modified: 2026-10-31T02:30:00Z
 ---
 
 # `local-build`
@@ -27,6 +27,12 @@ _tools_/local-build/run test --manifest-path rust/Cargo.toml -p heddle-config  #
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml      # release, integrators only
 _tools_/local-build/run status                                               # who holds which slot
 ```
+
+## Shared target
+
+A seat's worktrees share one `CARGO_TARGET_DIR`. For a compiling command into it, `run` builds one tree at a
+time and, when another tree built there last, touches this tree's Rust sources first, so its binary is never
+the other tree's code. [shared-target.md](shared-target.md) has the trap and the rules.
 
 ## Browser slot
 
@@ -64,15 +70,16 @@ node --test _tools_/local-build/_tests_/tmp-sweep/unit.test.mjs
 node --test _tools_/local-build/_tests_/deps-sweep/unit.test.mjs
 ```
 
-Last run 2026-10-23 22:05 PDT, on hd/tool-developer with main 445ea43 merged: `node --test _tools_/local-build/_tests_/slot-runner/unit.test.mjs`, 16 passed, 0 failed.
+Last run 2026-10-30 19:25 PDT, on hd/tool-developer on main c9b9cc75: `node --test _tools_/local-build/_tests_/slot-runner/unit.test.mjs`, 20 passed, 0 failed.
 
 The suite runs the script against a temporary slot root and a fake cargo: no real slot, no real build. It
 judges slot release, the exit status, the job cap, six concurrent callers held until released (so a full set of slots is proven, not timed), a killed owner, an old stamp, a live
-owner, an ownerless directory, the ownership guard, both owner-file formats, the usage errors, and that a held caller exits once its test is gone.
+owner, an ownerless directory, the ownership guard, both owner-file formats, the usage errors, that a held caller exits once its test is gone, and the shared target: the touch on a switch of tree and none on a rebuild, one build at a time, the lock's cargo pid, and a dead or live lock.
 
 ## Read next
 
 - [slots.md](slots.md): what a slot guarantees, and its bounds.
+- [shared-target.md](shared-target.md): worktrees sharing one target, the wrong-tree trap and the guard.
 - [browser-slot.md](browser-slot.md): the browser slot queue, its priority turn and stale-holder rule.
 - [tmp-sweep.md](tmp-sweep.md): what the TMPDIR sweep removes and keeps.
 - [deps-sweep.md](deps-sweep.md): the build output sweep after each build.
