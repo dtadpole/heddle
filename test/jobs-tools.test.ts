@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,7 +10,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { ApprovalService } from '../src/approvals/service.ts'
 import { bashBackground, processOutcome, runningToolCall, RUN_IN_BACKGROUND_DESCRIPTION } from '../src/jobs/bash.ts'
 import { JobRegistry, type JobEvent, type JobOutcome } from '../src/jobs/registry.ts'
-import { jobTools, renderJobList, renderModelDelta, statusLine } from '../src/jobs/tools.ts'
+import { JOBS_PROMPT_SECTION, jobTools, renderJobList, renderModelDelta, statusLine, withJobsSection } from '../src/jobs/tools.ts'
+import { killProcessGroup } from '../src/sandbox/process-group.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
 import { SessionService } from '../src/session/service.ts'
 import type { SessionEvent } from '../src/session/store.ts'
@@ -206,6 +207,37 @@ test('a command that ignores SIGTERM is killed with SIGKILL after the grace peri
   assert.equal(groupAlive(pid), false, 'nothing of the group survives')
 })
 
+test('a job kill and a foreground stop share one group helper: it sends the signal it is given, and refuses pids 0 and 1', async () => {
+  // The jobs producer sends SIGTERM, then SIGKILL, through the helper the foreground bash sends SIGKILL with.
+  assert.equal(killProcessGroup(0, 'SIGTERM'), false)
+  assert.equal(killProcessGroup(1, 'SIGTERM'), false)
+  // The shell prints its background sleep's pid before waiting, so the group is known to hold both when it is signalled.
+  const shell = spawn('/bin/sh', ['-c', 'sleep 30 & echo $!; wait'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+  const pid = shell.pid as number
+  const exited = new Promise<NodeJS.Signals | null>((resolve) => shell.on('exit', (_code, signal) => resolve(signal)))
+  const sleeper = await new Promise<number>((resolve) => {
+    let text = ''
+    shell.stdout?.on('data', (chunk: Buffer) => {
+      text += chunk.toString()
+      if (text.includes('\n')) resolve(Number(text.trim()))
+    })
+  })
+  assert.ok(Number.isInteger(sleeper) && sleeper > 1)
+  assert.equal(killProcessGroup(pid, 'SIGTERM'), true)
+  assert.equal(await exited, 'SIGTERM', 'the leader died of the signal it was sent, not SIGKILL')
+  const alive = (target: number): boolean => {
+    try {
+      process.kill(target, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const deadline = Date.now() + 5_000
+  while (alive(sleeper) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(alive(sleeper), false, 'the sleep the shell started got the SIGTERM too')
+})
+
 test('echo x; exit 3 settles completed with exit code 3, and job_output renders it verbatim', async () => {
   const h = harness()
   const id = jobIdOf((await h.call('bash', { command: 'echo x; echo oops >&2; exit 3', run_in_background: true })).output)
@@ -360,7 +392,44 @@ test('composed as rows, the jobs plugin gives the tools row’s bash its backgro
   const id = jobIdOf(result.output)
   const waited = await ctx.tools.call('job_output', { job_id: id, wait: true, timeout_ms: 5_000 }, { cwd: workspace, session: handle, log: () => undefined })
   assert.equal(waited.output, 'hi\n[status: completed, exit code: 0]')
+  /** DSH's `tool:jobs` section reaches the adapter on a request that offers the job tools, through the waterfall. */
+  const request = {
+    endpoint: 'scripted',
+    messages: [
+      { role: 'system' as const, content: [{ type: 'text' as const, text: 'You are heddle.' }] },
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] },
+    ],
+    tools: ctx.tools.describe(),
+  }
+  const sent = ctx.waterfall('model/request', request, () => request)
+  assert.equal((sent.messages[0]?.content[0] as { text: string }).text, `You are heddle.\n\n${JOBS_PROMPT_SECTION}`)
   await ctx.fiber.dispose()
   const after = ctx.tools?.describe?.().find((spec) => spec.name === 'bash')
   assert.ok(after === undefined || (after.parameters.properties as Record<string, unknown>).run_in_background === undefined)
+  const unloaded = ctx.waterfall('model/request', request, () => request)
+  assert.equal(unloaded, request, 'without the row, the request reaches the adapter as the loop built it')
+})
+
+test('withJobsSection: DSH\'s tool:jobs section ends the system prompt of a request that offers job_output, once', () => {
+  const tools = [{ name: 'job_output', description: 'read', parameters: {} }]
+  const system = { role: 'system' as const, content: [{ type: 'text' as const, text: 'You are heddle.' }] }
+  const user = { role: 'user' as const, content: [{ type: 'text' as const, text: 'hi' }] }
+  assert.equal(JOBS_PROMPT_SECTION.startsWith('Track every background job id you start.'), true)
+
+  const plain = { endpoint: 'e', messages: [system, user], tools: [{ name: 'bash', description: 'run', parameters: {} }] }
+  assert.equal(withJobsSection(plain), plain, 'no job tools: untouched')
+  const noTools = { endpoint: 'e', messages: [system, user] }
+  assert.equal(withJobsSection(noTools), noTools)
+
+  const added = withJobsSection({ endpoint: 'e', messages: [system, user], tools })
+  assert.deepEqual(added.messages, [{ role: 'system', content: [{ type: 'text', text: `You are heddle.\n\n${JOBS_PROMPT_SECTION}` }] }, user])
+  assert.equal(system.content[0]?.text, 'You are heddle.', 'the loop\'s request is not mutated')
+  assert.equal(withJobsSection(added), added, 'a request that has the section is not given it twice')
+
+  const second = { role: 'system' as const, content: [{ type: 'text' as const, text: 'a runtime note' }] }
+  const onlyFirst = withJobsSection({ endpoint: 'e', messages: [system, second, user], tools })
+  assert.deepEqual(onlyFirst.messages.slice(1), [second, user], 'only the first system message, the system prompt, carries it')
+
+  const bare = withJobsSection({ endpoint: 'e', messages: [user], tools })
+  assert.deepEqual(bare.messages, [{ role: 'system', content: [{ type: 'text', text: JOBS_PROMPT_SECTION }] }, user])
 })

@@ -16,6 +16,9 @@ pub struct ToolsConfig {
     pub include_builtins: bool,
     /// Wall time a `bash` call may take before it is killed, in milliseconds.
     pub bash_timeout_ms: u64,
+    /// The most wall time a `bash` call may ask for with its own `timeoutMs`, in milliseconds; a larger request is
+    /// cut to this (DSH's `maxTimeoutMs`, "the executor applies its configured default and cap").
+    pub bash_max_timeout_ms: u64,
     /// Characters of a `bash` call's combined output the model is shown; the rest is cut and marked (DSH's
     /// output cap). At least 1.
     pub bash_output_limit: usize,
@@ -33,6 +36,7 @@ impl Default for ToolsConfig {
             allow: Vec::new(),
             include_builtins: true,
             bash_timeout_ms: 30_000,
+            bash_max_timeout_ms: crate::builtin::BASH_MAX_TIMEOUT_MS,
             bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
             max_parallel_tool_calls: DEFAULT_MAX_PARALLEL_TOOL_CALLS,
         }
@@ -49,6 +53,11 @@ impl ToolsConfig {
         if parsed.bash_output_limit == 0 {
             return Err(serde::de::Error::custom(
                 "bashOutputLimit must be at least 1",
+            ));
+        }
+        if parsed.bash_max_timeout_ms == 0 {
+            return Err(serde::de::Error::custom(
+                "bashMaxTimeoutMs must be at least 1",
             ));
         }
         if parsed.max_parallel_tool_calls == 0 {
@@ -73,6 +82,7 @@ mod tests {
                 allow: vec![],
                 include_builtins: true,
                 bash_timeout_ms: 30_000,
+                bash_max_timeout_ms: 600_000,
                 bash_output_limit: 20_000,
                 max_parallel_tool_calls: 10
             }
@@ -94,6 +104,15 @@ mod tests {
 
     #[test]
     fn the_output_limit_is_a_setting_of_at_least_one() {
+        let capped =
+            ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 400 })).unwrap();
+        assert_eq!(capped.bash_max_timeout_ms, 400);
+        let none =
+            ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 0 })).unwrap_err();
+        assert!(
+            none.to_string()
+                .contains("bashMaxTimeoutMs must be at least 1")
+        );
         let config = ToolsConfig::from_row(&serde_json::json!({ "bashOutputLimit": 50 })).unwrap();
         assert_eq!(config.bash_output_limit, 50);
         let zero = ToolsConfig::from_row(&serde_json::json!({ "bashOutputLimit": 0 })).unwrap_err();

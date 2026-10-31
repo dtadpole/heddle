@@ -19,8 +19,8 @@ use crate::ring::{JobChannel, JobChunk};
 pub const DEFAULT_WAIT_TIMEOUT_MS: f64 = 30_000.0;
 pub const DEFAULT_MAX_WAIT_TIMEOUT_MS: f64 = 600_000.0;
 
-/// DSH's `tool:jobs` prompt section (TOOL:257-261). Heddle has no seam yet through which a row adds a system-prompt
-/// section, so the text is kept here for the row that adds one.
+/// DSH's `tool:jobs` prompt section (TOOL:257-261), verbatim. The row adds it to every model request that offers the
+/// job tools ([`crate::prompt::with_jobs_section`], through the `model/request` hook).
 pub const JOBS_PROMPT_SECTION: &str = "Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job's work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering.";
 
 /// The model-safe projection: no owner, offsets or limits; `detail` is the progress while live, the reason once

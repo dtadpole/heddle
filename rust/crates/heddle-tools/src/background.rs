@@ -40,6 +40,38 @@ pub trait BashBackground: Send + Sync {
         context: ToolRunContext,
         sandbox: Arc<dyn SandboxGate>,
     ) -> BoxFuture<'static, Result<ToolResult, ToolFailure>>;
+
+    /// Whether foreground calls are handed to [`BashBackground::run_foreground`]: DSH's `promoteOnTimeout`. `false`
+    /// unless the runner says so, which keeps the foreground run, and its wall-time kill, with the tool.
+    fn promotes(&self) -> bool {
+        false
+    }
+
+    /// Run a foreground call as a job (DSH's `promoteOnTimeout`: with a registry, every call registers its process as
+    /// a job at its start). Answers `render`'s result when the command ends within the wall time, and the promoted
+    /// answer when it outlives it and keeps running as a job. `None` means the job could not be registered, and the
+    /// tool runs the call in the foreground with the wall-time kill, as DSH falls back.
+    fn run_foreground(
+        &self,
+        run: ForegroundRun,
+    ) -> BoxFuture<'static, Option<Result<ToolResult, ToolFailure>>> {
+        let _ = run;
+        Box::pin(async { None })
+    }
+}
+
+/// One foreground call handed to [`BashBackground::run_foreground`].
+pub struct ForegroundRun {
+    pub args: ToolArgs,
+    pub context: ToolRunContext,
+    /// The gate rooted at the call's folder, which the settled command is classified by.
+    pub sandbox: Arc<dyn SandboxGate>,
+    /// The confined argv, from [`crate::launch_shell`]: the job runs exactly what the foreground would have.
+    pub launch: crate::builtin::ShellLaunch,
+    /// The call's wall time, already validated and capped.
+    pub limit_ms: u64,
+    /// `bash`'s own answer for a command that ended ([`crate::builtin::shell_result`], bound to this call).
+    pub render: Box<dyn FnOnce(crate::builtin::ShellEnd) -> ToolResult + Send>,
 }
 
 struct Attached {

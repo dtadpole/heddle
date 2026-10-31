@@ -37,10 +37,13 @@ pub mod upstream;
 pub mod validate;
 
 pub use background::{
-    BashBackground, BashBackgroundDetach, RUN_IN_BACKGROUND_DESCRIPTION, attach_bash_background,
-    background_for,
+    BashBackground, BashBackgroundDetach, ForegroundRun, RUN_IN_BACKGROUND_DESCRIPTION,
+    attach_bash_background, background_for,
 };
-pub use builtin::{BuiltinOptions, ShellLaunch, builtin_tools, escalation_fields, launch_shell};
+pub use builtin::{
+    BuiltinOptions, ShellEnd, ShellLaunch, builtin_tools, escalation_fields, launch_shell,
+    shell_result,
+};
 pub use config::ToolsConfig;
 pub use gates::{
     ApprovalGate, DefaultModes, EscalationError, EscalationRequest, ModeResolver, NoToolHooks,

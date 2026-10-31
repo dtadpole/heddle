@@ -1,3 +1,4 @@
+import type { GenerateRequest, Message } from '../llm/types.ts'
 import type { ToolDefinition, ToolResult } from '../tools/service.ts'
 import type { JobChunk } from './ring.ts'
 import { JobError, type JobRead, type JobRegistry, type JobView } from './registry.ts'
@@ -16,8 +17,8 @@ export const DEFAULT_WAIT_TIMEOUT_MS = 30_000
 export const DEFAULT_MAX_WAIT_TIMEOUT_MS = 600_000
 
 /**
- * DSH's `tool:jobs` prompt section (TOOL:257-261). Heddle has no seam yet through which a plugin adds a system-prompt
- * section, so the text is kept here, exported, for the row that adds one.
+ * DSH's `tool:jobs` prompt section (TOOL:257-261), verbatim. The jobs row adds it to every model request that offers
+ * the job tools ({@link withJobsSection}, through the `model/request` waterfall).
  */
 export const JOBS_PROMPT_SECTION =
   "Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job's work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering."
@@ -199,4 +200,32 @@ export function jobTools(jobs: JobRegistry, options: JobToolOptions = {}): reado
   }
 
   return [jobOutput, jobList, jobKill]
+}
+
+/**
+ * The request with DSH's `tool:jobs` section in its system prompt, when the request offers `job_output`.
+ *
+ * DSH registers the section with its system-prompt service whenever the job tools are loaded, and joins sections with a
+ * blank line (`dsh-system-prompt`: `sections ... .join("\n\n")`). Heddle composes no sections, so the jobs row adds the
+ * text where DSH's lands — at the end of the system prompt, the request's first `system` message — on the way to the
+ * adapter. The session log keeps the request as the loop built it; the section is the composition's, like the rest of
+ * the system prompt. A request without the job tools (a probe, a title, a profile without the row) is untouched, and a
+ * request that already carries the section is not given it twice.
+ */
+export function withJobsSection(request: GenerateRequest): GenerateRequest {
+  if (request.tools?.some((tool) => tool.name === 'job_output') !== true) return request
+  const index = request.messages.findIndex((message) => message.role === 'system')
+  if (index === -1) {
+    const section: Message = { role: 'system', content: [{ type: 'text', text: JOBS_PROMPT_SECTION }] }
+    return { ...request, messages: [section, ...request.messages] }
+  }
+  const system = request.messages[index] as Message
+  if (system.content.some((part) => part.type === 'text' && part.text.includes(JOBS_PROMPT_SECTION))) return request
+  const last = system.content.map((part) => part.type).lastIndexOf('text')
+  const content =
+    last === -1
+      ? [...system.content, { type: 'text' as const, text: JOBS_PROMPT_SECTION }]
+      : system.content.map((part, at) => (at === last && part.type === 'text' ? { ...part, text: `${part.text}\n\n${JOBS_PROMPT_SECTION}` } : part))
+  const messages = request.messages.map((message, at) => (at === index ? { ...message, content } : message))
+  return { ...request, messages }
 }

@@ -65,6 +65,11 @@ pub struct JobsConfig {
     /// The round cap of a notice's turn; the loop's own default when absent.
     #[serde(default)]
     pub max_rounds: Option<f64>,
+    /// Run foreground `bash` calls as jobs, so one that outlives its wall time moves to the background instead of
+    /// being killed: DSH's `promoteOnTimeout` (a `dsh-tool-bash` option there; here the row that owns jobs carries
+    /// it). Default true, as DSH's.
+    #[serde(default)]
+    pub promote_on_timeout: Option<bool>,
 }
 
 /// A whole number of at least `min`, or the row's refusal naming the field (the schema's `step(1).min(n)`).
@@ -312,6 +317,7 @@ pub fn start_row(row: JobsRow<'_>) -> Result<Arc<JobsPlugin>, String> {
                 read_log: Some(Arc::new(move |handle| reader.read(handle).ok())),
                 kill_grace_ms: kill_grace_ms.map(|grace| grace.round() as u64),
                 on_spawn: None,
+                promote_on_timeout: config.promote_on_timeout,
             },
         )),
     );
@@ -406,8 +412,11 @@ impl RuntimeHost {
 }
 
 impl NoticeHost for RuntimeHost {
+    /// An archived session is no longer a place to deliver to: DSH stops its work when it is archived and its
+    /// agent refuses a step there, so a notice must not start a turn in it.
     fn exists(&self, session: &str) -> bool {
         self.store.open(session).is_some()
+            && self.store.meta(session).is_none_or(|meta| !meta.archived())
     }
 
     fn is_running(&self, session: &str) -> bool {
@@ -742,6 +751,224 @@ mod tests {
         assert_eq!(*fixture.runtime.tools.get("bash").unwrap().spec(), before);
     }
 
+    /// DSH's promoted answer: the output so far, the marker, and the hand-off; the job id is captured.
+    fn promoted_id(output: &str, timeout_ms: u64) -> (String, String) {
+        let marker = format!("[still running after {timeout_ms}ms; moved to background job ");
+        let at = output
+            .find(&marker)
+            .unwrap_or_else(|| panic!("not a promoted answer: {output:?}"));
+        let rest = &output[at + marker.len()..];
+        let id = rest[..21].to_owned();
+        assert!(id.starts_with("bash-"), "{id}");
+        assert_eq!(
+            &rest[21..],
+            "]\nThe command keeps running in the background. You will be notified when it finishes; read newer output with job_output, stop it with job_kill."
+        );
+        (output[..at].to_owned(), id)
+    }
+
+    #[test]
+    fn render_promoted_is_dsh_s_text() {
+        let tail = "The command keeps running in the background. You will be notified when it finishes; read newer output with job_output, stop it with job_kill.";
+        assert_eq!(
+            crate::bash::render_promoted("", 500, "bash-x"),
+            format!("[still running after 500ms; moved to background job bash-x]\n{tail}")
+        );
+        assert_eq!(
+            crate::bash::render_promoted("early", 500, "bash-x"),
+            format!("early\n[still running after 500ms; moved to background job bash-x]\n{tail}")
+        );
+        assert_eq!(
+            crate::bash::render_promoted("early\n", 500, "bash-x"),
+            format!("early\n[still running after 500ms; moved to background job bash-x]\n{tail}")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_foreground_call_that_ends_in_time_answers_as_one_and_leaves_no_job() {
+        let fixture = fixture("promote-in-time", true);
+        let plugin = start(&fixture, json!({}));
+        let handle = session(&fixture);
+        let ok = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({ "command": "echo out; echo err >&2" }),
+        )
+        .await;
+        assert_eq!(ok.output, "out\nerr\n");
+        assert!(ok.error.is_none(), "{ok:?}");
+        assert_eq!(
+            ok.data.as_ref().and_then(|data| data.get("exitCode")),
+            Some(&json!(0))
+        );
+        let failed = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({ "command": "echo x; exit 3" }),
+        )
+        .await;
+        assert_eq!(failed.output, "x\n");
+        assert_eq!(
+            failed.error.as_ref().map(|error| error.code.as_str()),
+            Some("EXIT")
+        );
+        assert!(
+            plugin.registry.list(Some(&handle.id)).is_empty(),
+            "the records were removed"
+        );
+        let kinds: Vec<String> = events(&fixture, &handle)
+            .iter()
+            .map(|event| event.kind.clone())
+            .collect();
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| *kind == "job/registered")
+                .count(),
+            2
+        );
+        assert_eq!(
+            kinds.iter().filter(|kind| *kind == "job/settled").count(),
+            2
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            user_messages(&fixture, &handle).is_empty(),
+            "each settle was the call's own, so no notice"
+        );
+        plugin.dispose();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_foreground_call_that_outlives_its_wall_time_moves_to_a_background_job() {
+        let fixture = fixture("promote-late", true);
+        let plugin = start(&fixture, json!({}));
+        let handle = session(&fixture);
+        let began = std::time::Instant::now();
+        let answer = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({ "command": "echo early; sleep 0.8; echo late", "timeoutMs": 300 }),
+        )
+        .await;
+        assert!(began.elapsed() < Duration::from_secs(2));
+        assert!(answer.error.is_none(), "{answer:?}");
+        let (before, id) = promoted_id(&answer.output, 300);
+        assert_eq!(before, "early\n");
+        assert_eq!(
+            answer.data.as_ref().and_then(|data| data.get("promoted")),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            call(&fixture, &handle, "job_list", json!({})).await.output,
+            format!("{id} [bash] running — echo early; sleep 0.8; echo late")
+        );
+        let read = call(
+            &fixture,
+            &handle,
+            "job_output",
+            json!({ "job_id": id, "wait": true, "timeout_ms": 5000 }),
+        )
+        .await;
+        assert_eq!(read.output, "late\n[status: completed, exit code: 0]");
+        plugin.dispose();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_promoted_job_that_ends_on_its_own_sends_the_completion_notice() {
+        let fixture = fixture("promote-notice", true);
+        let plugin = start(&fixture, json!({}));
+        let handle = session(&fixture);
+        let answer = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({ "command": "sleep 0.5; echo done", "timeoutMs": 150 }),
+        )
+        .await;
+        let (_, id) = promoted_id(&answer.output, 150);
+        let settled = settled_in_log(&fixture, &handle, &id).await;
+        assert_eq!(settled["status"], "completed");
+        until("the completion notice", || {
+            user_messages(&fixture, &handle).iter().any(|message| {
+                message.to_string().contains(&format!(
+                    "background job {id} (bash: sleep 0.5; echo done) finished"
+                ))
+            })
+        })
+        .await;
+        plugin.dispose();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_during_the_wait_kills_the_group_and_answers_stopped() {
+        let fixture = fixture("promote-stop", true);
+        let plugin = start(&fixture, json!({ "killGraceMs": 200 }));
+        let handle = session(&fixture);
+        let token = heddle_tools::CancellationToken::new();
+        let stopper = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            stopper.cancel();
+        });
+        let answer = fixture
+            .runtime
+            .tools
+            .call(
+                "bash",
+                json!({ "command": "echo before; sleep 30" })
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+                call_context(&fixture, &handle).with_cancel(token),
+            )
+            .await;
+        assert_eq!(
+            answer.error.as_ref().map(|error| error.code.as_str()),
+            Some("INTERRUPTED"),
+            "{answer:?}"
+        );
+        assert!(
+            plugin.registry.list(Some(&handle.id)).is_empty(),
+            "the record was removed"
+        );
+        let settled = events(&fixture, &handle)
+            .iter()
+            .find(|event| event.kind == "job/settled")
+            .map(|event| Value::Object(event.fields.clone()))
+            .expect("the job settled before the call answered");
+        assert_eq!(settled["detail"], "signal: SIGTERM; tool call aborted");
+        plugin.dispose();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_promote_on_timeout_false_the_wall_time_kills_as_without_the_row() {
+        let fixture = fixture("promote-off", true);
+        let plugin = start(&fixture, json!({ "promoteOnTimeout": false }));
+        let handle = session(&fixture);
+        let answer = call(
+            &fixture,
+            &handle,
+            "bash",
+            json!({ "command": "echo early; sleep 30", "timeoutMs": 200 }),
+        )
+        .await;
+        assert_eq!(
+            answer.error.as_ref().map(|error| error.code.as_str()),
+            Some("TIMEOUT"),
+            "{answer:?}"
+        );
+        assert!(
+            events(&fixture, &handle)
+                .iter()
+                .all(|event| event.kind != "job/registered")
+        );
+        plugin.dispose();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sleep_30_in_the_background_is_killed_with_its_process_group() {
         let fixture = fixture("kill", true);
@@ -760,6 +987,7 @@ mod tests {
                     on_spawn: Some(Arc::new(move |id: &str, pid: i32| {
                         lock(&seen).insert(id.to_owned(), pid);
                     })),
+                    promote_on_timeout: None,
                 },
             )),
         );

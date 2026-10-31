@@ -822,6 +822,7 @@ impl Component for ToolsComponent {
                 "allow": { "type": "array", "items": { "type": "string" } },
                 "includeBuiltins": { "type": "boolean" },
                 "bashTimeoutMs": { "type": "number" },
+                "bashMaxTimeoutMs": { "type": "number" },
                 "bashOutputLimit": { "type": "number" },
                 "maxParallelToolCalls": { "type": "number" },
             },
@@ -1608,6 +1609,14 @@ impl Component for JobsComponent {
                 heddle_events::ListenOptions::default(),
             );
             services.provide("jobs-listener", Arc::new((scope, listener)));
+        }
+        // DSH's `tool:jobs` prompt section on every request that offers the job tools, through the model service's
+        // `model/request` hook; dropped with the boot's services, which removes the hook.
+        if let Some(model) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            services.provide(
+                "jobs-prompt-section",
+                Arc::new(heddle_jobs::attach_prompt_section(&model)),
+            );
         }
         // Dropped with the boot's services, so disposing the boot stops every live job (`ctx.effect` teardown).
         services.provide(

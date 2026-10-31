@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Background jobs, judged as DSH's `dsh-jobs-local`, `dsh-tool-jobs`, background `dsh-tool-bash` and
@@ -24,6 +24,14 @@ import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, rep
  *    session`.
  * 7. **A57** the page's follow route reads output without consuming it — the model's next `job_output` still
  *    returns it — and the kill route stops the job with `cancelled by the user`, which still notifies.
+ * 8. **A54's guidance** a model request that offers the job tools carries DSH's `tool:jobs` prompt section at the end
+ *    of its system prompt ("Track every background job id you start. …"), as the request reaches the provider.
+ * 9. **A50, promoted** a foreground `bash` that outlives its `timeoutMs` is not killed: it answers the output so far
+ *    and `[still running after <ms>ms; moved to background job <id>]` with DSH's hand-off, and the job goes on, so a
+ *    later `job_output` reads the rest (DSH's `promoteOnTimeout`, default true while a job registry is loaded).
+ * 10. **Lifetime** archiving a session with a live job is refused as active and names the job; archiving it with
+ *    `stop: true` kills the job with `session archived`, and no completion notice wakes a turn in the archived
+ *    session (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`).
  *
  * It is gated on the Web command alone, never on the jobs capability, so a build without background jobs fails
  * here rather than skipping. Every model step comes from the offline scripted endpoint. The script is re-read on
@@ -378,6 +386,97 @@ test('A57: the follow route reads without consuming, and the kill route stops th
     await events$
   } finally {
     stream.abort()
+    await server.close()
+  }
+})
+
+/** DSH's `tool:jobs` section (dsh-tool-jobs/lib/index.js:257-261), verbatim. */
+const JOBS_SECTION =
+  "Track every background job id you start. You are notified in-session when a job finishes — do not busy-poll or sleep on one; keep working on independent steps and do not duplicate a running job's work. Before giving a final answer, collect every still-relevant job with job_output (set wait: true only when you are genuinely blocked on it), and job_kill jobs that stopped mattering."
+
+test('A54 guidance: a request that offers the job tools ends its system prompt with DSH\'s tool:jobs section', async (context) => {
+  if (!skipUnless(context, /--turn/.test((await runCli(['--help'])).stdout), 'a one-shot turn')) return
+  const home = isolatedHome('jobs-section')
+  const work = fixtureDir('jobs-section-work')
+  mkdirSync(work, { recursive: true })
+  const double = await chatDouble({ content: 'ok' })
+  try {
+    const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
+    const run = await runCli(['--config', join(repoRoot, 'cordis.yml'), '--session-root', join(home, 'sessions'), '--turn', 'hello'], {
+      env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+      cwd: work,
+    })
+    assert.equal(run.code, 0, `the turn ran\n${run.stdout}${run.stderr}`)
+    const bodies = double.requests.map((entry) => {
+      try {
+        return JSON.parse(entry.body)
+      } catch {
+        return undefined
+      }
+    })
+    const body = bodies.find((value) => Array.isArray(value?.tools) && value.tools.some((tool) => (tool.function ?? tool).name === 'job_output'))
+    assert.ok(body !== undefined, `a request offered job_output\nsaw tools: ${JSON.stringify(bodies.map((value) => value?.tools?.map((tool) => (tool.function ?? tool).name)))}`)
+    const system = body.messages.find((message) => message.role === 'system')
+    const text = typeof system?.content === 'string' ? system.content : (system?.content ?? []).map((part) => part.text ?? '').join('')
+    // The section ends the system prompt, after a blank line; with no other system text it is the whole prompt.
+    assert.ok(text === JOBS_SECTION || text.endsWith(`\n\n${JOBS_SECTION}`), `the system prompt ends with the tool:jobs section\nsaw: ${JSON.stringify(text.slice(-400))}`)
+    assert.equal(text.split(JOBS_SECTION).length, 2, 'the section appears once')
+  } finally {
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
+const PROMOTED = /^([\s\S]*)\[still running after (\d+)ms; moved to background job (bash-[0-9a-f]{16})\]\nThe command keeps running in the background\. You will be notified when it finishes; read newer output with job_output, stop it with job_kill\.$/
+
+test('A50 promoted: a foreground bash that outlives its wall time moves to a background job instead of being killed', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('promote')
+  try {
+    const folder = join(server.work, 'promote')
+    const session = await openSession(server, folder)
+    let mark = events(server, session).length
+    await turn(server, session, folder, [{ toolCall: { name: 'bash', arguments: { command: 'echo early; sleep 1.5; echo late', timeoutMs: 500 } } }, { text: 'promoted' }])
+    const answer = toolTexts(server, session, mark)[0]
+    const match = PROMOTED.exec(answer ?? '')
+    assert.ok(match, `the call answers DSH's promoted text, not a timeout\nsaw: ${JSON.stringify(answer)}`)
+    assert.equal(match[1], 'early\n', 'the output so far comes first')
+    assert.equal(match[2], '500')
+    const id = match[3]
+    mark = events(server, session).length
+    await turn(server, session, folder, [{ toolCall: { name: 'job_output', arguments: { job_id: id, wait: true, timeout_ms: 10_000 } } }, { text: 'read it' }])
+    assert.equal(toolTexts(server, session, mark)[0], 'late\n[status: completed, exit code: 0]', 'the command went on, and job_output reads after what the call answered')
+  } finally {
+    await server.close()
+  }
+})
+
+test('archive: a live job blocks the archive and is listed; stop: true archives, kills it with "session archived", and wakes nothing', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('archive')
+  try {
+    const folder = join(server.work, 'archive')
+    const session = await openSession(server, folder)
+    const mark = events(server, session).length
+    await turn(server, session, folder, [backgroundBash('sleep 30'), { text: 'started' }])
+    const id = startedId(toolTexts(server, session, mark)[0])
+    const flags = `/api/sessions/${encodeURIComponent(session)}/flags`
+    const refused = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(refused.status, 409, `a session with a live job is not archived without stop\nsaw: ${JSON.stringify(refused)}`)
+    assert.equal(refused.body.code, 'active')
+    assert.deepEqual(refused.body.jobs, [{ id, label: 'sleep 30' }], 'the refusal names the job that blocks it')
+    // Were a notice to start a turn in the archived session, this step would answer it.
+    steps(server, [{ purpose: 'jobs-notice', text: 'woken in an archived session' }])
+    const archived = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true, stop: true }) })
+    assert.equal(archived.status, 200, `stop: true archives\nsaw: ${JSON.stringify(archived)}`)
+    assert.equal(archived.body.archived, true)
+    const settled = await waitFor(() => settledEvent(server, session, id), 10_000, 'the job to settle')
+    assert.equal(settled.status, 'killed')
+    assert.equal(settled.detail, 'signal: SIGTERM; session archived')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500))
+    assert.equal(notices(server, session).length, 0, 'no completion notice is delivered to an archived session')
+  } finally {
     await server.close()
   }
 })

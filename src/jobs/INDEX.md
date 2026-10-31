@@ -1,6 +1,6 @@
 ---
 title: Jobs
-version: 1.0.0
+version: 1.0.4
 description: Background jobs a session starts and collects later - the in-memory registry and its output ring, the three job tools, background bash, the completion notice that wakes an idle session, and the page's job routes.
 grounded_in:
   - source: dsh-0.2.1-rc.2
@@ -23,9 +23,9 @@ own, the session is told with a completion notice, which starts a turn if the se
 | [`ring.ts`](ring.ts) | `OutputRing`: chunks at absolute UTF-8 byte offsets, the oldest whole chunks dropped past the cap, an oversized chunk cut to a UTF-8-safe tail marked `gapBefore`, non-consuming reads that answer `lossy` below `earliest`; channels `stdout`, `stderr`, `log` |
 | [`registry.ts`](registry.ts) | `JobRegistry`, the substrate: `JobView`, the five statuses, `<kind>-<16 hex>` ids re-rolled on collision, the producer spec (`run(handle) -> {cancel, done}`, pull sources), preflight in DSH's order, the per-owner cap, the pump (150 ms, then a final drain before settle), the one consuming `read` and the non-consuming `readAt`, `kill`, `wait`, `remove`, first-wins settle with the kill reason merged, ownership, the `job/registered` and `job/settled` session-log events, the event stream, teardown |
 | [`tools.ts`](tools.ts) | `job_output`, `job_list`, `job_kill`: DSH's descriptions, parameter schemas and renderings verbatim (status line, `(no new output)`, the `[stderr]` section, the dropped-output note, `(no background jobs)`, the kill answers) |
-| [`bash.ts`](bash.ts) | background `bash`: the producer (confined by the same sandbox path as a foreground call, detached in its own process group, SIGTERM then SIGKILL after 3000 ms, DSH's outcome mapping and sandbox notes) and the runner the jobs row attaches to the `bash` tool |
+| [`bash.ts`](bash.ts) | background `bash`: the producer (confined by the same sandbox path as a foreground call, detached in its own process group, SIGTERM then SIGKILL after 3000 ms through the sandbox's `killProcessGroup`, DSH's outcome mapping and sandbox notes), the runner the jobs row attaches to the `bash` tool, and `runForeground`: a foreground call run as a job, promoted to the background when it outlives its wall time (`renderPromoted`) |
 | [`notice.ts`](notice.ts) | the completion notice's text and source, and `NoticeDelivery`: who is told, wake or inject, per-session serialization, `quiet` delivery and the wake budget |
-| [`http.ts`](http.ts) | the person's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`) |
+| [`http.ts`](http.ts) | the person's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`); and the archive admission the flags route asks (`sessionJobActivity`, `stopSessionJobs`) |
 
 The plugin that wires them is [`../plugins/jobs.ts`](../plugins/jobs.ts): it provides `ctx.jobs`, registers the
 three tools, attaches background `bash`, delivers notices with `runTurn` as its turn starter and the session inbox as
@@ -69,8 +69,11 @@ run uses.
 - **Owner liveness is session existence.** DSH requires a live agent for the owner and cancels its jobs when that
   agent is disposed (`owner disposed`). Heddle has no per-session agent object, so the owner must exist in the session
   store, and a job lives until it ends, is killed, or the row is disposed (`jobs service disposed`).
-- **The archive kill is a method, not a hook.** `killOwnedBy(session, 'session archived')` exists; heddle has no
-  archive event yet (the schedule row notes the same gap), so nothing calls it.
+- **Archiving stops a session's jobs**, as DSH's job archive admission does (`dsh-jobs/lib/index.js:19-43`): the
+  server's flags route counts the session's live owned jobs as activity (`sessionJobActivity`), refuses the archive
+  with `code: 'active'` and the jobs listed unless `stop: true`, and after the archive is written kills them with
+  `session archived` (`stopSessionJobs`). An archived session receives no completion notice: the row's notice host
+  treats it as gone, so no turn starts there.
 - **The tool call is read from the log.** DSH's producer receives the call id; heddle's tool context carries none. As
   `bash` is an exclusive tool, the running call is the first unanswered `bash` call of the current model answer with
   the same arguments; `toolCall` is omitted when the log cannot say.
@@ -80,13 +83,25 @@ run uses.
   person's message (a user message with no `source`) resets the wake count, as DSH's claimed user message does.
 - **Background stdin is closed.** A background command's stdin is `ignore`, since nothing can ever write to it; the
   foreground run keeps its pipe.
-- **Not ported**: `promoteOnTimeout` (a foreground call that outlives its timeout moving to the background), the
-  `outputLimitBytes` truncation of tool answers and notices (no heddle producer sets a limit), spill files, the
-  `tool:jobs` prompt section (exported as `JOBS_PROMPT_SECTION`; heddle has no seam for a plugin's prompt section), and
-  the streamed `job.list` / `job.follow` frames — the page refreshes on the `jobs` event and polls the follow route.
+- **The `tool:jobs` prompt section** reaches the model through the `model/request` waterfall (`withJobsSection`):
+  DSH's text, after a blank line, at the end of the request's first `system` message, or as that message when there
+  is none, on every request that offers `job_output`. DSH composes it into its system prompt; heddle composes no
+  sections, and the session log keeps the request as the loop built it.
+- **`promoteOnTimeout`** (default true) is the jobs row's option, not `bash`'s: the tools row builds `bash` without
+  knowing about jobs, so the row hands it `runForeground` through the same seam. While it is set, every foreground
+  call is a job from its start, as DSH's is: ended in time, the record is removed and the call answers as the
+  foreground does (`shellResult`, shared); still running at the wall time, nothing is killed and the call answers
+  DSH's promoted text; stopped, the job is killed with `tool call aborted` and removed. A registration the row refuses
+  (the session at its cap) runs in the foreground with the wall-time kill. With it false, the wall time kills.
+- **Not ported**: the `outputLimitBytes` truncation of tool answers and notices (no heddle producer sets a limit),
+  spill files, and the streamed `job.list` / `job.follow` frames — the page refreshes on the `jobs` event and polls
+  the follow route.
 
 ## Tests
 
+- [`../../test/jobs-promote.test.ts`](../../test/jobs-promote.test.ts) — `promoteOnTimeout`: DSH's promoted text, a call
+  that ends in time (no record, no notice), one that outlives its wall time (output so far, then `job_output` goes on),
+  the notice of a promoted job, a Stop during the wait, the option off, and the cap's foreground fallback.
 - [`../../test/jobs-registry.test.ts`](../../test/jobs-registry.test.ts) — the ring, ids, preflight order and texts,
   the cap, consuming against non-consuming reads, result-once, kill and settle with the reason merged, wait, remove,
   ownership, the session-log events, the event stream, the pump, teardown.

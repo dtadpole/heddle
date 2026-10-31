@@ -20,6 +20,9 @@ a display or a window.
 ## What decides it
 
 `check-tools.mjs` lists and calls the built-in tools, and `check-plugins.mjs` adds a fixture tool through a layer file.
+`check-bash-timeout.mjs` holds a bash call's own `timeoutMs` to DSH's rule: a value that is not a finite positive number
+is refused and the command does not run, a larger one is cut to the tools row's `bashMaxTimeoutMs` (DSH's `maxTimeoutMs`,
+ten minutes by default; live-testing issue #13).
 
 ## Under `HEDDLE_BIN`
 

@@ -1,8 +1,8 @@
 ---
 title: The heddle-sandbox sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T05:10:31Z
-version: 0.3.2
+modified: 2026-10-31T02:21:29Z
+version: 0.3.3
 description: The sources of the heddle-sandbox crate, one module per TypeScript file, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md at 5c113e8
@@ -21,6 +21,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`backend.rs`](backend.rs) | the backend trait, platform selection, the fail-closed error, outcome classification and the shell's sentences | `src/sandbox/backend.ts` |
 | [`seatbelt.rs`](seatbelt.rs) | the macOS rung: the SBPL profile and its functional probe | `src/sandbox/seatbelt.ts` |
 | [`linux.rs`](linux.rs) | the bubblewrap and Landlock rungs and their chain | `src/sandbox/linux.ts` |
+| [`process.rs`](process.rs) | `kill_process_group`, `signal_process_group`: a Stop, a timeout or a job kill reaches every process a command started, as DSH signals a child's group | `src/sandbox/process-group.ts` |
 | [`escalation.rs`](escalation.rs) | the one-call wider-retry ladder and its approval ask | `src/sandbox/escalation.ts` |
 | [`transition.rs`](transition.rs) | the owner's session-mode change rule | `permissionTransition` in `src/sandbox/service.ts` |
 | [`service.rs`](service.rs) | the sandbox service: the file fence and the shell seam | `SandboxService` in `src/sandbox/service.ts` |

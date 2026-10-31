@@ -21,6 +21,8 @@ use crate::upstream::{SandboxMode, SandboxOutcome, ToolSpec};
 pub struct BuiltinOptions {
     /// Default wall time of a `bash` call, in milliseconds; a call may name its own `timeoutMs`.
     pub bash_timeout_ms: u64,
+    /// The most a call's own `timeoutMs` may ask for ([`BASH_MAX_TIMEOUT_MS`] by default).
+    pub bash_max_timeout_ms: u64,
     /// Characters of a `bash` call's combined output kept for the model ([`BASH_OUTPUT_LIMIT`] by default).
     pub bash_output_limit: usize,
 }
@@ -29,6 +31,7 @@ impl Default for BuiltinOptions {
     fn default() -> Self {
         Self {
             bash_timeout_ms: 30_000,
+            bash_max_timeout_ms: BASH_MAX_TIMEOUT_MS,
             bash_output_limit: BASH_OUTPUT_LIMIT,
         }
     }
@@ -37,6 +40,36 @@ impl Default for BuiltinOptions {
 /// The default for `bashOutputLimit`: the most combined output a `bash` result carries before it is cut, in
 /// characters.
 pub const BASH_OUTPUT_LIMIT: usize = 20_000;
+
+/// The default for `bashMaxTimeoutMs`: the most wall time a `bash` call may ask for, DSH's `maxTimeoutMs` (ten
+/// minutes, `dsh-bash-local`).
+pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
+///
+/// DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the
+/// default; a value that is not a finite positive number is refused, never turned into an instant kill or an
+/// unbounded wait; a larger one is cut to the cap. Live-testing issue #13 measured `0`, `-5` and `3000000000` killing
+/// the command at once on the TypeScript build and the last one honoured for 34 days here.
+fn bash_wall_time(
+    requested: Option<&serde_json::Value>,
+    default_ms: u64,
+    max_ms: u64,
+) -> Result<u64, String> {
+    let cap = |milliseconds: u64| milliseconds.min(max_ms);
+    match requested {
+        None | Some(serde_json::Value::Null) => Ok(cap(default_ms)),
+        Some(value) => match value.as_f64() {
+            // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
+            Some(milliseconds) if milliseconds.is_finite() && milliseconds > 0.0 => {
+                Ok(cap(milliseconds.round().max(1.0) as u64))
+            }
+            _ => Err(format!(
+                "invalid timeoutMs: expected a positive number, got {value}"
+            )),
+        },
+    }
+}
 
 /// Build the four standard tools around one sandbox, in the order `heddle tools` lists them:
 /// `write_file`, `read_file`, `list_dir`, `bash`.
@@ -54,6 +87,7 @@ pub fn builtin_tools(sandbox: Arc<dyn SandboxGate>, options: BuiltinOptions) -> 
         bash_tool(
             sandbox,
             options.bash_timeout_ms,
+            options.bash_max_timeout_ms,
             options.bash_output_limit,
             escalation,
         ),
@@ -386,12 +420,14 @@ struct BashTool {
     foreground: ToolSpec,
     background: ToolSpec,
     default_timeout_ms: u64,
+    max_timeout_ms: u64,
     output_limit: usize,
 }
 
 fn bash_tool(
     sandbox: Arc<dyn SandboxGate>,
     default_timeout_ms: u64,
+    max_timeout_ms: u64,
     output_limit: usize,
     escalation: serde_json::Map<String, serde_json::Value>,
 ) -> Arc<dyn Tool> {
@@ -403,7 +439,7 @@ fn bash_tool(
             ),
             (
                 "timeoutMs".to_owned(),
-                json!({ "type": "number", "description": format!("Wall time before the command is killed; default {default_timeout_ms}.") }),
+                json!({ "type": "number", "description": format!("Wall time before the command is killed, in milliseconds; default {default_timeout_ms}, at most {max_timeout_ms}.") }),
             ),
         ]);
         if background {
@@ -425,6 +461,7 @@ fn bash_tool(
         background: spec("bash", BASH_DESCRIPTION, parameters(true)),
         sandbox,
         default_timeout_ms,
+        max_timeout_ms,
         output_limit,
     })
 }
@@ -445,12 +482,18 @@ impl Tool for BashTool {
         let sandbox = rooted(&self.sandbox, &context);
         let attached = crate::background::background_for(&self.sandbox);
         let default_timeout_ms = self.default_timeout_ms;
+        let max_timeout_ms = self.max_timeout_ms;
         let output_limit = self.output_limit;
         Box::pin(async move {
             let command = string_arg(&args, "command");
             if command.is_empty() {
                 return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
             }
+            let limit =
+                match bash_wall_time(args.get("timeoutMs"), default_timeout_ms, max_timeout_ms) {
+                    Ok(milliseconds) => milliseconds,
+                    Err(message) => return Ok(ToolResult::refused(codes::BAD_ARGS, message)),
+                };
             // A background call is the jobs row's (DSH's refusal text when no job registry is loaded, adapted).
             if args.get("run_in_background") == Some(&serde_json::Value::Bool(true)) {
                 return match attached {
@@ -462,18 +505,37 @@ impl Tool for BashTool {
                 };
             }
             let mode = context.mode();
-            let ShellLaunch { argv, confined } =
-                match launch_shell(sandbox.as_ref(), &command, &context) {
-                    Ok(launch) => launch,
-                    Err(refusal) => return Ok(*refusal),
+            let launch = match launch_shell(sandbox.as_ref(), &command, &context) {
+                Ok(launch) => launch,
+                Err(refusal) => return Ok(*refusal),
+            };
+            // With the jobs row attached and promoting, the call runs as a job (DSH's `promoteOnTimeout`): a command
+            // that outlives its wall time keeps running in the background instead of being killed. A registration
+            // the row refuses (a session at its job cap) falls through to the foreground run and its wall-time kill.
+            if let Some(background) = attached.filter(|background| background.promotes()) {
+                let render_sandbox = Arc::clone(&sandbox);
+                let render_confined = launch.confined.clone();
+                let run = crate::background::ForegroundRun {
+                    args: args.clone(),
+                    context: context.clone(),
+                    sandbox: Arc::clone(&sandbox),
+                    launch: launch.clone(),
+                    limit_ms: limit,
+                    render: Box::new(move |end: ShellEnd| {
+                        shell_result(
+                            render_sandbox.as_ref(),
+                            &end,
+                            mode,
+                            render_confined.as_ref(),
+                            output_limit,
+                        )
+                    }),
                 };
-            // The TypeScript build takes `Number(args.timeoutMs)`, so a fractional millisecond counts.
-            let limit = args
-                .get("timeoutMs")
-                .and_then(serde_json::Value::as_f64)
-                .filter(|milliseconds| *milliseconds > 0.0)
-                .map(|milliseconds| milliseconds.round() as u64)
-                .unwrap_or(default_timeout_ms);
+                if let Some(answered) = background.run_foreground(run).await {
+                    return answered;
+                }
+            }
+            let ShellLaunch { argv, confined } = launch;
             run_command(
                 sandbox.as_ref(),
                 &argv,
@@ -510,14 +572,13 @@ async fn run_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The command leads its own process group, so a Stop or the wall time reaches everything it started, as DSH's
+    // launcher does (`detached`, then a signal to `-pid`). `kill_on_drop` alone stops only the shell, and the
+    // shell's children kept running orphaned (live-testing draft developer-five-5).
+    #[cfg(unix)]
+    process.process_group(0);
     let child = process.spawn()?;
-
-    let facts = || match confined {
-        None => sandbox_facts(mode, false),
-        Some(confined) => {
-            json!({ "mode": mode, "enforcement": confined.enforcement, "denied": false })
-        }
-    };
+    let leader = child.id();
 
     let limit = Duration::from_millis(limit_ms);
     let cancel = context.cancel.clone();
@@ -540,65 +601,113 @@ async fn run_command(
         }
     };
 
-    match output {
+    let end = match output {
         None => {
-            // The child was killed for its wall time or by the caller's Stop. It is dropped here, which
-            // kills it (`kill_on_drop`); whatever it printed before that is still worth reporting.
+            // The child was killed for its wall time or by the caller's Stop: dropping it killed the shell
+            // (`kill_on_drop`), and the group signal stops whatever the shell had started, which outlives the
+            // shell as long as one member of the group is left.
+            if let Some(leader) = leader {
+                if let Err(error) = heddle_sandbox::kill_process_group(leader) {
+                    tracing::warn!(%error, leader, "the command's process group could not be stopped");
+                }
+            }
             let stopped = context.is_cancelled();
-            let message = if stopped {
-                "the command was stopped before it finished".to_owned()
-            } else {
-                format!("the command exceeded {limit_ms}ms and was killed")
-            };
-            let code = if stopped {
-                codes::INTERRUPTED
-            } else {
-                codes::TIMEOUT
-            };
-            let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
-            Ok(ToolResult::refused(code, message).with_data(data))
-        }
-        Some(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let trimmed = truncate_output_at(&format!("{stdout}{stderr}"), output_limit);
-            let code = output.status.code().unwrap_or(1);
-            let outcome = match confined {
-                None => SandboxOutcome::Exited,
-                Some(confined) => sandbox.classify_outcome(code, &stderr, Some(confined)),
-            };
-            let kept = || ToolResult::ok(trimmed.clone());
-            match outcome {
-                SandboxOutcome::RunnerFailure { detail } => Ok(kept()
-                    .with_error(
-                        codes::SANDBOX_UNAVAILABLE,
-                        // The sandbox crate's sentence, which 75's shell-confinement checks match.
-                        heddle_sandbox::runner_failure_message(mode, &detail),
-                    )
-                    .with_data(serde_json::Map::from_iter([(
-                        "sandbox".to_owned(),
-                        json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": false, "runnerFailed": true }),
-                    )]))),
-                SandboxOutcome::Denied => Ok(kept()
-                    .with_error(
-                        codes::SANDBOX,
-                        heddle_sandbox::shell_denial_message(mode),
-                    )
-                    .with_data(serde_json::Map::from_iter([(
-                        "sandbox".to_owned(),
-                        json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": true }),
-                    )]))),
-                SandboxOutcome::Exited if code != 0 => Ok(kept()
-                    .with_error(codes::EXIT, format!("the command exited {code}"))
-                    .with_data(serde_json::Map::from_iter([("sandbox".to_owned(), facts())]))),
-                SandboxOutcome::Exited => Ok(ToolResult::ok(trimmed).with_data(
-                    serde_json::Map::from_iter([
-                        ("exitCode".to_owned(), json!(code)),
-                        ("sandbox".to_owned(), facts()),
-                    ]),
-                )),
+            ShellEnd {
+                stopped,
+                timed_out: !stopped,
+                limit_ms,
+                ..ShellEnd::default()
             }
         }
+        Some(output) => ShellEnd {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: output.status.code(),
+            stopped: false,
+            timed_out: false,
+            limit_ms,
+        },
+    };
+    Ok(shell_result(sandbox, &end, mode, confined, output_limit))
+}
+
+/// What a foreground command reported when it ended, before it becomes `bash`'s answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShellEnd {
+    pub stdout: String,
+    pub stderr: String,
+    /// The exit code; `None` when a signal ended it (classified and reported as 1).
+    pub code: Option<i32>,
+    /// The call's Stop ended it.
+    pub stopped: bool,
+    /// Its wall time ended it.
+    pub timed_out: bool,
+    pub limit_ms: u64,
+}
+
+/// `bash`'s answer for a command that ended: the stop or the wall time, else the combined output cut to
+/// `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
+/// sandbox facts. Shared by the foreground run and the jobs row's promoting run (`heddle-jobs`), so a call answers
+/// the same however it was run.
+pub fn shell_result(
+    sandbox: &dyn SandboxGate,
+    end: &ShellEnd,
+    mode: SandboxMode,
+    confined: Option<&crate::upstream::ConfinedArgv>,
+    output_limit: usize,
+) -> ToolResult {
+    let facts = || match confined {
+        None => sandbox_facts(mode, false),
+        Some(confined) => {
+            json!({ "mode": mode, "enforcement": confined.enforcement, "denied": false })
+        }
+    };
+    if end.stopped || end.timed_out {
+        let (code, message) = if end.stopped {
+            (
+                codes::INTERRUPTED,
+                "the command was stopped before it finished".to_owned(),
+            )
+        } else {
+            (
+                codes::TIMEOUT,
+                format!("the command exceeded {}ms and was killed", end.limit_ms),
+            )
+        };
+        let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
+        return ToolResult::refused(code, message).with_data(data);
+    }
+    let trimmed = truncate_output_at(&format!("{}{}", end.stdout, end.stderr), output_limit);
+    let code = end.code.unwrap_or(1);
+    let outcome = match confined {
+        None => SandboxOutcome::Exited,
+        Some(confined) => sandbox.classify_outcome(code, &end.stderr, Some(confined)),
+    };
+    let kept = || ToolResult::ok(trimmed.clone());
+    match outcome {
+        SandboxOutcome::RunnerFailure { detail } => kept()
+            .with_error(
+                codes::SANDBOX_UNAVAILABLE,
+                // The sandbox crate's sentence, which 75's shell-confinement checks match.
+                heddle_sandbox::runner_failure_message(mode, &detail),
+            )
+            .with_data(serde_json::Map::from_iter([(
+                "sandbox".to_owned(),
+                json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": false, "runnerFailed": true }),
+            )])),
+        SandboxOutcome::Denied => kept()
+            .with_error(codes::SANDBOX, heddle_sandbox::shell_denial_message(mode))
+            .with_data(serde_json::Map::from_iter([(
+                "sandbox".to_owned(),
+                json!({ "mode": mode, "enforcement": confined.map(|c| c.enforcement), "denied": true }),
+            )])),
+        SandboxOutcome::Exited if code != 0 => kept()
+            .with_error(codes::EXIT, format!("the command exited {code}"))
+            .with_data(serde_json::Map::from_iter([("sandbox".to_owned(), facts())])),
+        SandboxOutcome::Exited => ToolResult::ok(trimmed).with_data(serde_json::Map::from_iter([
+            ("exitCode".to_owned(), json!(code)),
+            ("sandbox".to_owned(), facts()),
+        ])),
     }
 }
 
@@ -880,6 +989,109 @@ mod tests {
             .unwrap();
         assert_eq!(result.error.as_ref().unwrap().code, codes::TIMEOUT);
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn the_wall_time_rule_is_dshs_default_refusal_and_cap() {
+        // Live-testing issue #13; DSH: dsh-tool-bash validateBashArgs and dsh-timeout clampTimeout.
+        assert_eq!(bash_wall_time(None, 30_000, 600_000), Ok(30_000));
+        assert_eq!(
+            bash_wall_time(Some(&json!(null)), 30_000, 600_000),
+            Ok(30_000)
+        );
+        for (value, shown) in [
+            (json!(0), "0"),
+            (json!(-5), "-5"),
+            (json!("5000"), "\"5000\""),
+            (json!(true), "true"),
+        ] {
+            assert_eq!(
+                bash_wall_time(Some(&value), 30_000, 600_000),
+                Err(format!(
+                    "invalid timeoutMs: expected a positive number, got {shown}"
+                )),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            bash_wall_time(Some(&json!(3_000_000_000_u64)), 30_000, 600_000),
+            Ok(600_000),
+            "cut to the cap"
+        );
+        assert_eq!(
+            bash_wall_time(Some(&json!(1500.4)), 30_000, 600_000),
+            Ok(1500),
+            "a fractional millisecond rounds"
+        );
+        assert_eq!(
+            bash_wall_time(Some(&json!(0.2)), 30_000, 600_000),
+            Ok(1),
+            "a tiny positive value is still a timer"
+        );
+        assert_eq!(
+            bash_wall_time(None, 900_000, 600_000),
+            Ok(600_000),
+            "a default above the cap is cut too"
+        );
+        assert_eq!(BASH_MAX_TIMEOUT_MS, 600_000, "DSH's ten minutes");
+    }
+
+    #[tokio::test]
+    async fn a_non_positive_timeout_is_refused_and_the_command_does_not_run() {
+        let root = tempdir();
+        let marker = root.path().join("ran.marker");
+        let bash = tool("bash", sandbox(root.path()));
+        let result = bash
+            .run(
+                args(json!({ "command": format!("touch '{}'", marker.display()), "timeoutMs": 0 })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::BAD_ARGS);
+        assert_eq!(
+            error.message,
+            "invalid timeoutMs: expected a positive number, got 0"
+        );
+        assert!(!marker.exists(), "the command did not run");
+    }
+
+    #[tokio::test]
+    async fn the_cap_bounds_what_a_call_may_ask_for_and_the_schema_says_so() {
+        let root = tempdir();
+        let bash = builtin_tools(
+            sandbox(root.path()),
+            BuiltinOptions {
+                bash_max_timeout_ms: 300,
+                ..BuiltinOptions::default()
+            },
+        )
+        .into_iter()
+        .find(|tool| tool.spec().name == "bash")
+        .expect("bash");
+        let described = bash.spec().parameters["properties"]["timeoutMs"]["description"].clone();
+        assert_eq!(
+            described,
+            json!(
+                "Wall time before the command is killed, in milliseconds; default 30000, at most 300."
+            )
+        );
+        let started = std::time::Instant::now();
+        let result = bash
+            .run(
+                args(json!({ "command": "sleep 3", "timeoutMs": 5000 })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        let error = result.error.as_ref().expect("timed out");
+        assert_eq!(error.code, codes::TIMEOUT);
+        assert_eq!(error.message, "the command exceeded 300ms and was killed");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stopped at the cap"
+        );
     }
 
     #[tokio::test]

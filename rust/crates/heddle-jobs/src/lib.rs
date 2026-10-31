@@ -15,6 +15,7 @@
 //! | [`tools`] | `job_output`, `job_list`, `job_kill`: DSH's descriptions, schemas and renderings |
 //! | [`bash`] | background `bash`: the process-group producer and the runner attached to the tools row's `bash` |
 //! | [`notice`] | the completion notice and its delivery: wake or inject, serialized per session |
+//! | [`prompt`] | DSH's `tool:jobs` prompt section, added to a request that offers the job tools (`model/request`) |
 //! | [`http`] | the page's routes under `/api/jobs` |
 //! | [`compose`] | the `jobs` row, for the binary |
 //! | [`js`] | the JavaScript number semantics the refusal sentences lean on |
@@ -24,12 +25,14 @@ pub mod compose;
 pub mod http;
 pub mod js;
 pub mod notice;
+pub mod prompt;
 pub mod registry;
 pub mod ring;
 pub mod tools;
 
 pub use compose::{JobsConfig, JobsPlugin, JobsRow, JobsTeardown, start_row};
 pub use notice::{NoticeDelivery, NoticeHost, NoticeSource, notice_source, notice_text};
+pub use prompt::{JobsPromptSection, PromptSectionHooks, attach_prompt_section, with_jobs_section};
 pub use registry::{
     JobError, JobEvent, JobHandle, JobHooks, JobOutcome, JobRead, JobRegistry, JobRegistryOptions,
     JobSpec, JobStatus, JobToolCall, JobView, KillOutcome, OutcomeStatus, SettleCause,

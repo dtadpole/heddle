@@ -2,11 +2,13 @@ import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 
 import { classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
+import { killProcessGroup } from '../sandbox/process-group.ts'
 import type { SandboxMode, SandboxService } from '../sandbox/service.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
-import { launchShell, shellEnv, type BashBackground } from '../tools/builtin.ts'
+import { launchShell, shellEnv, type BashBackground, type ForegroundRun } from '../tools/builtin.ts'
 import type { ToolResult, ToolRunContext } from '../tools/service.ts'
 import { JobError, type JobHooks, type JobOutcome, type JobRegistry, type JobToolCall } from './registry.ts'
+import { renderModelDelta } from './tools.ts'
 
 /**
  * Background `bash`: the job producer and the `run_in_background` half of the tool (`dsh-tool-bash/lib/index.js`,
@@ -14,7 +16,9 @@ import { JobError, type JobHooks, type JobOutcome, type JobRegistry, type JobToo
  *
  * The command is confined by the same sandbox path a foreground call takes (`launchShell` in `src/tools/builtin.ts`),
  * runs in the call's folder with the same environment, and is spawned **detached**, in a process group of its own,
- * so a kill reaches the whole tree: SIGTERM to the group, then SIGKILL after a grace period (DSH's 3000 ms).
+ * so a kill reaches the whole tree: SIGTERM to the group, then SIGKILL after a grace period (DSH's 3000 ms). Both
+ * signals go through the sandbox's one group helper (`killProcessGroup` in `src/sandbox/process-group.ts`), the one a
+ * foreground `bash` stops its group with.
  */
 
 /** DSH's parameter description, verbatim (BASH:514-517). */
@@ -72,15 +76,16 @@ export interface BackgroundProcess {
   readonly killGraceMs?: number
   /** Told the process id once it is spawned, so a caller (a test) can watch the group. */
   readonly onSpawn?: (pid: number) => void
+  /** Told how the process ended, before the job settles (a promoting foreground call renders its own answer). */
+  readonly onEnd?: (end: { readonly exitCode: number | null; readonly signal: NodeJS.Signals | null }) => void
 }
 
-/** Signal a whole process group, ignoring a group that is already gone. */
-function signalGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    // ESRCH: the group has already exited, which is what the signal wanted.
-  }
+/**
+ * Signal a whole process group through the sandbox's helper (a group already gone counts as signalled); where the
+ * group cannot be signalled, the shell alone is.
+ */
+function signalGroup(pid: number, signal: NodeJS.Signals, child: { kill(signal: NodeJS.Signals): boolean } | undefined): void {
+  if (!killProcessGroup(pid, signal)) child?.kill(signal)
 }
 
 /**
@@ -92,6 +97,7 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
   let closed = false
   let killTimer: ReturnType<typeof setTimeout> | undefined
   let pid: number | undefined
+  let spawned: ReturnType<typeof spawn> | undefined
   let stderrTail = ''
 
   const done = new Promise<JobOutcome>((resolve) => {
@@ -114,6 +120,7 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       return
     }
     pid = child.pid
+    spawned = child
     if (pid !== undefined) spec.onSpawn?.(pid)
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
     const take = (channel: 'stdout' | 'stderr', text: string): void => {
@@ -132,6 +139,7 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       closed = true
       take('stdout', decoders.stdout.end())
       take('stderr', decoders.stderr.end())
+      spec.onEnd?.({ exitCode: code, signal })
       // A killed group's stragglers still get their SIGKILL, but the pending timer no longer holds the process open.
       killTimer?.unref()
       let sandbox: ProcessEnd['sandbox']
@@ -153,9 +161,10 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       if (cancelled) return
       cancelled = true
       if (pid === undefined || closed) return
-      signalGroup(pid, 'SIGTERM')
       const group = pid
-      killTimer = setTimeout(() => signalGroup(group, 'SIGKILL'), spec.killGraceMs ?? DEFAULT_KILL_GRACE_MS)
+      const shell = spawned
+      signalGroup(group, 'SIGTERM', shell)
+      killTimer = setTimeout(() => signalGroup(group, 'SIGKILL', shell), spec.killGraceMs ?? DEFAULT_KILL_GRACE_MS)
     },
     done,
   }
@@ -204,6 +213,18 @@ export interface BashBackgroundOptions {
   readonly readLog?: (session: SessionHandle) => readonly SessionEvent[]
   readonly killGraceMs?: number
   readonly onSpawn?: (jobId: string, pid: number) => void
+  /**
+   * Run every foreground call as a job, so one that outlives its wall time moves to the background instead of being
+   * killed: DSH's `promoteOnTimeout`, default true (BASH:181-183, 386-491). `false` leaves the foreground run, and its
+   * wall-time kill, to the tool.
+   */
+  readonly promoteOnTimeout?: boolean
+}
+
+/** The promoted call's answer, DSH's `renderPromoted` verbatim (BASH:181-183). */
+export function renderPromoted(output: string, timeoutMs: number, jobId: string): string {
+  const lead = output.length > 0 ? (output.endsWith('\n') ? output : `${output}\n`) : ''
+  return `${lead}[still running after ${timeoutMs}ms; moved to background job ${jobId}]\nThe command keeps running in the background. You will be notified when it finishes; read newer output with job_output, stop it with job_kill.`
 }
 
 /**
@@ -211,7 +232,83 @@ export interface BashBackgroundOptions {
  * the calling session and answer `started background job <id>` at once (BASH:651, 673-685).
  */
 export function bashBackground(jobs: JobRegistry, sandbox: SandboxService, options: BashBackgroundOptions = {}): BashBackground {
+  /**
+   * A foreground call as a job (BASH:386-491, `waitOnJob`). The job is registered at the call's start and waited on
+   * for the wall time. Ended in time: the record is removed (the wait collected the settle, so no notice follows) and
+   * the call answers as a foreground one would. Still running: nothing is killed; the call answers the output so far
+   * (one consuming read, so `job_output` goes on after it) and the promoted marker, and the job's end is noticed like
+   * any other. Stopped: the job is killed with `tool call aborted`, waited on and removed, and the call answers stopped.
+   */
+  const runForeground = async ({ args, context, launch, limitMs, render }: ForegroundRun): Promise<ToolResult | undefined> => {
+    const command = String(args.command ?? '')
+    const owner = context.session?.id
+    const toolCall = context.session !== undefined && options.readLog !== undefined ? runningToolCall(options.readLog(context.session), 'bash', args) : undefined
+    const captured = { stdout: '', stderr: '' }
+    let promoted = false
+    let ended: { readonly exitCode: number | null; readonly signal: NodeJS.Signals | null } | undefined
+    let jobId: string
+    try {
+      jobId = jobs.start({
+        kind: 'bash',
+        label: command,
+        ...(owner !== undefined ? { owner } : {}),
+        ...(toolCall !== undefined ? { toolCall } : {}),
+        run: (handle) =>
+          runProcess(
+            {
+              argv: launch.argv,
+              cwd: context.cwd,
+              confined: launch.confined,
+              mode: context.mode,
+              escalationModes: sandbox.escalationTargets(),
+              ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
+              onSpawn: (pid) => options.onSpawn?.(handle.id, pid),
+              onEnd: (end) => {
+                ended = end
+              },
+            },
+            (text, channel) => {
+              handle.append(text, { channel })
+              // Kept for the foreground answer until the call stops waiting; a promoted job's output is the ring's.
+              if (!promoted) captured[channel] += text
+            },
+          ),
+      })
+    } catch (error) {
+      if (error instanceof JobError) {
+        context.log(`bash: job registration refused, running in the foreground with the wall-time kill instead: ${error.message}`)
+        return undefined
+      }
+      throw error
+    }
+    const stop = async (): Promise<void> => {
+      jobs.kill(jobId, owner, 'tool call aborted')
+      const settled = await jobs.wait(jobId, Math.max(limitMs, (options.killGraceMs ?? DEFAULT_KILL_GRACE_MS) + 1_000), owner)
+      if (settled.status !== 'running' && settled.status !== 'stopping') jobs.remove(jobId, owner)
+    }
+    let view
+    try {
+      view = await jobs.wait(jobId, limitMs, owner, context.signal)
+    } catch {
+      await stop()
+      return render({ ...captured, code: ended?.exitCode ?? null, stopped: true, timedOut: false, limitMs })
+    }
+    if (view.status === 'running' || view.status === 'stopping') {
+      promoted = true
+      const read = jobs.read(jobId, owner)
+      context.log(`moved the command to background job ${jobId} after ${limitMs}ms`)
+      return {
+        output: renderPromoted(renderModelDelta(read.chunks, read.lossy, read.job.output.spillPaths ?? []), limitMs, jobId),
+        data: { jobId, promoted: true, cwd: context.cwd },
+      }
+    }
+    jobs.remove(jobId, owner)
+    if (view.status === 'failed') return { output: '', error: { code: 'TOOL_FAILED', message: view.detail ?? 'the command could not start' } }
+    return render({ ...captured, code: ended?.exitCode ?? null, stopped: false, timedOut: false, limitMs })
+  }
+
   return {
+    ...(options.promoteOnTimeout !== false ? { runForeground } : {}),
     property: { type: 'boolean', description: RUN_IN_BACKGROUND_DESCRIPTION },
     start: async (args: Record<string, unknown>, context: ToolRunContext): Promise<ToolResult> => {
       const command = String(args.command ?? '')

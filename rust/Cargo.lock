@@ -777,6 +777,7 @@ dependencies = [
 name = "heddle-sandbox"
 version = "0.0.1"
 dependencies = [
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

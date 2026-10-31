@@ -6,7 +6,7 @@ import type { TurnRegistry } from '../agent/turns.ts'
 import { bashBackground } from '../jobs/bash.ts'
 import { NoticeDelivery, type NoticeHost } from '../jobs/notice.ts'
 import { JobRegistry } from '../jobs/registry.ts'
-import { jobTools } from '../jobs/tools.ts'
+import { jobTools, withJobsSection } from '../jobs/tools.ts'
 import { pendingInbox, queueSteer } from '../session/inbox.ts'
 import { attachBashBackground } from '../tools/builtin.ts'
 
@@ -41,6 +41,12 @@ export interface Config {
   readonly killGraceMs?: number
   /** The round cap of a notice's turn; the loop's own default when absent. */
   readonly maxRounds?: number
+  /**
+   * Run foreground `bash` calls as jobs, so one that outlives its wall time moves to the background instead of being
+   * killed: DSH's `promoteOnTimeout` (a `dsh-tool-bash` option there; here the row that owns jobs carries it, since
+   * the tools row builds `bash` without knowing about jobs). Default true, as DSH's.
+   */
+  readonly promoteOnTimeout?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -54,6 +60,7 @@ export const Config: Schema<Config> = Schema.object({
   maxConsecutiveWakes: Schema.number().step(1).min(1),
   killGraceMs: Schema.number().min(0).default(3_000),
   maxRounds: Schema.number(),
+  promoteOnTimeout: Schema.boolean().default(true),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -104,7 +111,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   let disposed = false
 
   const host: NoticeHost = {
-    exists: (sessionId) => store.open(sessionId) !== null,
+    /**
+     * An archived session is no longer a place to deliver to: DSH stops its work when it is archived and its agent
+     * refuses a step there, so a notice must not start a turn in it.
+     */
+    exists: (sessionId) => store.open(sessionId) !== null && metaOf(sessionId)?.archived !== true,
     isRunning: (sessionId) => {
       const live = turns()
       return live !== undefined ? live.isRunning(sessionId) : inTurn.has(sessionId)
@@ -174,8 +185,15 @@ export function apply(ctx: Context, config: Config = {}): void {
     bashBackground(registry, ctx.sandbox, {
       readLog: (handle) => store.read(handle),
       ...(config.killGraceMs !== undefined ? { killGraceMs: config.killGraceMs } : {}),
+      ...(config.promoteOnTimeout !== undefined ? { promoteOnTimeout: config.promoteOnTimeout } : {}),
     }),
   )
+
+  /**
+   * DSH's `tool:jobs` prompt section, on every request that offers the job tools: the `model/request` waterfall is the
+   * one seam through which a row reaches the system prompt the adapter is sent (`withJobsSection`).
+   */
+  ctx.on('model/request', (request, next) => withJobsSection(next()))
 
   /** Every lifecycle change, so the page's job views refresh. Output advances are left to the page's follow poll. */
   const unsubscribe = registry.subscribe((event) => {
