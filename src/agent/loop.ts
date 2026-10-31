@@ -362,7 +362,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
        * for one message. What the rule is about is a message that arrives *while the model is answering*.
        */
       inputBefore = userInputSeqs(ctx, options.session)
-      const request = {
+      const asked = {
         endpoint: options.endpoint,
         messages: prepared.messages,
         ...(options.model !== undefined ? { model: options.model } : {}),
@@ -373,11 +373,23 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
         sessionId: options.session.id,
         round,
       }
+      /**
+       * The record names the request this step **sends**, not the one the turn started with (issue #14).
+       *
+       * The `model/request` waterfall is where a selection policy rewrites a call: the server's running-turn rule
+       * moves a step to the session's current endpoint, model and level, so a switch made mid-turn lands on the next
+       * step, as DSH's does. The record used to be written from the turn's options before that rewrite, so a step that
+       * went to the new model was logged under the old one, and the log read as if the switch had been ignored. DSH's
+       * request header names the provider, model and effort actually used. The waterfall therefore runs here, and the
+       * record and the call both take its answer. The model service applies the waterfall again on the way to the
+       * adapter; the selection rule leaves a request it already rewrote as it is.
+       */
+      const request = ctx.waterfall('model/request', asked, () => asked)
 
       ctx.session.store.modelRequest(options.session, {
-        endpoint: options.endpoint,
-        ...(options.model !== undefined ? { model: options.model } : {}),
-        ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
+        endpoint: request.endpoint,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
         messages: prepared.messages.length,
         tools: prepared.tools.map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,
