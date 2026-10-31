@@ -2286,6 +2286,11 @@ async fn input_terminal(
         InputResult::Exited => {
             respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
         }
+        InputResult::Busy => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the terminal has too much input waiting; try again",
+            "busy",
+        ),
         InputResult::TooLarge => respond::error(
             StatusCode::PAYLOAD_TOO_LARGE,
             format!(

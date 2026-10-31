@@ -116,6 +116,23 @@ pub enum InputResult {
     Missing,
     Exited,
     TooLarge,
+    /// More than `MAX_PENDING_INPUT_BYTES` is already waiting to reach the PTY.
+    Busy,
+}
+
+/// Input bytes a terminal may have waiting for the PTY before more input is refused as busy, as in TypeScript.
+const MAX_PENDING_INPUT_BYTES: usize = 1024 * 1024;
+
+/// Counts one request's input as pending until the write is over, even if the request is dropped midway.
+struct PendingInput<'a> {
+    pending: &'a std::sync::atomic::AtomicUsize,
+    bytes: usize,
+}
+
+impl Drop for PendingInput<'_> {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(self.bytes, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,6 +457,8 @@ struct Terminal {
     limits: TerminalLimits,
     state: Mutex<State>,
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    /// Input bytes accepted and not yet written to the PTY.
+    pending_input: std::sync::atomic::AtomicUsize,
     done: watch::Receiver<bool>,
     closing: OnceCell<()>,
 }
@@ -548,6 +567,14 @@ impl Terminal {
         if lock(&self.state).exited {
             return InputResult::Exited;
         }
+        if self.pending_input.load(Ordering::SeqCst) > MAX_PENDING_INPUT_BYTES {
+            return InputResult::Busy;
+        }
+        self.pending_input.fetch_add(data.len(), Ordering::SeqCst);
+        let _pending = PendingInput {
+            pending: &self.pending_input,
+            bytes: data.len(),
+        };
         let mut stdin = self.stdin.lock().await;
         let Some(pipe) = stdin.as_mut() else {
             return InputResult::Exited;
@@ -931,6 +958,7 @@ impl TerminalRegistry {
             limits: self.inner.limits,
             state: Mutex::new(new_state(spec.cols, spec.rows)),
             stdin: tokio::sync::Mutex::new(child.as_mut().and_then(|child| child.stdin.take())),
+            pending_input: std::sync::atomic::AtomicUsize::new(0),
             done: done_rx,
             closing: OnceCell::new(),
         });
