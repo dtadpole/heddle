@@ -6179,7 +6179,13 @@ async function showView(next) {
 /** Read the ledger projection for one session and draw it. */
 let ledgerFetches = 0
 async function showLedger(id) {
-  ledger.replaceChildren()
+  /**
+   * Another session's ledger is taken down at once, so it is never read as this one's. The same session's drawn ledger
+   * stays until the new read draws over it (renderLedger replaces the pane): a live refetch, or entering the view again,
+   * used to blank the pane first, and a read the server refused (`!response.ok`) then left it blank for good. Under load,
+   * 80's stale-ledger check caught that pane empty for 20 s on both builds.
+   */
+  if (trajectory.data?.id !== id) ledger.replaceChildren()
   /**
    * Only the newest request draws. Without this, two overlapping reads can land out of order and the older
    * one paints last, which is the other half of the stacked-draw bug.
@@ -6197,8 +6203,10 @@ async function showLedger(id) {
      * drawn would otherwise append its error under the new ledger (developer-two, reproduced in a component run).
      */
     if (ticket !== ledgerFetches) return
+    /** The drawn ledger now stays under a failed read, so an earlier failure's note gives way: one note, not a stack. */
+    ledger.querySelector('.tr-read-failed')?.remove()
     const note = document.createElement('div')
-    note.className = 'turn denied'
+    note.className = 'turn denied tr-read-failed'
     note.textContent = 'could not read the ledger: ' + (error && error.message)
     ledger.append(note)
   }
