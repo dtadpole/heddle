@@ -2661,3 +2661,68 @@ test('only a turn that edited files shows the Edited files card, under its own a
     await server.close()
   }
 })
+
+test('a settled subagent\'s notice reads as its blocks, a paragraph each, live, in the transcript and after a reload', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live-testing draft developer-five-10: the notice a settled child sends its parent is three text blocks (DSH's
+   * `createSettlementMessage`: the summary, `Its closing message:`, the child's text), and both the transcript route and
+   * the page's live path joined them with nothing, so the page read one run-on line. The page is open on the parent
+   * session while the turn runs, so the notice arrives live first and is then read back from the transcript.
+   */
+  const server = await startServer('notice-blocks', () => [
+    { toolCall: { name: 'delegate', arguments: { prompt: 'child task' } } },
+    { text: 'parent started the child' },
+    { purpose: 'subagent', text: 'pong' },
+    { purpose: 'subagent-notice', text: 'parent read the notice' },
+  ])
+  const browser = await openBrowser()
+  const blocks = /^Background subagent \S+ finished\. It cannot receive follow-up messages\.\n\nIts closing message:\n\npong$/
+  const noticeText = 'document.querySelector("#log .trigger-notice .trigger-text")?.textContent ?? null'
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+
+    /** The session has opened (its history drawn) before anything is sent into it: a send while it is still opening races the page's own redraw. */
+    assert.ok(await browser.waitFor(`document.getElementById('session-title')?.textContent === ${JSON.stringify(session)}`, 10_000), 'the session opens')
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'delegate it', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the parent turn ran (${turn.status})`)
+    await turn.text()
+
+    assert.ok(await browser.waitFor(`${noticeText} !== null`, 30_000), 'the notice arrives in the open page')
+    assert.match(String(await browser.evaluate(noticeText)), blocks, 'live, each block of the notice is its own paragraph')
+
+    let notice
+    for (let attempt = 0; attempt < 60 && notice === undefined; attempt += 1) {
+      const record = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+      notice = (record.body.turns ?? []).find((entry) => entry.kind === 'user' && entry.trigger?.kind === 'subagent-settled')
+      if (notice === undefined) await new Promise((resolve) => setTimeout(resolve, 500))
+    }
+    assert.ok(notice !== undefined, 'the transcript records the notice')
+    assert.match(notice.text, blocks, 'the transcript route folds the notice a paragraph per block')
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    if (!(await browser.waitFor(`${noticeText} !== null`, 5_000).catch(() => false))) {
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    }
+    assert.ok(await browser.waitFor(`${noticeText} !== null`, 10_000), 'the reloaded session draws the notice')
+    assert.match(String(await browser.evaluate(noticeText)), blocks, 'and after a reload it reads the same')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
