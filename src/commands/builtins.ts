@@ -20,7 +20,15 @@ export interface CompactionOutcome {
   readonly tokens?: number
   /** The summary's sequence number in the session log. */
   readonly summarySeq?: number
+  /** A turn of the session is running, or another compaction of it is: nothing was attempted. */
+  readonly busy?: boolean
+  /** A summary was written and refused (it did not shrink the history), with the reason recorded in the log. */
+  readonly refused?: string
 }
+
+/** DSH's `/compact` answers for an agent that is not idle and for a summary that was refused (dsh-command-compact). */
+export const COMPACT_BUSY = 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.'
+export const COMPACT_REFUSED = 'Compaction could not produce a useful summary. The attempt is recorded in the session log.'
 
 /** The compaction `/compact` asks for: summarise the session's older history now. */
 export interface CompactionHost {
@@ -37,6 +45,12 @@ export function compactCommand(host: CompactionHost): CommandDefinition {
     handler: async ({ session, args }): Promise<CommandResult> => {
       if (args.length > 0) return { kind: 'error', text: 'Usage: /compact (no arguments)' }
       const outcome = await host.compactNow(session)
+      /**
+       * DSH refuses a manual compaction while the session has an open turn or a compaction (`busy`). It also reports a
+       * summary that could not be made smaller as an error (`summary`), not as "nothing to compact" (#132).
+       */
+      if (outcome.busy === true) return { kind: 'error', text: COMPACT_BUSY }
+      if (outcome.refused !== undefined) return { kind: 'error', text: COMPACT_REFUSED }
       if (!outcome.compacted) return { kind: 'success', text: 'No compactable history yet.' }
       const items = outcome.items !== undefined ? `${outcome.items} history items` : 'older history'
       const tokens = outcome.tokens !== undefined ? ` (~${outcome.tokens} tokens)` : ''
