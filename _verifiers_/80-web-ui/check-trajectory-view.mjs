@@ -1006,3 +1006,59 @@ test("a user record counts its images and files, and its inspector lists them wi
     await server.close()
   }
 })
+
+test('a read of the same ledger that the server refuses leaves the drawn ledger in place, not a blank pane', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * showLedger blanked the pane before every read, the live refetch's and a re-entry's alike, and a refused read
+   * (`!response.ok`) returned without drawing. The session's good ledger was then gone until some later read. Under load
+   * the stale-ledger check above found that pane empty for 20 s on both builds. The refusal is simulated on cue.
+   */
+  const server = await startServer('ledger-keep')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    /** Opened as the page restores it, after boot, so boot's fresh session cannot take its place. */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    const view = (name) => browser.evaluate(`document.querySelector('#views button[data-view="${name}"]').click()`)
+    await view('trajectory')
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the ledger is drawn')
+    const drawn = await browser.evaluate('document.querySelectorAll("#tr-table tbody tr").length')
+    /** The next ledger read is refused, as a busy or failing server answers. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let refuse = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (refuse && address.includes('view=ledger')) {
+          refuse = false
+          window.__refused = true
+          return Promise.resolve(new Response('busy', { status: 503 }))
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await view('chat')
+    await view('trajectory')
+    assert.ok(await browser.waitFor('window.__refused === true', 10_000), 'the next read was refused')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const after = await browser.evaluate('document.querySelectorAll("#tr-table tbody tr").length')
+    assert.equal(after, drawn, `the session's ledger stays drawn after the refused read (${drawn} rows before, ${after} after)`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
