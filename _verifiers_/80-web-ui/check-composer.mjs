@@ -1835,3 +1835,32 @@ test('switching to idle Y keeps X queued messages moving and Y offers Send', asy
     assert.ok(!JSON.stringify(other).includes('QUEUED-X'), 'queued text stays in X')
   } finally { browser.close(); await server.close() }
 })
+
+
+test('Stop preserves pending messages until a new send drains them ahead of new text', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('stop-keeps-queue', { holdOpenMs: 3500 })
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("model-trigger") !== null', 20000)
+    await type(browser, 'FIRST')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length === 1))
+    await type(browser, 'KEPT')
+    await press(browser, { key: 'Enter' })
+    await browser.waitFor('!document.getElementById("queue").hidden', 10000)
+    await browser.evaluate('document.getElementById("stop").click()')
+    await browser.waitFor('document.getElementById("stop").hidden', 10000)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    assert.equal(server.double.requests.length, 1, 'Refs #75: Stop must not start a queued turn')
+    assert.ok(await browser.evaluate('document.getElementById("queue").innerText.includes("KEPT")'), 'pending text remains visible')
+    await type(browser, 'NEXT')
+    await press(browser, { key: 'Enter' })
+    assert.ok(await until(() => server.double.requests.length >= 3, 20000), 'a new send wakes retained work and then itself')
+    const asked = server.double.requests.map((request) => JSON.stringify(request))
+    assert.ok(asked[1].includes('KEPT'), 'retained work goes first')
+    assert.ok(asked[2].includes('NEXT'), 'new text follows retained work')
+  } finally { browser.close(); await server.close() }
+})
