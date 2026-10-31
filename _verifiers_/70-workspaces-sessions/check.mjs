@@ -733,6 +733,120 @@ test('a file under a root reads, and what cannot be shown is refused with a reas
   }
 })
 
+test('a symlink to a folder lists as a folder at its own path, and opening it lists its target, as DSH lists one', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * DSH's workspace listing reports what a child resolves to and keeps it at its own path (dsh-api-workspace-files: a
+   * symlink reports the type of its destination, a size only for a regular file, a child's path is the listing's joined
+   * with its name; list follows a final directory link inside the root). Measured on both builds before this check
+   * (live-testing draft developer-six-2): the link was a file of 0 bytes (TS) or of the folder entry's size (Rust) at
+   * its target's path, so it could not be expanded and two rows shared one path.
+   */
+  const h = harness('symlink')
+  try {
+    entry(join(h.work, 'nest', 'a.txt'), 'hello\n')
+    entry(join(h.work, 'plain.txt'), 'x\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync('nest', join(h.work, 'nest-link'))
+    symlinkSync('plain.txt', join(h.work, 'file-link'))
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    const root = realpathSync(h.work)
+
+    const { result, tree } = await treeAt(h, h.work)
+    assert.equal(result.code, 0, `the tree ran\n${result.stdout}${result.stderr}`)
+    const link = childOf(tree, 'nest-link')
+    assert.ok(link, `the link is listed\nsaw: ${(tree.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder is a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.children, null, 'which can be expanded, like any folder nobody opened yet')
+    assert.equal(link.bytes, undefined, 'and carries no size, as a folder does not')
+    assert.equal(link.path, join(root, 'nest-link'), 'at its own path')
+    const paths = (tree.children ?? []).map((node) => node.path)
+    assert.equal(new Set(paths).size, paths.length, `no two rows share one path\nsaw: ${paths.join(', ')}`)
+    const fileLink = childOf(tree, 'file-link')
+    assert.equal(fileLink?.kind, 'file', 'a link to a file is a file row')
+    assert.equal(fileLink?.bytes, 2, "with its target's size")
+
+    const opened = await treeAt(h, link.path)
+    assert.equal(opened.result.code, 0, `opening the link ran\n${opened.result.stdout}${opened.result.stderr}`)
+    assert.deepEqual(
+      (opened.tree.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['file:a.txt'],
+      'and lists what its target holds',
+    )
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a symlink that leads out of every root lists at its own path, and opening it is refused, through the Web API and the CLI', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * The row of a link stays at the link's own path (the check above), so opening it asks for a path inside the root. What
+   * refuses a link whose target no root owns is the containment check on the canonical path, the one the Web API and
+   * the CLI make before they list anything ("the Web API's tree lists only what a workspace root holds"). DSH's list
+   * confines the resolved path to the workspace root the same way (dsh-api-workspace-files list and confine,
+   * workspace-file/outside-workspace). Judged here end to end: the row a person would click, then the click.
+   */
+  const h = harness('symlink-out')
+  const root = fixtureDir('symlink-out-root')
+  const outside = fixtureDir('symlink-out-target')
+  let live
+  try {
+    entry(join(root, 'kept.txt'), 'inside\n')
+    entry(join(outside, 'not-yours.txt'), 'outside\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync(outside, join(root, 'out-link'))
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const call = async (path, init = {}) => {
+      const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+      const text = await response.text()
+      let body
+      try {
+        body = JSON.parse(text)
+      } catch {
+        body = text
+      }
+      return { status: response.status, body }
+    }
+    const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `the root is registered (${JSON.stringify(added.body)})`)
+    const treeOf = (path) => call(`/api/tree?path=${encodeURIComponent(path)}`)
+
+    const level = await treeOf(root)
+    assert.equal(level.status, 200, `the root lists (${JSON.stringify(level.body)})`)
+    const link = childOf(level.body, 'out-link')
+    assert.ok(link, `the link is listed\nsaw: ${(level.body.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder outside is still a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.path, join(realpathSync(root), 'out-link'), 'at its own path, inside the root')
+
+    const opened = await treeOf(link.path)
+    const listed = Array.isArray(opened.body?.children) ? opened.body.children.map((node) => node.label).join(', ') : ''
+    assert.equal(opened.status, 400, `opening it through the Web API is refused, not listed (${opened.status}${listed ? `, listed: ${listed}` : ''})`)
+    assert.deepEqual(opened.body, { error: `${realpathSync(outside)} is not under any workspace root` }, 'naming where the link lands')
+
+    const cli = await treeAt(h, link.path, { cwd: root })
+    assert.notEqual(cli.result.code, 0, `opening it through the CLI is refused too\n${cli.result.stdout}`)
+    assert.match(`${cli.result.stdout}${cli.result.stderr}`, /not under any workspace root/, 'with the same rule')
+    assert.doesNotMatch(cli.result.stdout, /not-yours\.txt/, 'and nothing of the target is printed')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(root)
+    removeDir(outside)
+  }
+})
+
 test('a file the 256 KiB cap cuts inside a character previews its whole characters, a literal U+FFFD is text, and only bytes that are not UTF-8 are refused', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
