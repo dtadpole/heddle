@@ -3958,6 +3958,26 @@ const MESSAGES = Object.freeze({
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
     'settings.configuration': 'Configuration',
+    'settings.config.readFailed': 'could not read the settings: {reason}',
+    'settings.config.noSurface': 'this server offers no settings surface',
+    'settings.config.writable': 'Changes are written to this profile\u2019s patch.',
+    'settings.config.readOnly': 'This run has no profile patch to write (start it with --profile, or from a project without --patch); values are read-only.',
+    'settings.config.applied': 'applied',
+    'settings.config.appliesRestart': 'applies when the server restarts',
+    'settings.config.default': 'default',
+    'settings.config.reset': 'Reset',
+    'settings.config.resetTitle': 'restore the value beneath this profile',
+    'settings.config.secretSet': 'set',
+    'settings.config.secretUnset': 'not set',
+    'settings.config.secretTitle': 'a credential: kept in the environment or the machine file, never shown here',
+    'settings.config.save': 'Save',
+    'settings.config.needsNumber': '{key} needs a number; Reset restores the value beneath this profile',
+    'settings.config.nothingChanged': 'nothing changed',
+    'settings.config.saving': 'saving\u2026',
+    'settings.config.unreachable': 'could not reach the server: {reason}',
+    'settings.config.conflict': 'This entry changed since Settings opened; close and reopen it to see the current values.',
+    'settings.config.refused': 'the server refused the change ({status})',
+    'settings.config.saved': 'Saved; {applies}.',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
     'empty.title': 'Start a conversation',
     'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
@@ -4081,6 +4101,26 @@ const MESSAGES = Object.freeze({
     'settings.models': '模型',
     'settings.workspaces': '工作区',
     'settings.configuration': '配置',
+    'settings.config.readFailed': '无法读取设置：{reason}',
+    'settings.config.noSurface': '此服务器不提供设置接口',
+    'settings.config.writable': '更改会写入此配置档案的补丁文件。',
+    'settings.config.readOnly': '本次运行没有可写入的配置档案补丁（请用 --profile 启动，或在不带 --patch 的项目中启动）；这些值只读。',
+    'settings.config.applied': '已生效',
+    'settings.config.appliesRestart': '服务器重启后生效',
+    'settings.config.default': '默认',
+    'settings.config.reset': '重置',
+    'settings.config.resetTitle': '恢复为此配置档案之下的值',
+    'settings.config.secretSet': '已设置',
+    'settings.config.secretUnset': '未设置',
+    'settings.config.secretTitle': '凭据：保存在环境变量或本机文件中，从不在此显示',
+    'settings.config.save': '保存',
+    'settings.config.needsNumber': '{key} 需要一个数字；“重置”可恢复为此配置档案之下的值',
+    'settings.config.nothingChanged': '没有更改',
+    'settings.config.saving': '正在保存…',
+    'settings.config.unreachable': '无法连接服务器：{reason}',
+    'settings.config.conflict': '自打开设置以来，此条目已被更改；请关闭后重新打开以查看当前值。',
+    'settings.config.refused': '服务器拒绝了此更改（{status}）',
+    'settings.config.saved': '已保存；{applies}。',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
     'empty.title': '开始对话',
     'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
@@ -14182,16 +14222,16 @@ function renderSettingsConfig(view, failure) {
   const note = document.getElementById('settings-config-note')
   host.replaceChildren()
   if (failure !== undefined) {
-    note.textContent = `could not read the settings: ${failure}`
+    note.textContent = t('settings.config.readFailed', { reason: failure })
     return
   }
   if (view === null || !Array.isArray(view.namespaces)) {
-    note.textContent = 'this server offers no settings surface'
+    note.textContent = t('settings.config.noSurface')
     return
   }
   note.textContent = view.writable
-    ? 'Changes are written to this profile\u2019s patch.'
-    : 'This run has no profile patch to write (start it with --profile, or from a project without --patch); values are read-only.'
+    ? t('settings.config.writable')
+    : t('settings.config.readOnly')
   for (const entry of view.namespaces) host.append(settingsEntryForm(entry))
 }
 
@@ -14223,7 +14263,7 @@ function settingsSchemaFields(schema) {
 
 /** When a saved value takes effect, as the entry says. */
 function settingsApplies(entry) {
-  return entry.applies === 'live' ? 'applied' : 'applies when the server restarts'
+  return entry.applies === 'live' ? t('settings.config.applied') : t('settings.config.appliesRestart')
 }
 
 function settingsEntryForm(entry) {
@@ -14268,7 +14308,7 @@ function settingsEntryForm(entry) {
       if (kind === 'number') control.step = 'any'
       if (kind === 'boolean') control.checked = present ? current === true : fallback === true
       else if (present) control.value = String(current)
-      else control.placeholder = fallback === undefined ? 'default' : String(fallback)
+      else control.placeholder = fallback === undefined ? t('settings.config.default') : String(fallback)
       control.dataset.field = key
       control.disabled = !entry.editable
       control.id = `setting-${entry.ns}-${key}`.replace(/[^A-Za-z0-9_-]/g, '_')
@@ -14281,8 +14321,8 @@ function settingsEntryForm(entry) {
     }
     const reset = document.createElement('button')
     reset.type = 'button'
-    reset.textContent = 'Reset'
-    reset.title = 'restore the value beneath this profile'
+    reset.textContent = t('settings.config.reset')
+    reset.title = t('settings.config.resetTitle')
     reset.hidden = !entry.editable || !Object.prototype.hasOwnProperty.call(user, key)
     reset.addEventListener('click', () => void saveSettings(details, entry, { ops: [{ op: 'unset', path: [key] }] }))
     form.append(label, control, reset)
@@ -14292,8 +14332,8 @@ function settingsEntryForm(entry) {
     label.textContent = secret.path.join('.')
     const state = document.createElement('span')
     state.className = 'value'
-    state.textContent = secret.set ? 'set' : 'not set'
-    state.title = 'a credential: kept in the environment or the machine file, never shown here'
+    state.textContent = secret.set ? t('settings.config.secretSet') : t('settings.config.secretUnset')
+    state.title = t('settings.config.secretTitle')
     form.append(label, state, document.createElement('span'))
   }
 
@@ -14301,7 +14341,7 @@ function settingsEntryForm(entry) {
   actions.className = 'settings-actions'
   const save = document.createElement('button')
   save.type = 'submit'
-  save.textContent = 'Save'
+  save.textContent = t('settings.config.save')
   save.disabled = !entry.editable || inputs.length === 0
   const status = document.createElement('span')
   status.className = 'settings-status'
@@ -14318,14 +14358,14 @@ function settingsEntryForm(entry) {
       /** An emptied number is not 0: say so, and leave unsetting to Reset (developer-ten's note 3). */
       if (control.type === 'number' && control.value.trim() === '') {
         status.dataset.kind = 'error'
-        status.textContent = `${key} needs a number; Reset restores the value beneath this profile`
+        status.textContent = t('settings.config.needsNumber', { key })
         return
       }
       changed[key] = control.type === 'number' ? Number(control.value) : shown
     }
     if (Object.keys(changed).length === 0) {
       status.dataset.kind = ''
-      status.textContent = 'nothing changed'
+      status.textContent = t('settings.config.nothingChanged')
       return
     }
     void saveSettings(details, entry, { update: changed })
@@ -14338,7 +14378,7 @@ function settingsEntryForm(entry) {
 async function saveSettings(details, entry, body) {
   const status = details.querySelector('.settings-status')
   status.dataset.kind = ''
-  status.textContent = 'saving\u2026'
+  status.textContent = t('settings.config.saving')
   let response
   let answer = {}
   try {
@@ -14350,23 +14390,23 @@ async function saveSettings(details, entry, body) {
     answer = await response.json().catch(() => ({}))
   } catch (error) {
     status.dataset.kind = 'error'
-    status.textContent = `could not reach the server: ${error.message}`
+    status.textContent = t('settings.config.unreachable', { reason: error.message })
     return
   }
   if (response.ok) {
     const fresh = settingsEntryForm(answer)
     fresh.open = true
     details.replaceWith(fresh)
-    fresh.querySelector('.settings-status').textContent = `Saved; ${settingsApplies(answer)}.`
+    fresh.querySelector('.settings-status').textContent = t('settings.config.saved', { applies: settingsApplies(answer) })
     return
   }
   status.dataset.kind = 'error'
   status.textContent =
     response.status === 409
-      ? 'This entry changed since Settings opened; close and reopen it to see the current values.'
+      ? t('settings.config.conflict')
       : typeof answer.error === 'string'
         ? answer.error
-        : `the server refused the change (${response.status})`
+        : t('settings.config.refused', { status: response.status })
 }
 
 async function showSettings() {
