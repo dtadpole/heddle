@@ -771,7 +771,10 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
             let lang = page_language(&state, request.headers());
-            return respond::html(StatusCode::OK, page::with_language(page::page(), lang));
+            return respond::html(
+                StatusCode::OK,
+                page::with_document(page::page(), lang, &page_theme(&state)),
+            );
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
@@ -883,8 +886,25 @@ async fn healthz(State(state): State<AppState>) -> Response {
 async fn page_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
     respond::html(
         StatusCode::OK,
-        page::with_language(page::page(), page_language(&state, &headers)),
+        page::with_document(
+            page::page(),
+            page_language(&state, &headers),
+            &page_theme(&state),
+        ),
     )
+}
+
+/// The served page's appearance and typography (issue #81): the `ui-theme` row's settings, read on every request so a
+/// settings write is the next page's theme and sizes without a restart; DSH's defaults without the row. They travel
+/// on `<html>` as `data-theme` and CSS custom properties.
+fn page_theme(state: &AppState) -> String {
+    state
+        .harness()
+        .theme
+        .as_ref()
+        .map(|live| live.get())
+        .unwrap_or_default()
+        .document_attributes()
 }
 
 /// The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one

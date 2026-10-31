@@ -22,6 +22,7 @@ import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
+import { documentAttributes, themeSettings, type ThemeSettings } from '../config/theme.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
 import { type InventoryLoader, readPluginInventory } from '../config/plugin-inventory.ts'
@@ -565,7 +566,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
+      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language']), pageTheme(ctx)))
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -3286,8 +3287,18 @@ export function markedPage(html: string): string {
  * which on screen look identical. (It happened: the live daemon served a stale deployment checkout while the source
  * and the checks were already correct, and a row's geometry read as "not implemented".)
  */
-function page(lang = 'en'): string {
-  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')).replace('<html lang="en">', `<html lang="${lang}">`)
+function page(lang = 'en', theme: ThemeSettings = themeSettings()): string {
+  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')).replace('<html lang="en">', `<html lang="${lang}"${documentAttributes(theme)}>`)
+}
+
+/**
+ * The served page's appearance and typography (issue #81): the `ui-theme` row's settings, read on every request, so a
+ * settings write is the next page's theme and sizes without a restart; DSH's defaults without the row. They travel on
+ * `<html>` as `data-theme` and CSS custom properties (`documentAttributes`), so the first paint already uses them.
+ */
+export function pageTheme(ctx: Context): ThemeSettings {
+  const theme = ctx.get('uiTheme') as { readonly settings: ThemeSettings } | undefined
+  return theme?.settings ?? themeSettings()
 }
 
 /**

@@ -576,6 +576,9 @@ pub struct Harness {
     /// `<html lang>`; `None` follows each browser's `Accept-Language`.
     /// Held live: a settings write to the row replaces the preference, and each page request reads it.
     pub locale: Option<Arc<heddle_config::LiveLocale>>,
+    /// The appearance and typography the optional `ui-theme` row stores (issue #81), held live: the page is served
+    /// with them on `<html>`; `None` serves DSH's defaults.
+    pub theme: Option<Arc<heddle_config::LiveTheme>>,
     /// The agent presets (inventory A96), from the optional `presets` row: `GET /api/presets` answers them, and a
     /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
     /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
@@ -610,6 +613,7 @@ impl Harness {
             markdown: None,
             stats: None,
             locale: None,
+            theme: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -657,6 +661,7 @@ impl Harness {
             markdown: None,
             stats: None,
             locale: None,
+            theme: None,
             presets: None,
             interrupter: None,
             cwd,
@@ -858,6 +863,12 @@ impl HarnessBuilder {
     /// The interface language the profile's `locale` row stores (issue #80).
     pub fn locale(mut self, preference: Arc<heddle_config::LiveLocale>) -> Self {
         self.harness.locale = Some(preference);
+        self
+    }
+
+    /// The appearance and typography the profile's `ui-theme` row stores (issue #81).
+    pub fn theme(mut self, theme: Arc<heddle_config::LiveTheme>) -> Self {
+        self.harness.theme = Some(theme);
         self
     }
 

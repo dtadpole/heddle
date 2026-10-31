@@ -55,7 +55,18 @@ pub fn marked_page(html: &str) -> String {
 
 /// The page with its `<html lang>` set to `lang` (issue #80); the marker stays the file's own.
 pub fn with_language(page: &str, lang: &str) -> String {
-    page.replacen("<html lang=\"en\">", &format!("<html lang=\"{lang}\">"), 1)
+    with_document(page, lang, "")
+}
+
+/// The page with its `<html>` element carrying `lang` (issue #80) and `attributes`, the appearance and typography of
+/// issue #81 ([`heddle_config::ThemeSettings::document_attributes`], with its leading space); the marker stays the
+/// file's own.
+pub fn with_document(page: &str, lang: &str, attributes: &str) -> String {
+    page.replacen(
+        "<html lang=\"en\">",
+        &format!("<html lang=\"{lang}\"{attributes}>"),
+        1,
+    )
 }
 
 /// The page as served: [`marked_page`] of [`PAGE_SOURCE`], computed once per process.
