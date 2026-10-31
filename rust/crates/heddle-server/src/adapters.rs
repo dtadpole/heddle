@@ -113,6 +113,7 @@ impl SessionService for StoreSessions {
                 model: options.selection.model,
                 reasoning_effort: options.selection.reasoning_effort,
                 title: options.title,
+                preset: options.preset,
             })
             .map(|handle| handle.id)
             .map_err(failure)
@@ -128,6 +129,7 @@ impl SessionService for StoreSessions {
                     model: options.selection.model,
                     reasoning_effort: options.selection.reasoning_effort,
                     title: options.title,
+                    preset: options.preset,
                 },
             )
             .map(|handle| handle.id)
@@ -138,12 +140,14 @@ impl SessionService for StoreSessions {
         &self,
         branch: &Path,
         title: Option<&str>,
+        preset: Option<&str>,
     ) -> Result<CreatedSession, ServiceError> {
         self.service
             .create_at(
                 &path_text(branch),
                 heddle_session::CreateAtOptions {
                     title: title.map(str::to_owned),
+                    preset: preset.map(str::to_owned),
                     ..Default::default()
                 },
             )
@@ -267,6 +271,15 @@ impl SessionService for StoreSessions {
         self.service.folder(&handle).map(PathBuf::from)
     }
 
+    fn record_preset(&self, id: &str, preset: &str) -> Option<SessionMeta> {
+        self.service
+            .record_preset(id, preset)
+            .ok()
+            .flatten()
+            .as_ref()
+            .map(meta_of)
+    }
+
     fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
         self.search
             .search(self.service.store(), query)
@@ -333,6 +346,7 @@ mod tests {
                 cwd: Some(scratch.0.clone()),
                 title: Some("first".into()),
                 selection: selection("double"),
+                preset: None,
             })
             .expect("a session starts");
         assert!(crate::respond::SessionId::parse(&id).is_some(), "{id}");
@@ -460,13 +474,52 @@ mod tests {
         assert_eq!(sessions.folder(&first).as_deref(), Some(folder.as_path()));
     }
 
+    /// Inventory A96: a session is started under the preset it is given, and `record_preset` writes one only when it
+    /// has none.
+    #[test]
+    fn a_session_runs_under_its_preset_and_records_one_only_when_it_has_none() {
+        let scratch = Scratch::new("preset");
+        let sessions = store_at(&scratch.0.join("sessions"), None);
+        let reader = sessions
+            .start(StartSession {
+                cwd: Some(scratch.0.clone()),
+                preset: Some("reader".into()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        assert_eq!(sessions.meta(&reader).unwrap().preset(), Some("reader"));
+        let plain = sessions
+            .start(StartSession {
+                cwd: Some(scratch.0.clone()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        assert_eq!(sessions.meta(&plain).unwrap().preset(), None);
+        assert_eq!(
+            sessions
+                .record_preset(&plain, "standard")
+                .and_then(|meta| meta.preset().map(str::to_owned))
+                .as_deref(),
+            Some("standard")
+        );
+        assert_eq!(
+            sessions
+                .record_preset(&reader, "standard")
+                .and_then(|meta| meta.preset().map(str::to_owned))
+                .as_deref(),
+            Some("reader"),
+            "a session keeps its preset"
+        );
+        assert_eq!(sessions.record_preset("session-nobody", "standard"), None);
+    }
+
     #[test]
     fn a_session_created_at_a_branch_writes_its_definition_there() {
         let scratch = Scratch::new("create-at");
         let sessions = store_at(&scratch.0.join("sessions"), None);
         let branch = scratch.0.join("branch");
         std::fs::create_dir_all(&branch).unwrap();
-        let created = sessions.create_at(&branch, Some("planning")).unwrap();
+        let created = sessions.create_at(&branch, Some("planning"), None).unwrap();
         assert!(sessions.exists(&created.session));
         assert!(
             Path::new(&created.definition).is_file(),

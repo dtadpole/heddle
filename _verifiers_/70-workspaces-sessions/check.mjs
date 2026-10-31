@@ -3054,6 +3054,60 @@ test('a session forks into a new one named after it, with its conversation and i
   }
 })
 
+test("a fork is named from its source's title alone: a second fork of T is T (1) again (#67)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  const h = harness('session-fork-title')
+  let live
+  try {
+    await conventionsFixture(h)
+    const branch = join(h.work, '_tools_', 'some-tool')
+    const made = parseJson((await runCli(adminArgs(h, ['session', 'new', branch, '--json']), { env: h.env, cwd: h.work })).stdout)
+    await runCli(adminArgs(h, ['--turn', 'a conversation worth forking']), { env: h.env, cwd: branch })
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(new URL(path, live.url), {
+        method: 'POST',
+        headers: { cookie, ...(body !== undefined ? { 'content-type': 'application/json' } : {}) },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      })
+    const fork = async (id) => {
+      const response = await post(`/api/sessions/${id}/fork`)
+      assert.equal(response.status, 200, `${id} forks\n${await response.clone().text()}`)
+      return (await response.json()).session
+    }
+    const titleOf = async (id) => (await sessionsOf(h)).find((meta) => meta.id === id)?.title
+    assert.equal((await post(`/api/sessions/${made.session}/title`, { title: 'T' })).status, 200, 'the source is named T')
+
+    /**
+     * DSH's table in #67, read from its code: `increasedForkTitle(sourceTitle)` (`dsh-api-session-controller`
+     * lib/client.js:3714-3720, applied at :4003) looks at the source's title and nothing else. Measured on both builds
+     * before the fix: T (1), T (2), T (3), T (4), because every number another session held was skipped.
+     */
+    const first = await fork(made.session)
+    const second = await fork(made.session)
+    const ofFirst = await fork(first)
+    assert.equal((await post(`/api/sessions/${ofFirst}/flags`, { archived: true })).status, 200, 'the fork of the first fork is archived')
+    const ofArchived = await fork(ofFirst)
+    const seen = { first: await titleOf(first), second: await titleOf(second), ofFirst: await titleOf(ofFirst), ofArchived: await titleOf(ofArchived) }
+    assert.deepEqual(
+      seen,
+      { first: 'T (1)', second: 'T (1)', ofFirst: 'T (2)', ofArchived: 'T (3)' },
+      `fork T, fork T again, fork the first fork, fork the archived T (2): DSH names them T (1), T (1), T (2), T (3)\nsaw: ${JSON.stringify(seen)}`,
+    )
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 /**
  * Fork a session through the server and read both conversations as the chat draws them.
  *
