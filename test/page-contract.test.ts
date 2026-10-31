@@ -194,6 +194,12 @@ test('New session starts in the workspace row the person opened or added, not th
   assert.match(page, /if \(node\.kind === 'workspace'\) \{\s*if \(li\.dataset\.open !== 'true'\) chooseWorkspace\(node\.path\)/, 'opening a workspace row chooses it')
   const adopt = page.slice(page.indexOf('async function adoptWorkspace(path) {'))
   assert.match(adopt.slice(0, adopt.indexOf('\n}\n')), /chooseWorkspace\(added\)/, 'and so does adding one')
+  const select = page.slice(page.indexOf('async function selectSession(node) {'))
+  assert.match(
+    select.slice(0, select.indexOf('\n}\n')),
+    /if \(current === node\.session\.id\) chooseSelected\(node\.path\)/,
+    'a session row\'s slow load does not take the mark back from a session opened meanwhile',
+  )
 })
 
 test('Add workspace and New session say when their request fails, instead of leaving a rejection in the console (#59)', () => {

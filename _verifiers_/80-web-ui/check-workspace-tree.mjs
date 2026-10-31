@@ -331,7 +331,12 @@ test('New session starts in the workspace row the person opened, not in the open
       await browser.evaluate(`(() => { const row = ${workspaceRow(a)}; if (row.closest('li').dataset.open !== 'true') row.click() })()`)
       await browser.waitFor(`document.querySelector('#tree li[data-session-id="${inA}"] > .row') !== null`, 10_000)
       await browser.evaluate(`document.querySelector('#tree li[data-session-id="${inA}"] > .row').click()`)
-      assert.ok(await browser.waitFor(`${openId} === ${JSON.stringify(inA)}`, 10_000), 'the session in A is the open one')
+      assert.ok(
+        await browser.waitFor(`${openId} === ${JSON.stringify(inA)} && document.getElementById('session-title').textContent.includes('work in a')`, 10_000),
+        'the session in A is the open one',
+      )
+      /** The click's handler goes on loading the session for a moment; the person's next act comes after it, as here. */
+      await new Promise((done) => setTimeout(done, 1_000))
     }
     /** Click a workspace row so that it opens (folding it first when it is already open). */
     const openWorkspace = async (record) => {

@@ -9543,8 +9543,12 @@ async function selectSession(node) {
    * The mark is put on the row that was **clicked**, and last, because `showSession` resynchronises the
    * selection to whichever row claims the session. Before the tree stopped showing a captured conversation
    * twice, that moved the mark to the instance row — the session was shown once but claimed by two rows.
+   *
+   * Only while this session is still the open one: the load above awaits several requests, and a New session pressed
+   * meanwhile opens another session and marks its row; marking this row afterwards put the mark on a session that was
+   * no longer open (found by 80's New session check, #25).
    */
-  chooseSelected(node.path)
+  if (current === node.session.id) chooseSelected(node.path)
 }
 
 /**
