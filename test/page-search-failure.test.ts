@@ -12,9 +12,12 @@ import { test } from 'node:test'
  * README, Search). The page used to keep a failed `/api/sessions` read as an empty index: the search said
  * `No matching sessions` beside a tree full of them, and kept saying it after the network was back.
  *
- * The code from `let searchIndex = null` up to `openSearchResult` is cut out of `page.html` and run against a small
- * stand-in for the document and for `fetch`, with the workspace tree's real block, so this fails when the page's own
- * functions do.
+ * The code from `let searchIndex = null` up to `openSearchResult`, and the one-column list (`renderFlatList`), are cut
+ * out of `page.html` and run against a small stand-in for the document and for `fetch`, with the workspace tree's real
+ * block, so this fails when the page's own functions do.
+ *
+ * The same code also says which workspace a session is in (#57), which is judged at the end: a session in a workspace
+ * registered inside another one is named after that nested workspace, not the top-level root.
  */
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
@@ -28,6 +31,8 @@ const block = (name: string): string => {
 
 const searchBegin = page.indexOf('let searchIndex = null')
 const searchEnd = page.indexOf('async function openSearchResult(')
+const flatBegin = page.indexOf('async function renderFlatList(')
+const flatEnd = page.indexOf('async function renderTree(')
 
 interface Group {
   sessions: { id: string }[]
@@ -52,8 +57,10 @@ class FakeElement {
   className = ''
   type = ''
   maxLength = 0
+  tabIndex = -1
   onclick: unknown = null
   children: FakeElement[] = []
+  readonly dataset: Record<string, string> = {}
   readonly attributes = new Map<string, string>()
   readonly registry: Map<string, FakeElement>
 
@@ -113,7 +120,7 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
   }
   const timers: (() => void)[] = []
   const treeList = new FakeElement(registry)
-  const body = page.slice(searchBegin, searchEnd)
+  const body = `${page.slice(searchBegin, searchEnd)}\n${page.slice(flatBegin, flatEnd)}`
   const run = new Function(
     'document',
     'fetch',
@@ -128,7 +135,12 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     'openSearchResult',
     'setTimeout',
     'clearTimeout',
-    `${body}\nreturn { applySearch }`,
+    'rowIndex',
+    'setNote',
+    'kindIcon',
+    'current',
+    'showSession',
+    `${body}\nreturn { applySearch, renderFlatList }`,
   )(
     document,
     fetch,
@@ -146,7 +158,12 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
       return timers.length
     },
     () => undefined,
-  ) as { applySearch: () => Promise<void> }
+    new Map(),
+    () => undefined,
+    () => new FakeElement(registry),
+    null,
+    async () => undefined,
+  ) as { applySearch: () => Promise<void>; renderFlatList: () => Promise<void> }
 
   /** Type a query, then let every pending answer and debounce run, as a person waiting a moment would. */
   const search = async (query: string) => {
@@ -166,7 +183,17 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
       treeHidden: treeList.hidden,
     }
   }
-  return { search, requests }
+  /** Each search hit as it reads: its title, and the line under it naming the workspace (the age is stubbed out). */
+  const hitLines = () => registry.get('search-results')!.children.map((hit) => `${hit.children[0]?.textContent} | ${hit.children[1]?.textContent}`)
+  /** Draw the one-column list (`In one list`) and read each row the same way: its title, and where it lives. */
+  const flatRows = async () => {
+    await run.renderFlatList()
+    return treeList.children.map((li) => {
+      const [, label, place] = li.children[0]?.children ?? []
+      return `${label?.textContent} | ${place?.textContent}`
+    })
+  }
+  return { search, requests, hitLines, flatRows }
 }
 
 function workspace(id: string, path: string, sessionIds: string[]) {
@@ -197,6 +224,7 @@ function server(sessions: () => Reply | Promise<Reply>, workspaces: () => unknow
 
 test('the page code under test is found', () => {
   assert.ok(searchBegin > 0 && searchEnd > searchBegin, 'the search index and applySearch are in the page, in that order')
+  assert.ok(flatBegin > searchEnd && flatEnd > flatBegin, 'and the one-column list after them, before renderTree')
 })
 
 test('a failed sessions read searches the rows the tree holds, is not kept, and the next search reads again', async () => {
@@ -302,4 +330,98 @@ test('a failed content request leaves the name matches with no warning of their 
   )
   assert.equal(askedWhileDown, 1, 'one content request for the first search, which failed, and the redraw reporting it asked nothing more')
   assert.equal(asked.length, 2, 'the failure was not kept: the same query asked the host again')
+})
+
+/**
+ * Which workspace a session is in (#57): the **nearest registered** workspace that holds its folder, by its title — the
+ * group the tree files it under — and the top-level root only when no registered workspace holds it.
+ *
+ * DSH's search result names the workspace whose `sessionIds` holds the session, by its title, else the folder's name
+ * (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1182-1183`, `workspaceLabel` `:875-879`). The search hit
+ * has done that since the search matched workspaces; the one-column list (`In one list`) named every row after the
+ * longest **root** path, and `/api/tree`'s roots are the top-level workspaces only, so all of `nest`'s sessions read
+ * `team`. DSH's flat rows carry no workspace (`sessionNode`, `lib/client.js:1059-1073`); heddle's does, and it has to be
+ * the right one.
+ */
+function registeredAt(id: string, path: string, title: string, parent: string | null, sessionIds: string[], origin = 'added') {
+  return { id, path, title, origin, parent, createdAt: '2026-10-28T00:00:00.000Z', updatedAt: '2026-10-28T00:00:00.000Z', sessionIds }
+}
+
+function sessionAt(id: string, minute: number, title: string, cwd: string, extra: Record<string, unknown> = {}) {
+  const at = `2026-10-28T11:${String(minute).padStart(2, '0')}:00.000Z`
+  return { id, cwd, created: at, updated: at, turns: 1, title, ...extra }
+}
+
+/**
+ * `team` registered, `nest` registered inside it under a title that is not its folder's name, and an automatic
+ * workspace inside `nest`. `/api/workspaces` files each session under its nearest root (`workspaceViews`), so `nest`
+ * holds its own sessions and the one reached through a symlink the server resolved; the automatic one holds `scratch`.
+ */
+const nested = {
+  workspaces: [
+    registeredAt('w-team', '/code/team', 'team', null, ['s-top']),
+    registeredAt('w-nest', '/code/team/nest', 'Nest desk', 'w-team', ['s-nest', 's-deep', 's-link', 's-child']),
+    registeredAt('w-scratch', '/code/team/nest/scratch', 'scratch', 'w-nest', ['s-scratch'], 'auto'),
+  ],
+  sessions: [
+    sessionAt('s-top', 1, 'Heron top', '/code/team'),
+    sessionAt('s-nest', 2, 'Heron draft', '/code/team/nest'),
+    sessionAt('s-deep', 3, 'Heron deep', '/code/team/nest/src'),
+    sessionAt('s-scratch', 4, 'Heron scratch', '/code/team/nest/scratch'),
+    /** Listed under `nest` by the server, which compares canonical paths; its own `cwd` is the link's. */
+    sessionAt('s-link', 5, 'Heron link', '/links/nest'),
+    /** A subagent's session: never a hit or a tree row, but the one-column list draws it, and membership skips it. */
+    sessionAt('s-child', 6, 'Heron child', '/code/team/nest/src', { origin: 'subagent' }),
+  ],
+}
+
+function nestedServer(workspaces: () => Reply): Route {
+  return (url) => {
+    if (url === '/api/sessions') return answer(nested.sessions)
+    /** The roots the tree draws at the top: `team` only, as `/api/tree` lists them. */
+    if (url === '/api/tree') return answer({ children: [{ path: '/code/team', label: 'team' }] })
+    if (url === '/api/workspaces') return workspaces()
+    if (url.startsWith('/api/sessions/search')) return answer({ items: [], hasMore: false })
+    return answer(null, 404)
+  }
+}
+
+test('a search hit for a session in a nested registered workspace names that workspace, by its title (#57)', async () => {
+  const treeGroups = libraries.WorkspaceTree.deriveGroups(nested.workspaces, nested.sessions, { grouping: 'tree', archived: 'hide' })
+  const view = loadPage({ treeGroups, route: nestedServer(() => answer({ workspaces: nested.workspaces })) })
+  const result = await view.search('heron')
+  assert.equal(result.note, null)
+  assert.deepEqual(
+    view.hitLines(),
+    ['Heron link | Nest desk', 'Heron scratch | Nest desk', 'Heron deep | Nest desk', 'Heron draft | Nest desk', 'Heron top | team'],
+    'each hit names the workspace the tree files it under: nest by its title, the automatic one inside it included, and team only for its own',
+  )
+})
+
+test('a row of the one-column list names the nearest registered workspace that holds its session, not the top-level root (#57)', async () => {
+  const view = loadPage({ treeGroups: [], grouping: 'list', route: nestedServer(() => answer({ workspaces: nested.workspaces })) })
+  assert.deepEqual(
+    await view.flatRows(),
+    [
+      /** No membership (a subagent's session is not a tree row), so the longest registered path that holds its folder. */
+      'Heron child | Nest desk',
+      /** Membership: the server filed it under nest, though its own path is the link's. */
+      'Heron link | Nest desk',
+      /** Filed under the automatic workspace, which the tree climbs past to nest. */
+      'Heron scratch | Nest desk',
+      'Heron deep | Nest desk',
+      'Heron draft | Nest desk',
+      'Heron top | team',
+    ],
+    'each row names the workspace the tree files it under, by its title',
+  )
+})
+
+test('with no workspace list, a row of the one-column list falls back to the top-level root that holds it (#57)', async () => {
+  const view = loadPage({ treeGroups: [], grouping: 'list', route: nestedServer(() => answer({ error: 'unavailable' }, 503)) })
+  assert.deepEqual(
+    await view.flatRows(),
+    ['Heron child | team', 'Heron link | ', 'Heron scratch | team', 'Heron deep | team', 'Heron draft | team', 'Heron top | team'],
+    'the root, the last resort, names what it holds, and a folder nothing holds names no workspace',
+  )
 })

@@ -49,8 +49,9 @@ grounded_in:
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show more` / `Show less`,
   Ungrouped last for a session no registered workspace owns, the open session's row selected and its workspace
-  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections; its
-  search matching a title or a workspace name, twenty at most, revealing a chosen hit, and, while `/api/sessions`
+  tinted, a workspace's `+` starting a session there, and the `Workspace` grouping drawing sibling sections; a
+  session in the nested workspace named after that workspace, not the root above it, in a search hit and in an `In one
+  list` row (#57); its search matching a title or a workspace name, twenty at most, revealing a chosen hit, and, while `/api/sessions`
   fails, listing the rows the tree holds rather than "No matching sessions", then reading again on the next search
   (#58).
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a

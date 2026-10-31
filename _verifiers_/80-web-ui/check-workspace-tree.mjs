@@ -241,6 +241,56 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
 })
 
 /**
+ * A session in a nested registered workspace is named after **that** workspace (#57), wherever a session is named with
+ * its workspace: a search hit, and a row of the one-column list (`In one list`).
+ *
+ * DSH's search result names the workspace whose `sessionIds` holds the session, by its title (`deriveSearchResults`,
+ * dsh-client-ui-workspace `lib/client.js:1182-1183`), the group the tree files it under — so `app session` reads `app`,
+ * not the root above it. The search hit has done that since it matched workspace names; the one-column row named the
+ * longest top-level root that held the folder, so it read the outer workspace. DSH's flat rows carry no workspace
+ * (`sessionNode`, `lib/client.js:1059-1073`); heddle's row does, and it must name the same workspace the tree does.
+ */
+test('a session in a nested registered workspace is named after that workspace: in a search hit and in the one-column list', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const fixture = await seeded('nested-name')
+  const browser = await openBrowser({ width: 1280, height: 720 })
+  try {
+    const repoLabel = fixture.repo.title
+    const appLabel = fixture.inner.title
+    await browser.goto(fixture.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor('document.querySelectorAll(\'#tree li[data-kind="session"]\').length > 0', 15_000)
+
+    /** The search: the hit line reads `<workspace> · <age>`. */
+    await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = 'session'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await browser.waitFor(`[...document.querySelectorAll('#search-results .hit .hit-title')].some((title) => title.textContent === 'app session')`, 10_000)
+    const hits = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#search-results .hit')].map((hit) => [hit.querySelector('.hit-title').textContent, hit.querySelector('.hit-workspace').textContent.split(' · ')[0]]))`))
+    assert.deepEqual(
+      hits.filter(([title]) => title === 'app session' || title === 'repo session 7'),
+      [['app session', appLabel], ['repo session 7', repoLabel]],
+      `the nested workspace's session names the nested workspace, the outer one's names the outer one\nsaw: ${JSON.stringify(hits)}`,
+    )
+
+    /** The one-column list: each row's `.age` reads `<workspace> · <age>` too. */
+    await browser.evaluate(`localStorage.setItem('heddle.tree.grouping.v1', 'list')`)
+    await browser.goto(fixture.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="session"] > .row > .label')].some((label) => label.textContent === 'app session')`, 15_000)
+    const rows = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tree li[data-kind="session"] > .row')].map((row) => [row.querySelector('.label').textContent, row.querySelector('.age').textContent.split(' · ')[0]]))`))
+    assert.ok(rows.length >= 9, `the list draws every session as a row\nsaw: ${JSON.stringify(rows)}`)
+    assert.deepEqual(
+      rows.filter(([title]) => title === 'app session' || title === 'repo session 7'),
+      [['app session', appLabel], ['repo session 7', repoLabel]],
+      `a row names the nearest registered workspace that holds its session, not the top-level root\nsaw: ${JSON.stringify(rows)}`,
+    )
+  } finally {
+    browser.close()
+    fixture.close()
+  }
+})
+
+/**
  * The sidebar search is DSH's local session search (C14). Read from DSH's own source: `deriveSearchResults`
  * (dsh-client-ui-workspace `lib/client.js:1169`) matches the query, trimmed and lower-cased, as a substring of the session's
  * **title or its workspace's name** — never its id — and lists the hits newest first, at most `searchResultLimit` = 20

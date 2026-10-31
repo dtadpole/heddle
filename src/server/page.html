@@ -11272,7 +11272,7 @@ async function toggle(node, li) {
 
 /**
  * What a search runs over: every session, the workspaces that place them (the same two answers the tree is drawn
- * from), and the roots the one-column list labels its rows with.
+ * from), and the top-level roots, which name a one-column row only when no workspace list arrived (`workspaceNamer`).
  *
  * Held until `refreshSessions` says the set changed, because a keystroke should not refetch three endpoints, and
  * rebuilt rather than patched when it does change — a stale index would answer a search with sessions that no
@@ -11317,15 +11317,51 @@ async function loadSearchIndex() {
   return searchIndex
 }
 
-/** The workspace a folder belongs to: the longest root path that contains it. */
-function workspaceOf(cwd, roots) {
-  let best = null
-  for (const root of roots) {
-    if (cwd === root.path || cwd.startsWith(root.path + '/')) {
-      if (best === null || root.path.length > best.path.length) best = root
-    }
+/**
+ * The name of the workspace each session belongs to, as a function of the session: `(meta) => name | null` (#57).
+ *
+ * It is the **nearest registered** workspace that holds the session's folder, by its title — the group the tree files
+ * the session under, so a row never names a different workspace than the tree beside it:
+ *
+ * 1. membership first: `/api/workspaces` lists in each workspace's `sessionIds` the sessions whose nearest root it is,
+ *    and the tree climbs past an automatic one to the registered workspace above (`WorkspaceTree.deriveGroups`). The
+ *    search hit names the same group (`WorkspaceTree.search`), which is DSH's rule: the workspace whose `sessionIds`
+ *    holds the session, by its title (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1182-1183`);
+ * 2. else the registered workspace with the longest path that contains the folder;
+ * 3. the top-level roots only when no registered workspace holds it — no workspace list arrived.
+ *
+ * It used to be the longest **root** path, and `/api/tree`'s roots are the top-level workspaces only, so a session in a
+ * workspace registered inside another one was named after the root above it.
+ */
+function workspaceNamer(index) {
+  const workspaces = Array.isArray(index.workspaces) ? index.workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
+  const sessions = Array.isArray(index.sessions) ? index.sessions : []
+  const members = new Map()
+  for (const group of WorkspaceTree.flatten(WorkspaceTree.deriveGroups(workspaces, sessions, { grouping: 'workspace', archived: 'show' }))) {
+    if (group.workspace === null) continue
+    for (const meta of group.sessions) members.set(meta.id, group.label)
   }
-  return best === null ? null : best.title
+  /** The entry with the longest path that is the folder or contains it, by path segment. */
+  const nearest = (cwd, entries) => {
+    let best = null
+    for (const entry of entries) {
+      if (typeof entry.path !== 'string' || entry.path.length === 0) continue
+      if (cwd === entry.path || cwd.startsWith(entry.path.endsWith('/') ? entry.path : entry.path + '/')) {
+        if (best === null || entry.path.length > best.path.length) best = entry
+      }
+    }
+    return best
+  }
+  const registered = workspaces.filter((entry) => entry.origin !== 'auto')
+  const roots = Array.isArray(index.roots) ? index.roots : []
+  return (meta) => {
+    const member = members.get(meta.id)
+    if (member !== undefined) return member
+    if (typeof meta.cwd !== 'string' || meta.cwd.length === 0) return null
+    const holder = nearest(meta.cwd, registered)
+    if (holder !== null) return typeof holder.title === 'string' && holder.title.length > 0 ? holder.title : WorkspaceTree.basename(holder.path)
+    return nearest(meta.cwd, roots)?.title ?? null
+  }
 }
 
 /** The latest search asked for; an answer to an older keystroke is dropped rather than drawn over a newer one. */
@@ -11571,6 +11607,8 @@ async function renderFlatList() {
     return true
   })
   visible.sort((left, right) => Number(right.pinned === true) - Number(left.pinned === true) || String(right.created).localeCompare(String(left.created)))
+  /** The workspace a row names is the one the tree files it under, the nested one included (#57). */
+  const workspaceOf = workspaceNamer(index)
   treeList.replaceChildren(
     ...visible.map((meta) => {
       const li = document.createElement('li')
@@ -11590,7 +11628,7 @@ async function renderFlatList() {
       label.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
       const place = document.createElement('span')
       place.className = 'age'
-      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      place.textContent = [workspaceOf(meta), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       row.append(icon, label, place)
       /**
        * A row in the flat list is also **the selected row**.
