@@ -2904,7 +2904,7 @@ test('a workspace reorder is pushed to every open page as a workspace frame, and
   }
 })
 
-test('a workspace whose folder was deleted or moved is renamed and deleted by the routes the page uses, and the tree says the folder is gone (#141)', async (context) => {
+test('a workspace whose folder was deleted or moved is renamed and deleted by the routes the page uses, and the tree says the folder is gone', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
    * GitHub issue #141, both builds: once a workspace's folder was deleted or moved, a path spelled through a link (the

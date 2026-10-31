@@ -687,7 +687,7 @@ test('Rename and Delete on a workspace another client removed say so in words an
   }
 })
 
-test('a workspace whose folder was deleted says so when opened, and Rename and Delete reach it by its id (#141)', async (context) => {
+test('a workspace whose folder was deleted says so when opened, and Rename and Delete reach it by its id', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
@@ -698,6 +698,10 @@ test('a workspace whose folder was deleted says so when opened, and Rename and D
    * its file tree draws a level whose directory is gone as one failed line, "That directory is gone. It may have been
    * moved or deleted." (dsh-client-ui-sidebar-files lib/client.js:483-489, :564-569, words at :770). The page draws that
    * line under the group's Files heading, the shape of the failed line #106 brought, and keeps the group's session.
+   *
+   * The page is opened on the gone folder's own session (its saved selection). A load with nothing saved starts a fresh
+   * session in the most recently active workspace (#17), here the gone one, and creating a session there makes the
+   * folder again in both builds today (#56), which would leave nothing gone to judge.
    */
   const place = fixtureDir('workspaces-gone-folder')
   const server = await startServer('gone-folder', { home: place })
@@ -722,6 +726,14 @@ test('a workspace whose folder was deleted says so when opened, and Rename and D
       empty: Array.from(group.querySelectorAll(':scope > .empty')).map((line) => line.textContent),
     }
   })())`
+  /** waitFor throws when time runs out; this answers false instead, so the assertion can say what was drawn. */
+  const settled = async (expression, ms) => {
+    try {
+      return await browser.waitFor(expression, ms)
+    } catch {
+      return false
+    }
+  }
   try {
     for (const name of ['keep', 'gone']) mkdirSync(join(place, name), { recursive: true })
     const real = realpathSync(place)
@@ -739,15 +751,21 @@ test('a workspace whose folder was deleted says so when opened, and Rename and D
     const { rmSync } = await import('node:fs')
     rmSync(join(place, 'gone'), { recursive: true, force: true })
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
     await browser.waitFor(`${row('keep')} !== undefined && ${row('gone')} !== undefined`, 10_000)
+    assert.equal(existsSync(join(place, 'gone')), false, 'loading the page did not make the folder again')
+    const listed = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((view) => view.id === ids.gone)
+    assert.equal(listed?.status, 'missing-dir', `the server lists the workspace as missing-dir (${JSON.stringify(listed)})`)
     await browser.evaluate(`window.__unhandled = []; window.addEventListener('unhandledrejection', (event) => window.__unhandled.push(String(event.reason && event.reason.message ? event.reason.message : event.reason)))`)
     await browser.evaluate(`window.__asked = []; (() => { const original = window.fetch.bind(window); window.fetch = (input, init) => { window.__asked.push([(init && init.method) || 'GET', typeof input === 'string' ? input : input.url]); return original(input, init) } })()`)
 
     await browser.evaluate(open('gone'))
     const failedLine = `${groupOf('gone')}?.querySelector(':scope > ul > [data-files-row="failed"]')`
-    assert.ok(await browser.waitFor(`${failedLine} != null`, 10_000), `the workspace whose folder is gone opens to a line that says so\nsaw: ${await browser.evaluate(level('gone'))}`)
+    assert.ok(
+      await settled(`${failedLine} != null`, 10_000),
+      `the workspace whose folder is gone opens to a line that says so\nsaw: ${await browser.evaluate(level('gone'))}, open ${await browser.evaluate(`${groupOf('gone')}?.dataset.open ?? null`)}, folder there again: ${existsSync(join(place, 'gone'))}`,
+    )
     const gone = JSON.parse(await browser.evaluate(level('gone')))
     assert.deepEqual(gone.failed, { text: 'That directory is gone. It may have been moved or deleted.', code: 'workspace-file/not-found' }, "in DSH's words, with DSH's code")
     assert.deepEqual(gone.headings, ['Files'], 'under its Files heading')
