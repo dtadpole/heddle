@@ -15,7 +15,7 @@ use std::task::{Context, Poll};
 
 use futures::future::{BoxFuture, FutureExt, Shared};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::service::{GoalActivation, GoalBlockReason, GoalPhase, GoalRef, GoalService, GoalView};
 
@@ -171,6 +171,56 @@ pub struct ResumeReport {
 struct Lane {
     requested: bool,
     run: Option<DriverRun>,
+    /// One of this driver's rounds is running in the session now.
+    round_running: bool,
+    /// The running round was stopped by the caller: the goal is paused once the round returns.
+    cancelled: bool,
+}
+
+/// How a turn ended, as far as the driver acts on it: the `turn/end` reasons DSH's driver listens for
+/// (`TurnEnd` in `src/goal/driver.ts`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnEnd {
+    /// Anything else.
+    Completed,
+    /// The caller cancelled it (DSH's `aborted`).
+    Stopped,
+    /// It failed (DSH's `agent/error`).
+    Failed,
+    /// Its last answer was cut at the output limit.
+    MaxTokens,
+}
+
+/// Read how a turn ended from its last `assistant/completed` and its `turn/completed` (`turnEndOf`).
+///
+/// A turn that failed or was cut mid-stream writes `turn/completed` with `stopped: true` or an `error`. A turn
+/// stopped between steps ends normally, and only its `assistant/completed` says so: `ended` carries "stopped by the
+/// caller", or the finish reason is `aborted`. A cut at the output limit is the canonical `max_output_tokens`.
+pub fn turn_end_of(completed: Option<&Value>, closing: &Value) -> TurnEnd {
+    let finish = completed
+        .and_then(|completed| completed.get("finishReason"))
+        .and_then(Value::as_str);
+    let stopped_by_caller = completed
+        .and_then(|completed| completed.get("ended"))
+        .and_then(Value::as_array)
+        .is_some_and(|ended| {
+            ended
+                .iter()
+                .any(|line| line.as_str() == Some("stopped by the caller"))
+        });
+    if closing.get("stopped") == Some(&Value::Bool(true))
+        || finish == Some("aborted")
+        || stopped_by_caller
+    {
+        return TurnEnd::Stopped;
+    }
+    if closing.get("error").is_some_and(|error| !error.is_null()) || finish == Some("error") {
+        return TurnEnd::Failed;
+    }
+    if finish == Some("max_output_tokens") {
+        return TurnEnd::MaxTokens;
+    }
+    TurnEnd::Completed
 }
 
 /// The driver: one serialized chain per session.
@@ -245,6 +295,8 @@ impl GoalDriver {
         let lane = lanes.entry(session.to_owned()).or_insert_with(|| Lane {
             requested: false,
             run: None,
+            round_running: false,
+            cancelled: false,
         });
         lane.requested = true;
         if let Some(run) = &lane.run {
@@ -340,6 +392,56 @@ impl GoalDriver {
         }
     }
 
+    /// Tell the driver how one of the session's turns ended (DSH's `turn/end` and `agent/error` listeners,
+    /// `dsh-goal-round-driver/lib/index.js:211-213, 265-284`; `turnEnded` in `src/goal/driver.ts`).
+    ///
+    /// - A turn stopped while one of this driver's rounds runs is that round, cancelled: the goal is **paused** once
+    ///   the round returns ("a goal whose round was under way is paused at the next idle point").
+    /// - A turn stopped while no round runs only **disarms** continuation.
+    /// - A failed turn, or one cut at the output limit, disarms continuation ("No abnormal auto-retry"; the driver
+    ///   "stops on its own when a turn ends on max tokens"). A person's resume re-arms it.
+    pub fn turn_ended(&self, session: &str, end: TurnEnd) {
+        if end == TurnEnd::Completed {
+            return;
+        }
+        if end == TurnEnd::Stopped {
+            let mut lanes = self
+                .lanes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(lane) = lanes.get_mut(session).filter(|lane| lane.round_running) {
+                lane.cancelled = true;
+                return;
+            }
+        }
+        let _ = self.goals.disarm(session);
+    }
+
+    /// Mark whether one of this driver's rounds is running in `session`, clearing a stale cancel when one starts.
+    fn set_round_running(&self, session: &str, running: bool) {
+        let mut lanes = self
+            .lanes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(lane) = lanes.get_mut(session) {
+            lane.round_running = running;
+            if running {
+                lane.cancelled = false;
+            }
+        }
+    }
+
+    /// Whether the round that just returned was cancelled, clearing the mark.
+    fn take_cancelled(&self, session: &str) -> bool {
+        let mut lanes = self
+            .lanes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        lanes
+            .get_mut(session)
+            .is_some_and(|lane| std::mem::take(&mut lane.cancelled))
+    }
+
     /// One evaluation of the condition: act on it until it stops being runnable.
     async fn reconcile(&self, session: &str) -> DriverOutcome {
         let mut rounds = 0u64;
@@ -402,7 +504,36 @@ impl GoalDriver {
                         revision,
                         round,
                     };
-                    if let Err(error) = self.runner.run(session, prompt, source).await {
+                    self.set_round_running(session, true);
+                    let ran = self.runner.run(session, prompt, source).await;
+                    self.set_round_running(session, false);
+                    // The round was stopped (#93): DSH pauses the goal whose round was under way, so nothing
+                    // continues on its own and a person's resume starts the next round.
+                    if self.take_cancelled(session) {
+                        let mut error = None;
+                        if let Ok(Some(current)) = self.goals.get(session)
+                            && current.goal.id == goal_id
+                            && current.goal.phase == GoalPhase::Active
+                        {
+                            let reference = GoalRef {
+                                id: current.goal.id.clone(),
+                                revision: current.goal.revision,
+                            };
+                            if let Err(paused) = self.goals.pause(session, &reference) {
+                                let _ = self.goals.disarm(session);
+                                error = Some(paused.to_string());
+                            }
+                        }
+                        return DriverOutcome {
+                            rounds: rounds + 1,
+                            stopped: "cancelled".to_owned(),
+                            blocked: None,
+                            error,
+                        };
+                    }
+                    // A failed round keeps the goal's phase; its own end disarmed continuation (`turn_ended`), so
+                    // nothing retries it on its own.
+                    if let Err(error) = ran {
                         return DriverOutcome {
                             rounds,
                             stopped: "turn-failed".to_owned(),
@@ -487,12 +618,9 @@ impl GoalDriver {
     /// Whether the events `session` gained since `mark` end a turn with DSH's `blocked`: the archived-session gate's
     /// `turn/failed` `{"reason": {"kind": "blocked"}}`, the one turn end heddle writes for a rejected step.
     fn ended_blocked_since(&self, session: &str, mark: usize) -> bool {
-        self.goals.session_events(session).is_ok_and(|events| {
-            events
-                .iter()
-                .skip(mark)
-                .any(|event| event["type"] == "turn/failed" && event["reason"]["kind"] == "blocked")
-        })
+        self.goals
+            .session_events(session)
+            .is_ok_and(|events| events.iter().skip(mark).any(is_blocked_turn_end))
     }
 
     /// Clear a settled lane, draining an edge that arrived as it settled.
@@ -538,6 +666,14 @@ pub enum SessionEdge {
     Other,
 }
 
+/// Whether `event` ends its turn with DSH's `blocked`: the archived-session gate's `turn/failed`
+/// `{"reason": {"kind": "blocked"}}`, the one turn end heddle writes for a rejected step (`isBlockedTurnEnd` in
+/// `src/goal/driver.ts`). Any other `turn/failed` (a teammate's turn that failed, whose `reason` is its error) is a
+/// failure, DSH's `agent/error`.
+fn is_blocked_turn_end(event: &Value) -> bool {
+    event["type"] == "turn/failed" && event["reason"]["kind"] == "blocked"
+}
+
 /// Classify a session event by its `type`.
 pub fn classify_session_event(event_type: &str) -> SessionEdge {
     match event_type {
@@ -557,6 +693,8 @@ pub fn classify_session_event(event_type: &str) -> SessionEdge {
 pub struct DriverTrigger {
     driver: Arc<GoalDriver>,
     in_turn: Mutex<HashSet<String>>,
+    /// Each session's last `assistant/completed`, read at its `turn/completed` to tell how the turn ended.
+    last_completed: Mutex<HashMap<String, Value>>,
 }
 
 impl DriverTrigger {
@@ -565,6 +703,53 @@ impl DriverTrigger {
         DriverTrigger {
             driver,
             in_turn: Mutex::new(HashSet::new()),
+            last_completed: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// One appended event of `session`, whole: what the boot forwards. Like
+    /// [`on_session_event`](DriverTrigger::on_session_event), and it also reads how a turn ended (#93, DSH's
+    /// `turn/end` listener): a stopped goal round pauses its goal, and any other stopped, failed or length-cut turn
+    /// disarms continuation ([`GoalDriver::turn_ended`]), so no round starts after it.
+    pub fn on_event(&self, session: &str, event: &Value) -> Option<DriverRun> {
+        let kind = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match kind {
+            "assistant/completed" => {
+                self.last_completed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(session.to_owned(), event.clone());
+                None
+            }
+            "turn/completed" => {
+                let completed = self
+                    .last_completed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(session);
+                self.driver
+                    .turn_ended(session, turn_end_of(completed.as_ref(), event));
+                self.on_session_event(session, kind)
+            }
+            // The gate's refusal (`{"kind": "blocked"}`, DSH's `turn/end` `blocked`) leaves the goal armed, so a
+            // refused goal round can block it `prompt-rejected` in the driver; any other `turn/failed` is a failure
+            // and disarms continuation, as DSH's `agent/error` listener does (dsh-goal-round-driver
+            // lib/index.js:211-213) and a failed `turn/completed` does (#93). Either way the busy span ends and no
+            // pass is requested ([`SessionEdge::TurnFailed`]).
+            "turn/failed" => {
+                self.last_completed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(session);
+                if !is_blocked_turn_end(event) {
+                    self.driver.turn_ended(session, TurnEnd::Failed);
+                }
+                self.on_session_event(session, kind)
+            }
+            _ => self.on_session_event(session, kind),
         }
     }
 
@@ -946,6 +1131,231 @@ mod tests {
             calls.lock().unwrap().len()
         );
         assert_eq!(outcome.stopped, "phase-paused");
+    }
+
+    #[test]
+    fn turn_end_of_reads_a_stop_a_failure_and_a_length_cut() {
+        assert_eq!(
+            turn_end_of(Some(&json!({"finishReason": "stop"})), &json!({})),
+            TurnEnd::Completed
+        );
+        assert_eq!(turn_end_of(None, &json!({})), TurnEnd::Completed);
+        assert_eq!(
+            turn_end_of(
+                Some(&json!({"finishReason": "aborted", "ended": ["stopped by the caller"]})),
+                &json!({"stopped": true})
+            ),
+            TurnEnd::Stopped
+        );
+        assert_eq!(
+            turn_end_of(
+                Some(&json!({"finishReason": "tool_calls", "ended": ["stopped by the caller"]})),
+                &json!({})
+            ),
+            TurnEnd::Stopped,
+            "a turn stopped between steps ends normally"
+        );
+        assert_eq!(
+            turn_end_of(
+                Some(&json!({"finishReason": "error"})),
+                &json!({"error": "provider down"})
+            ),
+            TurnEnd::Failed
+        );
+        assert_eq!(
+            turn_end_of(
+                Some(&json!({"finishReason": "max_output_tokens"})),
+                &json!({})
+            ),
+            TurnEnd::MaxTokens
+        );
+    }
+
+    /// A runner whose round ends the way `end` says, telling the driver as the trigger would.
+    fn ending_driver(
+        log: &Arc<MemoryLog>,
+        goals: &Arc<GoalService>,
+        calls: &Arc<Mutex<Vec<(u64, String)>>>,
+        end: TurnEnd,
+        fail: bool,
+    ) -> Arc<GoalDriver> {
+        let slot: Arc<OnceLock<Arc<GoalDriver>>> = Arc::new(OnceLock::new());
+        let slot_in_hook = slot.clone();
+        let hook: Hook = Arc::new(move |session: &str, _round: u64| {
+            if let Some(driver) = slot_in_hook.get() {
+                driver.turn_ended(session, end);
+            }
+        });
+        let mut runner = runner(log, calls);
+        runner.hook = Some(hook);
+        runner.fail = fail;
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner));
+        slot.set(driver.clone()).ok();
+        driver
+    }
+
+    #[tokio::test]
+    async fn a_goal_round_stopped_by_the_caller_pauses_its_goal_and_starts_nothing_more() {
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = ending_driver(&log, &goals, &calls, TurnEnd::Stopped, false);
+        let outcome = driver.request("s1").await;
+        assert_eq!(calls.lock().unwrap().len(), 1, "one round, not cap-many");
+        assert_eq!(outcome.stopped, "cancelled");
+        assert_eq!(outcome.rounds, 1);
+        let after = goals.get("s1").unwrap().unwrap();
+        assert_eq!(after.goal.phase, GoalPhase::Paused);
+        assert_eq!(after.activation, GoalActivation::Disarmed);
+        assert_eq!(driver.request("s1").await.stopped, "phase-paused");
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_goal_round_disarms_instead_of_retrying() {
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        // A failing runner never calls its hook, so the failure is told the way the trigger tells it.
+        let driver = ending_driver(&log, &goals, &calls, TurnEnd::Failed, true);
+        let outcome = driver.request("s1").await;
+        assert_eq!(outcome.stopped, "turn-failed");
+        driver.turn_ended("s1", TurnEnd::Failed);
+        let after = goals.get("s1").unwrap().unwrap();
+        assert_eq!(
+            after.goal.phase,
+            GoalPhase::Active,
+            "the goal keeps its phase"
+        );
+        assert_eq!(
+            after.activation,
+            GoalActivation::Disarmed,
+            "no abnormal auto-retry"
+        );
+        assert_eq!(driver.request("s1").await.stopped, "disarmed");
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_turn_outside_a_round_a_failure_and_a_length_cut_only_disarm() {
+        for end in [TurnEnd::Stopped, TurnEnd::Failed, TurnEnd::MaxTokens] {
+            let (log, goals) = setup();
+            create(&goals, 4.0);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+            driver.turn_ended("s1", end);
+            let after = goals.get("s1").unwrap().unwrap();
+            assert_eq!(after.goal.phase, GoalPhase::Active, "{end:?}");
+            assert_eq!(after.activation, GoalActivation::Disarmed, "{end:?}");
+        }
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)))
+            .turn_ended("s1", TurnEnd::Completed);
+        assert_eq!(
+            goals.get("s1").unwrap().unwrap().activation,
+            GoalActivation::Armed
+        );
+    }
+
+    #[tokio::test]
+    async fn the_trigger_reads_the_turns_end_from_its_events_and_requests_no_round_after_a_failure()
+    {
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let trigger = DriverTrigger::new(driver);
+        assert!(
+            trigger
+                .on_event("s1", &json!({"type": "model/request"}))
+                .is_none()
+        );
+        assert!(
+            trigger
+                .on_event(
+                    "s1",
+                    &json!({"type": "assistant/completed", "finishReason": "error", "ended": ["failed: provider down"]})
+                )
+                .is_none()
+        );
+        let run = trigger
+            .on_event(
+                "s1",
+                &json!({"type": "turn/completed", "rounds": 1, "error": "provider down"}),
+            )
+            .expect("a turn/completed still asks the driver to look");
+        assert_eq!(
+            run.await.stopped,
+            "disarmed",
+            "and the failed turn disarmed it first"
+        );
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "no round started after the failure"
+        );
+    }
+
+    // The archived-session gate (#26) and goal-stop (#93) together: every `turn/failed` ends the busy span and requests
+    // nothing; the gate's refusal leaves the goal armed (DSH's `turn/end` `blocked` does not disarm, so a refused round
+    // can block `prompt-rejected`), and a failed teammate turn disarms, as DSH's `agent/error` does.
+    #[tokio::test]
+    async fn a_refused_turn_failed_leaves_the_goal_armed_and_a_failed_one_disarms_it() {
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let trigger = DriverTrigger::new(driver);
+        assert!(
+            trigger
+                .on_event("s1", &json!({"type": "model/request"}))
+                .is_none()
+        );
+        assert!(
+            trigger
+                .on_event(
+                    "s1",
+                    &json!({"type": "turn/failed", "reason": {"kind": "blocked"}})
+                )
+                .is_none(),
+            "a refused turn's end requests nothing"
+        );
+        assert_eq!(
+            goals.get("s1").unwrap().unwrap().activation,
+            GoalActivation::Armed,
+            "and leaves the goal armed"
+        );
+        assert!(
+            trigger
+                .on_event("s1", &json!({"type": "model/request"}))
+                .is_none()
+        );
+        assert!(
+            trigger
+                .on_event(
+                    "s1",
+                    &json!({"type": "turn/failed", "reason": "provider down"})
+                )
+                .is_none(),
+            "a failed turn's end requests nothing"
+        );
+        let after = goals.get("s1").unwrap().unwrap();
+        assert_eq!(
+            after.goal.phase,
+            GoalPhase::Active,
+            "the goal keeps its phase"
+        );
+        assert_eq!(
+            after.activation,
+            GoalActivation::Disarmed,
+            "and is disarmed: no abnormal auto-retry"
+        );
+        let run = trigger
+            .on_event("s1", &json!({"type": "goal/change"}))
+            .expect("the session is at rest after turn/failed");
+        assert_eq!(run.await.stopped, "disarmed");
+        assert!(calls.lock().unwrap().is_empty(), "no round started");
     }
 
     #[tokio::test]

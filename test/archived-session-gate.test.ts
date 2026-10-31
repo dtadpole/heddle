@@ -317,3 +317,30 @@ test('a goal round the gate refuses at its first step blocks the goal with DSH\'
   assert.ok(sessions.store.read(session).some((event) => event.type === 'assistant/completed' && event.text === 'the round ran'), 'and the round answered')
   assert.notEqual(created.revision, goals.get(session)?.revision)
 })
+
+/**
+ * The gate (#26) beside goal-stop (#93): every `turn/failed` ends the busy span and requests no round. The gate's refusal
+ * leaves the goal armed, as DSH's `turn/end` `blocked` does (only `agent/error`, `aborted` and `max-tokens` act on it,
+ * dsh-goal-round-driver lib/index.js:211-213, 273-281), which is what lets a refused round block `prompt-rejected`; a
+ * failed teammate turn (`reason` is its error) disarms continuation, as DSH's `agent/error` and a failed
+ * `turn/completed` do.
+ */
+test('a refused turn/failed leaves the goal armed and a failed one disarms it; neither starts a round', async () => {
+  const { sessions, session, goals } = await driven('driver-failed-end', [{ text: 'never asked' }])
+  /** The session is busy (a turn's model call is in flight), so creating the goal requests no round yet. */
+  sessions.store.append(session, { type: 'model/request' })
+  goals.create(session, { objective: 'finish the report', maxGoalRounds: 3 })
+  sessions.store.append(session, { type: 'turn/failed', reason: { kind: 'blocked' } })
+  await settle()
+  assert.equal(goals.get(session)?.activation, 'armed', 'the refusal leaves the goal armed')
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [], 'and starts no round by itself')
+
+  sessions.store.append(session, { type: 'model/request' })
+  sessions.store.append(session, { type: 'turn/failed', reason: 'provider down' })
+  await settle()
+  const failed = goals.get(session)
+  assert.equal(failed?.phase, 'active', 'the failure keeps the goal\'s phase')
+  assert.equal(failed?.activation, 'disarmed', 'and disarms it: no abnormal auto-retry')
+  assert.deepEqual(goalRounds(sessions.store.read(session)), [], 'no round started')
+  assert.equal(of(sessions.store.read(session), 'model/request'), 2, 'and no model was asked')
+})

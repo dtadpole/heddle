@@ -35,11 +35,17 @@ export const PROMPT_REJECTED_CODE = 'prompt-rejected'
 export const PROMPT_REJECTED_MESSAGE = 'Goal round was rejected before entering its step.'
 
 /**
- * Whether a round's own events end its turn with DSH's `blocked`: the archived-session gate's
- * `turn/failed` `{ reason: { kind: 'blocked' } }`, the one turn end heddle writes for a rejected step.
+ * Whether an event ends its turn with DSH's `blocked`: the archived-session gate's `turn/failed`
+ * `{ reason: { kind: 'blocked' } }`, the one turn end heddle writes for a rejected step. Any other `turn/failed` (a
+ * teammate's turn that failed, whose `reason` is its error) is a failure, DSH's `agent/error`.
  */
+export function isBlockedTurnEnd(event: { readonly type: string; readonly [key: string]: unknown }): boolean {
+  return event.type === 'turn/failed' && (event.reason as { kind?: unknown } | undefined)?.kind === 'blocked'
+}
+
+/** Whether a round's own events end its turn with DSH's `blocked`. */
 function endedBlocked(events: readonly { readonly type: string; readonly [key: string]: unknown }[]): boolean {
-  return events.some((event) => event.type === 'turn/failed' && (event.reason as { kind?: unknown } | undefined)?.kind === 'blocked')
+  return events.some(isBlockedTurnEnd)
 }
 
 /** What should happen next for one goal. */
@@ -85,6 +91,39 @@ export function decideGoalRound(goal: GoalView | undefined): RoundDecision {
   return { kind: 'round', round, prompt: renderGoalRoundPrompt(goal, round) }
 }
 
+/**
+ * How a turn ended, as far as the driver acts on it: the `turn/end` reasons DSH's driver listens for.
+ *
+ * - `stopped`: the caller cancelled it (DSH's `aborted`);
+ * - `failed`: it threw (DSH's `agent/error`);
+ * - `max-tokens`: its last answer was cut at the output limit;
+ * - `completed`: anything else.
+ */
+export type TurnEnd = 'completed' | 'stopped' | 'failed' | 'max-tokens'
+
+/** The fields of a turn's last `assistant/completed` and its `turn/completed` that say how it ended. */
+export interface TurnEndEvidence {
+  readonly finishReason?: unknown
+  readonly ended?: unknown
+  readonly stopped?: unknown
+  readonly error?: unknown
+}
+
+/**
+ * Read how a turn ended from its closing records.
+ *
+ * A turn that threw writes `turn/completed` with `stopped: true` or an `error`. A turn stopped between steps returns
+ * normally, and only its `assistant/completed` says so: `ended` carries "stopped by the caller", or the finish reason
+ * is `aborted`. A cut at the output limit is the canonical `max_output_tokens`.
+ */
+export function turnEndOf(completed: TurnEndEvidence | undefined, closing: TurnEndEvidence): TurnEnd {
+  const ended = Array.isArray(completed?.ended) ? (completed.ended as unknown[]) : []
+  if (closing.stopped === true || completed?.finishReason === 'aborted' || ended.includes('stopped by the caller')) return 'stopped'
+  if (closing.error !== undefined || completed?.finishReason === 'error') return 'failed'
+  if (completed?.finishReason === 'max_output_tokens') return 'max-tokens'
+  return 'completed'
+}
+
 /** How one round is run: append the attributed user message and answer it with a turn. */
 export interface GoalDriverDeps {
   readonly run: (handle: SessionHandle, prompt: string, source: Record<string, unknown>) => Promise<unknown>
@@ -108,6 +147,10 @@ interface Lane {
   requested: boolean
   /** The chain currently draining, if any. */
   run?: Promise<DriverOutcome>
+  /** One of this driver's rounds is running in the session now. */
+  roundRunning: boolean
+  /** The running round was stopped by the caller: the goal is paused once the round returns. */
+  cancelled: boolean
 }
 
 /** The driver service: one serialized chain per session, started from the session's own turn events. */
@@ -159,6 +202,30 @@ export class GoalDriver extends Service {
     return lane.run
   }
 
+  /**
+   * Tell the driver how one of the session's turns ended (DSH's `turn/end` and `agent/error` listeners,
+   * `dsh-goal-round-driver/lib/index.js:211-213, 265-284`).
+   *
+   * - A turn stopped while one of this driver's rounds runs is that round, cancelled: the goal is **paused** once the
+   *   round returns ("a goal whose round was under way is paused at the next idle point").
+   * - A turn stopped while no round runs only **disarms** continuation ("a cancellation unrelated to a goal attempt
+   *   only disarms continuation").
+   * - A failed turn, or one cut at the output limit, disarms continuation: "No abnormal auto-retry", and the driver
+   *   "stops on its own when a turn ends on max tokens". A person's resume re-arms it.
+   *
+   * Called synchronously from the turn's own `turn/completed`, which the loop writes before the round's `run`
+   * returns, so the chain sees the outcome before it would decide on another round.
+   */
+  turnEnded(handle: SessionHandle, end: TurnEnd): void {
+    if (end === 'completed') return
+    const lane = this.laneFor(handle.id)
+    if (end === 'stopped' && lane.roundRunning) {
+      lane.cancelled = true
+      return
+    }
+    this.goals.disarm(handle)
+  }
+
   /** Await a chain. The CLI's join after a one-shot turn; identical to `request`. */
   advance(handle: SessionHandle): Promise<DriverOutcome> {
     return this.request(handle)
@@ -167,7 +234,7 @@ export class GoalDriver extends Service {
   private laneFor(id: string): Lane {
     const existing = this.lanes.get(id)
     if (existing !== undefined) return existing
-    const lane: Lane = { requested: false }
+    const lane: Lane = { requested: false, roundRunning: false, cancelled: false }
     this.lanes.set(id, lane)
     return lane
   }
@@ -188,7 +255,7 @@ export class GoalDriver extends Service {
     try {
       while (lane.requested) {
         lane.requested = false
-        const outcome = await this.reconcile(handle)
+        const outcome = await this.reconcile(handle, lane)
         rounds += outcome.rounds
         stopped = outcome.stopped
         if (outcome.blocked !== undefined) blocked = outcome.blocked
@@ -231,7 +298,7 @@ export class GoalDriver extends Service {
   }
 
   /** One evaluation of the condition: act on it until it stops being runnable. */
-  private async reconcile(handle: SessionHandle): Promise<DriverOutcome> {
+  private async reconcile(handle: SessionHandle, lane: Lane): Promise<DriverOutcome> {
     let rounds = 0
     for (;;) {
       const view = this.goals.get(handle)
@@ -253,6 +320,10 @@ export class GoalDriver extends Service {
       const before = view!.roundsStarted
       /** Where this round's own events start, so a round that was not admitted can be read back. */
       const mark = this.goals.sessionEvents(handle).length
+      let failure: unknown
+      let failed = false
+      lane.roundRunning = true
+      lane.cancelled = false
       try {
         await this.deps.run(handle, decision.prompt, {
           kind: 'goal',
@@ -261,11 +332,35 @@ export class GoalDriver extends Service {
           round: decision.round,
         })
       } catch (error) {
+        failed = true
+        failure = error
+      } finally {
+        lane.roundRunning = false
+      }
+      /**
+       * The round was stopped (#93): DSH pauses the goal whose round was under way, so nothing continues on its own
+       * and a person's resume is what starts the next round. Only the goal the round belonged to is paused.
+       */
+      if (lane.cancelled) {
+        lane.cancelled = false
+        const current = this.goals.get(handle)
+        if (current !== undefined && current.id === view!.id && current.phase === 'active') {
+          try {
+            this.goals.pause(handle, { id: current.id, revision: current.revision })
+          } catch (error) {
+            this.goals.disarm(handle)
+            return { rounds: rounds + 1, stopped: 'cancelled', error: messageOf(error) }
+          }
+        }
+        return { rounds: rounds + 1, stopped: 'cancelled' }
+      }
+      if (failed) {
         /**
-         * A turn that failed is not a queue failure: the goal is left as it is, so a later trigger can try
-         * again, and the error is reported rather than swallowed.
+         * A turn that failed is not a queue failure: the goal keeps its phase, the error is reported rather than
+         * swallowed, and continuation was disarmed by the turn's own end (`turnEnded`), so nothing retries it on
+         * its own (DSH: "No abnormal auto-retry").
          */
-        return { rounds, stopped: 'turn-failed', error: messageOf(error) }
+        return { rounds, stopped: 'turn-failed', error: messageOf(failure) }
       }
 
       /**

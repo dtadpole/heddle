@@ -42,6 +42,7 @@ function harness(baseUrl: string) {
     return {
       completed: events.filter((event) => event.type === 'assistant/completed'),
       closed: events.filter((event) => event.type === 'turn/completed'),
+      recoveries: events.filter((event) => event.type === 'compaction/recovery'),
       last: events.at(-1)?.type,
     }
   }
@@ -80,6 +81,8 @@ test('a turn stopped mid-stream is ended in the log as stopped', async () => {
     assert.equal(completed.length, 1, 'one completion record')
     assert.deepEqual(completed[0]?.ended, ['stopped by the caller'])
     assert.equal(completed[0]?.text, 'counting ', 'with the text that streamed before the stop')
+    // #99: a stop is a cancellation, not a request failure, so the recovery listener is not asked about it.
+    assert.deepEqual(ends().recoveries, [], 'and no compaction/recovery for a call that never failed')
     assert.equal(closed.length, 1, 'and the turn is closed')
     assert.equal(last, 'turn/completed')
   } finally {
