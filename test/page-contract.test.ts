@@ -178,6 +178,26 @@ test('New session asks for a new session every time and names none it found in t
   assert.doesNotMatch(body, /session: |blankToReuse\(/, 'no session id, found or remembered, rides along')
 })
 
+test('Add workspace and New session say when their request fails, instead of leaving a rejection in the console (#59)', () => {
+  /**
+   * DSH reports a failed session creation as `New session failed: {message}` (dsh-client-ui-workspace lib/client.js:4957,
+   * from openWorkspaceSession's catch, :1476-1487) and an adoption failure's message in its folder dialog's alert
+   * (:2603-2611). On main both requests were unguarded `fetch` calls, so an offline press changed nothing on screen; the
+   * browser check is 80's "Add workspace and New session say they failed". This detects a guard being dropped.
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const start = body('async function startSessionAt(node) {')
+  assert.match(start, /try \{\s*response = await fetch\('\/api\/sessions'/, 'the session request is guarded')
+  assert.match(start, /const failed = \(message\) => setNote\('New session failed: ' \+ message\)/, 'and a failure is said in DSH\'s words')
+  const adopt = body('async function adoptWorkspace(path) {')
+  assert.match(adopt, /try \{\s*response = await fetch\('\/api\/workspaces'/, 'the registration request is guarded')
+  assert.match(adopt, /return 'could not register that folder: ' \+/, 'and its failure is a refusal the dialog shows')
+})
+
 test('a panel with nothing open shows an invitation, and gives way when something opens', () => {
   /**
    * DSH's home centres a mark, a heading and the composer; Heddle showed an empty column under a header that said

@@ -403,3 +403,71 @@ test('the page adds, renames and deletes a workspace with its own dialogs', asyn
     removeDir(place)
   }
 })
+
+test('Add workspace and New session say they failed when their request gets no answer (#59)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH reports a failed session creation as `New session failed: {message}` (dsh-client-ui-workspace lib/client.js:4957,
+   * from openWorkspaceSession's catch, :1476-1487) and puts an adoption failure's message in its folder dialog's alert
+   * (:2603-2611, :2673-2695). Before the fix both requests were unguarded here: with the server gone, *Add workspace*
+   * left the picker open with an empty error line, and *New session* (the panel's button and the workspace menu) changed
+   * nothing on screen; each press left only an unhandled `Failed to fetch` in the console (#59). The server is stopped
+   * rather than stubbed, so the failure is the one a person meets when the network or the server goes away.
+   */
+  const place = fixtureDir('workspaces-unanswered')
+  const home = isolatedHome('workspaces-unanswered')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config, HOME: place } },
+  )
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const row = (label) => `Array.from(document.querySelectorAll('#tree li[data-kind=workspace] > .row')).find((entry) => entry.querySelector('.label')?.textContent === ${JSON.stringify(label)})`
+  const said = (prefix) => `(() => { const note = document.getElementById('tree-note'); return !note.hidden && note.textContent.startsWith(${JSON.stringify(prefix)}) })()`
+  const clearNote = `(() => { const note = document.getElementById('tree-note'); note.textContent = ''; note.hidden = true })()`
+  try {
+    mkdirSync(join(place, 'other'), { recursive: true })
+    mkdirSync(join(place, 'wanted'), { recursive: true })
+    const cookie = await cookieFor(server.url)
+    const registered = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: join(place, 'other') }) })
+    assert.equal(registered.status, 200, `registered a workspace (${JSON.stringify(registered.body)})`)
+    await browser.goto(server.url)
+    await browser.waitFor('document.getElementById("tree") !== null', 10_000)
+    await browser.waitFor(`${row('other')} !== undefined`, 10_000)
+    await browser.evaluate(`window.__unhandled = []; window.addEventListener('unhandledrejection', (event) => window.__unhandled.push(String(event.reason && event.reason.message ? event.reason.message : event.reason)))`)
+    await browser.evaluate('document.getElementById("add-workspace").click()')
+    await browser.waitFor(`document.getElementById('workspace-picker').open && document.querySelectorAll('#workspace-picker-list button').length > 0`, 10_000)
+
+    /** From here on no request gets an answer. */
+    server.kill()
+    await new Promise((done) => setTimeout(done, 300))
+
+    await browser.evaluate(`(() => { const input = document.getElementById('workspace-picker-path'); input.value = ${JSON.stringify(join(place, 'wanted'))}; input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    await browser.evaluate(`document.getElementById('workspace-picker-add').click()`)
+    assert.ok(
+      await browser.waitFor(`(() => { const line = document.getElementById('workspace-picker-error'); return !line.hidden && line.textContent.startsWith('could not register that folder: ') })()`, 10_000),
+      `Add workspace says in its dialog that the folder was not registered\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('workspace-picker-error').textContent)`)}`,
+    )
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-picker').open`), true, 'and the dialog stays open, to try again or cancel')
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-picker-add').disabled`), false, 'with its button usable again')
+    await browser.evaluate('document.querySelector("#workspace-picker [data-ws-close]").click()')
+
+    await browser.evaluate(clearNote)
+    await browser.evaluate(`document.getElementById('new-session').click()`)
+    assert.ok(await browser.waitFor(said('New session failed: '), 10_000), 'the panel\'s New session says it failed, in DSH\'s words')
+
+    await browser.evaluate(clearNote)
+    await browser.evaluate(`${row('other')}.querySelector('[aria-haspopup]').click()`)
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')).find((entry) => entry.textContent.trim() === 'New session').click()`)
+    assert.ok(await browser.waitFor(said('New session failed: '), 10_000), 'and so does the workspace menu\'s New session')
+
+    const unhandled = JSON.parse(await browser.evaluate('JSON.stringify(window.__unhandled)'))
+    assert.deepEqual(unhandled, [], 'no failure is left to the console as an unhandled rejection')
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(place)
+  }
+})

@@ -9915,14 +9915,29 @@ async function startSessionAt(node) {
    * session on purpose: on a shared server an empty session in the list may be another client's, and naming it put two
    * clients in one conversation (coordinator, 2026-10-29).
    */
-  const response = await fetch('/api/sessions', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ branch: node.path }),
-  })
-  const body = await response.json().catch(() => ({}))
+  /**
+   * A failed start is said, in DSH's words: `New session failed: {message}` (`toast.createFailed`, `lib/client.js:4957`,
+   * raised by `openWorkspaceSession`'s catch, `:1476-1487`), with the server's refusal or, for a request that never got an
+   * answer (the network is down, the server stopped), the failure's own message (`creationFailureMessage`, `:1688-1692`).
+   * Before, a rejected `fetch` escaped every caller — the button, the chord, the row's `+` and its menu — as an unhandled
+   * rejection, and nothing on screen changed (#59).
+   */
+  const failed = (message) => setNote('New session failed: ' + message)
+  let response
+  let body
+  try {
+    response = await fetch('/api/sessions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ branch: node.path }),
+    })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    failed(error instanceof Error ? error.message : String(error))
+    return
+  }
   if (!response.ok) {
-    setNote(body.error ?? 'could not start a session there')
+    failed(body.error ?? `the server refused it (${response.status})`)
     return
   }
   setNote('')
@@ -11630,12 +11645,24 @@ async function browseTo(path) {
 
 /** Register a folder, then show it: the tree redrawn, the new workspace open and selected, the composer aimed at it. */
 async function adoptWorkspace(path) {
-  const response = await fetch('/api/workspaces', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ path }),
-  })
-  const body = await response.json().catch(() => ({}))
+  /**
+   * A request that never got an answer is a refusal too, said in the dialog's alert line with the failure's own message —
+   * DSH puts an adoption failure's `message` in its folder dialog's alert (`adoptDirectory`'s catch,
+   * `dsh-client-ui-workspace` `lib/client.js:2603-2611`, drawn at `:2673-2695`). Before, the rejection escaped the click
+   * handler, the line stayed empty and only the console knew (#59).
+   */
+  let response
+  let body
+  try {
+    response = await fetch('/api/workspaces', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    return 'could not register that folder: ' + (error instanceof Error ? error.message : String(error))
+  }
   if (!response.ok) return body.error ?? 'could not register that folder'
   const added = typeof body.record?.path === 'string' ? body.record.path : path
   activeFolder = added
@@ -11681,12 +11708,19 @@ document.getElementById('workspace-picker-new').addEventListener('submit', async
   if (pickerListing === null) return
   const name = document.getElementById('workspace-picker-new-name').value.trim()
   if (name === '') return
-  const response = await fetch('/api/directories', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ parent: pickerListing.path, name }),
-  })
-  const body = await response.json().catch(() => ({}))
+  let response
+  let body
+  try {
+    response = await fetch('/api/directories', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ parent: pickerListing.path, name }),
+    })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    dialogError('workspace-picker-error', 'could not create that folder: ' + (error instanceof Error ? error.message : String(error)))
+    return
+  }
   if (!response.ok) {
     dialogError('workspace-picker-error', body.error ?? 'could not create that folder')
     return
@@ -11704,6 +11738,8 @@ document.getElementById('workspace-picker-add').addEventListener('click', async 
   pickerBusy = true
   const add = document.getElementById('workspace-picker-add')
   add.disabled = true
+  /** The line speaks for this add alone: an older listing error says nothing about it. */
+  dialogError('workspace-picker-error', '')
   try {
     const refusal = await adoptWorkspace(path)
     if (refusal !== null) {
