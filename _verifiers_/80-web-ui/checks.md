@@ -81,7 +81,12 @@ grounded_in:
   store under an open page) opening to DSH's one line *Failed to load history: {message} (404)*, the header and the
   disabled composer reading *Session unavailable*, no request sent by a draft, Enter, submit or Send, the stale row let
   go, and a reload starting a fresh New session rather than showing the failure again (#56, ported from
-  developer-six's 4cd4cafb); and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
+  developer-six's 4cd4cafb); and first use on an empty home (#134): the hero chip and the note naming *Default
+  workspace* on the first load and again after a reload before anything is sent, and the first message running in
+  `<home>/default-workspace` with a row under Default workspace and the header naming it, never in the server's start
+  folder; with no workspace at all (the Default workspace made and deleted), the composer reading DSH's *Choose a
+  workspace to start*, Send disabled, Enter refused with *Choose a workspace first.* and opening Add workspace, and no
+  session started; and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
   placeholder *No archived sessions yet* with its *View other sessions* action (not the no-roots note), the action
   setting *Hide archived* back and drawing the rows again (#107). The page opens no session on its own, so a check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
