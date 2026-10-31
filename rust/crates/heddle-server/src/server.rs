@@ -1105,10 +1105,14 @@ async fn flags_session(
     let stop = archived == Some(true) && body.bool("stop") == Some(true);
     if archived == Some(true) {
         let running = state.runs().is_running(id.as_str());
-        let jobs = activity
+        let jobs: Vec<Value> = activity
             .as_ref()
-            .map(|activity| activity.jobs(id.as_str()))
-            .unwrap_or_default();
+            .map(|activity| activity.active(id.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.kind == crate::services::ActivityKind::Job)
+            .map(|item| json!({ "id": item.id, "label": item.label }))
+            .collect();
         if running || !jobs.is_empty() {
             if !stop {
                 let mut refusal = json!({
@@ -3011,11 +3015,15 @@ mod tests {
     }
 
     impl crate::services::SessionActivity for OneJob {
-        fn jobs(&self, session: &str) -> Vec<Value> {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
             if self.stopped.lock().unwrap().iter().any(|id| id == session) {
                 Vec::new()
             } else {
-                vec![json!({ "id": "bash-0123456789abcdef", "label": "sleep 30" })]
+                vec![crate::services::ActivityItem {
+                    kind: crate::services::ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }]
             }
         }
         fn stop(&self, session: &str) {
