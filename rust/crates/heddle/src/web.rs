@@ -327,7 +327,53 @@ fn page_routers(
             .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
             .map(|schedule| Arc::clone(&schedule.service)),
     ));
+    // Only when the profile loads the `commands` row, as `web.ts` hands over only when `ctx.get('commands')` exists.
+    if boot
+        .services
+        .get::<Arc<heddle_commands::CommandsRow>>("commands")
+        .is_some()
+    {
+        routers.push(heddle_commands::router(commands_host(boot, &host)));
+    }
+    // `GET /api/sessions/{id}/plan`, only when the profile loads the `plan` row, as `web.ts` hands over only when
+    // `ctx.get('plan')` exists.
+    if let Some(plan) = boot
+        .services
+        .get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME)
+    {
+        routers.push(plan.router());
+    }
     routers
+}
+
+/// The slash commands (`/commands/menu.js`, `GET /api/commands`, `POST /api/sessions/{id}/commands`): the
+/// built-ins wired to the booted session, goal, context and model services, with the sandbox's mode as a
+/// session's default, and `/plan` when the profile loads the `plan` row.
+fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands> {
+    let services = &boot.services;
+    // Commands another row contributes, as that row's plugin registers them in the TypeScript build.
+    let contributed = services
+        .get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME)
+        .map(|plan| plan.command());
+    let commands = heddle_commands::Commands::new(heddle_commands::CommandServices {
+        sessions: Arc::clone(&host.sessions),
+        goals: services.get::<Arc<heddle_goal::GoalService>>("goal"),
+        context: services
+            .get::<Arc<heddle_context::ContextService<heddle_session::SessionStore>>>("context"),
+        models: services.get::<Arc<heddle_llm::ModelService>>("model"),
+        sandbox_default: services
+            .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
+            .map(|sandbox| sandbox.mode())
+            .unwrap_or(heddle_sandbox::SandboxMode::WorkspaceWrite),
+        heddle_home: host.home.clone(),
+        // The directory `compose_uploads` gives the turn route: a command line's attachments are read as a turn's.
+        upload_dir: heddle_web_files::uploads::upload_directory(&host.home),
+    })
+    .with_contributed(contributed);
+    for refusal in commands.refused() {
+        eprintln!("heddle web: a contributed command was not registered: {refusal}");
+    }
+    Arc::new(commands)
 }
 
 /// What the composer's routes read: the booted session store, the model service and the sandbox.
@@ -1366,6 +1412,66 @@ mod tests {
             "a session with no record keeps the request"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_plan_row_adds_plan_and_its_route_and_without_it_the_commands_are_as_before() {
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut boot = composer_boot(&root);
+        boot.services
+            .provide("commands", Arc::new(heddle_commands::CommandsRow));
+        let env = heddle_config::Env::from_pairs([(
+            "HEDDLE_HOME",
+            root.join("home").to_string_lossy().into_owned(),
+        )]);
+        let host = page_host(&boot, &env).expect("a session store");
+        let names = |boot: &Boot| -> Vec<String> {
+            commands_host(boot, &host)
+                .registry()
+                .list()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect()
+        };
+        assert_eq!(
+            names(&boot),
+            ["compact", "export", "feedback", "goal", "permission"],
+            "no plan row: the five built-ins, as before"
+        );
+        let without = page_routers(&boot, &env, None).len();
+
+        let sessions = boot
+            .services
+            .get::<Arc<heddle_session::SessionService>>("session")
+            .expect("the session service");
+        boot.services.provide(
+            heddle_plan::NAME,
+            heddle_plan::PlanService::new(Arc::clone(sessions.store())),
+        );
+        assert_eq!(
+            names(&boot),
+            [
+                "compact",
+                "export",
+                "feedback",
+                "goal",
+                "permission",
+                "plan"
+            ]
+        );
+        assert_eq!(
+            page_routers(&boot, &env, None).len(),
+            without + 1,
+            "the plan route is mounted with the row"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

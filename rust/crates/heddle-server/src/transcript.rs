@@ -15,6 +15,10 @@
 //!   or to a row that exists only to carry it.
 //! - **Edited files**: `write_file` calls since the last user message are attached, as `{path, added}`, to
 //!   that exchange's last answer once the whole log is folded.
+//! - **A slash command is a row of its own**, outside the conversation: `command/run` opens a `command` turn
+//!   (`{kind, text: "", commandId, name, args?, state: "running"}`) and closes any open run; `command/done`
+//!   settles it in place with the host's words (`state` `done`, or `error` for a done of kind `error`).
+//!   Neither is a message, so the model never saw either (`src/commands/`, developer-three).
 //!
 //! Events are read as JSON values, because the fold's job is to ignore what it does not draw rather than to
 //! demand a shape: a real log holds `session/created`, `model/request` and many more.
@@ -32,16 +36,20 @@ pub enum TurnKind {
     Assistant,
     Reasoning,
     Tool,
+    /// A slash command's row: `command/run` and its `command/done`.
+    Command,
 }
 
 /// A tool turn's phase: running until its result says otherwise; a result starting with `error`
-/// (case-insensitive) is an error.
+/// (case-insensitive) is an error. A command turn is running until its `command/done`, then done or error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolState {
     Running,
     Ok,
     Error,
+    /// A command that finished with kind `success`.
+    Done,
 }
 
 /// One file attached to a person's message, as the transcript draws it.
@@ -79,13 +87,20 @@ pub struct ChatTurn {
     pub ended: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<TurnAttachment>>,
-    /// What the model said, a tool call's arguments, or the reasoning text.
+    /// What the model said, a tool call's arguments, the reasoning text, or a command's answer.
     pub text: String,
+    /// A slash command's run id, which pairs its `command/run` and `command/done`. Declared here so a command
+    /// turn serializes as the TypeScript object is written: `kind, text, commandId, name, args, state`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
     /// A tool call's one-liner, `→ <name>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What followed a command's name, when the log kept it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,8 +122,10 @@ impl ChatTurn {
             ended: None,
             attachments: None,
             text: text.into(),
+            command_id: None,
             label: None,
             name: None,
+            args: None,
             tool_call_id: None,
             result: None,
             state: None,
@@ -291,9 +308,55 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
         *open_assistant = None;
         *open_reasoning = None;
     };
+    // Where each slash command's row sits, by its run id.
+    let mut command_at: HashMap<String, usize> = HashMap::new();
 
     for event in events {
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        // A slash command is a row of its own, outside the conversation: `command/run` opens it and
+        // `command/done` settles it with the host's words. An event without a string `commandId` is not one.
+        let command_id = event.get("commandId").and_then(Value::as_str);
+        if event_type == "command/run"
+            && let Some(command_id) = command_id
+        {
+            close_runs(&mut open_assistant, &mut open_reasoning);
+            command_at.insert(command_id.to_owned(), turns.len());
+            let mut turn = ChatTurn::new(TurnKind::Command, "");
+            turn.command_id = Some(command_id.to_owned());
+            turn.name = Some(
+                event
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            );
+            turn.args = event.get("args").and_then(Value::as_str).map(str::to_owned);
+            turn.state = Some(ToolState::Running);
+            turns.push(turn);
+            continue;
+        }
+        if event_type == "command/done"
+            && let Some(command_id) = command_id
+        {
+            if let Some(turn) = command_at
+                .get(command_id)
+                .and_then(|index| turns.get_mut(*index))
+            {
+                turn.state = Some(
+                    if event.get("kind").and_then(Value::as_str) == Some("error") {
+                        ToolState::Error
+                    } else {
+                        ToolState::Done
+                    },
+                );
+                turn.text = event
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+            }
+            continue;
+        }
         if event_type == "message" {
             close_runs(&mut open_assistant, &mut open_reasoning);
             let Some(message) = event.get("message") else {
@@ -703,5 +766,72 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].attachments.as_ref().unwrap().len(), 1);
         assert_eq!(turns[0].text, "look");
+    }
+
+    /// `test/commands.test.ts`: "a session's history shows each command as its own row, settled by its done
+    /// event, outside the conversation".
+    #[test]
+    fn a_sessions_history_shows_each_command_as_its_own_row_settled_by_its_done_event() {
+        // A `/goal` create answers with DSH's goal card (developer-nine's `/goal`, D-059).
+        let created = "Goal created\nStatus: active\nObjective: ship it\nRounds: 0/256\nActivation: armed\n\nCommands: /goal edit <objective>, /goal pause, /goal clear";
+        let turns = transcript_turns(&[
+            json!({"type": "message", "seq": 0, "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+            json!({"type": "command/run", "seq": 1, "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "source": {"kind": "user"}}),
+            json!({"type": "goal/change", "seq": 2}),
+            json!({"type": "command/done", "seq": 3, "commandId": "cmd-0000abcd-1", "kind": "success", "text": created}),
+            json!({"type": "command/run", "seq": 4, "commandId": "cmd-0000abcd-2", "name": "export"}),
+            json!({"type": "command/done", "seq": 5, "commandId": "cmd-0000abcd-2", "kind": "error", "text": "The Web /export command does not accept a path."}),
+            json!({"type": "command/run", "seq": 6, "commandId": "cmd-0000abcd-3", "name": "compact"}),
+        ]);
+        let commands: Vec<&ChatTurn> = turns
+            .iter()
+            .filter(|turn| turn.kind == TurnKind::Command)
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&commands).unwrap(),
+            json!([
+                {"kind": "command", "text": created, "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "state": "done"},
+                {"kind": "command", "text": "The Web /export command does not accept a path.", "commandId": "cmd-0000abcd-2", "name": "export", "state": "error"},
+                {"kind": "command", "text": "", "commandId": "cmd-0000abcd-3", "name": "compact", "state": "running"},
+            ])
+        );
+        // The bytes keep the TypeScript object's key order.
+        assert_eq!(
+            serde_json::to_string(commands[0]).unwrap(),
+            format!(
+                r#"{{"kind":"command","text":{},"commandId":"cmd-0000abcd-1","name":"goal","args":"ship it","state":"done"}}"#,
+                serde_json::to_string(created).unwrap()
+            )
+        );
+        assert_eq!(
+            turns[0].kind,
+            TurnKind::User,
+            "the conversation keeps its place"
+        );
+        assert_eq!(turns.len(), 4);
+    }
+
+    #[test]
+    fn a_command_run_ends_an_open_answer_and_a_malformed_one_is_not_a_row() {
+        let turns = transcript_turns(&[
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "one"}}),
+            json!({"type": "command/run", "commandId": "cmd-0000abcd-1", "name": "compact"}),
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "two"}}),
+            json!({"type": "command/run", "commandId": 7, "name": "compact"}),
+            json!({"type": "command/done", "commandId": "cmd-unknown-9", "kind": "success", "text": "x"}),
+        ]);
+        assert_eq!(
+            kinds(&turns),
+            vec![TurnKind::Assistant, TurnKind::Command, TurnKind::Assistant],
+            "the answer run ends at the command; a run without a string id draws nothing"
+        );
+        assert_eq!(turns[0].text, "one");
+        assert_eq!(turns[2].text, "two");
+        assert_eq!(
+            turns[1].state,
+            Some(ToolState::Running),
+            "a done for another id settles nothing"
+        );
+        assert_eq!(turns[1].text, "");
     }
 }
