@@ -1,8 +1,8 @@
 ---
 title: The heddle-tools crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T07:07:16Z
-version: 0.6.0
+modified: 2026-10-31T02:58:51Z
+version: 0.6.1
 description: The Rust port crate for the tool registry, the built-in tools, and outside tools as processes — its public API, what it asks of other crates, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -86,9 +86,10 @@ Each step lands with its unit tests in the worktree and is pushed to `hd/develop
 | 5b | The `tools`/`commands` entry point (D-043) | **landed** | 5 unit tests from the verifier's own expectations: the allow list leaves exactly `read_file` with a description over ten characters; the JSON is `JSON.stringify(v, null, 2)` with only `name` and `description`; the text pads the name to 14 and cuts the description at its first period; a replacement under a taken name is the one listed; `commands` with its em dash and as JSON. Plus a registry over the three real services writing inside the workspace and refusing outside |
 | 6 | `40-pluggable-tools` through `HEDDLE_BIN` | with `heddle` (boot, `tools --json`, `--turn`) and integrator-one's process branch | the verifier, exit 0 |
 
-**Not ported: background jobs.** The crate description names them, but the TypeScript build has no source and no
-verifier for them (its `background-jobs` session read DSH's mechanism and recorded it in
-`_context_/dsh-mechanisms/dsh-jobs.md`; nothing landed in `src/`). They join this API when the oracle has them.
+**Background jobs live in `heddle-jobs`.** This crate holds only the seam they reach `bash` through
+(`background.rs`: `BashBackground`, `attach_bash_background`, `ForegroundRun`) and what both runs share
+(`launch_shell`, `shell_result`). With no runner attached, `bash` is foreground-only and its wall time kills; the jobs
+row's runner adds `run_in_background` and, with `promoteOnTimeout`, takes the foreground calls too.
 
 ## Read next
 
