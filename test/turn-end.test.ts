@@ -79,6 +79,7 @@ test('a turn stopped mid-stream is ended in the log as stopped', async () => {
     const { completed, closed, last } = ends()
     assert.equal(completed.length, 1, 'one completion record')
     assert.deepEqual(completed[0]?.ended, ['stopped by the caller'])
+    assert.equal(completed[0]?.text, 'counting ', 'with the text that streamed before the stop')
     assert.equal(closed.length, 1, 'and the turn is closed')
     assert.equal(last, 'turn/completed')
   } finally {
@@ -118,6 +119,32 @@ test('a turn that fails after a round keeps that round’s progress in its recor
     assert.equal(completed[0]?.rounds, 2)
     assert.equal(completed[0]?.denials, 1, 'and the unknown tool’s refusal')
     assert.match(String((completed[0]?.ended as string[] | undefined)?.[0]), /^failed: /)
+    assert.equal(closed.length, 1)
+  } finally {
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve())
+      server.closeAllConnections()
+    })
+  }
+})
+
+test('a stream that breaks after some text keeps that text in the record', async () => {
+  const server = createServer((request, response: ServerResponse) => {
+    request.resume()
+    request.on('end', () => {
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: 'partial ' }, finish_reason: null }] })}\n\n`)
+      // The connection breaks mid-answer.
+      setTimeout(() => response.destroy(), 100)
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
+  const { ctx, session, ends } = harness(`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`)
+  try {
+    await runTurn(ctx, { session, endpoint: 'double', prompt: 'go', maxRounds: 1 }).catch(() => undefined)
+    const { completed, closed } = ends()
+    assert.equal(completed.length, 1, 'one completion record')
+    assert.equal(completed[0]?.text, 'partial ', 'with the text that streamed before the break')
     assert.equal(closed.length, 1)
   } finally {
     await new Promise<void>((resolve) => {

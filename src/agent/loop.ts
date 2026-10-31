@@ -457,7 +457,11 @@ async function runTurnBody(
           // Recorded as it arrives: the transcript of an interrupted turn should show
           // the half of the answer that arrived.
           ctx.session.store.assistantChunk(options.session, chunk)
-          if (chunk.type === 'text-delta') roundText += chunk.text
+          if (chunk.type === 'text-delta') {
+            roundText += chunk.text
+            // The round's partial answer counts too, should the stream fail or be stopped before the round ends.
+            progress.text = text + roundText
+          }
           else if (chunk.type === 'reasoning-delta') {
             reasoning += chunk.text
             progress.reasoning = reasoning

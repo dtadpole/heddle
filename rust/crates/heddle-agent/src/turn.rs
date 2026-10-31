@@ -558,7 +558,12 @@ async fn run_turn_body(
                         // Recorded as it arrives: an interrupted turn shows the half of the answer that came.
                         runtime.session.assistant_chunk(session, &chunk)?;
                         match &chunk {
-                            Chunk::TextDelta { text: delta } => round_text.push_str(delta),
+                            Chunk::TextDelta { text: delta } => {
+                                round_text.push_str(delta);
+                                // The round's partial answer counts too, should the stream fail before the
+                                // round ends.
+                                progress.text = format!("{text}{round_text}");
+                            }
                             Chunk::ReasoningDelta { text: delta } => {
                                 reasoning.push_str(delta);
                                 progress.reasoning.push_str(delta);
@@ -656,7 +661,7 @@ async fn run_turn_body(
         }
 
         text.push_str(&round_text);
-        progress.text.push_str(&round_text);
+        progress.text.clone_from(&text);
 
         // A message that arrived while the model was answering is answered by this turn (steering): one that
         // waits in the inbox (a steer) or one written straight to the log (a teammate's mail). DSH takes
@@ -1262,6 +1267,8 @@ pub(crate) mod tests {
     enum Step {
         Chunks(Vec<Chunk>),
         Fail(ModelError),
+        /// Some chunks, then a failure mid-stream.
+        ChunksThenFail(Vec<Chunk>, ModelError),
     }
 
     /// A model double: one scripted step per call, and every request kept for the assertions.
@@ -1307,6 +1314,11 @@ pub(crate) mod tests {
             let items: Vec<Result<Chunk, ModelError>> = match step {
                 Some(Step::Chunks(chunks)) => chunks.into_iter().map(Ok).collect(),
                 Some(Step::Fail(error)) => vec![Err(error)],
+                Some(Step::ChunksThenFail(chunks, error)) => chunks
+                    .into_iter()
+                    .map(Ok)
+                    .chain(std::iter::once(Err(error)))
+                    .collect(),
                 None => vec![Ok(Chunk::Done {
                     finish_reason: "stop".into(),
                     usage: None,
@@ -2208,6 +2220,76 @@ pub(crate) mod tests {
                 .filter(|kind| *kind == events::ASSISTANT_COMPLETED)
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_fails_after_text_keeps_that_partial_text_in_the_record() {
+        // developer-five's re-review: the round's text was copied into the progress only when its stream finished.
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::ChunksThenFail(
+            vec![Chunk::TextDelta {
+                text: "partial ".into(),
+            }],
+            ModelError {
+                code: None,
+                message: "the stream broke".into(),
+            },
+        )]);
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            RetryOnce::new() as Arc<dyn TurnHooks>,
+        );
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "go"),
+        )
+        .await
+        .unwrap_err();
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the failed turn is ended in the log");
+        assert_eq!(completed.fields["text"], "partial ");
+        assert_eq!(
+            completed.fields["ended"],
+            serde_json::json!(["failed: the stream broke"])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_stopped_after_text_keeps_that_text_in_its_completion() {
+        let session = RecordingSession::new();
+        let model = ScriptedModel::new(vec![Step::Chunks(vec![
+            Chunk::TextDelta {
+                text: "partial ".into(),
+            },
+            done("stop"),
+        ])]);
+        let token = CancellationToken::new();
+        let stop = token.clone();
+        let model = model.with_stream_hook(Arc::new(move || stop.cancel()));
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(Vec::new()),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let mut options = RunTurnOptions::new(session_handle(), "scripted", "go");
+        options.cancel = Some(token);
+        // A stop ends the turn either way; what matters is the record.
+        let _ = run_turn(&runtime, options).await;
+        let completed = session
+            .event(events::ASSISTANT_COMPLETED)
+            .expect("the stopped turn is ended in the log");
+        assert_eq!(completed.fields["text"], "partial ");
+        assert!(
+            completed.fields["ended"]
+                .to_string()
+                .contains("stopped by the caller"),
+            "{}",
+            completed.fields["ended"]
         );
     }
 
