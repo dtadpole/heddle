@@ -35,7 +35,7 @@ The coordinator's review pass starts with one report of the Mac:
 node _tools_/load-check/load-check.mjs
 ```
 
-It prints the free disk against the 26 GB and 20 GB lines, the load average per core, swap, every slot's
+It prints the free disk against the 26 GB and 16 GB (D-067) lines, the load average per core, swap, every slot's
 owner, and the processes in the `~/heddle--*` worktrees, then exits 0 ok, 1 warn, 2 stop (see
 [`../load-check/INDEX.md`](../load-check/INDEX.md)).
 
