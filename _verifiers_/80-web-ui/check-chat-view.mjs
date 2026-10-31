@@ -2241,3 +2241,42 @@ test('an answer carries neither a hidden script link nor a remote image, as the 
     await server.close()
   }
 })
+
+test('a deeply nested answer, file or text renders, and the server keeps answering', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-15 (P0) and -16 (2026-10-29): fifty thousand nested `>` overflowed the Rust renderer's
+   * stack and aborted the server, again on every open of the session whose answer held them; the TypeScript build
+   * failed the whole session view with marked's "Maximum call stack size exceeded". HTTP only.
+   */
+  const deep = `${'>'.repeat(50000)} x`
+  const server = await startServer('deep-nesting', () => [{ text: deep }])
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'deep.md'), `${deep}\n`)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'nest', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    for (const attempt of [1, 2]) {
+      const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+      assert.equal(view.status, 200, `the session holding the deep answer opens (attempt ${attempt}: ${view.status})`)
+    }
+    const posted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: deep }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(posted.status, 200, `the text renders (${posted.status})`)
+    assert.ok((String(posted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth')
+    const file = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'deep.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+    assert.equal(file.status, 200, `the file previews (${file.status})`)
+    const alive = await fetch(new URL('/healthz', server.url)).then((response) => response.status).catch((error) => `no answer: ${error.message}`)
+    assert.equal(alive, 200, 'and the server is still up')
+  } finally {
+    await server.close()
+  }
+})
