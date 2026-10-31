@@ -8804,7 +8804,7 @@ function submitDraft(gesture) {
    * goes straight to Add workspace. Before, the message went out with no folder and ran in the server's start folder.
    */
   if (composerAimless()) {
-    setNote(NO_WORKSPACE_REFUSAL)
+    sayNote(NO_WORKSPACE_REFUSAL)
     if (!heroRow.hidden && heroMenu.hidden) void openHeroMenu()
     return
   }
@@ -11681,6 +11681,8 @@ modelTrigger.addEventListener('blur', () => {
  */
 const treeList = document.getElementById('tree')
 const treeNote = document.getElementById('tree-note')
+/** Counts the note's writes, so a repeat `sayNote` scheduled before a newer note does not overwrite it (N4). */
+let noteTicket = 0
 const EXPANDED_KEY = 'heddle.tree.expanded.v1'
 
 /** Where each drawn node is, so a remembered path can be opened without walking the DOM by label. */
@@ -11844,6 +11846,22 @@ function rememberWorkspace(path) {
     localStorage.setItem(WorkspaceTree.LAST_WORKSPACE_KEY, WorkspaceTree.workspaceRecord(path))
   } catch (error) {
     /* A browser with no storage still works; only the next visit's aim is lost. */
+  }
+}
+
+/**
+ * Forget the remembered workspace once the registry no longer has it registered: deleted here or by another client
+ * (developer-ten's N5). The aim re-checks the registry anyway (`WorkspaceTree.aimedWorkspace`), but a folder added
+ * again later would otherwise be aimed at again by a memory of the workspace that was deleted.
+ */
+function forgetRemovedWorkspace(workspaces) {
+  if (lastWorkspace === null || !Array.isArray(workspaces)) return
+  if (workspaces.some((entry) => entry !== null && typeof entry === 'object' && entry.origin !== 'auto' && entry.path === lastWorkspace)) return
+  lastWorkspace = null
+  try {
+    localStorage.setItem(WorkspaceTree.LAST_WORKSPACE_KEY, WorkspaceTree.workspaceRecord(null))
+  } catch (error) {
+    /* No storage: the memory in this page is gone, which is what matters here. */
   }
 }
 
@@ -12030,9 +12048,28 @@ function rememberExpanded() {
  * (developer-ten's review of follow-up 2).
  */
 function setNote(text) {
+  noteTicket += 1
   const next = text ?? ''
   if (treeNote.textContent !== next) treeNote.textContent = next
   treeNote.hidden = next === ''
+}
+
+/**
+ * Say the answer to a person's action in the note, even when it is the note's text already (developer-ten's N4): the
+ * same refusal after a second press is cleared and written again a moment later, so the live region announces it again
+ * and the press is not met with nothing, which matters where the note is the only feedback (the hero hidden, an Ungrouped
+ * session open). Any note written meanwhile wins (`noteTicket`).
+ */
+function sayNote(text) {
+  if (typeof text !== 'string' || text === '' || treeNote.textContent !== text) {
+    setNote(text)
+    return
+  }
+  treeNote.textContent = ''
+  const ticket = ++noteTicket
+  setTimeout(() => {
+    if (ticket === noteTicket) setNote(text)
+  }, 120)
 }
 
 /**
@@ -13073,7 +13110,8 @@ document.getElementById('session-rename-confirm').addEventListener('click', () =
 async function forkSession(node) {
   const blocked = WorkspaceTree.forkBlocked(node.session)
   if (blocked !== null) {
-    setNote(blocked)
+    /** Said again on a repeated press (N4), as the chord on the open blank may be pressed twice. */
+    sayNote(blocked)
     return
   }
   let response
@@ -13443,8 +13481,14 @@ const NEW_CONVERSATION_NOTE = 'a new conversation in '
 function paintNewConversationPlace() {
   if (current !== null || !firstTreeSettled) return
   paintConversationTarget()
-  if (!treeNote.textContent.startsWith(NEW_CONVERSATION_NOTE)) return
+  /**
+   * DSH's "Choose a workspace first." gives way once there is a place, as the composer's inert state does: a workspace row
+   * picked after the refusal left it in the note until the next tree draw (developer-ten's N3).
+   */
+  const refused = treeNote.textContent === NO_WORKSPACE_REFUSAL
+  if (!refused && !treeNote.textContent.startsWith(NEW_CONVERSATION_NOTE)) return
   const place = newConversationTarget()?.label ?? null
+  if (refused && place === null) return
   setNote(place === null ? '' : NEW_CONVERSATION_NOTE + place)
 }
 
@@ -13478,10 +13522,10 @@ async function startNewSession() {
      */
     const registered = knownWorkspaces.some((entry) => entry !== null && typeof entry === 'object' && entry.origin !== 'auto')
     if (!registered) {
-      setNote('register a workspace first — the + beside Workspaces')
+      sayNote('register a workspace first — the + beside Workspaces')
       return
     }
-    setNote(NO_WORKSPACE_REFUSAL)
+    sayNote(NO_WORKSPACE_REFUSAL)
     if (!heroRow.hidden && heroMenu.hidden) void openHeroMenu()
     return
   }
@@ -17370,7 +17414,10 @@ async function renderTree() {
     return
   }
   /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
-  if (Array.isArray(workspaces)) knownWorkspaces = workspaces
+  if (Array.isArray(workspaces)) {
+    knownWorkspaces = workspaces
+    forgetRemovedWorkspace(workspaces)
+  }
   rowIndex.clear()
   noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))

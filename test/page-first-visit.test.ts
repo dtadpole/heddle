@@ -213,3 +213,31 @@ test('opening a session remembers the registered workspace it lives in; an Ungro
   assert.ok(read > 0 && show.indexOf('rememberSessionWorkspace(id)', read) > read, 'the page remembers it once the opened session\'s history was read, so a session that cannot be loaded is not kept')
   assert.match(source('startSessionAt'), /await showSession\(body\.session\)/, 'a session started in a workspace is opened, and so remembered')
 })
+
+test('the memory of a workspace that is no longer registered is forgotten when the registry is read (N5)', () => {
+  /**
+   * developer-ten's N5 on f3adbf49: nothing cleared heddle.workspace.last when its workspace was deleted. The aim already
+   * re-checks the registry, so the stale entry was harmless, but adding that folder again re-aimed at it. The tree's read
+   * of the registry (here, or after another client's delete) now forgets it.
+   */
+  const reconcile = (workspaces: unknown[], remembered: string) =>
+    JSON.parse(
+      runInNewContext(
+        `
+        ${block}
+        let lastWorkspace = REMEMBERED
+        const stored = { 'heddle.workspace.last': JSON.stringify({ path: REMEMBERED }) }
+        const localStorage = { getItem: (key) => stored[key] ?? null, setItem: (key, value) => { stored[key] = String(value) } }
+        ${source('forgetRemovedWorkspace')}
+        forgetRemovedWorkspace(WORKSPACES)
+        JSON.stringify({ last: lastWorkspace, stored: stored['heddle.workspace.last'] })
+        `,
+        { WORKSPACES: workspaces, REMEMBERED: remembered, JSON, Map, Set, Array, Object, String },
+      ) as string,
+    ) as { last: string | null; stored: string }
+  assert.deepEqual(reconcile(shared, A), { last: A, stored: JSON.stringify({ path: A }) }, 'a registered workspace is kept')
+  assert.deepEqual(reconcile([shared[1]], A), { last: null, stored: '{}' }, 'a deleted one is forgotten, in memory and in storage')
+  assert.deepEqual(reconcile([{ ...shared[0], origin: 'auto' }], A), { last: null, stored: '{}' }, 'an adopted root at that path is no registered workspace')
+  const tree = source('renderTree')
+  assert.match(tree, /if \(Array\.isArray\(workspaces\)\) \{\s*knownWorkspaces = workspaces\s*forgetRemovedWorkspace\(workspaces\)/, 'the tree forgets it where it keeps the registry')
+})

@@ -202,6 +202,8 @@ test('with no session and no workspace to start one in, the composer is inert in
       composerAimless: () => aimless,
       NO_WORKSPACE_REFUSAL: 'Choose a workspace first.',
       setNote: (text: string) => notes.push(text),
+      /** A person's refusal is said through sayNote, which says it again on a repeated press (N4). */
+      sayNote: (text: string) => notes.push(text),
       heroRow: { hidden: false },
       heroMenu: { hidden: true },
       openHeroMenu: () => {
