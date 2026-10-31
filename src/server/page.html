@@ -10662,8 +10662,31 @@ function rememberOrder(next) {
   paintViewOptions()
 }
 
+/**
+ * Every account's complete order **now**, DSH's `activeSessionOrders` (client.js:3593-3597), which DSH derives for every
+ * account whichever view is on screen, so entering Manual or dropping a row freezes them all (`setOrderBy` /
+ * `setSessionOrder`, client.js:1279-1283, 1297-1302). In one list draws only the flat account, so there the groups'
+ * orders are read fresh. Without it, Manual chosen in a freshly loaded flat list froze the flat list alone, and each group
+ * then reconciled its pins by pin time instead of keeping the Last updated order the reader saw (C13, #63).
+ */
+async function liveOrders() {
+  if (groupingMode !== 'list') return shownOrders
+  try {
+    const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
+    if (!workspaceResponse.ok || !sessionResponse.ok) return shownOrders
+    const workspaces = (await workspaceResponse.json()).workspaces ?? []
+    const sessions = await sessionResponse.json()
+    const fresh = WorkspaceTree.accountOrders(workspaces, Array.isArray(sessions) ? sessions : [], orderState)
+    /** The flat account keeps the order on screen, which is the one the reader chose from. */
+    return { ...fresh, [WorkspaceTree.FLAT]: shownOrders[WorkspaceTree.FLAT] ?? fresh[WorkspaceTree.FLAT] }
+  } catch (error) {
+    return shownOrders
+  }
+}
+
 async function chooseOrder(mode) {
-  rememberOrder(WorkspaceTree.chooseOrderBy(orderState, mode, shownOrders))
+  const shown = mode === 'manual' && orderState.orderBy !== 'manual' ? await liveOrders() : shownOrders
+  rememberOrder(WorkspaceTree.chooseOrderBy(orderState, mode, shown))
   await renderTree()
 }
 
@@ -10718,7 +10741,7 @@ function wireSessionDrag(items, key, rows, order) {
       clearDropMarks()
       const next = WorkspaceTree.dragOrder(order, rows, drag, { id: meta.id, half: half(event) })
       if (next === undefined) return
-      rememberOrder(WorkspaceTree.withSessionOrder(orderState, key, next, { ...shownOrders, [key]: order }))
+      rememberOrder(WorkspaceTree.withSessionOrder(orderState, key, next, { ...(await liveOrders()), [key]: order }))
       await renderTree()
     })
   }
