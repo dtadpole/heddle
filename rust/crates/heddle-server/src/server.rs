@@ -88,6 +88,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/status"),
     ("GET", "/api/sessions"),
     ("POST", "/api/sessions"),
+    ("GET", "/api/sessions/search"),
     ("GET", "/api/sessions/{id}"),
     ("POST", "/api/sessions/{id}/fork"),
     ("POST", "/api/sessions/{id}/flags"),
@@ -381,6 +382,7 @@ impl ServerBuilder {
             .route("/api/events", get(events_route))
             .route("/api/status", get(status))
             .route("/api/sessions", get(list_sessions).post(create_session))
+            .route("/api/sessions/search", get(search_sessions))
             .route("/api/sessions/{id}", get(session_view_route))
             .route("/api/sessions/{id}/fork", post(fork_session))
             .route("/api/sessions/{id}/flags", post(flags_session))
@@ -902,6 +904,28 @@ async fn list_sessions(State(state): State<AppState>) -> Response {
         .map(|meta| listing_entry(meta, &state))
         .collect();
     respond::json(StatusCode::OK, &Value::Array(sessions))
+}
+
+/// `GET /api/sessions/search?q=` — content search, DSH's `session.search` (dsh-api-session-controller
+/// lib/index.js:2010-2123): `{"items":[{"sessionId","snippet"}],"hasMore"}`, at most 20, ranked and quoted by
+/// `heddle_session::search`. A query DSH refuses answers `400` with its sentence. The static segment wins over
+/// `/api/sessions/{id}`, which would otherwise answer it as "not a session id".
+async fn search_sessions(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let raw = params.get("q").map(String::as_str).unwrap_or("");
+    let query = match heddle_session::normalize_search_query(raw) {
+        Ok(query) => query,
+        Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal.message),
+    };
+    match state.harness().sessions.search(&query) {
+        Ok(page) => respond::json(StatusCode::OK, &page),
+        Err(error) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session search failed: {}", error.message),
+        ),
+    }
 }
 
 async fn status(State(state): State<AppState>) -> Response {
@@ -1690,7 +1714,11 @@ fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
 }
 
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
-    let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
+    // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
+    let Some(prompt) = body
+        .str("prompt")
+        .filter(|prompt| !prompt.trim().is_empty())
+    else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
     };
     let attachments = match state.harness().attachments.as_ref() {
@@ -2824,6 +2852,16 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
+        // A prompt of only whitespace is refused before anything else, as an empty one is (#32).
+        for blank in [
+            r#"{"prompt":""}"#,
+            r#"{"prompt":"   "}"#,
+            r#"{"prompt":"\n\t "}"#,
+        ] {
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, blank).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
+            assert_eq!(body_text(&bytes), "a prompt is required\n", "{blank}");
+        }
     }
 
     #[tokio::test]
@@ -3895,6 +3933,125 @@ mod tests {
                 .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
             "{turns:?}"
         );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Content search over the real store (R-developer-eight-19): a phrase in an answer finds its session, in
+    /// DSH's order (more phrase marks first), with its snippet; a token fragment is no match; a refused query
+    /// answers DSH's sentence; and a session id is still a session.
+    #[tokio::test]
+    async fn content_search_finds_a_phrase_inside_an_answer() {
+        use crate::adapters::StoreSessions;
+        use crate::services::SessionService as _;
+
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-content-search-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let sessions = StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("content-search")),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+
+        let answered = |folder: &str, text: &str| -> String {
+            let cwd = scratch.join(folder);
+            std::fs::create_dir_all(&cwd).unwrap();
+            let id = sessions
+                .start(StartSession {
+                    cwd: Some(cwd),
+                    ..StartSession::default()
+                })
+                .unwrap();
+            let store = sessions.inner().store();
+            let handle = store.open(&id).unwrap();
+            store
+                .message(
+                    &handle,
+                    heddle_session::Message {
+                        role: heddle_session::Role::Assistant,
+                        tool_call_id: None,
+                        content: vec![heddle_session::ContentPart::Text {
+                            text: text.to_string(),
+                        }],
+                        source: None,
+                    },
+                )
+                .unwrap();
+            id
+        };
+        let one = answered("one", "The quokka ledger is balanced.");
+        let two = answered("two", "A quokka ledger here, another QUOKKA LEDGER there.");
+        answered("three", "quokkaledger, or the quokka and its ledger.");
+
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=Quokka%20Ledger",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            page,
+            json!({
+                "items": [
+                    {"sessionId": two, "snippet": "A quokka ledger here, another QUOKKA LEDGER there."},
+                    {"sessionId": one, "snippet": "The quokka ledger is balanced."},
+                ],
+                "hasMore": false,
+            })
+        );
+
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=quokkaled",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page, json!({"items": [], "hasMore": false}));
+
+        for path in ["/api/sessions/search", "/api/sessions/search?q=%20%20"] {
+            let (status, _, bytes) = call(&router, Method::GET, path, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(refusal["error"], "session search query must not be empty");
+        }
+        let (status, _, _) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{one}"),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a session id is still a session");
         std::fs::remove_dir_all(&scratch).ok();
     }
 

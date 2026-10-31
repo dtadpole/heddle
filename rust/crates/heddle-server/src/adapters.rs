@@ -39,11 +39,16 @@ pub fn session_event_listener(hub: EventHub) -> heddle_session::EventListener {
 #[derive(Clone)]
 pub struct StoreSessions {
     service: heddle_session::SessionService,
+    /// Content search's prepared documents, shared by every clone so repeated queries reuse what earlier ones read.
+    search: std::sync::Arc<heddle_session::SessionSearchIndex>,
 }
 
 impl StoreSessions {
     pub fn new(service: heddle_session::SessionService) -> Self {
-        StoreSessions { service }
+        StoreSessions {
+            service,
+            search: std::sync::Arc::new(heddle_session::SessionSearchIndex::new()),
+        }
     }
 
     /// The store's own service, for the parts of the binary that use it directly.
@@ -264,6 +269,12 @@ impl SessionService for StoreSessions {
     fn folder(&self, id: &str) -> Option<PathBuf> {
         let handle = self.handle(id)?;
         self.service.folder(&handle).map(PathBuf::from)
+    }
+
+    fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+        self.search
+            .search(self.service.store(), query)
+            .map_err(|refusal| ServiceError::with_code(refusal.message.clone(), refusal.code()))
     }
 }
 
