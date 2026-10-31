@@ -103,7 +103,9 @@ test('Settings says a section could not be read when the server is unreachable, 
   })
   const server = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double-one', '--session-root', join(home, 'sessions')],
-    { env: { HEDDLE_CONFIG: config } },
+    /** The fixture's own HEDDLE_HOME: without it the server read and wrote the operator's workspace registry, and a first
+     * visit, which starts a fresh session in the most recently active workspace (#17), started it in a real folder. */
+    { env: { HEDDLE_CONFIG: config, HEDDLE_HOME: home } },
   )
   const browser = await openBrowser({ width: 1280, height: 900 })
   try {
