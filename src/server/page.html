@@ -11550,7 +11550,16 @@ async function browseTo(path) {
   }
 }
 
-/** Register a folder, then show it: the tree redrawn, the new workspace open and selected, the composer aimed at it. */
+/**
+ * Register a folder, then open a session in it: the tree redrawn, the new workspace open, its new session selected and
+ * shown, and the composer bound to that session.
+ *
+ * DSH (dsh-client-ui-workspace): "Choose Add workspace and select a directory to register it and open a Session." Live
+ * issue #22 (developer-six-3, 2026-10-29): this used to set `activeFolder` and select the workspace row while the
+ * composer stayed bound to the session that was open, so the note read "a new conversation in <folder>" and the next
+ * message went into the previous session (the turn route resumes a named session and ignores the folder). Opening the
+ * session through `startSessionAt`, the workspace row's own New session, makes the page do what it says.
+ */
 async function adoptWorkspace(path) {
   const response = await fetch('/api/workspaces', {
     method: 'POST',
@@ -11564,7 +11573,7 @@ async function adoptWorkspace(path) {
   expanded.add(added)
   rememberExpanded()
   await renderTree()
-  chooseSelected(added)
+  await startSessionAt({ path: added })
   const row = Array.from(treeList.querySelectorAll('.row')).find((entry) => entry.dataset.path === added)
   row?.scrollIntoView({ block: 'nearest' })
   return null
