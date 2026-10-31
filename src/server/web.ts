@@ -36,7 +36,7 @@ import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
-import { handleJobsRoute } from '../jobs/http.ts'
+import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -1598,19 +1598,35 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
      * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
      */
+    /**
+     * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
+     * they block the archive the same way, are listed in the refusal, and with `stop: true` are killed with
+     * `session archived` once the archive is written.
+     */
+    const jobs = ctx.get('jobs') as JobRegistry | undefined
+    const stopJobs = archived === true && body.stop === true
     if (archived === true) {
       const running = state.running.get(id) ?? 0
-      if (running > 0) {
+      const liveJobs = sessionJobActivity(jobs, id)
+      if (running > 0 || liveJobs.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
-            `${JSON.stringify({ error: `session ${id} is running; pass stop: true to stop it and archive`, code: 'active', running })}\n`,
+            `${JSON.stringify({
+              error:
+                running > 0
+                  ? `session ${id} is running; pass stop: true to stop it and archive`
+                  : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
+              code: 'active',
+              running,
+              ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
+            })}\n`,
           )
           return
         }
-        abortSession(state.controllers, id)
+        if (running > 0) abortSession(state.controllers, id)
       }
     }
     let meta
@@ -1636,6 +1652,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
+    if (stopJobs) stopSessionJobs(jobs, id)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
