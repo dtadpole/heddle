@@ -5493,10 +5493,13 @@ async function refreshSessions() {
       live.set(String(entry.id ?? ''), entry)
     }
     let changed = false
+    /** Sessions this read found no longer running: their end was never seen on the stream. */
+    const ended = []
     for (const id of [...runningSessions]) {
       if (!live.has(id)) {
         runningSessions.delete(id)
         runningSince.delete(id)
+        ended.push(id)
         changed = true
       }
     }
@@ -5531,6 +5534,21 @@ async function refreshSessions() {
       paintRunningMarks()
       refreshRunningStatus()
     }
+    /**
+     * A turn whose end this page never saw ends here, as the `turn/completed` handler would end it (#122): the open
+     * chat settles, the composer offers Send again, and a message queued behind that turn is sent. Measured before
+     * (issue #122, J17b): after a server restart the stream's `reset` re-read the sessions and cleared the running mark,
+     * but the queued message stayed in the page until a reload dropped it. The pump refuses to run twice, so a
+     * message is never sent twice; the same path also ends a turn missed by a reload mid-turn or a failed turn.
+     */
+    for (const id of ended) {
+      if (id === current) {
+        settleChat()
+        void renderSettledAnswers()
+      }
+      if (id === composerKey) void pumpQueue(composerKey)
+    }
+    if (ended.length > 0) renderComposerState()
   }
   /**
    * The newest session is selected when nothing is yet.
