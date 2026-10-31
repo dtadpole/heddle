@@ -1519,6 +1519,73 @@
   #view-options .menu[hidden] { display: none; }
   #view-options .menu button { text-align: left; font: inherit; font-size: .82rem; padding: .3rem .5rem; background: none; border: 0; border-radius: .25rem; color: inherit; cursor: pointer; }
   #view-options .menu button:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
+  /**
+   * The background-jobs control, DSH's `JobListAction.module.css` (dsh-client-ui-jobs/lib/client.js:12) in this sheet's
+   * tokens: a quiet 12px trigger, a fixed 500px popover anchored 5px under it and kept 12px inside the viewport, live rows
+   * on a filled surface, settled rows muted, and the live output in a terminal block capped at 288px.
+   */
+  #session-jobs { display: inline-flex; flex: none; align-self: center; }
+  #session-jobs[hidden] { display: none; }
+  .jobs-trigger { display: inline-flex; align-items: center; gap: 3px; min-height: 28px; padding: 3px 2px; border: 0; border-radius: .25rem; background: none; color: var(--text-3); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; }
+  .jobs-trigger:hover, .jobs-trigger:focus-visible, .jobs-trigger[aria-expanded='true'] { color: var(--text-2); }
+  .jobs-trigger .jobs-chevron { transition: transform .12s; }
+  .jobs-trigger[aria-expanded='true'] .jobs-chevron { transform: rotate(180deg); }
+  .jobs-count { margin: 0 5px; white-space: nowrap; }
+  .jobs-dot { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--text-3); }
+  .jobs-dot .spinner-motion { transform-origin: center; animation: heddle-spin 1.5s linear infinite; }
+  .jobs-dot circle { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+  .jobs-dot .spinner-track { opacity: .25; }
+  .jobs-dot .spinner-arc { stroke-dasharray: 12 150; animation: heddle-dash 1.5s ease-in-out infinite; }
+  .jobs-dot .jobs-dot-fill { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .jobs-dot[data-state='done'] { color: #4fa36a; }
+  .jobs-dot[data-state='warning'] { color: #e0b15c; }
+  .jobs-dot[data-state='error'] { color: #d14343; }
+  @media (prefers-reduced-motion: reduce) {
+    .jobs-dot .spinner-motion, .jobs-dot .spinner-arc { animation: none; }
+    .jobs-dot .spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
+  }
+  .jobs-menu { position: fixed; z-index: 100; box-sizing: border-box; display: flex; flex-direction: column; width: 500px; max-width: min(560px, 100vw - 32px); max-height: min(480px, 100vh - 140px); overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-menu); color: var(--text); }
+  .jobs-menu-body { display: flex; flex-direction: column; gap: 1px; min-height: 0; margin: 0; padding: 4px; list-style: none; overflow: auto; }
+  .jobs-section { display: flex; justify-content: space-between; align-items: center; margin: 4px 4px 1px; padding: 4px 0 3px; border-top: .5px solid var(--border); color: var(--text-3); font-size: 11px; line-height: 16px; }
+  .jobs-section:first-child { margin-top: 0; border-top: 0; }
+  .jobs-section-toggle, .jobs-section-clear { display: inline-flex; align-items: center; gap: 3px; padding: 2px 4px; border: 0; border-radius: .25rem; background: none; color: var(--text-3); font: inherit; font-size: 11px; line-height: 16px; cursor: pointer; }
+  .jobs-section-toggle:hover, .jobs-section-toggle:focus-visible, .jobs-section-clear:hover, .jobs-section-clear:focus-visible { background: var(--hover); color: var(--text-2); }
+  .jobs-section-toggle .jobs-chevron { transition: transform .12s; transform: rotate(-90deg); }
+  .jobs-section-toggle[aria-expanded='true'] .jobs-chevron { transform: none; }
+  .jobs-item { display: flex; flex-direction: column; }
+  .jobs-row-line { display: flex; align-items: stretch; gap: 6px; }
+  .jobs-row-line[data-live] { padding: 4px 8px 4px 2px; border-radius: var(--radius); background: color-mix(in oklab, currentColor 6%, transparent); }
+  .jobs-row-line[data-live]:hover { background: color-mix(in oklab, currentColor 9%, transparent); }
+  .jobs-row { box-sizing: border-box; display: flex; flex: 1; align-items: center; gap: 6px; width: 100%; min-width: 0; min-height: 28px; padding: 4px 7px; border: 0; border-radius: var(--radius); background: none; color: var(--text); font: inherit; font-size: 12px; line-height: 17px; text-align: left; cursor: pointer; }
+  .jobs-row:hover, .jobs-row:focus-visible { background: var(--hover); }
+  .jobs-row-line[data-live] .jobs-row:hover { background: none; }
+  .jobs-row[data-settled] { color: var(--text-3); }
+  .jobs-row[data-static] { cursor: default; }
+  .jobs-row[data-static]:hover { background: none; }
+  .jobs-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+  .jobs-primary { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .jobs-secondary { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .jobs-kind { flex: none; padding: 0 5px; border-radius: 4px; background: color-mix(in oklab, currentColor 10%, transparent); color: var(--text-2); font-size: 10px; line-height: 16px; }
+  .jobs-label { flex: 1; min-width: 0; overflow: hidden; font-family: var(--code-font); white-space: nowrap; text-overflow: ellipsis; }
+  .jobs-status { flex: none; max-width: 60%; overflow: hidden; color: var(--text-3); font-size: 10px; line-height: 16px; white-space: nowrap; text-overflow: ellipsis; }
+  .jobs-duration { flex: none; color: var(--text-3); font-size: 11px; line-height: 18px; font-variant-numeric: tabular-nums; }
+  .jobs-chevron-box { display: inline-flex; flex: none; align-self: center; align-items: center; justify-content: center; width: 20px; height: 20px; border: .5px solid var(--border); border-radius: .25rem; color: var(--text-3); }
+  .jobs-chevron-box .jobs-chevron { transition: transform .12s; }
+  .jobs-row[aria-expanded='true'] .jobs-chevron-box .jobs-chevron { transform: rotate(180deg); }
+  .jobs-stop { display: inline-flex; flex: none; align-self: center; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: .5px solid var(--border); border-radius: .25rem; background: var(--surface); color: var(--text-2); font: inherit; cursor: pointer; }
+  .jobs-stop:hover, .jobs-stop:focus-visible { border-color: color-mix(in oklab, #d14343 45%, transparent); color: #d14343; }
+  .jobs-stop[data-kill-state='armed'] { width: auto; gap: 4px; padding: 0 7px; border-color: color-mix(in oklab, #d14343 45%, transparent); background: color-mix(in oklab, #d14343 12%, transparent); color: #d14343; }
+  .jobs-stop[data-kill-state='failed'] { color: #d14343; }
+  .jobs-stop:disabled { cursor: default; opacity: .6; }
+  .jobs-stop-label { font-size: 11px; line-height: 18px; white-space: nowrap; }
+  .jobs-panel { margin: 0 8px 8px; }
+  .jobs-notice { margin: 6px 8px; color: var(--text-3); font-size: 11px; line-height: 16px; }
+  .jobs-notice[data-error] { color: #d14343; }
+  .jobs-term { margin-top: 6px; overflow: hidden; border: .5px solid var(--border); border-radius: var(--radius); background: var(--code-bg); }
+  .jobs-term-command { display: flex; gap: 6px; padding: 6px 10px; border-bottom: .5px solid var(--border); color: var(--text-2); font: 12px/18px var(--code-font); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .jobs-term-prompt { flex: none; color: var(--text-3); user-select: none; }
+  .jobs-term-output { max-height: 288px; margin: 0; padding: 6px 10px; overflow: auto; color: var(--text); font: 12px/18px var(--code-font); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .jobs-term-output[data-empty] { color: var(--text-3); }
   /** The chosen state's tick: drawn by the sheet so the item's name stays the action. */
   #view-options .menu button[data-current='true'] { font-weight: 500; }
   /**
@@ -1881,6 +1948,18 @@
   #access:disabled { cursor: default; opacity: .55; }
   #access:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #access .mode-icon, #access .chevron { flex: none; width: 14px; height: 14px; }
+  /**
+   * A mode chip, drawn through window.heddlePage.setModeChip (src/commands/menu.js): DSH's blue "Plan" chip while a
+   * session is in plan mode. The access chip's shape, in the accent colour; one at a time, right after #access.
+   */
+  .mode-chip {
+    flex: none; display: inline-flex; align-items: center; gap: 4px; height: 28px;
+    padding: 0 8px; font-size: 13px; font-weight: 500; line-height: 20px;
+    background: rgba(38, 148, 254, .14); color: var(--accent); border: 0; border-radius: 8px; cursor: pointer;
+  }
+  .mode-chip:hover { background: rgba(38, 148, 254, .22); }
+  .mode-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .mode-chip .mode-icon { flex: none; width: 14px; height: 14px; }
   #access .chevron { opacity: .8; }
   #access[aria-busy='true'] .chevron { opacity: .35; }
   /**
@@ -2995,6 +3074,12 @@
     <h2 id="session-title">No session</h2>
     <span id="session-branch" class="meta"></span>
     <!--
+      DSH's session-header actions slot: its background-jobs control registers there at order 20
+      (dsh-client-ui-jobs/lib/client.js:627-638), after the title and before the header's utilities. The control renders
+      nothing at all until the open session can see a job, so the span stays hidden until then.
+    -->
+    <span id="session-jobs" hidden></span>
+    <!--
       DSH's header carries a `More actions` menu, and the one item in it this UI can honestly offer is
       `Download session log` — the other is product feedback for DSH itself.
     -->
@@ -3218,7 +3303,7 @@
         message, not as a file plus some text.
       -->
       <div id="attach-cards" aria-label="Pending files" hidden></div>
-      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands, @ files or sessions" autofocus></textarea>
+      <textarea name="prompt" rows="1" placeholder="Message or run a task, / commands" autofocus></textarea>
       <!--
         The control row, inside the card and in DSH's order: `+` and the access mode on the left, the model
         seat on the right, then the one action button. The button is Send when nothing runs and Stop while a
@@ -3502,6 +3587,41 @@ let todoView = null
 let todoCollapsed = true
 /** The generation of the todo read: an older response must not paint over a newer list. */
 let todoGeneration = 0
+/**
+ * The header's background-jobs control's state (DSH's `JobListAction`, dsh-client-ui-jobs/lib/client.js:323-338),
+ * declared up here with the other per-session views so `showSession` can reset it whenever it runs. The functions
+ * that draw it sit with the header's other actions, after `#session-more` is filled.
+ *
+ * - `rows` are the open session's `JobView`s from `GET /api/jobs`; `session` is the session they were read for.
+ * - `expandedKey` is the one row whose live output is shown; `settledOpen` is the reader's choice for the Finished
+ *   section (`undefined` means DSH's default: folded while any job is live); `cleared` holds the settled rows the
+ *   client-side Clear put away.
+ * - `kill` is the two-press stop's phase `{key, state: armed | pending | failed}`.
+ * - `views` keeps each observed job's text and the client's own next offset, so a row expanded again resumes where
+ *   this page stopped reading rather than where the model's cursor is (the follow route never moves it).
+ */
+const JOBS_KILL_ARM_MS = 3e3
+const JOBS_KILL_FAILED_MS = 4e3
+/** How often an expanded row asks the follow route for more output. */
+const JOBS_FOLLOW_MS = 400
+/** The most text one row's panel keeps; older text is dropped and marked as a gap. */
+const JOBS_VIEW_MAX_CHARS = 1 << 20
+const jobsUi = {
+  session: null,
+  rows: [],
+  generation: 0,
+  refreshTimer: null,
+  open: false,
+  expandedKey: undefined,
+  settledOpen: undefined,
+  cleared: new Set(),
+  kill: undefined,
+  killTimer: 0,
+  now: Date.now(),
+  tick: 0,
+  follow: undefined,
+  views: new Map(),
+}
 /**
  * The reminder views' state — DSH's `dsh-client-ui-schedule` (see "Schedules and reminders" below). Declared up here,
  * with the other durable views' state, because the tree's row painter reads it and can run before that section does.
@@ -6108,8 +6228,12 @@ async function showSession(id) {
   updateStatusBar()
   current = id
   paintEmptyState()
+  /** The header's jobs control follows the open session: its rows are re-read now, not after the transcript. */
+  jobsSessionChanged()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
   applySessionAccess(null)
+  /** So does plan mode's chip, re-read on every show so a change missed while away is not lost. */
+  void slashReady.then((commands) => commands?.sessionShown(id))
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
@@ -6139,6 +6263,7 @@ async function showSession(id) {
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
       applySessionAccess(null)
+      jobsSessionChanged()
       paintScheduleHeader()
       return
     }
@@ -6167,6 +6292,16 @@ async function showSession(id) {
      * recorded in the DOM as a visible note so the failure is not silent.
      */
     for (const turn of body.turns ?? []) {
+      /** A command's row is held in place now and drawn by the menu module once it has loaded. */
+      if (turn.kind === 'command') {
+        const holder = document.createElement('div')
+        holder.className = 'turn command hc-command'
+        holder.dataset.kind = 'command'
+        holder.dataset.commandId = String(turn.commandId)
+        log.append(holder)
+        void slashReady.then((commands) => commands?.drawTurn(turn))
+        continue
+      }
       try {
         add(turn.kind, turn.text, false, turn.label, turn)
       } catch (error) {
@@ -6377,6 +6512,11 @@ events.addEventListener('session', (message) => {
     }
   }
   if (current && payload.session !== current) return
+  /** A slash command's row, whichever window ran it (src/commands/menu.js). */
+  if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
+    void slashReady.then((commands) => commands?.draw(event))
+    return
+  }
   /**
    * Usage rides the chunk that ends a round. It is merged into the live value so the dock's numbers move with
    * the running turn, exactly as the reference's do; the turn's end re-reads the durable fold.
@@ -6750,6 +6890,88 @@ const runningSessions = new Set()
 
 const composer = document.getElementById('prompt')
 const field = composer.elements.prompt
+/** A feature's placeholder (window.heddlePage.setPlaceholder): below the steer hint, above the default. */
+let placeholderOverride = null
+
+/**
+ * The slash-command menu (src/commands/menu.js, developer-three, D-057), imported after the page so the composer never
+ * waits for it. Until it has loaded nothing is claimed, so a line typed in that instant is an ordinary message.
+ */
+/**
+ * What the page lends a feature module — one named surface (developer-ten) whose choices are the composer's
+ * (developer-twelve), agreed 2026-10-29: a row appended through the page's own path, so tail-following and session
+ * switches treat it like any other `#log` row, and the three controls a command opens instead of typing — the model
+ * seat, the file picker and the access chip. Ids move when the composer is restyled; this surface does not.
+ */
+window.heddlePage = {
+  addRow(kind, node) {
+    node.classList.add('turn', kind)
+    node.dataset.kind = kind
+    log.append(node)
+    followChatTail()
+  },
+  openModelMenu: () => document.getElementById('model-trigger').click(),
+  openFilePicker: () => document.getElementById('attach-file').click(),
+  openAccessMenu: () => document.getElementById('access').click(),
+  /** One mode chip after the access chip; the same id re-applies, another replaces it, null removes it. */
+  setModeChip(chip) {
+    const current = document.querySelector('#prompt-tools .mode-chip')
+    if (chip === null || chip === undefined) {
+      current?.remove()
+      return
+    }
+    const button = current ?? document.createElement('button')
+    button.type = 'button'
+    button.className = 'mode-chip'
+    button.id = `mode-chip-${chip.id}`
+    button.title = chip.title
+    button.setAttribute('aria-label', chip.ariaLabel)
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    icon.setAttribute('class', 'mode-icon')
+    icon.setAttribute('viewBox', '0 0 16 16')
+    icon.setAttribute('aria-hidden', 'true')
+    icon.innerHTML = '<path d="M3 3.5h10M3 8h10M3 12.5h6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'
+    const label = document.createElement('span')
+    label.textContent = chip.label
+    button.replaceChildren(icon, label)
+    button.onclick = () => chip.onClick()
+    if (current === null) document.getElementById('access').after(button)
+  },
+  /** A placeholder below the steer hint and above the default; null restores the default. */
+  setPlaceholder(text) {
+    placeholderOverride = typeof text === 'string' && text.length > 0 ? text : null
+    renderComposerState()
+  },
+}
+let slashCommands = null
+const slashReady = import('/commands/menu.js')
+  .then((module) => {
+    slashCommands = module.install({
+      field,
+      anchor: document.getElementById('composer-card'),
+      sessionId: () => (composerKey === QUEUE_KEY_NONE ? null : composerKey),
+      ensureSession: async () => {
+        await startNewSession()
+        return composerKey === QUEUE_KEY_NONE ? null : composerKey
+      },
+      sendAsPrompt: (text, attachments = []) => (anyRunning() ? enqueue(text, 'queue', attachments) : void sendNow(text, attachments)),
+      pendingAttachments: () => pendingAttachments.length,
+      takeAttachments: () => takeAttachments(),
+      addRow: (node) => window.heddlePage.addRow('command', node),
+      notice: (text) => add('denied', text),
+      openModelMenu: window.heddlePage.openModelMenu,
+      openFilePicker: window.heddlePage.openFilePicker,
+      openAccessMenu: window.heddlePage.openAccessMenu,
+      setModeChip: window.heddlePage.setModeChip,
+      setPlaceholder: window.heddlePage.setPlaceholder,
+    })
+    if (current !== null) void slashCommands.sessionShown(current)
+    return slashCommands
+  })
+  .catch((error) => {
+    console.warn('the slash-command menu did not load', error)
+    return null
+  })
 const sendButton = document.getElementById('send')
 const stopButton = document.getElementById('stop')
 const attachButton = document.getElementById('attach')
@@ -7044,6 +7266,14 @@ function submitDraft(gesture) {
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
+    return
+  }
+  /** A slash command runs on the host and is never a message; a line it does not claim goes on as one. */
+  if (slashCommands !== null && slashCommands.claims(text)) {
+    field.value = ''
+    growComposer()
+    updateSendDisabled()
+    void slashCommands.submit(text)
     return
   }
   field.value = ''
@@ -7743,7 +7973,7 @@ function renderComposerState() {
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
   field.placeholder = canSteerQueue
     ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : 'Message or run a task, / commands, @ files or sessions'
+    : (placeholderOverride ?? 'Message or run a task, / commands')
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
@@ -10839,6 +11069,20 @@ async function setSessionFlags(node, patch, extra = {}, applied = () => {}) {
     body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
   })
   const body = await response.json().catch(() => ({}))
+  /**
+   * The route refuses an archive while the session still has work the page did not know about — a background job
+   * (DSH's job archive admission lists it). DSH's archive dialog offers to stop that work; the confirm names it, and
+   * agreeing archives with `stop: true`, which kills the jobs with `session archived`.
+   */
+  if (response.status === 409 && body.code === 'active' && patch.archived === true && extra.stop !== true) {
+    const jobs = Array.isArray(body.jobs) ? body.jobs : []
+    const work =
+      jobs.length === 0
+        ? 'a running turn'
+        : `${jobs.length === 1 ? 'a running background job' : `${jobs.length} running background jobs`} (${jobs.map((job) => job.label).join(', ')})`
+    if (!window.confirm(`This session has ${work}. Stop ${jobs.length > 1 ? 'them' : 'it'} and archive the session?`)) return
+    return setSessionFlags(node, patch, { ...extra, stop: true })
+  }
   if (!response.ok) {
     setNote(body.error ?? 'could not change that session')
     return
@@ -12679,6 +12923,648 @@ function downloadSessionLog() {
 document.getElementById('session-more').append(
   menuButton({ label: 'this session' }, [{ label: 'Download session log', glyph: 'download', run: downloadSessionLog }], { label: 'More actions' }),
 )
+
+/**
+ * The session header's **background-jobs control** (row A56): DSH's `JobListAction` from `dsh-client-ui-jobs`, drawn
+ * with this page's DOM instead of React. Every text, order and timing below is DSH's; the line numbers cite
+ * `dsh-client-ui-jobs/lib/client.js`.
+ *
+ * - **Placement** (:627-638): the header's actions at order 20. It renders nothing while the open session sees no job
+ *   (:407).
+ * - **Trigger** (:455-481): the ongoing dot while a job is live, then the count, which is also the aria-label (:408,
+ *   :569-572), and `aria-expanded`.
+ * - **Popover** (:482-518): `ul aria-label="Background jobs"`, a `Running` header, live rows by start time, then the
+ *   `Finished {count}` toggle — folded while any job is live (:338) — and a client-side `Clear` (:409-416). Escape
+ *   closes it and gives the trigger focus back; Tab moves between the trigger and the list (:417-438); a press outside
+ *   closes it (:347).
+ * - **Rows** (:182-310): live rows show the dot, the label, then kind, progress and duration; settled rows show the
+ *   dot, kind, label, detail or status word, and duration. `killed` reads `cancelled` (:583-587).
+ * - **Duration** (:129-143, :349-358): `{s}s`, `{m}m {s}s`, `{h}h {m}m`, titled `Running for` / `Took`; it ticks once a
+ *   second only while the popover is open and a job is live.
+ * - **Live output** (:359-368, :287-308): one expanded row at a time; while it is expanded and the popover open, the
+ *   page polls `GET /api/jobs/follow` from its own next offset, and it stops when the row collapses or the popover
+ *   closes. The follow route never moves the model's cursor, so watching takes nothing from `job_output`.
+ * - **Stop** (:259, :274-286, :375-406): running rows only; the first press arms `Click again to confirm` (visible text
+ *   `Confirm stop`) for 3000 ms, the second posts `/api/jobs/kill`; a refusal shows `Stop failed` for 4000 ms.
+ *
+ * The rows are re-read on the server's `event: jobs` (DSH coalesces its roster frames over 100 ms, and so does this)
+ * and whenever the open session changes.
+ */
+function jobIsLive(job) {
+  return job.status === 'running' || job.status === 'stopping'
+}
+/** A row offers output when its job is live or left retained output behind (:85-87). */
+function jobIsObservable(job) {
+  return jobIsLive(job) || (job.output?.total ?? 0) > 0
+}
+/** Live progress while running, the terminal reason once settled (:89-91). */
+function jobDetail(job) {
+  return job.progress ?? job.detail
+}
+/** The marker's state (:101-111): stopping and killed share the attention colour. */
+function jobDotState(status) {
+  if (status === 'running') return 'ongoing'
+  if (status === 'completed') return 'done'
+  if (status === 'failed') return 'error'
+  return 'warning'
+}
+/** DSH's English status words (:583-587). */
+function jobStatusWord(status) {
+  if (status === 'killed') return 'cancelled'
+  return status === 'running' || status === 'stopping' || status === 'completed' || status === 'failed' ? status : String(status)
+}
+/** At most two adjacent units, hours the widest (:129-143, :588-590). */
+function formatJobDuration(elapsedMs) {
+  const total = Math.max(0, Math.floor(elapsedMs / 1e3))
+  const seconds = total % 60
+  const minutes = Math.floor(total / 60) % 60
+  const hours = Math.floor(total / 3600)
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
+}
+/** Live rows first by start, then settled rows newest first, ties by start (:172-180). */
+function jobsOrdered(jobs) {
+  return [...jobs].sort((left, right) => {
+    const liveLeft = jobIsLive(left)
+    if (liveLeft !== jobIsLive(right)) return liveLeft ? -1 : 1
+    if (liveLeft) return left.startedAt - right.startedAt
+    const finished = (right.finishedAt ?? right.startedAt) - (left.finishedAt ?? left.startedAt)
+    return finished !== 0 ? finished : left.startedAt - right.startedAt
+  })
+}
+/** The trigger's text and name (:408, :569-572). */
+function jobsCountLabel(liveCount, visibleCount) {
+  if (liveCount > 0) return `${liveCount} background ${liveCount === 1 ? 'job' : 'jobs'} running`
+  return `${visibleCount} background ${visibleCount === 1 ? 'job' : 'jobs'}`
+}
+
+function jobsIcon(kind, size = 12) {
+  const ns = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(ns, 'svg')
+  svg.setAttribute('width', String(size))
+  svg.setAttribute('height', String(size))
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('aria-hidden', 'true')
+  if (kind === 'stop') {
+    const square = document.createElementNS(ns, 'rect')
+    for (const [name, value] of [['x', '3'], ['y', '3'], ['width', '10'], ['height', '10'], ['rx', '2'], ['fill', 'currentColor']]) square.setAttribute(name, value)
+    svg.append(square)
+    return svg
+  }
+  svg.setAttribute('class', 'jobs-chevron')
+  for (const [name, value] of [['fill', 'none'], ['stroke', 'currentColor'], ['stroke-width', '1.5'], ['stroke-linecap', 'round'], ['stroke-linejoin', 'round']]) svg.setAttribute(name, value)
+  const path = document.createElementNS(ns, 'path')
+  path.setAttribute('d', 'M4 6.5 8 10.5 12 6.5')
+  svg.append(path)
+  return svg
+}
+
+/** DSH's `StateDot`: the page's own running spinner for `ongoing`, a filled dot in the state's colour otherwise. */
+function jobsDot(state, className) {
+  const mark = document.createElement('span')
+  mark.className = `jobs-dot ${className}`
+  mark.dataset.state = state
+  mark.setAttribute('aria-hidden', 'true')
+  if (state === 'ongoing') mark.append(runningSpinner())
+  else {
+    const fill = document.createElement('span')
+    fill.className = 'jobs-dot-fill'
+    mark.append(fill)
+  }
+  return mark
+}
+
+function jobsSpan(className, text, title) {
+  const span = document.createElement('span')
+  span.className = className
+  if (text !== undefined) span.textContent = text
+  if (title !== undefined) span.title = title
+  return span
+}
+
+/** One observed job's panel state: the text read so far and the client's own next offset. */
+function jobsView(id) {
+  let view = jobsUi.views.get(id)
+  if (view === undefined) {
+    view = { text: '', next: 0, gapBefore: false, error: undefined, settled: false }
+    jobsUi.views.set(id, view)
+  }
+  return view
+}
+
+/** Everything the control holds for one session, put back; the popover closes and any observation stops. */
+function jobsReset(session) {
+  closeJobsMenu(false)
+  jobsStopFollow()
+  jobsSetKill(undefined, false)
+  jobsUi.session = session
+  jobsUi.rows = []
+  jobsUi.expandedKey = undefined
+  jobsUi.settledOpen = undefined
+  jobsUi.cleared = new Set()
+  jobsUi.views = new Map()
+}
+
+/** Called by `showSession`: another session's rows must not stay on screen while this one's are read. */
+function jobsSessionChanged() {
+  if (jobsUi.session !== current) {
+    jobsReset(current)
+    renderJobs()
+  }
+  void refreshJobs()
+}
+
+/** The roster is re-read once per burst of `jobs` events, 100 ms after the first (DSH's coalescing). */
+function scheduleJobsRefresh() {
+  if (jobsUi.refreshTimer !== null) return
+  jobsUi.refreshTimer = setTimeout(() => {
+    jobsUi.refreshTimer = null
+    void refreshJobs()
+  }, 100)
+}
+
+async function refreshJobs() {
+  const session = current
+  const generation = ++jobsUi.generation
+  if (session !== jobsUi.session) jobsReset(session)
+  if (session === null) {
+    renderJobs()
+    return
+  }
+  let rows = null
+  try {
+    const response = await fetch('/api/jobs?session=' + encodeURIComponent(session))
+    const body = await response.json().catch(() => ({}))
+    /** A profile without the jobs row answers 503: that session has no jobs to show. */
+    rows = response.ok && Array.isArray(body.jobs) ? body.jobs : []
+  } catch {
+    /** A dropped request keeps what is shown; the next event or session change reads again. */
+    rows = null
+  }
+  if (generation !== jobsUi.generation || session !== current || session !== jobsUi.session) return
+  if (rows !== null) jobsUi.rows = rows
+  renderJobs()
+}
+
+function renderJobs() {
+  const host = document.getElementById('session-jobs')
+  if (host === null) return
+  const rows = jobsOrdered(jobsUi.rows)
+  const live = rows.filter(jobIsLive)
+  const settled = rows.filter((job) => !jobIsLive(job) && !jobsUi.cleared.has(job.id))
+  const visible = live.length + settled.length
+  /** A row that is gone is no longer expanded (:372-374); a stop phase whose job stopped running ends (:384-386). */
+  if (jobsUi.expandedKey !== undefined && !rows.some((job) => job.id === jobsUi.expandedKey)) jobsUi.expandedKey = undefined
+  if (jobsUi.kill !== undefined && !rows.some((job) => job.id === jobsUi.kill.key && job.status === 'running')) jobsSetKill(undefined, false)
+  if (visible === 0) {
+    /** Nothing to show is no control at all, and an open popover closes with it (:369-371, :407). */
+    if (jobsUi.open) closeJobsMenu(false)
+    host.hidden = true
+    host.replaceChildren()
+    jobsSyncFollow()
+    jobsSyncTick()
+    return
+  }
+  host.hidden = false
+  let trigger = document.getElementById('jobs-trigger')
+  if (trigger === null) {
+    trigger = document.createElement('button')
+    trigger.type = 'button'
+    trigger.id = 'jobs-trigger'
+    trigger.className = 'jobs-trigger'
+    trigger.addEventListener('click', () => {
+      jobsUi.now = Date.now()
+      if (jobsUi.open) closeJobsMenu(false)
+      else {
+        jobsUi.open = true
+        renderJobs()
+      }
+    })
+    host.replaceChildren(trigger)
+  }
+  const label = jobsCountLabel(live.length, visible)
+  trigger.setAttribute('aria-expanded', String(jobsUi.open))
+  trigger.setAttribute('aria-label', label)
+  const face = `${live.length > 0 ? 'live' : 'idle'}:${label}`
+  if (trigger.dataset.face !== face) {
+    trigger.dataset.face = face
+    trigger.replaceChildren(...(live.length > 0 ? [jobsDot('ongoing', 'jobs-trigger-dot')] : []), jobsSpan('jobs-count', label), jobsIcon('chevron'))
+  }
+  if (jobsUi.open) renderJobsMenu(live, settled)
+  jobsSyncFollow()
+  jobsSyncTick()
+}
+
+function renderJobsMenu(live, settled) {
+  let menu = document.getElementById('jobs-menu')
+  if (menu === null) {
+    menu = document.createElement('div')
+    menu.id = 'jobs-menu'
+    menu.className = 'jobs-menu'
+    /** Unplaced: laid out but hidden, so the first placement measures real dimensions (:66-71). */
+    menu.style.visibility = 'hidden'
+    menu.style.left = '0px'
+    menu.style.top = '0px'
+    menu.addEventListener('keydown', onJobsKeyDown)
+    document.body.append(menu)
+  }
+  const active = document.activeElement
+  const focusKey = active instanceof HTMLElement && menu.contains(active) ? (active.dataset.jobsFocus ?? '') : undefined
+  const oldList = menu.querySelector('#jobs-list')
+  const listScroll = oldList === null ? 0 : oldList.scrollTop
+  const oldOutput = menu.querySelector('.jobs-term-output')
+  const outputScroll = oldOutput === null ? null : { top: oldOutput.scrollTop, stick: oldOutput.scrollHeight - oldOutput.scrollTop - oldOutput.clientHeight <= 24 }
+
+  const list = document.createElement('ul')
+  list.id = 'jobs-list'
+  list.className = 'jobs-menu-body'
+  list.setAttribute('aria-label', 'Background jobs')
+  const settledExpanded = jobsUi.settledOpen ?? live.length === 0
+  if (live.length > 0) {
+    const item = document.createElement('li')
+    item.className = 'jobs-section'
+    item.dataset.section = 'live'
+    item.setAttribute('aria-hidden', 'true')
+    item.textContent = 'Running'
+    list.append(item)
+  }
+  for (const job of live) list.append(jobsItem(job))
+  if (settled.length > 0) {
+    const item = document.createElement('li')
+    item.className = 'jobs-section'
+    item.dataset.section = 'settled'
+    const toggle = document.createElement('button')
+    toggle.type = 'button'
+    toggle.className = 'jobs-section-toggle'
+    toggle.dataset.jobsFocus = 'settled-toggle'
+    toggle.setAttribute('aria-expanded', String(settledExpanded))
+    toggle.append(jobsIcon('chevron'), `Finished ${settled.length}`)
+    toggle.addEventListener('click', () => {
+      jobsUi.settledOpen = !settledExpanded
+      renderJobs()
+    })
+    const clear = document.createElement('button')
+    clear.type = 'button'
+    clear.className = 'jobs-section-clear'
+    clear.dataset.jobsFocus = 'clear'
+    clear.textContent = 'Clear'
+    clear.addEventListener('click', () => {
+      for (const job of settled) jobsUi.cleared.add(job.id)
+      if (jobsUi.expandedKey !== undefined && settled.some((job) => job.id === jobsUi.expandedKey)) jobsUi.expandedKey = undefined
+      renderJobs()
+    })
+    item.append(toggle, clear)
+    list.append(item)
+    if (settledExpanded) for (const job of settled) list.append(jobsItem(job))
+  }
+  menu.replaceChildren(list)
+  list.scrollTop = listScroll
+  const output = menu.querySelector('.jobs-term-output')
+  if (output !== null && outputScroll !== null) output.scrollTop = outputScroll.stick ? output.scrollHeight : outputScroll.top
+  else if (output !== null) output.scrollTop = output.scrollHeight
+  /** Redrawing replaces the buttons, so keyboard focus goes back to the same control, or to the trigger once it is gone. */
+  if (focusKey !== undefined) {
+    const again = focusKey === '' ? null : menu.querySelector(`[data-jobs-focus="${CSS.escape(focusKey)}"]`)
+    if (again instanceof HTMLElement && !again.matches(':disabled')) again.focus({ preventScroll: true })
+    else document.getElementById('jobs-trigger')?.focus({ preventScroll: true })
+  }
+  jobsPlaceMenu()
+}
+
+/** One row plus, when it is expanded, its live output panel (:182-310). */
+function jobsItem(job) {
+  const live = jobIsLive(job)
+  const status = jobStatusWord(job.status)
+  const detail = jobDetail(job)
+  const observable = jobIsObservable(job)
+  const expanded = jobsUi.expandedKey === job.id
+  const item = document.createElement('li')
+  item.className = 'jobs-item'
+  item.dataset.jobId = job.id
+  item.dataset.jobStatus = job.status
+  const line = document.createElement('div')
+  line.className = 'jobs-row-line'
+  if (live) line.dataset.live = ''
+  const duration = jobsSpan('jobs-duration')
+  duration.dataset.jobDuration = job.id
+  jobsPaintDuration(duration, job)
+  const chevron = () => {
+    const box = jobsSpan('jobs-chevron-box')
+    box.append(jobsIcon('chevron'))
+    return box
+  }
+  const body = []
+  body.push(jobsDot(jobDotState(job.status), 'jobs-row-dot'))
+  if (live) {
+    const main = jobsSpan('jobs-main')
+    const primary = jobsSpan('jobs-primary')
+    primary.append(jobsSpan('jobs-label', job.label, job.label))
+    const secondary = jobsSpan('jobs-secondary', undefined, detail ?? status)
+    secondary.append(jobsSpan('jobs-kind', job.kind))
+    if (detail !== undefined) secondary.append(jobsSpan('jobs-status', detail))
+    secondary.append(duration)
+    main.append(primary, secondary)
+    body.push(main, chevron())
+  } else {
+    body.push(jobsSpan('jobs-kind', job.kind), jobsSpan('jobs-label', job.label, job.label), jobsSpan('jobs-status', detail ?? status, detail ?? status), duration)
+    if (observable) body.push(chevron())
+  }
+  let row
+  if (observable) {
+    row = document.createElement('button')
+    row.type = 'button'
+    row.dataset.jobsFocus = `row:${job.id}`
+    row.setAttribute('aria-expanded', String(expanded))
+    row.setAttribute('aria-label', `${expanded ? 'Hide' : 'Show'} live output of ${job.label}`)
+    row.addEventListener('click', () => {
+      jobsUi.expandedKey = jobsUi.expandedKey === job.id ? undefined : job.id
+      renderJobs()
+    })
+  } else {
+    row = document.createElement('span')
+    row.dataset.static = ''
+  }
+  row.classList.add('jobs-row')
+  if (!live) row.dataset.settled = ''
+  row.append(...body)
+  line.append(row)
+  if (job.status === 'running') {
+    const state = jobsUi.kill?.key === job.id ? jobsUi.kill.state : 'idle'
+    const title = state === 'armed' ? 'Click again to confirm' : state === 'failed' ? 'Stop failed' : `Stop task ${job.label}`
+    const stop = document.createElement('button')
+    stop.type = 'button'
+    stop.className = 'jobs-stop'
+    stop.dataset.jobsFocus = `stop:${job.id}`
+    stop.dataset.killState = state
+    stop.disabled = state === 'pending'
+    stop.setAttribute('aria-label', title)
+    stop.title = title
+    stop.append(jobsIcon('stop', 10))
+    if (state === 'armed') stop.append(jobsSpan('jobs-stop-label', 'Confirm stop'))
+    stop.addEventListener('click', () => jobsPressKill(job))
+    line.append(stop)
+  }
+  item.append(line)
+  if (expanded && observable) {
+    const panel = document.createElement('div')
+    panel.className = 'jobs-panel'
+    panel.dataset.jobPanel = job.id
+    const view = jobsView(job.id)
+    const terminal = document.createElement('div')
+    terminal.className = 'jobs-term'
+    terminal.dataset.terminal = ''
+    if (live) terminal.dataset.running = ''
+    const command = jobsSpan('jobs-term-command')
+    command.append(jobsSpan('jobs-term-prompt', '$'), jobsSpan('jobs-term-text', job.label))
+    const output = document.createElement('pre')
+    output.className = 'jobs-term-output'
+    if (view.text.length === 0) {
+      output.dataset.empty = ''
+      output.textContent = '(no output)'
+    } else output.textContent = view.text
+    terminal.append(command, output)
+    panel.append(terminal)
+    jobsPaintNotices(panel, view)
+    item.append(panel)
+  }
+  return item
+}
+
+function jobsPaintDuration(cell, job) {
+  const live = jobIsLive(job)
+  const text = formatJobDuration(live ? jobsUi.now - job.startedAt : (job.finishedAt ?? job.startedAt) - job.startedAt)
+  cell.textContent = text
+  cell.title = `${live ? 'Running for' : 'Took'} ${text}`
+}
+
+function jobsPaintDurations() {
+  for (const cell of document.querySelectorAll('#jobs-menu [data-job-duration]')) {
+    const job = jobsUi.rows.find((row) => row.id === cell.dataset.jobDuration)
+    if (job !== undefined) jobsPaintDuration(cell, job)
+  }
+}
+
+/** The clock runs once a second only while the popover is open and a job is live (:349-358). */
+function jobsSyncTick() {
+  const want = jobsUi.open && jobsUi.rows.some(jobIsLive)
+  if (want && jobsUi.tick === 0) {
+    jobsUi.now = Date.now()
+    jobsPaintDurations()
+    jobsUi.tick = setInterval(() => {
+      jobsUi.now = Date.now()
+      jobsPaintDurations()
+    }, 1e3)
+  } else if (!want && jobsUi.tick !== 0) {
+    clearInterval(jobsUi.tick)
+    jobsUi.tick = 0
+  }
+}
+
+/** The gap and interruption notices above the terminal (:290-297, :593-594). */
+function jobsPaintNotices(panel, view) {
+  for (const notice of panel.querySelectorAll(':scope > .jobs-notice')) notice.remove()
+  const notice = (kind, text) => {
+    const line = document.createElement('div')
+    line.className = 'jobs-notice'
+    line.dataset.notice = kind
+    if (kind === 'error') line.dataset.error = ''
+    line.textContent = text
+    return line
+  }
+  const notices = []
+  if (view.gapBefore) notices.push(notice('gap', '… earlier output dropped …'))
+  if (view.error !== undefined) notices.push(notice('error', `live output stream interrupted: ${view.error}`))
+  panel.prepend(...notices)
+}
+
+/** Observe the one expanded row while the popover is open; anything else stops the observation (:359-368). */
+function jobsSyncFollow() {
+  const key = jobsUi.open ? jobsUi.expandedKey : undefined
+  const job = key === undefined ? undefined : jobsUi.rows.find((row) => row.id === key)
+  const active = job !== undefined && jobIsObservable(job) ? job.id : undefined
+  const follow = jobsUi.follow
+  if (follow !== undefined && follow.job === active && follow.session === jobsUi.session) return
+  jobsStopFollow()
+  if (active === undefined || jobsUi.session === null) return
+  const next = { session: jobsUi.session, job: active, timer: 0 }
+  jobsUi.follow = next
+  void jobsPoll(next)
+}
+
+function jobsStopFollow() {
+  if (jobsUi.follow !== undefined) clearTimeout(jobsUi.follow.timer)
+  jobsUi.follow = undefined
+}
+
+/**
+ * One read of `GET /api/jobs/follow` from the client's own offset, then the next one shortly after. A settled job
+ * whose every byte was answered ends the polling; an error is shown as DSH's interruption notice and retried slower.
+ */
+async function jobsPoll(follow) {
+  if (jobsUi.follow !== follow) return
+  const view = jobsView(follow.job)
+  let delay = JOBS_FOLLOW_MS
+  try {
+    const response = await fetch(`/api/jobs/follow?session=${encodeURIComponent(follow.session)}&job=${encodeURIComponent(follow.job)}&from=${view.next}`)
+    const body = await response.json().catch(() => ({}))
+    if (jobsUi.follow !== follow) return
+    if (!response.ok) throw new Error(typeof body.message === 'string' ? body.message : typeof body.error === 'string' ? body.error : `HTTP ${response.status}`)
+    let delta = ''
+    let gap = body.lossy === true
+    for (const chunk of Array.isArray(body.chunks) ? body.chunks : []) {
+      if (chunk.gapBefore === true) gap = true
+      delta += String(chunk.text ?? '')
+    }
+    const recovered = view.error !== undefined
+    view.error = undefined
+    if (Number.isFinite(body.next)) view.next = body.next
+    jobsApplyOutput(follow.job, view, delta, gap, recovered)
+    if (body.settled === true) {
+      view.settled = true
+      return
+    }
+  } catch (error) {
+    if (jobsUi.follow !== follow) return
+    view.error = error instanceof Error ? error.message : String(error)
+    jobsApplyOutput(follow.job, view, '', false, true)
+    delay = JOBS_FOLLOW_MS * 5
+  }
+  if (jobsUi.follow === follow) follow.timer = setTimeout(() => void jobsPoll(follow), delay)
+}
+
+/** New output lands in the open panel in place, following the tail unless the reader scrolled up. */
+function jobsApplyOutput(id, view, delta, gap, noticesChanged) {
+  let changed = noticesChanged
+  let repaint = false
+  if (gap && !view.gapBefore) {
+    view.gapBefore = true
+    changed = true
+  }
+  if (delta.length > 0) {
+    view.text += delta
+    if (view.text.length > JOBS_VIEW_MAX_CHARS) {
+      view.text = view.text.slice(-JOBS_VIEW_MAX_CHARS)
+      if (!view.gapBefore) changed = true
+      view.gapBefore = true
+      repaint = true
+    }
+  }
+  const panel = document.querySelector(`#jobs-menu [data-job-panel="${CSS.escape(id)}"]`)
+  if (panel === null) return
+  if (changed) jobsPaintNotices(panel, view)
+  const output = panel.querySelector('.jobs-term-output')
+  if (output === null || (delta.length === 0 && !repaint)) return
+  const stick = output.scrollHeight - output.scrollTop - output.clientHeight <= 24
+  if (repaint || output.hasAttribute('data-empty')) {
+    output.removeAttribute('data-empty')
+    output.textContent = view.text
+  } else output.append(delta)
+  if (stick) output.scrollTop = output.scrollHeight
+}
+
+/** Anchored 5px under the control and kept 12px inside the viewport (:62-65, :340-346). */
+function jobsPlaceMenu() {
+  const menu = document.getElementById('jobs-menu')
+  const host = document.getElementById('session-jobs')
+  if (menu === null || host === null) return
+  const anchor = host.getBoundingClientRect()
+  const margin = 12
+  const gap = 5
+  const left = Math.max(margin, Math.min(anchor.left, window.innerWidth - margin - menu.offsetWidth))
+  let top = anchor.bottom + gap
+  if (top + menu.offsetHeight > window.innerHeight - margin && anchor.top - gap - menu.offsetHeight >= margin) top = anchor.top - gap - menu.offsetHeight
+  menu.style.left = `${Math.round(left)}px`
+  menu.style.top = `${Math.round(top)}px`
+  menu.style.visibility = ''
+}
+
+function closeJobsMenu(refocus) {
+  jobsUi.open = false
+  document.getElementById('jobs-menu')?.remove()
+  const trigger = document.getElementById('jobs-trigger')
+  trigger?.setAttribute('aria-expanded', 'false')
+  jobsSyncFollow()
+  jobsSyncTick()
+  if (refocus) trigger?.focus()
+}
+
+/** Escape closes and refocuses the trigger; Tab crosses between the trigger and the portalled list (:417-438). */
+function onJobsKeyDown(event) {
+  if (!jobsUi.open) return
+  const trigger = document.getElementById('jobs-trigger')
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeJobsMenu(true)
+    return
+  }
+  const menu = document.getElementById('jobs-menu')
+  if (event.key !== 'Tab' || trigger === null || menu === null) return
+  const focusable = [...menu.querySelectorAll('button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])')]
+  if (event.target === trigger) {
+    if (event.shiftKey) return
+    event.preventDefault()
+    focusable[0]?.focus()
+  } else if (event.shiftKey ? event.target === focusable[0] : event.target === focusable.at(-1)) {
+    if (event.shiftKey) event.preventDefault()
+    trigger.focus()
+  }
+}
+
+/** The stop phase, with DSH's timers: armed for 3000 ms, failed for 4000 ms, pending until the row stops running. */
+function jobsSetKill(phase, render = true) {
+  clearTimeout(jobsUi.killTimer)
+  jobsUi.killTimer = 0
+  jobsUi.kill = phase
+  if (phase !== undefined && phase.state !== 'pending') {
+    jobsUi.killTimer = setTimeout(() => {
+      jobsUi.killTimer = 0
+      jobsUi.kill = undefined
+      renderJobs()
+    }, phase.state === 'armed' ? JOBS_KILL_ARM_MS : JOBS_KILL_FAILED_MS)
+  }
+  if (render) renderJobs()
+}
+
+/** The first press arms, the second within the window kills (:387-406). */
+function jobsPressKill(job) {
+  const key = job.id
+  if (jobsUi.kill?.key !== key || jobsUi.kill.state !== 'armed') {
+    jobsSetKill({ key, state: 'armed' })
+    return
+  }
+  jobsSetKill({ key, state: 'pending' })
+  const session = jobsUi.session
+  void (async () => {
+    let ok = false
+    try {
+      const response = await fetch('/api/jobs/kill', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session, job: key }),
+      })
+      ok = response.ok
+    } catch {
+      ok = false
+    }
+    if (jobsUi.session !== session) return
+    if (!ok && jobsUi.kill?.key === key) jobsSetKill({ key, state: 'failed' })
+    else if (ok) scheduleJobsRefresh()
+  })()
+}
+
+document.getElementById('session-jobs')?.addEventListener('keydown', onJobsKeyDown)
+document.addEventListener('pointerdown', (event) => {
+  if (!jobsUi.open || !(event.target instanceof Node)) return
+  if (document.getElementById('session-jobs')?.contains(event.target) || document.getElementById('jobs-menu')?.contains(event.target)) return
+  closeJobsMenu(false)
+})
+window.addEventListener('resize', () => {
+  if (jobsUi.open) jobsPlaceMenu()
+})
+/** Every job lifecycle change arrives as `event: jobs`; a reconnected stream re-reads in case one was missed. */
+events.addEventListener('jobs', scheduleJobsRefresh)
+events.addEventListener('ready', scheduleJobsRefresh)
 paintViewOptions()
 /**
  * The three workspace acts, DSH's way: Add workspace, Rename, Delete workspace — each a dialog of the page's own.
