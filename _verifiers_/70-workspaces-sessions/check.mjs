@@ -733,6 +733,67 @@ test('a file under a root reads, and what cannot be shown is refused with a reas
   }
 })
 
+test('a file the 256 KiB cap cuts inside a character previews its whole characters, a literal U+FFFD is text, and only bytes that are not UTF-8 are refused', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * Issue #78 (found by developer-two in both builds): the reader decoded the first 256 KiB lossily and refused any text
+   * holding U+FFFD, so the preview answered 415 "is not UTF-8 text" for a valid file whose character the cap cut, and for
+   * a valid file holding a literal U+FFFD. DSH decodes strictly and across chunk boundaries (dsh-fs-local
+   * lib/index.js:451-470 with TextDecoder fatal at :454 and stream decoding at :342), refusing only content that is not
+   * decodable UTF-8. Judged through both surfaces that call the reader: the preview route and the command line.
+   */
+  const h = harness('file-utf8-prefix')
+  const CAP = 256 * 1024
+  const notUtf8 = 'is not UTF-8 text, so it has no text to show'
+  let live
+  try {
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its root\n${added.stdout}${added.stderr}`)
+    /** name, content, and the whole characters the preview keeps (undefined for a refusal). */
+    const cases = [
+      ['aligned.txt', `${'a'.repeat(CAP - 3)}中tail\n`, `${'a'.repeat(CAP - 3)}中`],
+      ['accent-cut.txt', `${'a'.repeat(CAP - 1)}étail\n`, 'a'.repeat(CAP - 1)],
+      ['wide-cut.txt', `${'a'.repeat(CAP - 1)}中tail\n`, 'a'.repeat(CAP - 1)],
+      ['emoji-cut.txt', `${'a'.repeat(CAP - 2)}😀tail\n`, 'a'.repeat(CAP - 2)],
+      ['replacement.txt', 'a literal \uFFFD is a character\n', 'a literal \uFFFD is a character\n'],
+      ['invalid.txt', Buffer.from([...Buffer.from('valid, then '), 0xff, ...Buffer.from(' is not\n')]), undefined],
+    ]
+    for (const [name, content] of cases) entry(join(h.work, name), content)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    for (const [name, content, kept] of cases) {
+      const path = join(h.work, name)
+      const size = Buffer.byteLength(content)
+      const response = await fetch(new URL(`/api/file?path=${encodeURIComponent(path)}`, live.url), { headers: { cookie } })
+      const body = await response.json()
+      const cli = await runCli(adminArgs(h, ['file', path, '--json']), { env: h.env, cwd: h.work })
+      if (kept === undefined) {
+        assert.equal(response.status, 415, `${name}: bytes that are not UTF-8 are refused (HTTP ${response.status})`)
+        assert.ok(String(body.error).endsWith(`${realpathSync(path)} ${notUtf8}`), `${name}: with the reader's sentence\nsaw: ${body.error}`)
+        assert.notEqual(cli.code, 0, `${name}: and refused on the command line`)
+        assert.ok(cli.stderr.includes(notUtf8), `${name}: with the same sentence\nsaw: ${cli.stderr.slice(0, 300)}`)
+        continue
+      }
+      const expected = { text: kept, truncated: size > CAP, bytes: size, kept: Buffer.byteLength(kept) }
+      const seen = (reading) => ({ text: reading.text, truncated: reading.truncated, bytes: reading.bytes, kept: Buffer.byteLength(String(reading.text)) })
+      assert.equal(response.status, 200, `${name}: the preview answers (HTTP ${response.status}: ${String(body.error ?? '').slice(0, 200)})`)
+      assert.deepEqual(seen(body), expected, `${name}: the preview is the whole characters before the cap, and says when it is truncated`)
+      assert.equal(cli.code, 0, `${name}: the command line reads it\n${cli.stderr.slice(0, 300)}`)
+      assert.deepEqual(seen(parseJson(cli.stdout)), expected, `${name}: and gives the same reading`)
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a type folder is a type, and its badge names it without the underscores', async (context) => {
   if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
