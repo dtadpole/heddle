@@ -1777,6 +1777,83 @@ test('the Web API adds, renames and deletes a workspace the way DSH does', async
   }
 })
 
+test('a session title is cleaned as DSH cleans it, at creation and on rename, and one with nothing visible is refused', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH cleans an accepted title (dsh-session-title normalizeSessionTitle, lib/index.js:10-54): escape sequences,
+   * non-whitespace controls and directional or invisible characters removed, whitespace collapsed to one line, at most
+   * maxTitleBytes UTF-8 bytes on a code point, 80 in its shipped profile (dsh-base cordis.patch.yml:60-65); a title with
+   * nothing visible left is refused, session/title-invalid (dsh-api-session-controller lib/index.js:827-840). Measured
+   * on both builds before this check (live-testing draft developer-six-1): every title was stored as sent, and three
+   * spaces cleared the title with a 200.
+   */
+  const h = harness('title-clean')
+  let live
+  try {
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (path, body) => {
+      const response = await fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const text = await response.text()
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        parsed = text
+      }
+      return { status: response.status, body: parsed }
+    }
+    const stored = async (id) => {
+      const response = await fetch(`${origin}/api/sessions`, { headers: { cookie } })
+      return (await response.json()).find((meta) => meta.id === id)?.title
+    }
+
+    const made = await post('/api/sessions', { branch: h.work, title: 'made\u001b[31m red\u001b[0m\n\there \u202e' })
+    assert.equal(made.status, 200, `a session is created with a title (${JSON.stringify(made.body)})`)
+    const id = made.body.session
+    assert.equal(await stored(id), 'made red here', 'and the title is stored cleaned')
+
+    for (const [what, sent, kept] of [
+      ['300 ASCII letters', 'a'.repeat(300), 'a'.repeat(80)],
+      ['60 CJK characters', '\u5b57'.repeat(60), '\u5b57'.repeat(26)],
+      ['an ANSI colour sequence', 'a\u001b[31mred\u001b[0m b', 'ared b'],
+      ['a newline and a tab', 'line1\n\tline2', 'line1 line2'],
+      ['a right-to-left override', 'abc\u202edcba', 'abcdcba'],
+      ['a zero-width space', 'zero\u200bwidth', 'zerowidth'],
+      ['NUL and BEL', 'nul\u0000ctl\u0007x', 'nulctlx'],
+    ]) {
+      const renamed = await post(`/api/sessions/${id}/title`, { title: sent })
+      assert.equal(renamed.status, 200, `${what}: the rename is accepted`)
+      assert.equal(renamed.body.title, kept, `${what}: the answer carries the cleaned title`)
+      assert.equal(await stored(id), kept, `${what}: and the store holds it`)
+    }
+
+    for (const [what, sent] of [
+      ['three spaces', '   '],
+      ['only invisible and control characters', '\u200b\u0007\u202e'],
+    ]) {
+      const refused = await post(`/api/sessions/${id}/title`, { title: sent })
+      assert.equal(refused.status, 400, `${what}: refused rather than clearing the title (${JSON.stringify(refused.body)})`)
+      assert.equal(refused.body.code, 'session/title-invalid', `${what}: with DSH's code`)
+      assert.equal(refused.body.error, 'session title must contain visible characters', `${what}: and DSH's sentence`)
+      assert.equal(await stored(id), 'nulctlx', `${what}: and the title is left as it was`)
+    }
+    const unknown = await post('/api/sessions/session-00000000-0000-0000-0000-000000000000/title', { title: '   ' })
+    assert.equal(unknown.status, 404, 'an unknown session is still not found first')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
