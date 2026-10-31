@@ -433,6 +433,34 @@ pub trait SandboxService: Send + Sync {
         requested: Option<&Value>,
         confirm: Option<&Value>,
     ) -> Result<String, String>;
+
+    /// The folder a session's calls run in (`rootFor`): the session's folder, or the configured root when the
+    /// operator named one or the session has none. A page terminal starts here (#85).
+    fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        match folder {
+            Some(folder) if !folder.as_os_str().is_empty() => folder.to_path_buf(),
+            _ => PathBuf::from(self.workspace_root()),
+        }
+    }
+
+    /// Wrap `argv` under `mode`, rooted at `root`, the way a bash call is wrapped (#85: a page terminal is
+    /// confined like bash). `Err` carries the sandbox's sentence when this host cannot confine the mode. The
+    /// default confines nothing, so it refuses every mode but `danger-full-access`: it fails closed.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let _ = root;
+        if mode == "danger-full-access" {
+            Ok(argv.to_vec())
+        } else {
+            Err(format!(
+                "sandbox mode \"{mode}\" is requested but this server's sandbox cannot confine a terminal; refusing to run it unconfined"
+            ))
+        }
+    }
 }
 
 /// How a person answered an approval question.

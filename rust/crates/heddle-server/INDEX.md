@@ -114,6 +114,7 @@ to confirm or move a row.
 | `GET /api/sessions/{id}?view=ledger` | heddle-web-trajectory | as a `SessionView` |
 | `GET /api/sessions/{id}/log` | heddle-web-trajectory | the decoded log download |
 | `POST /api/sessions/{id}/fork`, `/flags`, `/title`, `/permission`, `/steer`, `/stop` | heddle-server | |
+| `GET`/`POST /api/sessions/{id}/terminals`, `DELETE …/{terminal}`, `GET …/stream`, `POST …/input`, `…/resize` | heddle-server | #85 slice 1 (`terminals.rs`) |
 | `POST /api/sessions/{id}/model` | heddle-web-composer | the model switcher |
 | `POST /api/folders/session`, `POST /api/turn` | heddle-server | the turn streams its own session's events, runs to its end if its reader goes away, stops running when it returns, and sends its terminal frame when it ends, without waiting for the `/api/events` readers, as web.ts does |
 | `GET /api/tree`, `GET`/`POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}`, `POST /api/workspaces/insertBefore` | heddle-server | over `WorkspaceService`; `GET /api/workspaces` is `views` (each workspace's parent and sessions, for the page's workspace tree); `insertBefore` moves a workspace in the stored order (DSH's `workspace/insertBefore`) |
