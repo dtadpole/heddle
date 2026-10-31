@@ -130,7 +130,7 @@ test('Mod+Alt+O adds a workspace, with the key value a Mac delivers', () => {
   /** DSH's Web default for `workspace.add` (`dsh-client-ui-workspace`); the page had no chord for it (S35). */
   assert.equal(shortcutFor(keydown({ code: 'KeyO', key: 'ø', metaKey: true, altKey: true }), mac), 'add-workspace')
   assert.equal(shortcutFor(keydown({ code: 'KeyO', key: 'o', ctrlKey: true, altKey: true }), elsewhere), 'add-workspace')
-  assert.match(page, /if \(action === 'add-workspace'\) \{\n\s+void openWorkspacePicker\(\)/, 'the chord opens the picker')
+  assert.match(page, /if \(action === 'add-workspace'\) \{\n\s+if \(!workspacePicker\.open\) void openWorkspacePicker\(\)/, 'the chord opens the picker')
 })
 
 test('two Escape presses within 500 ms stop the running turn, as DSH does', () => {
@@ -169,7 +169,7 @@ test('Mod+/ opens DSH\'s keyboard reference: every command in product order, the
     return page.slice(at, end)
   }
   const source = pieces.map(take).join('\n')
-  const rows = runInNewContext(`const SHORTCUTS_ON_MAC = true\n${source}\n({ all: shortcutReferenceRows('', true), byKey: shortcutReferenceRows('⌥⌘g', true), byAlias: shortcutReferenceRows('prefs', true), other: shortcutReferenceRows('', false) })`) as Record<string, Array<{ label: string; keys: string; fixed: boolean; group: string }>>
+  const rows = runInNewContext(`const SHORTCUTS_ON_MAC = true\n${source}\n({ all: shortcutReferenceRows('', true), byKey: shortcutReferenceRows('⌥⌘g', true), byAlias: shortcutReferenceRows('prefs', true), other: shortcutReferenceRows('', false) })`) as Record<'all' | 'byKey' | 'byAlias' | 'other', Array<{ label: string; keys: string; fixed: boolean; group: string }>>
   const plain = JSON.parse(JSON.stringify(rows)) as typeof rows
   assert.deepEqual(plain.all.filter((row) => !row.fixed).map((row) => row.label), ['New session', 'Search sessions', 'Add workspace', 'Rename session', 'Fork session', 'Archive session', 'Toggle sidebar', 'Open settings', 'Keyboard shortcuts'])
   assert.equal(plain.all.find((row) => row.label === 'New session')?.keys, '⌥⌘N')

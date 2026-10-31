@@ -325,7 +325,14 @@ test('the session shortcuts fire on the physical key, with the key values the br
       /** The page's own view of the turn decides whether Enter queues, so wait until its Stop button is up. */
       await browser.waitFor(`!document.getElementById('stop').hidden`, 8000)
       await settle(200)
-      const queued = () => browser.evaluate(`Number((/^(\\d+) queued/.exec(document.querySelector('#queue .panel button')?.textContent ?? '') ?? [0, 0])[1])`)
+      /** The dock draws one waiting message as its row and folds two or more behind an `N queued messages` header. */
+      const queued = () =>
+        browser.evaluate(`(() => {
+          const dock = document.getElementById('queue')
+          if (dock === null || dock.hidden) return 0
+          const header = /^(\\d+) queued/.exec(dock.querySelector('.panel .header')?.textContent ?? '')
+          return header !== null ? Number(header[1]) : dock.querySelectorAll('.panel .list > li.row').length
+        })()`)
       await browser.evaluate(`(() => {
         const field = document.querySelector('#prompt textarea')
         field.focus()
