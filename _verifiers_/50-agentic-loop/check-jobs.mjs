@@ -29,6 +29,9 @@ import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, readTr
  * 9. **A50, promoted** a foreground `bash` that outlives its `timeoutMs` is not killed: it answers the output so far
  *    and `[still running after <ms>ms; moved to background job <id>]` with DSH's hand-off, and the job goes on, so a
  *    later `job_output` reads the rest (DSH's `promoteOnTimeout`, default true while a job registry is loaded).
+ * 10. **Lifetime** archiving a session with a live job is refused as active and names the job; archiving it with
+ *    `stop: true` kills the job with `session archived`, and no completion notice wakes a turn in the archived
+ *    session (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`).
  *
  * It is gated on the Web command alone, never on the jobs capability, so a build without background jobs fails
  * here rather than skipping. Every model step comes from the offline scripted endpoint. The script is re-read on
@@ -446,6 +449,36 @@ test('A50 promoted: a foreground bash that outlives its wall time moves to a bac
     mark = events(server, session).length
     await turn(server, session, folder, [{ toolCall: { name: 'job_output', arguments: { job_id: id, wait: true, timeout_ms: 10_000 } } }, { text: 'read it' }])
     assert.equal(toolTexts(server, session, mark)[0], 'late\n[status: completed, exit code: 0]', 'the command went on, and job_output reads after what the call answered')
+  } finally {
+    await server.close()
+  }
+})
+
+test('archive: a live job blocks the archive and is listed; stop: true archives, kills it with "session archived", and wakes nothing', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('archive')
+  try {
+    const folder = join(server.work, 'archive')
+    const session = await openSession(server, folder)
+    const mark = events(server, session).length
+    await turn(server, session, folder, [backgroundBash('sleep 30'), { text: 'started' }])
+    const id = startedId(toolTexts(server, session, mark)[0])
+    const flags = `/api/sessions/${encodeURIComponent(session)}/flags`
+    const refused = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(refused.status, 409, `a session with a live job is not archived without stop\nsaw: ${JSON.stringify(refused)}`)
+    assert.equal(refused.body.code, 'active')
+    assert.equal(refused.body.error, `session ${session} has running background jobs; pass stop: true to stop them and archive`, 'the sentence says what blocks it')
+    assert.deepEqual(refused.body.jobs, [{ id, label: 'sleep 30' }], 'the refusal names the job that blocks it')
+    // Were a notice to start a turn in the archived session, this step would answer it.
+    steps(server, [{ purpose: 'jobs-notice', text: 'woken in an archived session' }])
+    const archived = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true, stop: true }) })
+    assert.equal(archived.status, 200, `stop: true archives\nsaw: ${JSON.stringify(archived)}`)
+    assert.equal(archived.body.archived, true)
+    const settled = await waitFor(() => settledEvent(server, session, id), 10_000, 'the job to settle')
+    assert.equal(settled.status, 'killed')
+    assert.equal(settled.detail, 'signal: SIGTERM; session archived')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500))
+    assert.equal(notices(server, session).length, 0, 'no completion notice is delivered to an archived session')
   } finally {
     await server.close()
   }
