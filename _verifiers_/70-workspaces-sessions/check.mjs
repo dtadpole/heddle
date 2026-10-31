@@ -5800,7 +5800,11 @@ test('archiving a session with running work is refused with the work named, and 
       { purpose: 'subagent', ...sleepStep },
       { purpose: 'subagent', text: 'the child is done' },
     ])
-    const parentTurn = await (await post('/api/turn', { prompt: 'delegate a slow job', folder: h.work })).text()
+    /**
+     * A fresh session (`new: true`): without it the turn route continues the folder's newest session, which is the one just
+     * archived above, and main's archived-session gate (cc8dec46) rightly blocks a turn into it before any model request.
+     */
+    const parentTurn = await (await post('/api/turn', { prompt: 'delegate a slow job', folder: h.work, new: true })).text()
     const parent = /"session":"(session-[^"]+)"/.exec(parentTurn)?.[1]
     assert.ok(parent, `the parent turn names its session\n${parentTurn.slice(0, 400)}`)
     const child = await until(async () => (await metas()).find((meta) => meta.parentSession === parent && meta.origin === 'subagent'))
