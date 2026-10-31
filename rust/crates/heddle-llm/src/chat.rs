@@ -13,7 +13,7 @@ use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fol
 use crate::error::ModelError;
 use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
-use crate::types::{Chunk, ContentPart, GenerateRequest, Message};
+use crate::types::{Chunk, ContentPart, GenerateRequest, Message, Role};
 use heddle_config::EndpointConfig;
 
 /// The Chat Completions adapter for one endpoint.
@@ -77,9 +77,17 @@ pub fn chat_request(
     if let Some(model) = request.model.as_ref().or(endpoint.model.as_ref()) {
         body.insert("model".into(), Value::String(model.clone()));
     }
+    let effort = crate::adapter::reasoning_value(endpoint, request)?;
+    let reasoning_content = replays_reasoning_content(endpoint, request, effort.is_some());
     body.insert(
         "messages".into(),
-        Value::Array(request.messages.iter().map(to_chat_message).collect()),
+        Value::Array(
+            request
+                .messages
+                .iter()
+                .map(|message| chat_message(message, reasoning_content))
+                .collect(),
+        ),
     );
     if !request.tools.is_empty() {
         body.insert(
@@ -114,7 +122,7 @@ pub fn chat_request(
         );
     }
     // Chat Completions names the level `reasoning_effort`; the value is the model's declared wire value.
-    if let Some(value) = crate::adapter::reasoning_value(endpoint, request)? {
+    if let Some(value) = effort {
         body.insert(
             "reasoning_effort".into(),
             serde_json::to_value(value).unwrap_or(Value::Null),
@@ -138,6 +146,61 @@ pub fn chat_request(
         ),
         stream: streaming,
     })
+}
+
+/// Whether this request's replayed assistant messages carry `reasoning_content` (`replaysReasoningContent`,
+/// developer-ten-3).
+///
+/// DeepSeek's thinking mode refuses a continuation whose replayed assistant message lacks it ("The
+/// `reasoning_content` in the thinking mode must be passed back to the API"): a tool-call round, a steer and a
+/// subagent's notice all continue a turn that way. DSH's rule, from its OpenAI-completions layer (pi-ai's compat
+/// `requiresReasoningContentOnAssistantMessages`, re-read 2026-10-29): auto-detected for a base URL containing
+/// `deepseek.com`, applied while reasoning is on — every replayed assistant message carries its thinking text, or
+/// `""` when it has none. Reasoning is on when the request names a reasoning level or the history already holds
+/// reasoning. Every other chat endpoint is left as it was.
+pub fn replays_reasoning_content(
+    endpoint: &EndpointConfig,
+    request: &GenerateRequest,
+    effort_named: bool,
+) -> bool {
+    if !endpoint
+        .base_url_for(request.model.as_deref())
+        .to_lowercase()
+        .contains("deepseek.com")
+    {
+        return false;
+    }
+    effort_named
+        || request.messages.iter().any(|message| {
+            message.role == Role::Assistant
+                && message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ContentPart::Reasoning { .. }))
+        })
+}
+
+/// [`to_chat_message`], with a replayed assistant message's `reasoning_content` when `reasoning_content` is set:
+/// its thinking, blank blocks dropped and the rest joined by newlines, or `""` (`toChatMessage(message,
+/// {reasoningContent})`).
+pub fn chat_message(message: &Message, reasoning_content: bool) -> Value {
+    let mut value = to_chat_message(message);
+    if reasoning_content
+        && message.role == Role::Assistant
+        && let Value::Object(object) = &mut value
+    {
+        let thinking = message
+            .content
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Reasoning { text } if !text.trim().is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        object.insert("reasoning_content".into(), Value::String(thinking));
+    }
+    value
 }
 
 /// One message in this shape (`toChatMessage`): text parts joined by `\n` as a string `content` (`null` when there
@@ -860,6 +923,97 @@ mod tests {
         )
         .expect("builds");
         assert!(call.stream);
+    }
+
+    fn thinking_message() -> Message {
+        Message::new(
+            Role::Assistant,
+            vec![
+                ContentPart::Reasoning {
+                    text: "count up".into(),
+                },
+                ContentPart::Reasoning { text: "   ".into() },
+                ContentPart::Reasoning {
+                    text: "from one".into(),
+                },
+                ContentPart::text("1 2 3"),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_replayed_assistant_message_carries_its_thinking_or_empty_only_when_asked() {
+        let thinking = thinking_message();
+        let plain = Message::new(Role::Assistant, vec![ContentPart::text("done")]);
+        let user = user_message("STEER: stop");
+        assert_eq!(
+            chat_message(&thinking, true)["reasoning_content"],
+            serde_json::json!("count up\nfrom one"),
+            "blank blocks dropped"
+        );
+        assert_eq!(
+            chat_message(&plain, true)["reasoning_content"],
+            serde_json::json!(""),
+            "no thinking is \"\""
+        );
+        assert!(chat_message(&user, true).get("reasoning_content").is_none());
+        assert!(
+            chat_message(&thinking, false)
+                .get("reasoning_content")
+                .is_none(),
+            "off, as every other endpoint keeps it"
+        );
+        assert_eq!(
+            chat_message(&thinking, true)["content"],
+            serde_json::json!("1 2 3")
+        );
+    }
+
+    #[test]
+    fn only_a_deepseek_base_url_with_reasoning_on_replays_reasoning_content() {
+        let mut deepseek = base_endpoint();
+        deepseek.base_url = "https://api.deepseek.com/v1".into();
+        let other = base_endpoint();
+        let user = user_message("go");
+        let quiet = GenerateRequest {
+            endpoint: "chat".into(),
+            messages: vec![
+                user.clone(),
+                Message::new(Role::Assistant, vec![ContentPart::text("done")]),
+                user.clone(),
+            ],
+            ..GenerateRequest::default()
+        };
+        let thought = GenerateRequest {
+            endpoint: "chat".into(),
+            messages: vec![user.clone(), thinking_message(), user.clone()],
+            ..GenerateRequest::default()
+        };
+        assert!(replays_reasoning_content(&deepseek, &quiet, true));
+        assert!(replays_reasoning_content(&deepseek, &thought, false));
+        assert!(!replays_reasoning_content(&deepseek, &quiet, false));
+        assert!(!replays_reasoning_content(&other, &thought, true));
+
+        let call = chat_request(&deepseek, &thought).expect("builds");
+        let assistants: Vec<&Value> = call.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        assert_eq!(
+            assistants[0]["reasoning_content"],
+            serde_json::json!("count up\nfrom one")
+        );
+        let plain = chat_request(&other, &thought).expect("builds");
+        assert!(
+            plain.body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message.get("reasoning_content").is_none()),
+            "another endpoint receives no reasoning_content"
+        );
     }
 
     #[test]
