@@ -116,12 +116,13 @@
   /**
    * The sidebar's width is one custom property, read by the panel and by nothing else.
    *
-   * The default lives here, so a reader without stored preferences gets 22rem, and the script only ever
-   * overwrites the property — measurement and layout can therefore never disagree about which width is in
-   * force, which is what happens when a script sets `style.width` on the panel and a stylesheet disagrees.
+   * The default lives here, so a reader without stored preferences gets 17.5rem (DSH's 280 pixels at the 16-pixel
+   * root), and the script only ever overwrites the property — measurement and layout can therefore never disagree
+   * about which width is in force, which is what happens when a script sets `style.width` on the panel and a
+   * stylesheet disagrees.
    */
   :root {
-    --sidebar-width: 22rem;
+    --sidebar-width: 17.5rem;
     /**
      * The code face, which is DSH's own stack and the reason it matters: a bare `monospace` resolves to whatever the
      * platform picks, and on this machine that is a face with no CJK coverage — so a Chinese comment in a source file
@@ -3144,7 +3145,7 @@
   width it produces is a CSS custom property, which is what lets one number position the panel and its
   divider without the two drifting apart.
 -->
-<div id="gutter-left" role="separator" aria-orientation="vertical" aria-label="resize the sidebar" aria-valuemin="12" aria-valuemax="48" aria-valuenow="22" tabindex="0"></div>
+<div id="gutter-left" role="separator" aria-orientation="vertical" aria-label="resize the sidebar" aria-valuemin="16.5" aria-valuemax="26.25" aria-valuenow="18" tabindex="0"></div>
 <main>
   <div id="connection-state" role="status" aria-live="polite" hidden>Reconnecting to heddle…</div>
   <!--
@@ -6909,10 +6910,17 @@ let ledgerRefetchTimer = null
  * default text size gets a proportionally wider panel rather than one measured in pixels that no longer
  * fits its contents. The upper bound also respects the window: a sidebar wider than four fifths of the
  * viewport leaves nothing to work in, which reads as the app being broken rather than as a choice.
+ *
+ * The bounds and the default are DSH's (`dsh-client-ui-layout`: `computeColumns` clamps the panel with
+ * `clampWidth(sidebar, 264, 420)`, and a first visit or a reopened panel gets `sidebar: 280`), written in rem so that
+ * at the 16-pixel root they are DSH's pixels. Phase A measured 192 to 768 pixels with a 352-pixel default here (S48,
+ * R-developer-seven-13). Unlike DSH, the width a reader chose survives a reload and a collapse (S50).
  */
 const SIDEBAR_KEY = 'heddle.layout.sidebar.v1'
-const SIDEBAR_MIN_REM = 12
-const SIDEBAR_MAX_REM = 48
+const SIDEBAR_MIN_REM = 16.5
+const SIDEBAR_MAX_REM = 26.25
+/** The width of a first visit and of a double-click on the divider: DSH's 280 pixels, not whatever was last dragged. */
+const DEFAULT_SIDEBAR_REM = 17.5
 
 /** The root font size, so rem bounds can be compared with pixel measurements from the window. */
 function remPx() {
@@ -6998,9 +7006,6 @@ gutterLeft.addEventListener('pointerdown', (downEvent) => {
   gutterLeft.addEventListener('pointercancel', stop)
 })
 
-/** The width a double-click returns to: the layout's own default, not whatever was last dragged. */
-const DEFAULT_SIDEBAR_REM = 22
-
 /** A double-click on the divider restores the default width, a conventional escape from a bad drag. */
 gutterLeft.addEventListener('dblclick', () => {
   setSidebarWidth(DEFAULT_SIDEBAR_REM)
@@ -7009,7 +7014,7 @@ gutterLeft.addEventListener('dblclick', () => {
 /** Keyboard: a separator with focus is a control, and a control responds to the arrow keys. */
 gutterLeft.addEventListener('keydown', (keyEvent) => {
   const step = keyEvent.shiftKey ? 4 : 1
-  const current = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')) || 22
+  const current = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')) || DEFAULT_SIDEBAR_REM
   if (keyEvent.key === 'ArrowLeft') setSidebarWidth(current - step)
   else if (keyEvent.key === 'ArrowRight') setSidebarWidth(current + step)
   else if (keyEvent.key === 'Home') setSidebarWidth(SIDEBAR_MIN_REM)
@@ -7020,7 +7025,7 @@ gutterLeft.addEventListener('keydown', (keyEvent) => {
 
 /** A window narrowed past the stored width must not leave the sidebar wider than the space for it. */
 window.addEventListener('resize', () => setSidebarWidth(
-  parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')) || 22,
+  parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width')) || DEFAULT_SIDEBAR_REM,
   { persist: false },
 ))
 

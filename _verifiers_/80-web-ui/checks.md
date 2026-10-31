@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T08:45:00Z
+modified: 2026-10-31T16:30:00Z
 level: L3
-version: 1.2.0
+version: 1.3.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -75,6 +75,12 @@ grounded_in:
   screen with nothing overflowing sideways; the toggle opens the panel there and closes it again, crossing the
   breakpoint forgets that opening and leaves the wide preference alone, and a desktop visit still opens wide
   (live-testing draft developer-ten-9).
+- [`check-sidebar-bounds.mjs`](check-sidebar-bounds.mjs) — the left sidebar's width at DSH parity
+  (`dsh-client-ui-layout`, `computeColumns`: `clampWidth(sidebar, 264, 420)`, default 280): at a 1400-pixel window a
+  first visit draws 280 pixels and the divider reports 16.5 to 26.25 rem; a drag past either edge, End and Home stop
+  at 420 and 264, a double-click returns to 280, a width stored under the old bounds (30 or 12 rem) is drawn at the
+  nearer bound without being rewritten and one inside them comes back as it was (heddle remembers it, S50), and the
+  collapsed rail is still 56 (DSH parity S48, R-developer-seven-13).
 - [`check-phone-composer.mjs`](check-phone-composer.mjs) — at phone width (390 x 844) the composer's control row and
   the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
   shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
