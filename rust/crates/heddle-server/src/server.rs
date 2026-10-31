@@ -2215,6 +2215,23 @@ async fn create_terminal(
                     "archived",
                 );
             }
+            // The same race for the permission mode: a mode change that landed during the spawn closed only the
+            // terminals already inserted, so this one would keep the old, possibly wider, confinement. It is ended
+            // and refused rather than kept. TypeScript needs no twin: its create is synchronous after the mode read.
+            let mode_now = state
+                .harness()
+                .sessions
+                .effective_mode(id.as_str(), &sandbox.default_mode());
+            if mode_now != mode {
+                state.terminals().close(id.as_str(), &info.id).await;
+                return respond::error_with_code(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "session {id}'s permission mode changed to {mode_now} while the terminal was starting; open it again"
+                    ),
+                    "mode-changed",
+                );
+            }
             respond::json_compact(StatusCode::CREATED, &json!({ "terminal": info }))
         }
         Err(CreateRefusal::Closed) => respond::error_with_code(

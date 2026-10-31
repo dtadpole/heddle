@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { accessSync, constants } from 'node:fs'
 import { isAbsolute } from 'node:path'
@@ -157,23 +157,33 @@ interface ProcessRow {
   readonly tty: string
 }
 
-function processTable(): readonly ProcessRow[] {
-  try {
-    const out = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000, env: HELPER_ENV })
-    const rows: ProcessRow[] = []
-    for (const line of out.split('\n')) {
-      const [pid, ppid, tty] = line.trim().split(/\s+/)
-      if (pid === undefined || ppid === undefined) continue
-      rows.push({ pid: Number(pid), ppid: Number(ppid), tty: tty ?? '' })
-    }
-    return rows
-  } catch {
-    return []
-  }
+/**
+ * Every process on the machine, from one `ps -A`.
+ *
+ * Asynchronous on purpose: a loaded host can take hundreds of milliseconds over `ps -A`, and the tty learner runs it
+ * unprompted on every new terminal, so a synchronous call there would stall every request and stream on the server
+ * (developer-ten's review of #85). The 5 s timeout still bounds one call; a failed call reads as an empty table.
+ */
+function processTable(): Promise<readonly ProcessRow[]> {
+  return new Promise((resolve) => {
+    execFile('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', timeout: 5000, env: HELPER_ENV }, (error, out) => {
+      if (error !== null) {
+        resolve([])
+        return
+      }
+      const rows: ProcessRow[] = []
+      for (const line of out.split('\n')) {
+        const [pid, ppid, tty] = line.trim().split(/\s+/)
+        if (pid === undefined || ppid === undefined || pid === '') continue
+        rows.push({ pid: Number(pid), ppid: Number(ppid), tty: tty ?? '' })
+      }
+      resolve(rows)
+    })
+  })
 }
 
-/** Every live descendant of `root`, nearest first. */
-export function descendants(root: number, table: readonly ProcessRow[] = processTable()): readonly ProcessRow[] {
+/** Every live descendant of `root` in `table`, nearest first. */
+export function descendants(root: number, table: readonly ProcessRow[]): readonly ProcessRow[] {
   const found: ProcessRow[] = []
   let frontier = [root]
   while (frontier.length > 0) {
@@ -253,12 +263,16 @@ class Terminal {
     })
     // The tty is learned while the PTY is surely this terminal's, so a close can sweep jobs that left the tree. It
     // is retried a few times, because a loaded host can take a while to start the shell.
-    let tries = 0
-    const learn = setInterval(() => {
-      tries += 1
-      if (this.exited || this.ttyPath() !== undefined || tries >= 6) clearInterval(learn)
-    }, 500)
-    learn.unref()
+    // Each try waits for the previous one, so a slow `ps` never stacks a second behind it.
+    const learn = (tries: number): void => {
+      const timer = setTimeout(() => {
+        void this.learnTty().then((tty) => {
+          if (!this.exited && tty === undefined && tries < 6) learn(tries + 1)
+        })
+      }, 500)
+      timer.unref()
+    }
+    learn(1)
     this.done = new Promise((resolve) => {
       child.on('error', (error) => {
         this.push(`${error.message}\r\n`)
@@ -306,7 +320,7 @@ class Terminal {
 
   async resize(cols: number, rows: number): Promise<ResizeResult> {
     if (this.exited) return 'exited'
-    const tty = this.ttyPath()
+    const tty = await this.learnTty()
     if (tty === undefined) return 'unavailable'
     const flag = this.platform === 'darwin' ? '-f' : '-F'
     const ok = await new Promise<boolean>((resolve) => {
@@ -338,8 +352,8 @@ class Terminal {
     // A terminal that ended on its own is not swept: once its PTY is gone the tty name can be reused by another
     // terminal, and DSH, too, leaves a shell's nohup jobs running after the shell exits by itself.
     if (leader === undefined || this.exited) return this.done
-    const tty = this.tty ?? this.ttyPath()
-    const table = processTable()
+    const tty = await this.learnTty()
+    const table = await processTable()
     // The tree, plus every process on this terminal's tty: a job started as `(cmd &)` or `nohup cmd &` leaves the
     // tree for init but keeps the tty while the PTY is still this terminal's.
     const tree = [...descendants(leader, table)]
@@ -353,20 +367,22 @@ class Terminal {
     }
     signal(-leader, 'SIGTERM')
     const graceful = await Promise.race([this.done.then(() => true), delay(this.limits.disposeGraceMs).then(() => false)])
-    if (!graceful || descendants(leader).length > 0 || tree.some((row) => alive(row.pid))) {
-      for (const row of [...tree, ...descendants(leader)]) signal(row.pid, 'SIGKILL')
+    const left = descendants(leader, await processTable())
+    if (!graceful || left.length > 0 || tree.some((row) => alive(row.pid))) {
+      for (const row of [...tree, ...left]) signal(row.pid, 'SIGKILL')
       for (const group of groups) signal(-group, 'SIGKILL')
     }
     await Promise.race([this.done, delay(this.limits.disposeGraceMs * 2)])
   }
 
-  private ttyPath(): string | undefined {
+  /** The PTY's device, learned once from the first descendant that has a tty. */
+  private async learnTty(): Promise<string | undefined> {
     if (this.tty !== undefined) return this.tty
     const leader = this.child.pid
     if (leader === undefined) return undefined
-    const row = descendants(leader).find(hasTty)
+    const row = descendants(leader, await processTable()).find(hasTty)
     if (row === undefined) return undefined
-    this.tty = `/dev/${row.tty}`
+    this.tty ??= `/dev/${row.tty}`
     return this.tty
   }
 
