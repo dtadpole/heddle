@@ -104,10 +104,15 @@ mod tests {
 
     #[test]
     fn the_output_limit_is_a_setting_of_at_least_one() {
-        let capped = ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 400 })).unwrap();
+        let capped =
+            ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 400 })).unwrap();
         assert_eq!(capped.bash_max_timeout_ms, 400);
-        let none = ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 0 })).unwrap_err();
-        assert!(none.to_string().contains("bashMaxTimeoutMs must be at least 1"));
+        let none =
+            ToolsConfig::from_row(&serde_json::json!({ "bashMaxTimeoutMs": 0 })).unwrap_err();
+        assert!(
+            none.to_string()
+                .contains("bashMaxTimeoutMs must be at least 1")
+        );
         let config = ToolsConfig::from_row(&serde_json::json!({ "bashOutputLimit": 50 })).unwrap();
         assert_eq!(config.bash_output_limit, 50);
         let zero = ToolsConfig::from_row(&serde_json::json!({ "bashOutputLimit": 0 })).unwrap_err();

@@ -51,7 +51,11 @@ pub const BASH_MAX_TIMEOUT_MS: u64 = 600_000;
 /// default; a value that is not a finite positive number is refused, never turned into an instant kill or an
 /// unbounded wait; a larger one is cut to the cap. Live-testing issue #13 measured `0`, `-5` and `3000000000` killing
 /// the command at once on the TypeScript build and the last one honoured for 34 days here.
-fn bash_wall_time(requested: Option<&serde_json::Value>, default_ms: u64, max_ms: u64) -> Result<u64, String> {
+fn bash_wall_time(
+    requested: Option<&serde_json::Value>,
+    default_ms: u64,
+    max_ms: u64,
+) -> Result<u64, String> {
     let cap = |milliseconds: u64| milliseconds.min(max_ms);
     match requested {
         None | Some(serde_json::Value::Null) => Ok(cap(default_ms)),
@@ -60,7 +64,9 @@ fn bash_wall_time(requested: Option<&serde_json::Value>, default_ms: u64, max_ms
             Some(milliseconds) if milliseconds.is_finite() && milliseconds > 0.0 => {
                 Ok(cap(milliseconds.round().max(1.0) as u64))
             }
-            _ => Err(format!("invalid timeoutMs: expected a positive number, got {value}")),
+            _ => Err(format!(
+                "invalid timeoutMs: expected a positive number, got {value}"
+            )),
         },
     }
 }
@@ -432,10 +438,12 @@ fn bash_tool(
                 if command.is_empty() {
                     return Ok(ToolResult::refused(codes::BAD_ARGS, "bash needs a command"));
                 }
-                let limit = match bash_wall_time(args.get("timeoutMs"), default_timeout_ms, max_timeout_ms) {
-                    Ok(milliseconds) => milliseconds,
-                    Err(message) => return Ok(ToolResult::refused(codes::BAD_ARGS, message)),
-                };
+                let limit =
+                    match bash_wall_time(args.get("timeoutMs"), default_timeout_ms, max_timeout_ms)
+                    {
+                        Ok(milliseconds) => milliseconds,
+                        Err(message) => return Ok(ToolResult::refused(codes::BAD_ARGS, message)),
+                    };
                 let mode = context.mode();
                 let confined = if mode == SandboxMode::DangerFullAccess {
                     None
@@ -942,18 +950,44 @@ mod tests {
     fn the_wall_time_rule_is_dshs_default_refusal_and_cap() {
         // Live-testing issue #13; DSH: dsh-tool-bash validateBashArgs and dsh-timeout clampTimeout.
         assert_eq!(bash_wall_time(None, 30_000, 600_000), Ok(30_000));
-        assert_eq!(bash_wall_time(Some(&json!(null)), 30_000, 600_000), Ok(30_000));
-        for (value, shown) in [(json!(0), "0"), (json!(-5), "-5"), (json!("5000"), "\"5000\""), (json!(true), "true")] {
+        assert_eq!(
+            bash_wall_time(Some(&json!(null)), 30_000, 600_000),
+            Ok(30_000)
+        );
+        for (value, shown) in [
+            (json!(0), "0"),
+            (json!(-5), "-5"),
+            (json!("5000"), "\"5000\""),
+            (json!(true), "true"),
+        ] {
             assert_eq!(
                 bash_wall_time(Some(&value), 30_000, 600_000),
-                Err(format!("invalid timeoutMs: expected a positive number, got {shown}")),
+                Err(format!(
+                    "invalid timeoutMs: expected a positive number, got {shown}"
+                )),
                 "{value}"
             );
         }
-        assert_eq!(bash_wall_time(Some(&json!(3_000_000_000_u64)), 30_000, 600_000), Ok(600_000), "cut to the cap");
-        assert_eq!(bash_wall_time(Some(&json!(1500.4)), 30_000, 600_000), Ok(1500), "a fractional millisecond rounds");
-        assert_eq!(bash_wall_time(Some(&json!(0.2)), 30_000, 600_000), Ok(1), "a tiny positive value is still a timer");
-        assert_eq!(bash_wall_time(None, 900_000, 600_000), Ok(600_000), "a default above the cap is cut too");
+        assert_eq!(
+            bash_wall_time(Some(&json!(3_000_000_000_u64)), 30_000, 600_000),
+            Ok(600_000),
+            "cut to the cap"
+        );
+        assert_eq!(
+            bash_wall_time(Some(&json!(1500.4)), 30_000, 600_000),
+            Ok(1500),
+            "a fractional millisecond rounds"
+        );
+        assert_eq!(
+            bash_wall_time(Some(&json!(0.2)), 30_000, 600_000),
+            Ok(1),
+            "a tiny positive value is still a timer"
+        );
+        assert_eq!(
+            bash_wall_time(None, 900_000, 600_000),
+            Ok(600_000),
+            "a default above the cap is cut too"
+        );
         assert_eq!(BASH_MAX_TIMEOUT_MS, 600_000, "DSH's ten minutes");
     }
 
@@ -971,7 +1005,10 @@ mod tests {
             .unwrap();
         let error = result.error.as_ref().expect("refused");
         assert_eq!(error.code, codes::BAD_ARGS);
-        assert_eq!(error.message, "invalid timeoutMs: expected a positive number, got 0");
+        assert_eq!(
+            error.message,
+            "invalid timeoutMs: expected a positive number, got 0"
+        );
         assert!(!marker.exists(), "the command did not run");
     }
 
@@ -980,7 +1017,10 @@ mod tests {
         let root = tempdir();
         let bash = builtin_tools(
             sandbox(root.path()),
-            BuiltinOptions { bash_max_timeout_ms: 300, ..BuiltinOptions::default() },
+            BuiltinOptions {
+                bash_max_timeout_ms: 300,
+                ..BuiltinOptions::default()
+            },
         )
         .into_iter()
         .find(|tool| tool.spec().name == "bash")
@@ -988,7 +1028,9 @@ mod tests {
         let described = bash.spec().parameters["properties"]["timeoutMs"]["description"].clone();
         assert_eq!(
             described,
-            json!("Wall time before the command is killed, in milliseconds; default 30000, at most 300.")
+            json!(
+                "Wall time before the command is killed, in milliseconds; default 30000, at most 300."
+            )
         );
         let started = std::time::Instant::now();
         let result = bash
@@ -1001,7 +1043,10 @@ mod tests {
         let error = result.error.as_ref().expect("timed out");
         assert_eq!(error.code, codes::TIMEOUT);
         assert_eq!(error.message, "the command exceeded 300ms and was killed");
-        assert!(started.elapsed() < Duration::from_secs(2), "stopped at the cap");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stopped at the cap"
+        );
     }
 
     #[tokio::test]
