@@ -5932,12 +5932,31 @@ function previewOf(record) {
   return record.label ?? record.kind
 }
 
-/** The ledger flattened into table rows, with turn and step boundaries on the rows themselves. */
+/* ledger-rows:begin */
+/**
+ * The ledger flattened into table rows, with turn and step boundaries on the rows themselves.
+ *
+ * A record outside every turn sits where it happened, in a Between turns section of its own (DSH's), placed by its
+ * `afterTurn`; the first row of each section heads it. A record without `afterTurn` follows the last turn.
+ */
 function rowsOf(data) {
   if (Array.isArray(data.rows)) return data.rows
   /** A server that does not send the projection still gets a table: flatten it here, the same way. */
+  const ledger = data.ledger ?? data
+  const turns = ledger.turns ?? []
+  const lastTurn = turns.length > 0 ? turns[turns.length - 1].index : 0
+  const between = new Map()
+  for (const record of ledger.loose ?? []) {
+    const after = record.afterTurn ?? lastTurn
+    between.set(after, [...(between.get(after) ?? []), record])
+  }
   const rows = []
-  for (const turn of data.turns ?? []) {
+  const section = (after) => {
+    ;(between.get(after) ?? []).forEach((record, index) => rows.push({ turn: 0, kind: record.kind, record, turnStart: index === 0, stepStart: false, loose: true }))
+    between.delete(after)
+  }
+  section(0)
+  for (const turn of turns) {
     for (const step of turn.steps ?? []) {
       ;(step.records ?? []).forEach((record, index) => {
         rows.push({
@@ -5951,10 +5970,25 @@ function rowsOf(data) {
         })
       })
     }
+    section(turn.index)
   }
-  for (const record of data.loose ?? []) rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true })
+  for (const after of [...between.keys()].sort((left, right) => left - right)) section(after)
   return rows
 }
+
+/** DSH's label for a section head: `Between turns` for records outside every turn, else `Turn N`. */
+function sectionLabel(row) {
+  return row.loose ? 'Between turns' : 'Turn ' + row.turn
+}
+
+/**
+ * Whether the turn fold hides a row. Only a turn's later rows fold behind its head; a Between turns section never
+ * folds, as DSH's fold skips records outside every turn.
+ */
+function rowFolded(row, collapsedTurns, expanded) {
+  return collapsedTurns && !row.loose && !row.turnStart && !expanded.has(row.turn)
+}
+/* ledger-rows:end */
 
 function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   /**
@@ -6063,7 +6097,7 @@ function renderRows() {
       const haystack = [row.kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase()
       if (!haystack.includes(query)) continue
     }
-    if (trajectory.collapsedTurns && !row.turnStart && !trajectory.expanded.has(row.turn)) continue
+    if (rowFolded(row, trajectory.collapsedTurns, trajectory.expanded)) continue
     shown.push([row, index])
   }
   body.replaceChildren(...shown.map(([row, index]) => rowNode(row, index)))
@@ -6093,7 +6127,7 @@ function rowNode(row, index) {
     rail.className = 'tr-rail'
     const label = document.createElement('span')
     label.className = 'tr-turn-label'
-    label.textContent = row.loose ? 'between turns' : 'Turn ' + row.turn
+    label.textContent = sectionLabel(row)
     event.append(rail, label)
   }
   const tag = document.createElement('span')
@@ -6106,7 +6140,7 @@ function rowNode(row, index) {
   event.append(tag, when)
   const content = document.createElement('td')
   content.className = 'tr-content'
-  const collapsed = trajectory.collapsedTurns && row.turnStart && !trajectory.expanded.has(row.turn)
+  const collapsed = trajectory.collapsedTurns && row.turnStart && !row.loose && !trajectory.expanded.has(row.turn)
   if (collapsed) {
     const summary = document.createElement('span')
     summary.className = 'tr-text'
@@ -6123,7 +6157,8 @@ function rowNode(row, index) {
   tr.append(event, content)
   tr.tabIndex = 0
   tr.setAttribute('role', 'row')
-  if (row.turnStart) turnAnchors.set(row.turn, tr)
+  /** A Between turns head is no turn's anchor: every such section has turn 0, and a tick picks a numbered turn. */
+  if (row.turnStart && !row.loose) turnAnchors.set(row.turn, tr)
   tr.addEventListener('click', () => {
     if (collapsed) {
       trajectory.expanded.add(row.turn)
@@ -6232,7 +6267,7 @@ function renderDetails(row) {
   tag.textContent = KIND_LABEL[row.kind] ?? String(row.kind).toUpperCase()
   const where = document.createElement('span')
   where.className = 'tr-d-where'
-  where.textContent = [row.loose ? 'before any turn' : 'Turn ' + row.turn, row.step !== undefined ? 'Step ' + row.step : null].filter(Boolean).join(' · ')
+  where.textContent = [sectionLabel(row), row.step !== undefined ? 'Step ' + row.step : null].filter(Boolean).join(' · ')
   const close = document.createElement('button')
   close.type = 'button'
   close.className = 'tr-d-close'
