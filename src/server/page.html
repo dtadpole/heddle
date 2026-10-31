@@ -4195,6 +4195,30 @@ function turnNotice(ended) {
 }
 
 /**
+ * The loop's reason for a turn the person stopped (`ended` in both builds' loops), which the transcript replays as the
+ * turn's notice.
+ */
+const STOPPED_REASON = 'stopped by the caller'
+
+/**
+ * Mark the turn this page just stopped where it ended, the way a reload draws it from the transcript.
+ *
+ * The turn's stream ends `cancelled` with no reason, so the live page drew nothing, and a stopped answer read like one
+ * that had finished there, until a reload showed "Stopped by the caller" (live-testing draft developer-ten-8, issue
+ * #34). The notice goes on the turn's answer when it has one, as history puts it, and otherwise as its own row. A turn
+ * already marked is left alone.
+ */
+function markStopped() {
+  const last = lastTurnRow()
+  if (last === null) return
+  if (last.dataset.kind === 'assistant') {
+    if (last.querySelector(':scope > .turn-notice') === null) last.append(turnNotice([STOPPED_REASON]))
+    return
+  }
+  if (!last.classList.contains('turn-notice')) log.append(turnNotice([STOPPED_REASON]))
+}
+
+/**
  * A completed turn's token usage, DSH's per-Turn usage row: closed it reads the total, open it lists the buckets the
  * provider reported, and a bucket nobody reported is left out rather than shown as zero.
  */
@@ -8551,6 +8575,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         /** A question the stopped turn was waiting on has no answer to give now. */
         hideApproval()
         settleChat()
+        if (current === null || payload.session === current) markStopped()
         void renderSettledAnswers()
         /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
         void attachEditedFiles()
