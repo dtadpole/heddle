@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import process from 'node:process'
 
 /**
@@ -58,6 +59,14 @@ export function tapCounts(text, key) {
  * @param {string} check absolute path to a `*.check.mjs` file
  * @param {{list?: boolean, json?: boolean, allowSkip?: boolean}} options
  */
+/** The tail of the check's TAP stream so far, so a runner that is stopped can say where its check stood. */
+let progress = ''
+
+/** The last `count` non-empty lines of the TAP read so far. */
+export function lastLines(text, count = 8) {
+  return text.split('\n').filter((line) => line.trim() !== '').slice(-count)
+}
+
 export async function runCheck(check, options = {}) {
   const args = ['--test', '--test-reporter=tap', '--test-reporter-destination=stdout', check]
 
@@ -73,6 +82,7 @@ export async function runCheck(check, options = {}) {
   child.stderr.setEncoding('utf8')
   child.stdout.on('data', (chunk) => {
     stdout += chunk
+    progress = (progress + chunk).slice(-8192)
   })
   child.stderr.on('data', (chunk) => {
     stderr += chunk
@@ -145,9 +155,81 @@ export function collectNames(stdout) {
   return names
 }
 
+/**
+ * Every process below `root`, read from `{ pid, ppid }` rows, in breadth-first order.
+ *
+ * Walked by parent rather than by process group, so a descendant that started its own group (a browser launched
+ * detached) is still found while its parent lives.
+ */
+export function descendantsOf(root, rows) {
+  const children = new Map()
+  for (const { pid, ppid } of rows) {
+    if (pid === ppid) continue
+    if (!children.has(ppid)) children.set(ppid, [])
+    children.get(ppid).push(pid)
+  }
+  const found = []
+  const queue = [root]
+  while (queue.length > 0) {
+    for (const child of children.get(queue.shift()) ?? []) {
+      found.push(child)
+      queue.push(child)
+    }
+  }
+  return found
+}
+
+/** This machine's process table as `{ pid, ppid }` rows, or none when `ps` cannot be read. */
+export function processTable() {
+  const ps = spawnSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' })
+  if (ps.status !== 0 || typeof ps.stdout !== 'string') return []
+  return ps.stdout
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/).map(Number))
+    .filter(([pid, ppid]) => Number.isInteger(pid) && Number.isInteger(ppid))
+    .map(([pid, ppid]) => ({ pid, ppid }))
+}
+
+/**
+ * End everything this runner started, at once.
+ *
+ * The lane gate stops a check file that outlives its time limit by signalling this runner. Measured on 31 Oct: when
+ * the runner was killed outright, `node --test`, the check's harness and its browser lived on as orphans for hours,
+ * holding ports and memory. The pids are read before any is signalled, so a child reparented by its parent's death is
+ * still ended.
+ */
+export function endDescendants(root = process.pid) {
+  const pids = descendantsOf(root, processTable())
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+  }
+  return pids
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   if (argv.length === 0) return usage(process.stderr, 2)
+  for (const [signal, code] of [['SIGTERM', 143], ['SIGHUP', 129], ['SIGINT', 130]]) {
+    process.once(signal, () => {
+      endDescendants()
+      // Where the check stood, so the next time-out names its test and step. The lane cannot read a pipe after it
+      // stops the runner (measured: spawnSync keeps only what came before its timeout), so it names a file for this.
+      const report = `run.mjs: stopped by ${signal}; the last TAP lines:\n${lastLines(progress).map((line) => `  ${line}`).join('\n')}\n`
+      if (process.env.HEDDLE_RUN_STOP_REPORT) {
+        try {
+          writeFileSync(process.env.HEDDLE_RUN_STOP_REPORT, report)
+        } catch {
+          // The report is a courtesy; the exit must not wait on it.
+        }
+      }
+      process.stderr.write(report)
+      process.exit(code)
+    })
+  }
   const check = argv.find((arg) => !arg.startsWith('-'))
   const list = argv.includes('--list')
   const json = argv.includes('--json')

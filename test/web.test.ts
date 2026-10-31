@@ -6,7 +6,7 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, HIGHLIGHT_GRAMMARS, highlightAsset, inlineContentType, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
+import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, HIGHLIGHT_GRAMMARS, highlightAsset, inlineContentType, inlineScripts, pagePolicy, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
 import { highlightCode } from '../src/server/highlight.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
@@ -643,6 +643,30 @@ test('a transcript names its session in every attachment address, and leaves oth
   assert.equal(first.attachments?.[0]?.url, `/api/uploads/a%20b.png?session=${session}`, 'the card is read for this session')
   assert.equal('attachments' in second, false, 'a turn without attachments is unchanged')
   assert.deepEqual(third.attachments, [], 'and an empty list stays empty')
+})
+
+test('the page policy carries a hash for every inline script of the served page, and nothing inline beyond them', () => {
+  const html = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
+  const scripts = inlineScripts(html)
+  assert.equal(scripts.length, 2, 'the page has a module script and a plain one')
+  const policy = pagePolicy(html)
+  for (const code of scripts) {
+    assert.ok(policy.includes(`'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`), 'every inline script is allowed by its hash')
+  }
+  assert.match(policy, /^default-src 'self'; script-src 'self' 'sha256-/)
+  assert.doesNotMatch(policy, /unsafe-eval|script-src 'self' 'unsafe-inline'/)
+  assert.match(policy, /object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'$/)
+  assert.deepEqual(inlineScripts('<script src="/vendor/x.js"></script><script type="module">a()</script><scripts>no</scripts><SCRIPT>b()</SCRIPT >'), ['a()', 'b()'])
+})
+
+
+test('D-068 only explicit Browser capability adds HTTP(S) frames without weakening other directives', () => {
+  const html = '<script>const x = 1</script>'
+  const strict = pagePolicy(html)
+  const enabled = pagePolicy(html, true)
+  assert.ok(strict.includes("frame-src 'self'"))
+  assert.equal(enabled, strict.replace("frame-src 'self'", 'frame-src http: https:'))
+  assert.ok(enabled.includes("object-src 'none'") && enabled.includes("frame-ancestors 'none'"))
 })
 
 test('the page highlights a code block exactly as the TypeScript server does, from the modules both servers serve', async () => {
