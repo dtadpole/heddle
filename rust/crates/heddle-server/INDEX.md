@@ -1,8 +1,8 @@
 ---
 title: The heddle-server crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-25T12:46:37Z
-version: 0.4.4
+modified: 2026-10-31T05:45:53Z
+version: 0.4.5
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -61,7 +61,7 @@ As of 2026-10-24 on main `445ea43`.
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
 | `command` | `heddle web`'s entry point under D-043: `Command::Web`, `Args` (`host`, `port`, `endpoint`, `max_rounds`, `dry_run`, `json`), `Context` (the `Harness`, the event hub, feature routers, session views, asset roots, the secret path, boot notes, a shutdown token) and `async fn run(..) -> i32`, printing `runWeb`'s lines byte for byte |
 | `adapters` | the trait implementations over the real crates, as each crate's API reaches `main`: `StoreSessions` (`SessionService` over `heddle_session::SessionService`) and `session_event_listener` (the store's event listener, publishing into the `EventHub`) |
-| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
+| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, `TurnInterrupter` (the agent runtime's live-turn registry, so a Stop also reaches a goal round or a reminder's turn the server did not start, #93), `SessionActivity` with `ActivityItem { kind, id, label }` (work besides turns that an archive is refused by or stops: the jobs row's live jobs, DSH's `workspace/session-activity`), collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
 | `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer and serves every connection with Nagle off, as Node does), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
 ### How a feature crate mounts its routes
@@ -108,18 +108,21 @@ to confirm or move a row.
 | `GET /api/events` | heddle-server | SSE, every session event and approval question |
 | `GET /api/status` | heddle-server | the deployment mode and cwd |
 | `GET`, `POST /api/sessions` | heddle-server | list with run state; create at a branch |
+| `GET /api/sessions/search?q=` | heddle-server | content search, DSH's `session.search`, over `SessionService::search` (`heddle_session::SessionSearchIndex`) |
 | `GET /api/sessions/{id}` | heddle-server | the chat view; `?view=<name>` goes to a registered `SessionView` |
 | `GET /api/sessions/{id}?view=ledger` | heddle-web-trajectory | as a `SessionView` |
 | `GET /api/sessions/{id}/log` | heddle-web-trajectory | the decoded log download |
 | `POST /api/sessions/{id}/fork`, `/flags`, `/title`, `/permission`, `/steer`, `/stop` | heddle-server | |
 | `POST /api/sessions/{id}/model` | heddle-web-composer | the model switcher |
 | `POST /api/folders/session`, `POST /api/turn` | heddle-server | the turn streams its own session's events, runs to its end if its reader goes away, stops running when it returns, and sends its terminal frame when it ends, without waiting for the `/api/events` readers, as web.ts does |
-| `GET /api/tree`, `GET`/`POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}` | heddle-server | over `WorkspaceService`; `GET /api/workspaces` is `views` (each workspace's parent and sessions, for the page's workspace tree) |
+| `GET /api/tree`, `GET`/`POST /api/workspaces`, `PATCH`/`DELETE /api/workspaces/{id}`, `POST /api/workspaces/insertBefore` | heddle-server | over `WorkspaceService`; `GET /api/workspaces` is `views` (each workspace's parent and sessions, for the page's workspace tree); `insertBefore` moves a workspace in the stored order (DSH's `workspace/insertBefore`) |
+| `POST /api/workspaces/default` | heddle-server | first use over `WorkspaceService::initialize_default`: `{workspace}` or `null`, `500 workspace/default-failed` |
 | `POST /api/workspaces/pick` | heddle-web-files | the platform folder picker |
 | `GET /api/directories`, `POST /api/directories` | heddle-web-files | the page's own folder chooser (DSH's browse picker) |
 | `GET /api/approvals`, `POST /api/approvals/{id}` | heddle-server | over `ApprovalService` |
 | `GET`, `POST /api/goal`, `GET /api/todo`, `GET /api/team` | heddle-server | over the goal, todo and team traits; a team log that refuses to fold answers `500 internal error: <message>`, as web.ts's catch-all does |
 | `GET /api/endpoints`, `GET /api/context` | heddle-web-composer | |
+| `GET /api/plugin-inventory` | heddle (`web.rs`) | DSH's read-only `pluginInventory/list`, from `heddle_config::plugin_inventory` over the booted rows and entries; the tree's phases are final once `load` returns, so it is read when the server is composed |
 | `GET /api/html`, `GET /vendor/purify.js` | heddle-server | `html.ts` is this crate's; the sanitiser is served as `text/javascript` so the preview page can run it |
 | `GET /api/raw`, `GET /api/uploads/{leaf}`, `POST /api/uploads`, `GET /api/file`, `POST /api/markdown` | heddle-web-files | use `respond::file_bytes` and `inline_content_type` |
 

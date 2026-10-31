@@ -60,6 +60,7 @@ test('every Option chord fires with the key values Chrome delivers on a Mac', ()
     ['KeyB', '∫', 'sidebar'],
     ['KeyN', 'Dead', 'new-session'],
     ['Comma', '≤', 'settings'],
+    ['KeyO', 'ø', 'add-workspace'],
   ]
   for (const [code, key, action] of chords) {
     assert.equal(shortcutFor(keydown({ code, key, metaKey: true, altKey: true }), mac), action, `⌥⌘ ${code} (key ${key})`)

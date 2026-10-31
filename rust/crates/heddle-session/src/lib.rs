@@ -42,10 +42,17 @@ pub mod layout;
 pub mod message;
 pub mod meta;
 pub mod mode;
+pub mod repair;
+pub mod search;
 pub mod service;
 pub mod store;
 pub mod surface;
+pub mod title;
 pub mod transcript;
+pub mod unicode61;
+
+/// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
+pub mod title_text;
 
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
@@ -63,8 +70,15 @@ pub use message::{
 };
 pub use meta::{
     CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta, SessionOrigin,
+    under_archived_session,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
+pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
+pub use search::{
+    SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
+    SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,
+    SessionSearchPage, SessionSearchQueryError, normalize_search_query,
+};
 pub use service::{
     CreateAtOptions, ForkOutcome, ModeChange, OpenAtOptions, SessionConfig, SessionService,
     StartOptions, fork_title, title_from,
@@ -76,7 +90,12 @@ pub use store::{
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
-    derive_node_message, fold_surface, index_by_seq, inherits_answer, is_surface_eligible,
+    derive_node_message, fold_surface, fork_seed, index_by_seq, inherited_by_fork, inherits_answer,
+    is_surface_eligible,
+};
+pub use title::{
+    LlmTitles, SESSION_TITLE_PURPOSE, SessionTitles, TitleAnswer, TitleDone, TitleModel,
+    TitleSpawn, TitleTask, normalize_session_title, title_from_answer,
 };
 pub use transcript::{
     DecodedTranscript, FRAME_MAGIC, Frame, TranscriptFormat, decode_transcript, encode_frame,

@@ -13,8 +13,13 @@
 //!   assistant run (a real paragraph break follows sentence punctuation or whitespace).
 //! - **A stopped turn says why**: `assistant/completed` with `ended` attaches it to the answer it stopped,
 //!   or to a row that exists only to carry it.
-//! - **Edited files**: `write_file` calls since the last user message are attached, as `{path, added}`, to
-//!   that exchange's last answer once the whole log is folded.
+//! - **Edited files**: `write_file` calls since the last user message whose result succeeded are attached, as
+//!   `{path, added}`, to that exchange's last answer once the whole log is folded; a refused or failed write, or
+//!   one still waiting for its result, changed nothing and is not listed.
+//! - **A slash command is a row of its own**, outside the conversation: `command/run` opens a `command` turn
+//!   (`{kind, text: "", commandId, name, args?, state: "running"}`) and closes any open run; `command/done`
+//!   settles it in place with the host's words (`state` `done`, or `error` for a done of kind `error`).
+//!   Neither is a message, so the model never saw either (`src/commands/`, developer-three).
 //!
 //! Events are read as JSON values, because the fold's job is to ignore what it does not draw rather than to
 //! demand a shape: a real log holds `session/created`, `model/request` and many more.
@@ -32,16 +37,20 @@ pub enum TurnKind {
     Assistant,
     Reasoning,
     Tool,
+    /// A slash command's row: `command/run` and its `command/done`.
+    Command,
 }
 
 /// A tool turn's phase: running until its result says otherwise; a result starting with `error`
-/// (case-insensitive) is an error.
+/// (case-insensitive) is an error. A command turn is running until its `command/done`, then done or error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolState {
     Running,
     Ok,
     Error,
+    /// A command that finished with kind `success`.
+    Done,
 }
 
 /// One file attached to a person's message, as the transcript draws it.
@@ -79,13 +88,20 @@ pub struct ChatTurn {
     pub ended: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<TurnAttachment>>,
-    /// What the model said, a tool call's arguments, or the reasoning text.
+    /// What the model said, a tool call's arguments, the reasoning text, or a command's answer.
     pub text: String,
+    /// A slash command's run id, which pairs its `command/run` and `command/done`. Declared here so a command
+    /// turn serializes as the TypeScript object is written: `kind, text, commandId, name, args, state`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
     /// A tool call's one-liner, `→ <name>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// What followed a command's name, when the log kept it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,8 +123,10 @@ impl ChatTurn {
             ended: None,
             attachments: None,
             text: text.into(),
+            command_id: None,
             label: None,
             name: None,
+            args: None,
             tool_call_id: None,
             result: None,
             state: None,
@@ -235,28 +253,47 @@ fn line_count(content: &str) -> u64 {
     (lines - usize::from(content.ends_with('\n'))) as u64
 }
 
-/// Note one `write_file` call, keeping the lines of its content per path.
-fn note_write(name: &str, arguments: &str, written: &mut Vec<EditedFile>) {
+/// A `write_file` call, noted when it is made and **counted only once its result says it succeeded**.
+///
+/// A call's arguments say what the model asked for, not what happened: a write the sandbox refused, or one that
+/// failed for any other reason, changed nothing on disk. Measured 2026-10-29 (DSH parity R-developer-twelve-11):
+/// with every write refused, the panel still named three files with their added lines. So a write is held against
+/// its call until the paired result arrives, and only an `ok` result makes it an edited file.
+#[derive(Debug, Clone)]
+struct NotedWrite {
+    path: String,
+    added: u64,
+    ok: bool,
+}
+
+/// The write one `write_file` call would make, or `None` for any other tool or unreadable arguments.
+fn noted_write(name: &str, arguments: &str) -> Option<NotedWrite> {
     if name != "write_file" {
-        return;
+        return None;
     }
-    let Ok(arguments) = serde_json::from_str::<Value>(arguments) else {
-        return;
-    };
-    let (Some(path), Some(content)) = (
-        arguments.get("path").and_then(Value::as_str),
-        arguments.get("content").and_then(Value::as_str),
-    ) else {
-        return;
-    };
-    let added = line_count(content);
-    match written.iter_mut().find(|file| file.path == path) {
-        Some(existing) => existing.added = added,
-        None => written.push(EditedFile {
-            path: path.to_owned(),
-            added,
-        }),
+    let arguments = serde_json::from_str::<Value>(arguments).ok()?;
+    let path = arguments.get("path").and_then(Value::as_str)?;
+    let content = arguments.get("content").and_then(Value::as_str)?;
+    Some(NotedWrite {
+        path: path.to_owned(),
+        added: line_count(content),
+        ok: false,
+    })
+}
+
+/// The edited files of one exchange: its successful writes, first position per path, the latest lines.
+fn edited_files(writes: &[NotedWrite]) -> Vec<EditedFile> {
+    let mut files: Vec<EditedFile> = Vec::new();
+    for write in writes.iter().filter(|write| write.ok) {
+        match files.iter_mut().find(|file| file.path == write.path) {
+            Some(existing) => existing.added = write.added,
+            None => files.push(EditedFile {
+                path: write.path.clone(),
+                added: write.added,
+            }),
+        }
     }
+    files
 }
 
 /// The transcript's attachment addresses for one session (`web.ts`'s `scopeAttachmentUrls`): each card's `url` names
@@ -283,17 +320,65 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
     let mut last_open: Option<usize> = None;
     let mut open_assistant: Option<usize> = None;
     let mut open_reasoning: Option<usize> = None;
-    // Writes kept per exchange, keyed by the index of the user turn that opened it.
-    let mut sections: HashMap<usize, Vec<EditedFile>> = HashMap::new();
+    // Writes kept per exchange in call order, keyed by the index of the user turn that opened it.
+    let mut sections: HashMap<usize, Vec<NotedWrite>> = HashMap::new();
+    // The write each call would make, by the index of its turn: (the exchange's start, its position there).
+    let mut write_of_call: HashMap<usize, (usize, usize)> = HashMap::new();
     let mut section_start: Option<usize> = None;
 
     let close_runs = |open_assistant: &mut Option<usize>, open_reasoning: &mut Option<usize>| {
         *open_assistant = None;
         *open_reasoning = None;
     };
+    // Where each slash command's row sits, by its run id.
+    let mut command_at: HashMap<String, usize> = HashMap::new();
 
     for event in events {
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        // A slash command is a row of its own, outside the conversation: `command/run` opens it and
+        // `command/done` settles it with the host's words. An event without a string `commandId` is not one.
+        let command_id = event.get("commandId").and_then(Value::as_str);
+        if event_type == "command/run"
+            && let Some(command_id) = command_id
+        {
+            close_runs(&mut open_assistant, &mut open_reasoning);
+            command_at.insert(command_id.to_owned(), turns.len());
+            let mut turn = ChatTurn::new(TurnKind::Command, "");
+            turn.command_id = Some(command_id.to_owned());
+            turn.name = Some(
+                event
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+            );
+            turn.args = event.get("args").and_then(Value::as_str).map(str::to_owned);
+            turn.state = Some(ToolState::Running);
+            turns.push(turn);
+            continue;
+        }
+        if event_type == "command/done"
+            && let Some(command_id) = command_id
+        {
+            if let Some(turn) = command_at
+                .get(command_id)
+                .and_then(|index| turns.get_mut(*index))
+            {
+                turn.state = Some(
+                    if event.get("kind").and_then(Value::as_str) == Some("error") {
+                        ToolState::Error
+                    } else {
+                        ToolState::Done
+                    },
+                );
+                turn.text = event
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+            }
+            continue;
+        }
         if event_type == "message" {
             close_runs(&mut open_assistant, &mut open_reasoning);
             let Some(message) = event.get("message") else {
@@ -339,13 +424,23 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                             turn.kind == TurnKind::Tool && turn.result.is_none()
                         });
                         if open_call {
+                            let succeeded = !starts_with_error(&text);
                             if let Some(turn) = turns.get_mut(index) {
                                 turn.result = Some(text.clone());
-                                turn.state = Some(if starts_with_error(&text) {
-                                    ToolState::Error
-                                } else {
+                                turn.state = Some(if succeeded {
                                     ToolState::Ok
+                                } else {
+                                    ToolState::Error
                                 });
+                            }
+                            // Only a write whose call succeeded is an edited file.
+                            if succeeded
+                                && let Some(&(start, position)) = write_of_call.get(&index)
+                                && let Some(write) = sections
+                                    .get_mut(&start)
+                                    .and_then(|writes| writes.get_mut(position))
+                            {
+                                write.ok = true;
                             }
                             if let Some(id) = tool_call_id.as_ref() {
                                 open.remove(id.as_str());
@@ -396,6 +491,26 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     }
                 }
             }
+            // A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the
+            // notice row a stopped turn uses — web.ts's transcriptTurns does the same.
+            if event_type == "turn/failed" {
+                let message = event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or("unknown error");
+                let reason = format!("the turn failed: {message}");
+                match turns.last_mut() {
+                    Some(last) if last.kind == TurnKind::Assistant => {
+                        last.ended.get_or_insert_with(Vec::new).push(reason);
+                    }
+                    _ => {
+                        let mut turn = ChatTurn::new(TurnKind::Assistant, String::new());
+                        turn.ended = Some(vec![reason]);
+                        turns.push(turn);
+                    }
+                }
+            }
             close_runs(&mut open_assistant, &mut open_reasoning);
             continue;
         }
@@ -433,9 +548,6 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                         .get("arguments")
                         .and_then(Value::as_str)
                         .unwrap_or("{}");
-                    if let Some(start) = section_start {
-                        note_write(name, arguments, sections.entry(start).or_default());
-                    }
                     let mut turn = ChatTurn::new(TurnKind::Tool, arguments);
                     turn.name = Some(name.to_owned());
                     turn.label = Some(format!("→ {name}"));
@@ -444,6 +556,13 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                     turn.tool_call_id = id.clone();
                     turns.push(turn);
                     let index = turns.len() - 1;
+                    if let Some(start) = section_start
+                        && let Some(write) = noted_write(name, arguments)
+                    {
+                        let writes = sections.entry(start).or_default();
+                        writes.push(write);
+                        write_of_call.insert(index, (start, writes.len() - 1));
+                    }
                     last_open = Some(index);
                     if let Some(id) = id {
                         open.insert(id, index);
@@ -457,9 +576,10 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
 
     // The Edited files panel belongs to the message that closes an exchange: the writes are attached to
     // that exchange's last answer once the whole log is folded.
-    let mut sections: Vec<(usize, Vec<EditedFile>)> = sections.into_iter().collect();
+    let mut sections: Vec<(usize, Vec<NotedWrite>)> = sections.into_iter().collect();
     sections.sort_by_key(|(start, _)| *start);
-    for (start, files) in sections {
+    for (start, writes) in sections {
+        let files = edited_files(&writes);
         if files.is_empty() {
             continue;
         }
@@ -509,6 +629,35 @@ fn append(turns: &mut Vec<ChatTurn>, kind: TurnKind, text: &str, index: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_turn_is_the_answers_stop_reason_as_in_typescript() {
+        let events = vec![
+            serde_json::json!({"seq": 0, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}}),
+            serde_json::json!({"seq": 1, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "partial"}}),
+            serde_json::json!({"seq": 2, "type": "turn/failed", "message": "upstream answered 502"}),
+        ];
+        let turns = transcript_turns(&events);
+        let last = turns.last().expect("an answer row");
+        assert_eq!(last.kind, TurnKind::Assistant);
+        assert_eq!(
+            last.ended.as_deref(),
+            Some(&["the turn failed: upstream answered 502".to_owned()][..])
+        );
+
+        let alone = transcript_turns(&[
+            serde_json::json!({"seq": 0, "type": "turn/failed", "message": ""}),
+        ]);
+        assert_eq!(
+            alone.len(),
+            1,
+            "a failure with no answer gets a row of its own"
+        );
+        assert_eq!(
+            alone[0].ended.as_deref(),
+            Some(&["the turn failed: unknown error".to_owned()][..])
+        );
+    }
     use serde_json::json;
 
     fn kinds(turns: &[ChatTurn]) -> Vec<TurnKind> {
@@ -652,6 +801,156 @@ mod tests {
         );
     }
 
+    fn answer_files(events: &[Value]) -> Option<Vec<EditedFile>> {
+        transcript_turns(events)
+            .into_iter()
+            .find(|turn| turn.kind == TurnKind::Assistant)
+            .and_then(|answer| answer.files)
+    }
+
+    fn user(text: &str) -> Value {
+        json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+    }
+
+    fn call(id: Option<&str>, name: &str, arguments: Value) -> Value {
+        let mut chunk =
+            json!({"type": "tool-call", "name": name, "arguments": arguments.to_string()});
+        if let Some(id) = id {
+            chunk["id"] = json!(id);
+        }
+        json!({"type": "assistant/chunk", "chunk": chunk})
+    }
+
+    fn result(id: Option<&str>, text: &str) -> Value {
+        let mut message = json!({"role": "tool", "content": [{"type": "text", "text": text}]});
+        if let Some(id) = id {
+            message["toolCallId"] = json!(id);
+        }
+        json!({"type": "message", "message": message})
+    }
+
+    fn answer(text: &str) -> Value {
+        json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": text}})
+    }
+
+    #[test]
+    fn a_failed_write_is_not_an_edited_file_and_a_successful_one_is() {
+        // DSH parity R-developer-twelve-11, measured 2026-10-29: with every write refused by the sandbox the panel
+        // still named the files with their added lines, though the disk was unchanged.
+        let events = vec![
+            user("edit three files"),
+            call(
+                Some("c1"),
+                "write_file",
+                json!({"path": "/w/refused.txt", "content": "one\ntwo\n"}),
+            ),
+            result(
+                Some("c1"),
+                "error (SANDBOX): '/w/refused.txt' is outside the sandbox root /elsewhere",
+            ),
+            call(
+                Some("c2"),
+                "bash",
+                json!({"command": "sed -i '' 's/a/b/' /w/shell.txt"}),
+            ),
+            result(
+                Some("c2"),
+                "error (SANDBOX): [sandbox: file access denied under workspace-write mode]",
+            ),
+            call(
+                Some("c3"),
+                "write_file",
+                json!({"path": "/w/kept.txt", "content": "x\n"}),
+            ),
+            result(Some("c3"), "wrote 2 bytes to /w/kept.txt"),
+            answer("one of three"),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            Some(vec![EditedFile {
+                path: "/w/kept.txt".into(),
+                added: 1
+            }]),
+            "only the write that succeeded is listed"
+        );
+        let turns = transcript_turns(&events);
+        let refused = turns
+            .iter()
+            .find(|turn| turn.name.as_deref() == Some("write_file"))
+            .expect("the refused call");
+        assert_eq!(
+            refused.state,
+            Some(ToolState::Error),
+            "the refused call still reads as an error"
+        );
+    }
+
+    #[test]
+    fn an_exchange_whose_every_write_failed_carries_no_panel() {
+        let events = vec![
+            user("edit"),
+            call(
+                Some("c1"),
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "x"}),
+            ),
+            result(Some("c1"), "error: permission denied"),
+            answer("could not write"),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            None,
+            "nothing changed, so no Edited files panel"
+        );
+    }
+
+    #[test]
+    fn a_write_still_waiting_for_its_result_is_not_yet_an_edited_file() {
+        let events = vec![
+            user("edit"),
+            answer("writing now"),
+            call(
+                Some("c1"),
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "x"}),
+            ),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            None,
+            "a running call has changed nothing yet"
+        );
+    }
+
+    #[test]
+    fn a_path_written_twice_keeps_the_lines_of_its_last_successful_write() {
+        // Results without ids pair with the newest open call, as a provider that sends no ids requires.
+        let events = vec![
+            user("edit"),
+            call(
+                None,
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "one\ntwo\nthree\n"}),
+            ),
+            result(None, "wrote 14 bytes to /w/a.txt"),
+            call(
+                None,
+                "write_file",
+                json!({"path": "/w/a.txt", "content": "one\n"}),
+            ),
+            result(None, "Error: disk full"),
+            answer("the second write failed"),
+        ];
+        assert_eq!(
+            answer_files(&events),
+            Some(vec![EditedFile {
+                path: "/w/a.txt".into(),
+                added: 3
+            }]),
+            "the failed second write does not overwrite the first"
+        );
+    }
+
     #[test]
     fn attachments_become_cards_with_the_upload_route() {
         let attachments = attachments_of(&[
@@ -703,5 +1002,72 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].attachments.as_ref().unwrap().len(), 1);
         assert_eq!(turns[0].text, "look");
+    }
+
+    /// `test/commands.test.ts`: "a session's history shows each command as its own row, settled by its done
+    /// event, outside the conversation".
+    #[test]
+    fn a_sessions_history_shows_each_command_as_its_own_row_settled_by_its_done_event() {
+        // A `/goal` create answers with DSH's goal card (developer-nine's `/goal`, D-059).
+        let created = "Goal created\nStatus: active\nObjective: ship it\nRounds: 0/256\nActivation: armed\n\nCommands: /goal edit <objective>, /goal pause, /goal clear";
+        let turns = transcript_turns(&[
+            json!({"type": "message", "seq": 0, "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+            json!({"type": "command/run", "seq": 1, "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "source": {"kind": "user"}}),
+            json!({"type": "goal/change", "seq": 2}),
+            json!({"type": "command/done", "seq": 3, "commandId": "cmd-0000abcd-1", "kind": "success", "text": created}),
+            json!({"type": "command/run", "seq": 4, "commandId": "cmd-0000abcd-2", "name": "export"}),
+            json!({"type": "command/done", "seq": 5, "commandId": "cmd-0000abcd-2", "kind": "error", "text": "The Web /export command does not accept a path."}),
+            json!({"type": "command/run", "seq": 6, "commandId": "cmd-0000abcd-3", "name": "compact"}),
+        ]);
+        let commands: Vec<&ChatTurn> = turns
+            .iter()
+            .filter(|turn| turn.kind == TurnKind::Command)
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&commands).unwrap(),
+            json!([
+                {"kind": "command", "text": created, "commandId": "cmd-0000abcd-1", "name": "goal", "args": "ship it", "state": "done"},
+                {"kind": "command", "text": "The Web /export command does not accept a path.", "commandId": "cmd-0000abcd-2", "name": "export", "state": "error"},
+                {"kind": "command", "text": "", "commandId": "cmd-0000abcd-3", "name": "compact", "state": "running"},
+            ])
+        );
+        // The bytes keep the TypeScript object's key order.
+        assert_eq!(
+            serde_json::to_string(commands[0]).unwrap(),
+            format!(
+                r#"{{"kind":"command","text":{},"commandId":"cmd-0000abcd-1","name":"goal","args":"ship it","state":"done"}}"#,
+                serde_json::to_string(created).unwrap()
+            )
+        );
+        assert_eq!(
+            turns[0].kind,
+            TurnKind::User,
+            "the conversation keeps its place"
+        );
+        assert_eq!(turns.len(), 4);
+    }
+
+    #[test]
+    fn a_command_run_ends_an_open_answer_and_a_malformed_one_is_not_a_row() {
+        let turns = transcript_turns(&[
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "one"}}),
+            json!({"type": "command/run", "commandId": "cmd-0000abcd-1", "name": "compact"}),
+            json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "two"}}),
+            json!({"type": "command/run", "commandId": 7, "name": "compact"}),
+            json!({"type": "command/done", "commandId": "cmd-unknown-9", "kind": "success", "text": "x"}),
+        ]);
+        assert_eq!(
+            kinds(&turns),
+            vec![TurnKind::Assistant, TurnKind::Command, TurnKind::Assistant],
+            "the answer run ends at the command; a run without a string id draws nothing"
+        );
+        assert_eq!(turns[0].text, "one");
+        assert_eq!(turns[2].text, "two");
+        assert_eq!(
+            turns[1].state,
+            Some(ToolState::Running),
+            "a done for another id settles nothing"
+        );
+        assert_eq!(turns[1].text, "");
     }
 }

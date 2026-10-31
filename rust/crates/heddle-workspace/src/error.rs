@@ -22,6 +22,11 @@ pub enum WorkspaceError {
     /// already carries; DSH's `workspace/name-conflict`, a `409` on the route.
     #[error("A workspace named “{0}” already exists.")]
     NameConflict(String),
+    /// `cannot reorder unknown workspace '<id-or-path>'` — a reorder naming a workspace, or an anchor, that is
+    /// not in the order: DSH's `WorkspaceOrderInvalidError` (dsh-workspace lib/index.js:333-344), which the
+    /// route answers `404` with DSH's `workspace/not-found`.
+    #[error("cannot reorder unknown workspace '{0}'")]
+    OrderInvalid(String),
     /// Removing a root that still holds sessions with nothing above it — a `409` on the route:
     /// `workspace '<title>' still holds <n> session(s) and no root above it, so removing it would only be
     /// undone on the next run; remove those sessions, register a root above '<path>', or force it`
@@ -33,4 +38,22 @@ pub enum WorkspaceError {
         path: String,
         sessions: usize,
     },
+    /// `cannot list "<name>": permission denied` — a folder the tree was asked for and may not read (#106),
+    /// named relative to its workspace (a root by its title). DSH's file backend says the same of such a
+    /// folder (dsh-fs-local lib/index.js:269); DSH has no code for it, so the route answers heddle's
+    /// `workspace-file/unreadable` ([`WorkspaceError::code`]), `400` as the folder picker answers
+    /// `directory-picker/unreadable`.
+    #[error("cannot list \"{name}\": permission denied")]
+    Unreadable { name: String },
+}
+
+impl WorkspaceError {
+    /// The code a route answers beside the sentence: `workspace-file/unreadable` for
+    /// [`WorkspaceError::Unreadable`]; `None` for every other error.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            WorkspaceError::Unreadable { .. } => Some("workspace-file/unreadable"),
+            _ => None,
+        }
+    }
 }

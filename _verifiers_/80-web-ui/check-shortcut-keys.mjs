@@ -34,6 +34,7 @@ const CHORDS = {
   sidebar: { code: 'KeyB', macKey: '∫', key: 'b', keyCode: 66, alt: true },
   newSession: { code: 'KeyN', macKey: 'Dead', key: 'n', keyCode: 78, alt: true },
   settings: { code: 'Comma', macKey: '≤', key: ',', keyCode: 188, alt: true },
+  addWorkspace: { code: 'KeyO', macKey: 'ø', key: 'o', keyCode: 79, alt: true },
   fork: { code: 'KeyF', macKey: 'F', key: 'F', keyCode: 70, shift: true },
 }
 
@@ -170,6 +171,13 @@ test('the session shortcuts fire on the physical key, with the key values the br
       await settle(600)
       assert.equal(await browser.evaluate(`document.getElementById('settings-dialog').open`), true, 'settings is open')
       await browser.evaluate(`document.getElementById('settings-dialog').close()`)
+    })
+
+    await t.test('add workspace: Mod+Alt+O opens the folder chooser', async () => {
+      await press(browser, CHORDS.addWorkspace, { onMac })
+      assert.ok(await browser.waitFor(`document.getElementById('workspace-picker').open`, 10_000), 'the chooser is open')
+      await browser.evaluate('document.querySelector("#workspace-picker [data-ws-close]").click()')
+      assert.equal(await browser.evaluate(`document.getElementById('workspace-picker').open`), false, 'and closes again')
     })
 
     await t.test('new session: Mod+Alt+N starts a session', async () => {

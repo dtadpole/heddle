@@ -35,6 +35,7 @@ fn every_chord_in_the_table_names_its_physical_key() {
         ("KeyB", "sidebar"),
         ("KeyN", "new-session"),
         ("Comma", "settings"),
+        ("KeyO", "add-workspace"),
     ] {
         let entry = source
             .lines()

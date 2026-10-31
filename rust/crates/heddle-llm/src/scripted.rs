@@ -63,16 +63,21 @@ fn expand_home(base_url: &str, home: Option<&std::ffi::OsStr>) -> PathBuf {
 pub fn load_script(endpoint: &EndpointConfig) -> Result<serde_json::Value, ModelError> {
     let path = script_path(&endpoint.base_url);
     let text = std::fs::read_to_string(&path).map_err(|error| {
-        ModelError::new(
+        // The shipped fixture with no script is what a home that configured nothing runs on (issue #74): say how
+        // to configure a model rather than naming a test file.
+        let message = if error.kind() == std::io::ErrorKind::NotFound
+            && heddle_config::is_shipped_fixture(endpoint)
+        {
+            heddle_config::unscripted_fixture_message(&heddle_config::Env::from_process())
+        } else {
             format!(
                 "the script for '{}' could not be read at {}",
                 endpoint.name,
                 path.display()
-            ),
-            endpoint.name.clone(),
-            crate::error::code::SCRIPT,
-        )
-        .with_source(error)
+            )
+        };
+        ModelError::new(message, endpoint.name.clone(), crate::error::code::SCRIPT)
+            .with_source(error)
     })?;
     serde_json::from_str(&text).map_err(|error| {
         ModelError::new(
@@ -235,6 +240,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 
@@ -460,6 +466,34 @@ mod tests {
         assert_eq!(
             chunks[0].as_ref().err().map(|error| error.code.as_str()),
             Some("SCRIPT")
+        );
+    }
+
+    /// Issue #74: the shipped fixture without its script says how to configure a model, still as `SCRIPT`; any other
+    /// scripted endpoint keeps naming the file it could not read. (A test runs in the crate folder, which has no
+    /// `scripted.json`.)
+    #[test]
+    fn the_shipped_fixture_without_a_script_says_how_to_configure_a_model() {
+        assert!(!Path::new("scripted.json").exists());
+        let shipped = heddle_config::default_endpoints().remove(0);
+        let error = load_script(&shipped).expect_err("no script in the crate folder");
+        assert_eq!(error.code.as_str(), "SCRIPT");
+        assert!(
+            error.message.starts_with(
+                "the offline test endpoint 'scripted' has no script at scripted.json. To talk to a model,"
+            ),
+            "{}",
+            error.message
+        );
+        let renamed = EndpointConfig {
+            name: "double".into(),
+            ..shipped
+        };
+        assert_eq!(
+            load_script(&renamed)
+                .expect_err("no script in the crate folder")
+                .message,
+            "the script for 'double' could not be read at scripted.json"
         );
     }
 }

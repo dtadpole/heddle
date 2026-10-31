@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::clock::iso_now;
 use crate::definition::{
-    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+    CreatedDefinition, DefinitionOptions, ensure_sessions_folder, existing_session_names,
+    write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -28,6 +29,7 @@ use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, Ses
 use crate::mode::{
     MODE_EVENT, effective_mode as fold_effective_mode, recorded_mode as fold_recorded_mode,
 };
+use crate::repair::interrupted_turn_closers;
 use crate::store::{EventListener, SessionStore, default_session_root};
 use crate::surface::{SurfaceState, inherits_answer};
 
@@ -47,6 +49,9 @@ pub struct StartOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub title: Option<String>,
+    /// The agent preset a new session runs under (inventory A96); ignored when resuming, since a session keeps
+    /// its own.
+    pub preset: Option<String>,
 }
 
 /// What `open_at` is told. `fresh` starts a new session even when the folder has one (`--new`).
@@ -57,6 +62,8 @@ pub struct OpenAtOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
     pub title: Option<String>,
+    /// The agent preset a session this call creates runs under (inventory A96); an existing one keeps its own.
+    pub preset: Option<String>,
 }
 
 /// What `create_at` is told.
@@ -66,6 +73,8 @@ pub struct CreateAtOptions {
     pub endpoint: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// The agent preset the new session runs under (inventory A96).
+    pub preset: Option<String>,
 }
 
 /// What a fork came to.
@@ -117,42 +126,34 @@ pub fn title_from(text: &str) -> String {
     format!("{}…", trim_punctuation(&String::from_utf16_lossy(chosen)))
 }
 
-/// A fork's name, DSH's `increasedForkTitle`: a title ending in `(n)` or the full-width `（n）` is
-/// incremented in place; any other gains ` (1)`; a blank one is `session (1)`. The ordinal steps past
-/// every name in `taken`.
-pub fn fork_title(base: &str, taken: &[String]) -> String {
-    let trimmed = if base.trim().is_empty() {
-        "session"
-    } else {
-        base.trim()
-    };
-    #[derive(Clone, Copy)]
-    enum Style {
-        Ascii,
-        FullWidth,
-        Space,
+/// A fork's name, from its **source's** title alone: DSH's `increasedForkTitle`
+/// (`dsh-api-session-controller` lib/client.js:3714-3720, applied at :3992 and :4003-4004 as
+/// `manager.rename(childId, increasedForkTitle(sourceTitle))`). A title ending in `(n)` or the
+/// full-width `（n）` is incremented in place; any other gains ` (1)`. No other session is consulted,
+/// so a second fork of `T` is `T (1)` again (#67); the version here used to step past every title
+/// the store held, which made it `T (2)`.
+///
+/// The number is incremented as decimal text, as DSH's `BigInt` increments it, so a long ordinal is
+/// exact and cannot overflow. A blank title gives `None` and the fork stays untitled: DSH renames the
+/// child only when its source has a durable title (`list.byId[id]?.title`).
+pub fn fork_title(base: &str) -> Option<String> {
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    let ascii = split_ordinal_suffix(trimmed, '(', ')');
-    let full_width = split_ordinal_suffix(trimmed, '（', '）');
-    let (prefix, mut ordinal, style) = match (&ascii, &full_width) {
-        (Some((prefix, value)), _) => (prefix.clone(), value + 1, Style::Ascii),
-        (None, Some((prefix, value))) => (prefix.clone(), value + 1, Style::FullWidth),
-        (None, None) => (trimmed.to_string(), 1, Style::Space),
-    };
-    let format = |value: u64| match style {
-        Style::Ascii => format!("{prefix}({value})"),
-        Style::FullWidth => format!("{prefix}（{value}）"),
-        Style::Space => format!("{prefix} ({value})"),
-    };
-    while taken.iter().any(|name| name == &format(ordinal)) {
-        ordinal += 1;
+    if let Some((prefix, digits)) = split_ordinal_suffix(trimmed, '(', ')') {
+        return Some(format!("{prefix}({})", increment_decimal(&digits)));
     }
-    format(ordinal)
+    if let Some((prefix, digits)) = split_ordinal_suffix(trimmed, '（', '）') {
+        return Some(format!("{prefix}（{}）", increment_decimal(&digits)));
+    }
+    Some(format!("{trimmed} (1)"))
 }
 
 /// The `(n)` suffix of a title, as the TypeScript regexes read it: the **first** opening bracket whose
-/// remainder is digits followed by the closing bracket and the end of the string.
-fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, u64)> {
+/// remainder is ASCII digits followed by the closing bracket and the end of the string. Answers the
+/// prefix and the digits as written.
+fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, String)> {
     let chars: Vec<char> = text.chars().collect();
     for (index, character) in chars.iter().enumerate() {
         if *character != open {
@@ -166,12 +167,29 @@ fn split_ordinal_suffix(text: &str, open: char, close: char) -> Option<(String, 
         if digits.is_empty() || !digits.iter().all(char::is_ascii_digit) {
             continue;
         }
-        let number: String = digits.iter().collect();
-        if let Ok(value) = number.parse::<u64>() {
-            return Some((chars[..index].iter().collect(), value));
-        }
+        return Some((chars[..index].iter().collect(), digits.iter().collect()));
     }
     None
+}
+
+/// `BigInt(digits) + 1n` written back in decimal: leading zeros dropped, any length exact.
+fn increment_decimal(digits: &str) -> String {
+    let mut out: Vec<char> = digits.trim_start_matches('0').chars().collect();
+    let mut index = out.len();
+    loop {
+        if index == 0 {
+            out.insert(0, '1');
+            break;
+        }
+        index -= 1;
+        if out[index] == '9' {
+            out[index] = '0';
+        } else {
+            out[index] = char::from(out[index] as u8 + 1);
+            break;
+        }
+    }
+    out.into_iter().collect()
 }
 
 /// The session service. Cheap to clone; clones share one store.
@@ -239,6 +257,7 @@ impl SessionService {
             model: options.model,
             reasoning_effort: options.reasoning_effort,
             title: options.title,
+            preset: options.preset,
             ..Default::default()
         })
     }
@@ -252,6 +271,10 @@ impl SessionService {
         let canonical = canonical_path(Path::new(branch))
             .to_string_lossy()
             .into_owned();
+        // The branch is written **before** the store records anything (#106): a folder heddle cannot write
+        // is refused with `SessionError::Unwritable` and leaves no session behind — measured, the old order
+        // recorded one, which then listed under a branch whose definition was never written.
+        ensure_sessions_folder(&canonical).map_err(|error| error.unwritable_in(&canonical))?;
         let taken = existing_session_names(&canonical);
         let handle = self.open_at(
             &canonical,
@@ -261,6 +284,7 @@ impl SessionService {
                 model: options.model.clone(),
                 reasoning_effort: options.reasoning_effort.clone(),
                 title: options.title.clone(),
+                preset: options.preset.clone(),
             },
         )?;
         let created = self
@@ -280,7 +304,8 @@ impl SessionService {
                 reasoning_effort: options.reasoning_effort,
                 taken,
             },
-        )?;
+        )
+        .map_err(|error| error.unwritable_in(&canonical))?;
         Ok(CreatedDefinition { handle, definition })
     }
 
@@ -308,30 +333,28 @@ impl SessionService {
         else {
             return Ok(ForkOutcome::Unavailable);
         };
+        // A fork continues its source, so it runs under the source's preset (inventory A96).
+        if let Some(preset) = source.preset() {
+            self.store.record_preset(&handle.id, preset)?;
+        }
         let created = self
             .list()
             .into_iter()
             .find(|meta| meta.id() == handle.id)
             .map(|meta| meta.created().to_string())
             .unwrap_or_else(iso_now);
-        let base = source
-            .title()
-            .filter(|title| !title.trim().is_empty())
-            .map(|title| title.trim().to_string())
-            .unwrap_or_else(|| "session".to_string());
-        let titles: Vec<String> = self
-            .list()
-            .iter()
-            .map(|meta| meta.title().unwrap_or("").to_string())
-            .collect();
-        let title = fork_title(&base, &titles);
-        self.store.rename(&handle.id, &title)?;
+        // Named from the source's title alone, as DSH names it (`fork_title`); an untitled source
+        // leaves the fork untitled.
+        let title = fork_title(source.title().unwrap_or(""));
+        if let Some(title) = &title {
+            self.store.rename(&handle.id, title)?;
+        }
         let definition = write_session_definition(
             &handle,
             source.cwd(),
             &DefinitionOptions {
                 created_at: created,
-                title: Some(title),
+                title,
                 endpoint: source.endpoint().map(str::to_string),
                 model: source.model().map(str::to_string),
                 reasoning_effort: source.reasoning_effort().map(str::to_string),
@@ -438,6 +461,7 @@ impl SessionService {
             model: options.model,
             reasoning_effort: options.reasoning_effort,
             title: options.title,
+            preset: options.preset,
             ..Default::default()
         })
     }
@@ -457,9 +481,22 @@ impl SessionService {
         self.store.derive_node(handle, seq)
     }
 
-    /// Every event so far.
+    /// Every event so far, for a caller that wants to show it.
+    ///
+    /// A session no live writer holds reads **balanced**: a turn its writer left unfinished is followed by the
+    /// closers the next write-open will append ([`crate::repair`]), and nothing is written — DSH's cold read
+    /// (`readColdSessionLog`, dsh-session-query lib/index.js:26-52). So a call cut by a restart reads as
+    /// interrupted at once, not as running until somebody writes the session (issue #5). The model's view is
+    /// [`SessionService::messages`], which reads the log itself.
     pub fn events(&self, handle: &SessionHandle) -> Result<Events, SessionError> {
-        self.store.read(handle)
+        let events = self.store.read(handle)?;
+        let closers = interrupted_turn_closers(&events);
+        if closers.is_empty() || self.store.writer_held(handle) {
+            return Ok(events);
+        }
+        let mut balanced = events.as_ref().clone();
+        balanced.extend(closers.into_iter().map(Arc::new));
+        Ok(Arc::new(balanced))
     }
 
     /// Every session, newest first.
@@ -468,13 +505,43 @@ impl SessionService {
     }
 
     /// Retitle a session; the log is untouched.
+    ///
+    /// A rename is a person naming the session, so it pins the name: an automatic title still being generated lands
+    /// nowhere (DSH's `rename()` supersedes in-flight generation, dsh-session-title lib/index.js:295-311), including when
+    /// the person confirms the automatic title unchanged.
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
+        self.store.titles().supersede(id);
         self.store.rename(id, title)
+    }
+
+    /// Give this store's automatic titles their model ([`crate::title`]): from now on a session's first prompt is
+    /// titled by the model the turn's own request names. The composition root calls it once, where it builds the turn
+    /// runtime; without it a session keeps its plain first-message name.
+    pub fn attach_titles(&self, model: Arc<dyn crate::title::TitleModel>) {
+        self.store
+            .titles()
+            .attach(Arc::downgrade(&self.store), model);
     }
 
     /// Pin, unpin, archive or unarchive.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
         self.store.flags(id, patch)
+    }
+
+    /// Whether an archived session owns this one's steps: it is archived itself, or a session above it in its
+    /// subagent lineage is. DSH's archived-session gate asks exactly this before every model step.
+    pub fn under_archived(&self, id: &str) -> bool {
+        self.store.under_archived(id)
+    }
+
+    /// Record the agent preset a session runs under, only when it has none (inventory A96); see
+    /// [`SessionStore::record_preset`]. Answers the record as it now is; `Ok(None)` for an unknown session.
+    pub fn record_preset(
+        &self,
+        id: &str,
+        preset: &str,
+    ) -> Result<Option<SessionMeta>, SessionError> {
+        self.store.record_preset(id, preset)
     }
 
     /// Switch a session onto an endpoint, replacing any model override it carried.
@@ -662,23 +729,153 @@ mod tests {
 
     #[test]
     fn a_fork_title_counts_up_in_place() {
-        assert_eq!(fork_title("Source", &[]), "Source (1)");
-        assert_eq!(fork_title("Source (1)", &[]), "Source (2)");
-        assert_eq!(fork_title("Source (2)", &[]), "Source (3)");
-        assert_eq!(fork_title("Source （1）", &[]), "Source （2）");
-        assert_eq!(fork_title("", &[]), "session (1)");
-        assert_eq!(fork_title("   ", &[]), "session (1)");
-        // The reference does not look past the suffix, but a taken name steps past it.
-        let taken = vec!["Source (2)".to_string(), "Source (3)".to_string()];
-        assert_eq!(fork_title("Source (1)", &taken), "Source (4)");
+        assert_eq!(fork_title("Source").as_deref(), Some("Source (1)"));
+        assert_eq!(fork_title("Source (1)").as_deref(), Some("Source (2)"));
+        assert_eq!(fork_title("Source (2)").as_deref(), Some("Source (3)"));
+        assert_eq!(fork_title("Source （1）").as_deref(), Some("Source （2）"));
+        // A blank source names nothing: DSH renames a fork only from a durable title.
+        assert_eq!(fork_title(""), None);
+        assert_eq!(fork_title("   "), None);
+    }
+
+    #[test]
+    fn a_fork_title_is_dsh_increased_fork_title_edge_cases_included() {
+        // Each pair is what DSH's two regexes and `BigInt` produce for that title.
+        for (title, expected) in [
+            ("T", "T (1)"),
+            ("全角标题（1）", "全角标题（2）"),
+            ("Plan (2023)", "Plan (2024)"),
+            ("x(1)", "x(2)"),
+            ("(3)", "(4)"),
+            ("a (1) (2)", "a (1) (3)"),
+            ("a (1) b", "a (1) b (1)"),
+            ("x (1)（2）", "x (1)（3）"),
+            ("x（1）(2)", "x（1）(3)"),
+            ("T (01)", "T (2)"),
+            ("T (x1)", "T (x1) (1)"),
+            ("T ()", "T () (1)"),
+            ("T (99999999999999999999)", "T (100000000000000000000)"),
+            ("T (12345678901234567891)", "T (12345678901234567892)"),
+            ("T (18446744073709551615)", "T (18446744073709551616)"),
+        ] {
+            assert_eq!(fork_title(title).as_deref(), Some(expected), "{title}");
+        }
     }
 
     #[test]
     fn a_fork_of_a_fork_is_incremented_rather_than_appended() {
-        let first = fork_title("Source", &[]);
-        let second = fork_title(&first, &[]);
+        let first = fork_title("Source").unwrap();
+        let second = fork_title(&first).unwrap();
         assert_eq!(second, "Source (2)");
         assert!(!second.contains("(1) (1)"));
+    }
+
+    /// One recorded message, written to the store directly so the first-message title fallback stays out of it.
+    fn say(service: &SessionService, handle: &SessionHandle, role: Role, text: &str) {
+        service
+            .store()
+            .message(
+                handle,
+                Message {
+                    role,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: text.to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+    }
+
+    /// A session in `folder` with one completed turn, so it can be forked; titled `title` when given.
+    fn answered(service: &SessionService, folder: &str, title: Option<&str>) -> SessionHandle {
+        let handle = service.open_at(folder, OpenAtOptions::default()).unwrap();
+        say(service, &handle, Role::User, "a question worth forking");
+        say(service, &handle, Role::Assistant, "the answer");
+        service
+            .store()
+            .append(&handle, NewEvent::new("turn/completed"), Default::default())
+            .unwrap();
+        if let Some(title) = title {
+            service.rename(&handle.id, title).unwrap();
+        }
+        handle
+    }
+
+    /// Fork `id`; answer the child's id and its title, after checking its definition says the same.
+    fn fork_named(service: &SessionService, id: &str) -> (String, Option<String>) {
+        let ForkOutcome::Forked(forked) = service.fork(id).unwrap() else {
+            panic!("{id} should fork");
+        };
+        let title = service
+            .list()
+            .into_iter()
+            .find(|meta| meta.id() == forked.handle.id)
+            .and_then(|meta| meta.title().map(str::to_string));
+        let written = crate::definition::read_session_definition(&forked.definition.dir)
+            .unwrap()
+            .title()
+            .map(str::to_string);
+        assert_eq!(
+            written, title,
+            "the definition names the fork as the store does"
+        );
+        (forked.handle.id, title)
+    }
+
+    #[test]
+    fn a_second_fork_is_named_from_its_source_alone() {
+        // #67, DSH's table: fork T, fork T again, fork the first fork, fork the archived T (2).
+        let (_dir, service) = service();
+        let folder = branch();
+        let source = answered(&service, folder.path().to_str().unwrap(), Some("T"));
+        let (first, first_title) = fork_named(&service, &source.id);
+        let (second, second_title) = fork_named(&service, &source.id);
+        let (of_first, of_first_title) = fork_named(&service, &first);
+        service
+            .flags(
+                &of_first,
+                FlagPatch {
+                    archived: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (_, of_archived_title) = fork_named(&service, &of_first);
+        assert_eq!(
+            [
+                first_title.as_deref(),
+                second_title.as_deref(),
+                of_first_title.as_deref(),
+                of_archived_title.as_deref()
+            ],
+            [Some("T (1)"), Some("T (1)"), Some("T (2)"), Some("T (3)")]
+        );
+        // The archived second fork, T (1), forks into T (2) though another session holds that name.
+        service
+            .flags(
+                &second,
+                FlagPatch {
+                    archived: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(fork_named(&service, &second).1.as_deref(), Some("T (2)"));
+    }
+
+    #[test]
+    fn a_fork_of_an_untitled_session_is_left_untitled() {
+        let (_dir, service) = service();
+        let folder = branch();
+        let source = answered(&service, folder.path().to_str().unwrap(), None);
+        assert_eq!(service.meta(&source.id).unwrap().title(), None);
+        let (_, title) = fork_named(&service, &source.id);
+        assert_eq!(
+            title, None,
+            "DSH renames a fork only from its source's title"
+        );
     }
 
     #[test]
@@ -802,6 +999,51 @@ mod tests {
         assert_eq!(service.list().len(), 1);
     }
 
+    /// Issue #106: a branch heddle cannot write failed with the I/O error and the definition's absolute path,
+    /// after the store had already recorded the session. It is refused by code, in words, naming the folder by
+    /// its name, and before anything is recorded.
+    #[test]
+    fn create_at_in_a_branch_heddle_cannot_write_is_refused_by_code_without_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, service) = service();
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let mode = |bits: u32| {
+            std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(bits)).unwrap()
+        };
+        mode(0o000);
+        // File modes do not stop the superuser, so a run as root cannot judge this.
+        if std::fs::read_dir(folder.path()).is_ok() {
+            mode(0o755);
+            return;
+        }
+        let error = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap_err();
+        mode(0o755);
+        let name = folder.path().file_name().unwrap().to_string_lossy();
+        assert_eq!(error.code(), Some("session/unwritable"));
+        assert_eq!(
+            error.to_string(),
+            format!("cannot write to \"{name}\": permission denied")
+        );
+        assert!(
+            !error.to_string().contains(folder_path),
+            "no absolute path in the sentence"
+        );
+        assert!(
+            service.list().is_empty(),
+            "the store holds no session for the refused branch"
+        );
+        let created = service
+            .create_at(folder_path, CreateAtOptions::default())
+            .unwrap();
+        assert!(
+            Path::new(&created.definition.file).exists(),
+            "once writable, the branch takes one"
+        );
+    }
+
     #[test]
     fn a_fork_needs_an_answer_and_then_copies_the_conversation() {
         let (_dir, service) = service();
@@ -882,6 +1124,110 @@ mod tests {
                 .title(),
             Some("Source (1)")
         );
+    }
+
+    /// Inventory A96: a session is created with the preset it is given (start, open_at, create_at), a folder's existing
+    /// session keeps its own, a fork runs under its source's, and `record_preset` never replaces one.
+    #[test]
+    fn a_session_is_created_with_its_preset_keeps_it_and_a_fork_copies_it() {
+        let (_dir, service) = service();
+        let preset_of = |id: &str| {
+            service
+                .meta(id)
+                .and_then(|meta| meta.preset().map(str::to_string))
+        };
+
+        let started = service
+            .start(StartOptions {
+                preset: Some("reader".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(preset_of(&started.id).as_deref(), Some("reader"));
+        let resumed = service
+            .start(StartOptions {
+                resume: Some(started.id.clone()),
+                preset: Some("standard".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            preset_of(&resumed.id).as_deref(),
+            Some("reader"),
+            "a resumed session keeps its own"
+        );
+
+        let folder = branch();
+        let folder_path = folder.path().to_str().unwrap();
+        let opened = service
+            .open_at(
+                folder_path,
+                OpenAtOptions {
+                    preset: Some("reader".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(preset_of(&opened.id).as_deref(), Some("reader"));
+        let again = service
+            .open_at(
+                folder_path,
+                OpenAtOptions {
+                    preset: Some("standard".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(again.id, opened.id);
+        assert_eq!(preset_of(&again.id).as_deref(), Some("reader"));
+
+        let other = branch();
+        let created = service
+            .create_at(
+                other.path().to_str().unwrap(),
+                CreateAtOptions {
+                    preset: Some("reader".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(preset_of(&created.handle.id).as_deref(), Some("reader"));
+
+        // A fork of a session under `reader` runs under `reader`.
+        service.user(&opened, "a question", None).unwrap();
+        service
+            .store()
+            .message(
+                &opened,
+                Message {
+                    role: Role::Assistant,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: "an answer".to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        service
+            .store()
+            .append(&opened, NewEvent::new("turn/completed"), Default::default())
+            .unwrap();
+        let ForkOutcome::Forked(forked) = service.fork(&opened.id).unwrap() else {
+            panic!("the fork should have been made");
+        };
+        assert_eq!(preset_of(&forked.handle.id).as_deref(), Some("reader"));
+
+        // A session with none takes one once, and keeps it.
+        let plain = service.start(StartOptions::default()).unwrap();
+        assert_eq!(preset_of(&plain.id), None);
+        let recorded = service
+            .record_preset(&plain.id, "standard")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.preset(), Some("standard"));
+        service.record_preset(&plain.id, "reader").unwrap();
+        assert_eq!(preset_of(&plain.id).as_deref(), Some("standard"));
     }
 
     #[test]
