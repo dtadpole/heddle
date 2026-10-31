@@ -301,12 +301,12 @@ export function releaseChromeOutput(child) {
  *
  * `Browser.close` is what flushes the profile and lets a page's `beforeunload` run, so it is tried
  * first; the signal is the fallback for a browser that is wedged, which is exactly when waiting on
- * politeness would hang.
+ * politeness would hang. The polite connect is bounded as tightly as the call, for the same reason.
  */
 export async function stopChrome(running) {
   if (running === undefined) return
   try {
-    const connection = await connect(running.wsUrl)
+    const connection = await connect(running.wsUrl, { timeoutMs: 2_000 })
     await connection.send('Browser.close', {}, { timeoutMs: 2_000 })
     connection.close()
   } catch {

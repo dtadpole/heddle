@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { endChild, fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { workspaceKey } from '../../src/session/layout.ts'
 
 /**
@@ -84,8 +84,8 @@ function startServer(home, work, config) {
       // A harness that exited before printing its URL has already emitted 'exit', and the event is not replayed:
       // waiting for it would hang the check instead of letting it report that the server did not start.
       if (child.exitCode !== null || child.signalCode !== null) return
-      child.kill()
-      await new Promise((resolve) => child.once('exit', resolve))
+      // Bounded: SIGTERM, then SIGKILL after 5 s, so a harness slow to exit fails the check by name, not by the lane's limit.
+      await endChild(child)
     },
   }
 }
