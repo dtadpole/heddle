@@ -110,6 +110,13 @@
       name: ./src/plugins/schedule.ts
       inject: [session, model, tools, sandbox, context]
 
+    # Background jobs (DSH's dsh-jobs-local, dsh-tool-jobs and background bash): the in-memory registry, the
+    # job_output / job_list / job_kill tools, bash's run_in_background, and the completion notice that wakes an idle
+    # session. A notice can start a turn, so the row declares what a turn needs.
+    - id: jobs
+      name: ./src/plugins/jobs.ts
+      inject: [session, model, tools, sandbox, context]
+
     # The live-turn registry: which sessions have a turn in flight, and the way to interrupt one. Optional —
     # the loop checks for it — so a minimal profile can run turns without interruption.
     - id: turns
@@ -129,7 +136,7 @@
     # The registry and its allow list. `heddle tools` and `heddle --turn` keep only the tools the list names, and a
     # name that nothing registered fails a `--turn`; `heddle web` applies no list. So a row above that registers
     # tools adds their names here, or the command line hides them while a web turn offers them. One line per
-    # registering row: the built-ins, subagent-tool, team, goal-tool, todo-tool, schedule. `todo_read` is left out
+    # registering row: the built-ins, subagent-tool, team, goal-tool, todo-tool, schedule, jobs. `todo_read` is left out
     # on purpose: DSH has no read tool and the todo-parity change removes it, and a listed name nothing registers
     # would then fail every `--turn`.
     - id: tools
@@ -143,5 +150,6 @@
             spawn_teammate, send_message, list_agents, wait_agent, interrupt_agent, team_task_create, team_task_list, team_task_get, team_task_update,
             create_goal, get_goal, update_goal,
             todo_write,
-            schedule_create, schedule_list, schedule_update, schedule_delete
+            schedule_create, schedule_list, schedule_update, schedule_delete,
+            job_output, job_list, job_kill
           ]

@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, type Stats } from 'node:fs'
 import { basename, join, sep } from 'node:path'
 
 import { canonicalPath, depthOf, isUnder } from '../paths.ts'
@@ -166,20 +166,43 @@ function currentByFolder(sessions: readonly SessionMeta[]): Map<string, SessionM
  * Folders first is what makes a tree navigable — the structure a person is walking stays together at
  * the top, and the leaves sit under it. Dot-entries and the two noise directories are not returned at
  * all, which is the same judgement the tree made when it showed folders only.
+ *
+ * A **symlink is what it resolves to**, as DSH lists one: `dsh-fs-local`'s `listDirectory` probes each child's resolved
+ * target for its type and reports a size only for a regular file, so a linked folder lists as a folder and expands like
+ * its target (`dsh-api-workspace-files`, `list` follows a final directory link). A directory entry's own type does not
+ * follow the link, which is why this asks `stat`: measured, a link to a folder was a 0-byte file that could not be
+ * opened. A link that resolves to nothing stays a 0-byte leaf. `link` tells the caller to keep the row at the link's own
+ * path rather than its target's.
  */
-function entries(dir: string): { readonly name: string; readonly directory: boolean; readonly bytes: number }[] {
+function entries(dir: string): { readonly name: string; readonly directory: boolean; readonly bytes: number; readonly link: boolean }[] {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter((entry) => !entry.name.startsWith('.') && !PLUMBING.has(entry.name))
-      .map((entry) => ({
-        name: entry.name,
-        directory: entry.isDirectory(),
-        bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0,
-      }))
+      .map((entry) => {
+        if (!entry.isSymbolicLink()) {
+          return { name: entry.name, directory: entry.isDirectory(), bytes: entry.isFile() ? sizeOf(join(dir, entry.name)) : 0, link: false }
+        }
+        const target = statOf(join(dir, entry.name))
+        return {
+          name: entry.name,
+          directory: target?.isDirectory() === true,
+          bytes: target?.isFile() === true ? target.size : 0,
+          link: true,
+        }
+      })
       .sort((left, right) => (left.directory === right.directory ? collator.compare(left.name, right.name) : left.directory ? -1 : 1))
   } catch {
     // A folder that cannot be read is a folder with nothing to show, not a failure of the tree.
     return []
+  }
+}
+
+/** What a path resolves to, following links, or `undefined` when it resolves to nothing. */
+function statOf(path: string): Stats | undefined {
+  try {
+    return statSync(path)
+  } catch {
+    return undefined
   }
 }
 
@@ -386,7 +409,13 @@ function childrenOf(dir: string, kind: NodeKind, context: Context): TreeNode[] {
   const parentIsSessions = basename(dir) === SESSIONS_FOLDER
 
   for (const entry of entries(dir)) {
-    const path = canonicalPath(join(dir, entry.name))
+    /**
+     * A link's row stays at the **link's own path**, DSH's rule (a child's path is the listed directory's joined with its
+     * name, `dsh-api-workspace-files` types.d.ts). Canonicalising it put the row at its target's path, which the target's
+     * own row already holds, so two rows shared one path. Asking for the link's path lists its target: `tree` resolves it,
+     * and the caller's containment check refuses a link that leads outside every root.
+     */
+    const path = entry.link ? join(dir, entry.name) : canonicalPath(join(dir, entry.name))
 
     /**
      * The sessions folder is **not a node**; the sessions inside it are this branch's own.

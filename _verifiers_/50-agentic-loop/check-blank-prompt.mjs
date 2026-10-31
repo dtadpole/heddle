@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, httpConfig, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — a prompt of only whitespace is refused, as an empty one is (#32).
@@ -22,13 +22,16 @@ const CAPABILITY = 'a Web UI whose turn route runs model turns'
 async function countingDouble() {
   let asked = 0
   const server = createServer((request, response) => {
-    request.resume()
+    let body = ''
+    request.on('data', (chunk) => { body += chunk })
     request.on('end', () => {
       if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
         response.writeHead(404, { 'content-type': 'application/json' })
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not the turn this double counts (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       asked += 1
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] })}\n\n`)

@@ -341,6 +341,12 @@ fn page_routers(
             .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
             .map(|schedule| Arc::clone(&schedule.service)),
     ));
+    // The background-job routes: DSH's job controller (list, follow, kill); 503 when the profile has no jobs row.
+    routers.push(heddle_jobs::http::router(
+        boot.services
+            .get::<Arc<heddle_jobs::JobsPlugin>>("jobs")
+            .map(|jobs| jobs.registry.clone()),
+    ));
     routers
 }
 
@@ -1023,6 +1029,15 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         }
         schedule.start_delivery();
     }
+    // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
+    if let (Some(jobs), Some(hub)) = (
+        boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs"),
+        boot.services.get::<heddle_server::EventHub>("event-hub"),
+    ) {
+        jobs.on_change(move || {
+            hub.publish(heddle_server::SseFrame::new("jobs", &serde_json::json!({})));
+        });
+    }
     notes
 }
 
@@ -1354,8 +1369,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            4,
-            "files, trajectory, the composer and the reminder routes (503 without a schedule row)"
+            5,
+            "files, trajectory, the composer, the reminder routes and the job routes (each 503 without its row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }

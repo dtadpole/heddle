@@ -1621,6 +1621,70 @@ impl Component for ScheduleComponent {
     }
 }
 
+/// `src/plugins/jobs.ts`: background jobs — the registry, the three job tools, background `bash`, the completion
+/// notices, and the page's routes, which `heddle web` mounts.
+pub struct JobsComponent;
+
+impl Component for JobsComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "jobs")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-jobs composes its own row: the registry, the tools in the runtime's registry, background bash on
+        // the registry's sandbox, and the notices.
+        let plugin = heddle_jobs::start_row(heddle_jobs::JobsRow {
+            config,
+            sessions,
+            runtime,
+            async_runtime: Some(crate::runtime::tokio().handle().clone()),
+            warn: None,
+        })?;
+        // The session's own events: busy and idle without a live-turn registry, and a person's message resetting
+        // the wake count.
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("jobs");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    if let (Some(session), Some(event)) = (
+                        payload.get("session").and_then(Value::as_str),
+                        payload.get("event"),
+                    ) {
+                        forward.on_session_event(session, event);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("jobs-listener", Arc::new((scope, listener)));
+        }
+        // DSH's `tool:jobs` prompt section on every request that offers the job tools, through the model service's
+        // `model/request` hook; dropped with the boot's services, which removes the hook.
+        if let Some(model) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            services.provide(
+                "jobs-prompt-section",
+                Arc::new(heddle_jobs::attach_prompt_section(&model)),
+            );
+        }
+        // Dropped with the boot's services, so disposing the boot stops every live job (`ctx.effect` teardown).
+        services.provide(
+            "jobs-teardown",
+            Arc::new(heddle_jobs::JobsTeardown(Arc::clone(&plugin))),
+        );
+        services.provide("jobs", plugin);
+        Ok(())
+    }
+}
+
 /// `src/agent/loop.ts`'s `recordTimeContext`: the clock reading DSH's time context gives the model, recorded right
 /// after each round's runtime-context snapshot.
 pub struct TimeContextHook {
