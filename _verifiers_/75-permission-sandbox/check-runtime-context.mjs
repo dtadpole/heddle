@@ -4,7 +4,7 @@ import { createServer as createHttpServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier 8, the runtime-context half — a mode change reaches the **active loop**, and survives a restart.
@@ -33,6 +33,8 @@ async function sequenceDouble(sequence) {
         response.end(JSON.stringify({ object: 'list', data: [{ id: 'double', object: 'model' }] }))
         return
       }
+      /** A new session's title request is not one of the completions this double answers in sequence (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(body)
       const step = sequence[Math.min(index, sequence.length - 1)]
       index += 1

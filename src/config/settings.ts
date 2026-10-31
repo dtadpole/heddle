@@ -26,7 +26,9 @@ import { rowSchemaJson, validateRows, type ValidationResult } from './validate.t
  * `!env` value stays a reference. An unset restores the value beneath the block; an entry back at its base
  * leaves the block, and an empty block leaves the file. Secrets (environment values and credential-named
  * fields) are redacted and never writable. Revisions count changes to the target's sections per entry, per
- * process. `applies` is `restart`: the next boot composes the written value.
+ * process. With an `Applier` (the web server gives the loader's `update`) a committed write is applied to the
+ * running tree at once and `applies` is `live`, as DSH's settings are; without one it is `restart`, and the next boot
+ * composes the written value.
  */
 
 export const SETTINGS_BEGIN = '# >>> heddle settings'
@@ -70,12 +72,22 @@ export interface SettingsNamespace {
   readonly value: unknown
   readonly base?: unknown
   readonly user?: unknown
-  readonly applies: 'restart'
+  /** `live` when a write is applied to the running tree as it lands (DSH's settings), `restart` when the next boot applies it. */
+  readonly applies: 'restart' | 'live'
   readonly secrets: readonly SecretSlot[]
   readonly revision: number
   readonly editable: boolean
   readonly reason?: string
+  /** Set on a write's answer when the file was written but the running tree refused the value; the next boot applies it. */
+  readonly applyError?: string
 }
+
+/**
+ * Apply entry `ns`'s newly composed config to the running tree (the server gives `ctx.loader.update(ns, { config })`).
+ * DSH's config editor applies a committed settings write the same way: the loader re-applies the entry, committing a
+ * volatile value in place and remounting otherwise.
+ */
+export type Applier = (ns: string, config: unknown) => Promise<void>
 
 export interface SettingsView {
   readonly writable: boolean
@@ -172,6 +184,7 @@ export class SettingsService {
   readonly env: NodeJS.ProcessEnv
   private readonly validate: Validator
   private readonly schemaOf: SchemaReader
+  private readonly applier: Applier | undefined
   private serial: Promise<unknown> = Promise.resolve()
 
   // Fields are assigned explicitly: Node runs this file by stripping types, which parameter properties defeat.
@@ -181,12 +194,14 @@ export class SettingsService {
     env: NodeJS.ProcessEnv = process.env,
     validate: Validator = validateRows,
     schemaOf: SchemaReader = rowSchemaJson,
+    apply?: Applier,
   ) {
     this.layers = layers
     this.target = target
     this.env = env
     this.validate = validate
     this.schemaOf = schemaOf
+    this.applier = apply
   }
 
   /** Every entry's form, the target re-read. */
@@ -203,7 +218,7 @@ export class SettingsService {
     for (const row of rows) {
       const ns = row.row.id
       if (ns === undefined) continue
-      namespaces.push(await namespaceOf(state, ns, row, baseRows, this.env, this.revisions, this.schemaOf))
+      namespaces.push(await namespaceOf(state, ns, row, baseRows, this.env, this.revisions, this.schemaOf, this.applier !== undefined))
     }
     return { writable: this.target !== undefined, hasDocument: this.target !== undefined && existsSync(this.target.path), namespaces }
   }
@@ -213,10 +228,21 @@ export class SettingsService {
     const run = this.serial.then(async () => {
       const text = await planWrite(this, ns, write, expectedRevision)
       commitWrite(this.target as SettingsTarget, text)
+      // Applied to the running tree as it lands, when the server can: the entry's composed, resolved config is what
+      // the next boot would hand it. A refusal does not undo the write; the answer says so and the next boot applies it.
+      let applyError: string | undefined
+      if (this.applier !== undefined) {
+        try {
+          const composed = compose(readState(this.layers, this.target, this.env).current, this.env).find((row) => row.row.id === ns)
+          await this.applier(ns, composed?.row.config ?? {})
+        } catch (error) {
+          applyError = error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message
+        }
+      }
       const view = await this.describe()
       const entry = view.namespaces.find((candidate) => candidate.ns === ns)
       if (entry === undefined) throw rejected(`entry '${ns}' vanished after the write`)
-      return entry
+      return applyError === undefined ? entry : { ...entry, applyError }
     })
     this.serial = run.catch(() => undefined)
     return run
@@ -240,12 +266,13 @@ export class SettingsService {
 export function settingsServiceFor(
   options: LayerOptions & { readonly overrides?: readonly Layer[]; readonly configDir?: string },
   env: NodeJS.ProcessEnv = process.env,
+  apply?: Applier,
 ): SettingsService {
   const layers: NamedLayer[] = [...defaultLayers({ ...options, env })]
   for (const [index, override] of (options.overrides ?? []).entries()) {
     layers.push({ layer: `override ${index + 1}`, file: '(inline)', entries: [override] })
   }
-  return new SettingsService(layers, settingsTarget(options, layers, env), env)
+  return new SettingsService(layers, settingsTarget(options, layers, env), env, validateRows, rowSchemaJson, apply)
 }
 
 /** Answer `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`; `undefined` for any other path. */
@@ -556,6 +583,7 @@ async function namespaceOf(
   env: NodeJS.ProcessEnv,
   revisions: SettingsRevisions,
   schemaOf: SchemaReader,
+  live: boolean,
 ): Promise<SettingsNamespace> {
   const raw = rawConfig(state.current, ns)
   const secrets = raw === undefined ? [] : secretSlots(raw, env)
@@ -589,7 +617,7 @@ async function namespaceOf(
     value,
     ...(baseRow !== undefined ? { base: redact(baseRow.row.config ?? {}, secrets) } : {}),
     ...(user !== undefined ? { user } : {}),
-    applies: 'restart',
+    applies: live ? 'live' : 'restart',
     secrets,
     revision: revisions.revision(ns, digest(state, ns)),
     editable: reason === undefined,

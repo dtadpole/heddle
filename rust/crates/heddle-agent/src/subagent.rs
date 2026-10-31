@@ -262,8 +262,8 @@ struct OpenedChild {
 ///
 /// Refused, in this order: no parent session, a blank prompt, a chain beyond `max_depth`, or `in_flight`
 /// children already at `max_active`. The child is created in the parent's folder (the process's current
-/// directory when unrecorded) with the parent's endpoint, model and reasoning level, and inherits the parent's
-/// recorded mode. One function, so the two paths cannot drift apart in what they refuse (`openChild`).
+/// directory when unrecorded) with the parent's endpoint, model, reasoning level and agent preset, and inherits the
+/// parent's recorded mode. One function, so the two paths cannot drift apart in what they refuse (`openChild`).
 fn open_child(
     store: &dyn SubagentStore,
     parent: Option<&SessionHandle>,
@@ -317,6 +317,9 @@ fn open_child(
             parent_session: Some(parent.id.clone()),
             origin: Some("subagent".to_owned()),
             delegation_depth: Some(child_depth),
+            // A child runs under its parent's agent preset (inventory A96), for the same reason it inherits the mode: a
+            // session narrowed to a preset's tools cannot widen itself by delegating to a child that has every tool.
+            preset: parent_meta.as_ref().and_then(|meta| meta.preset.clone()),
             ..CreateSession::default()
         })
         .map_err(|error| {
@@ -1405,6 +1408,88 @@ mod tests {
         );
     }
 
+    /// Writes the child's answer into its log through the real store, as a child turn would.
+    struct StoreAnswer {
+        sessions: Arc<heddle_session::SessionService>,
+    }
+
+    impl SubagentRun for StoreAnswer {
+        fn run<'a>(
+            &'a self,
+            child: &'a SessionHandle,
+            _prompt: String,
+            _cancel: Option<CancellationToken>,
+        ) -> BoxFuture<'a, Result<(), SubagentError>> {
+            Box::pin(async move {
+                let failed = |error: heddle_session::SessionError| {
+                    SubagentError::new(SubagentErrorCode::SubagentFailed, error.to_string())
+                };
+                let store = self.sessions.store();
+                store
+                    .assistant_chunk(
+                        child,
+                        &Chunk::TextDelta {
+                            text: "child answer".into(),
+                        },
+                    )
+                    .map_err(failed)?;
+                store
+                    .assistant_chunk(
+                        child,
+                        &Chunk::Done {
+                            finish_reason: "stop".into(),
+                            usage: None,
+                        },
+                    )
+                    .map_err(failed)?;
+                Ok(())
+            })
+        }
+    }
+
+    /// Inventory A96 (test/presets.test.ts): a delegated child runs under its parent's preset, through the real store.
+    #[tokio::test]
+    async fn a_delegated_child_runs_under_its_parents_preset() {
+        let (sessions, _sessions_dir) = crate::adapters::tests::sessions_at("child-preset");
+        let parent = sessions
+            .store()
+            .create(heddle_session::CreateOptions {
+                preset: Some("reader".into()),
+                ..heddle_session::CreateOptions::default()
+            })
+            .unwrap();
+        let deps = SubagentDeps {
+            store: Arc::new(crate::adapters::SessionSubagents::new(Arc::clone(
+                &sessions,
+            ))),
+            run: Arc::new(StoreAnswer {
+                sessions: Arc::clone(&sessions),
+            }),
+        };
+        let active = Mutex::new(HashSet::new());
+        let result = delegate_subagent(
+            &deps,
+            Some(&parent),
+            "look at it",
+            SubagentLimits {
+                max_depth: Some(2),
+                max_active: Some(2),
+            },
+            None,
+            &active,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "child answer");
+        assert_eq!(
+            sessions
+                .meta(&result.child_session)
+                .and_then(|meta| meta.preset().map(str::to_owned))
+                .as_deref(),
+            Some("reader")
+        );
+    }
+
     #[tokio::test]
     async fn an_empty_answer_is_subagent_failed() {
         let store = FakeStore::with(0, None);
@@ -1900,6 +1985,7 @@ mod tests {
             })),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: None,
+            presets: None,
         });
         let runner = subagent_runner(Arc::downgrade(&runtime));
         let error = runner
@@ -2058,6 +2144,7 @@ mod tests {
             })),
             hooks: Arc::new(crate::ports::NoTurnHooks),
             turns: None,
+            presets: None,
         });
         let runner = LateSubagentRunner::new();
         assert!(runner.bind(&runtime));
