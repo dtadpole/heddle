@@ -6137,6 +6137,11 @@ async function showSession(id) {
       if (title !== null) title.textContent = 'No session'
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
+      /** The draft that takes its place starts from the default selection, not the vanished session's (A104). */
+      chosenEndpoint = null
+      chosenModel = defaultSelection.model
+      chosenEffort = defaultSelection.effort
+      renderModelSeat()
       paintEmptyState()
       applySessionAccess(null)
       paintScheduleHeader()
@@ -8847,6 +8852,8 @@ let endpointDefault = null
 /** What this page will ask with. `null` means "whatever the server defaults to". */
 let chosenEndpoint = null
 let chosenModel = null
+/** The run's default selection as the endpoint list last named it (A104): what a fresh draft starts from. */
+let defaultSelection = { model: null, effort: null }
 let chosenEffort = null
 /** Which pane the open menu shows: the two-row root, the model list or the effort list. */
 let modelPane = 'root'
@@ -9634,9 +9641,13 @@ async function loadEndpoints() {
      * defaultEffort, which the server already checked against the default endpoint; DSH's default model selection),
      * so a fresh session shows and sends it. A session's own recorded selection still wins when one is opened.
      */
+    defaultSelection = {
+      model: typeof body.defaultModel === 'string' ? body.defaultModel : null,
+      effort: typeof body.defaultEffort === 'string' ? body.defaultEffort : null,
+    }
     if (chosenEndpoint === null && chosenModel === null && chosenEffort === null) {
-      if (typeof body.defaultModel === 'string') chosenModel = body.defaultModel
-      if (typeof body.defaultEffort === 'string') chosenEffort = body.defaultEffort
+      chosenModel = defaultSelection.model
+      chosenEffort = defaultSelection.effort
     }
   } catch (error) {
     setNote(`could not read the endpoint list: ${(error && error.message) || error}`)
