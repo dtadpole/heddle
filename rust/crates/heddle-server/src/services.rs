@@ -483,6 +483,14 @@ pub trait TodoService: Send + Sync {
     fn get(&self, session: &str) -> Option<Value>;
 }
 
+/// The turns a session runs besides the server's own, which a Stop must reach as well (#93): a goal round, a
+/// reminder's turn and a background job's notice turn are started by their rows through the agent runtime, which
+/// registers each with its live-turn registry. The binary supplies it from that registry.
+pub trait TurnInterrupter: Send + Sync {
+    /// Stop every turn in flight for `session`; whether there was one to stop.
+    fn interrupt(&self, session: &str) -> bool;
+}
+
 /// Work a session holds besides its turns, which an archive is refused by unless the caller agrees to stop it: DSH's
 /// `workspace/session-activity` waterfall and `workspace/session-stop` (`dsh-workspace` archive,
 /// `lib/index.js:512-540`). The binary supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`).
@@ -568,6 +576,8 @@ pub struct Harness {
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
     /// Work besides turns that an archive stops or is refused by; `None`: turns are the only activity.
     pub activity: Option<Arc<dyn SessionActivity>>,
+    /// The live-turn registry a Stop also asks; `None`: the server's own runs are the only turns it stops.
+    pub interrupter: Option<Arc<dyn TurnInterrupter>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
     /// `POST /api/sessions` creates one when no branch is named.
     pub cwd: PathBuf,
@@ -596,6 +606,7 @@ impl Harness {
             markdown: None,
             stats: None,
             activity: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -641,6 +652,7 @@ impl Harness {
             markdown: None,
             stats: None,
             activity: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -838,6 +850,11 @@ impl HarnessBuilder {
 
     pub fn activity(mut self, service: Arc<dyn SessionActivity>) -> Self {
         self.harness.activity = Some(service);
+        self
+    }
+
+    pub fn interrupter(mut self, service: Arc<dyn TurnInterrupter>) -> Self {
+        self.harness.interrupter = Some(service);
         self
     }
 
