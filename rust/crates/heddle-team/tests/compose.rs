@@ -124,6 +124,7 @@ fn boot(home: &Path, work: &Path, steps: Value) -> Booted {
         tools: registry,
         hooks: Arc::new(heddle_agent::NoTurnHooks),
         turns: Some(TurnRegistry::new()),
+        presets: None,
     });
     Booted {
         sessions,
