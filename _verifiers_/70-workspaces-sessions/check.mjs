@@ -598,6 +598,54 @@ test('a file under a root reads, and what cannot be shown is refused with a reas
   }
 })
 
+test('a symlink to a folder lists as a folder at its own path, and opening it lists its target, as DSH lists one', async (context) => {
+  if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
+  if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
+  /**
+   * DSH's workspace listing reports what a child resolves to and keeps it at its own path (dsh-api-workspace-files: a
+   * symlink reports the type of its destination, a size only for a regular file, a child's path is the listing's joined
+   * with its name; list follows a final directory link inside the root). Measured on both builds before this check
+   * (live-testing draft developer-six-2): the link was a file of 0 bytes (TS) or of the folder entry's size (Rust) at
+   * its target's path, so it could not be expanded and two rows shared one path.
+   */
+  const h = harness('symlink')
+  try {
+    entry(join(h.work, 'nest', 'a.txt'), 'hello\n')
+    entry(join(h.work, 'plain.txt'), 'x\n')
+    const { symlinkSync } = await import('node:fs')
+    symlinkSync('nest', join(h.work, 'nest-link'))
+    symlinkSync('plain.txt', join(h.work, 'file-link'))
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    const root = realpathSync(h.work)
+
+    const { result, tree } = await treeAt(h, h.work)
+    assert.equal(result.code, 0, `the tree ran\n${result.stdout}${result.stderr}`)
+    const link = childOf(tree, 'nest-link')
+    assert.ok(link, `the link is listed\nsaw: ${(tree.children ?? []).map((node) => node.label).join(', ')}`)
+    assert.equal(link.kind, 'folder', `a link to a folder is a folder row\nsaw: ${JSON.stringify(link)}`)
+    assert.equal(link.children, null, 'which can be expanded, like any folder nobody opened yet')
+    assert.equal(link.bytes, undefined, 'and carries no size, as a folder does not')
+    assert.equal(link.path, join(root, 'nest-link'), 'at its own path')
+    const paths = (tree.children ?? []).map((node) => node.path)
+    assert.equal(new Set(paths).size, paths.length, `no two rows share one path\nsaw: ${paths.join(', ')}`)
+    const fileLink = childOf(tree, 'file-link')
+    assert.equal(fileLink?.kind, 'file', 'a link to a file is a file row')
+    assert.equal(fileLink?.bytes, 2, "with its target's size")
+
+    const opened = await treeAt(h, link.path)
+    assert.equal(opened.result.code, 0, `opening the link ran\n${opened.result.stdout}${opened.result.stderr}`)
+    assert.deepEqual(
+      (opened.tree.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['file:a.txt'],
+      'and lists what its target holds',
+    )
+  } finally {
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a type folder is a type, and its badge names it without the underscores', async (context) => {
   if (!skipUnless(context, await supportsCommands(), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
