@@ -112,6 +112,19 @@ test('a default session is offered every tool, and records the default so a late
   assert.deepEqual(requests.at(-1), ['read_tool', 'write_tool'], 'an older session keeps the preset it recorded')
 })
 
+test('a tool an agent/pre-step listener adds outside the preset is still not offered', async () => {
+  const { ctx, sessions, work } = harness('hooked', [{ text: 'read only' }])
+  const writeSpec = ctx.tools.describe().find((spec) => spec.name === 'write_tool')
+  assert.ok(writeSpec !== undefined)
+  ctx.on('agent/pre-step', (_step, next) => {
+    const answered = next()
+    return { ...answered, tools: [...answered.tools, writeSpec] }
+  })
+  const session = sessions.start({ cwd: work, preset: 'reader' })
+  await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'look around' })
+  assert.deepEqual(offered(sessions.store.read(session)), [['read_tool']], 'the preset is applied after the hook')
+})
+
 test('a call to a tool outside the preset gets the unknown-tool answer and does not run', async () => {
   const { ctx, sessions, work, ran } = harness('outside', [{ toolCall: { name: 'write_tool', arguments: {} } }, { text: 'done' }])
   const session = sessions.start({ cwd: work, preset: 'reader' })

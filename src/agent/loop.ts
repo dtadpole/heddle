@@ -381,6 +381,12 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       const reason = isHookRefusal(error) ? (error as Error).message : `a hook failed at agent/pre-step — ${(error as Error).message}`
       throw new Error(reason)
     }
+    /**
+     * The session's preset is applied again to what the hook answered (developer-five's review of A96): a listener may
+     * add a registered tool, and one outside the preset would otherwise reach the model's tool list even though a call
+     * to it is refused. A profile without presets is unchanged.
+     */
+    if (preset !== undefined) prepared = { ...prepared, tools: presetToolSpecs(preset, prepared.tools) }
 
     const calls: { id: string; name: string; arguments: string }[] = []
     let roundText = ''
