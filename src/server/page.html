@@ -11555,11 +11555,35 @@ const WorkspaceTree = (() => {
    * A session row's label, DSH's `displayTitle` (`dsh-client-ui-workspace` `lib/client.js:1801-1804`): the open blank reads
    * `New Session` (`session.new`, `:4876`), every other row its stored title, else `Untitled` (`session.untitled`, `:4877`),
    * "rather than a directory name" (its README.md:32). The tree and the flat list both ask this. #24: the page labelled an
-   * unnamed session with its definition folder's name, `session-<yyyymmdd>-<hhmm>`; that folder stays the row's tooltip.
+   * unnamed session with its definition folder's name, `session-<yyyymmdd>-<hhmm>`; the page keeps that folder in the
+   * row's `data-definition`, never in what it shows or reads aloud (#109, `rowTooltip`).
    */
   function sessionLabel(meta) {
     if (placeholder(meta)) return 'New Session'
     return storedTitle(meta) ?? 'Untitled'
+  }
+
+  /**
+   * What a tree row's label reads: a session row the title a person or the first prompt gave it, else its node's label
+   * (`sessionLabel` for a listed session); every other row its node's label, the folder's or workspace's name.
+   */
+  function rowLabel(node) {
+    if (node === null || typeof node !== 'object') return ''
+    return String(node.kind === 'session' && node.session?.title ? node.session.title : (node.label ?? ''))
+  }
+
+  /**
+   * A tree row's `title`, or `undefined` for none (#109). The row is focusable, so its `title` is also what a keyboard or
+   * screen-reader user hears for it. DSH's rows carry no `title` and no `aria-label` at all: its session row
+   * (`SessionNodeItem`, `dsh-client-ui-workspace` `lib/client.js:2273-2280`) has only `aria-selected` and, archived,
+   * `aria-description`; its workspace row (`ProjectRowItem`, `:1965-1971`) only `aria-expanded`. The full title and the
+   * folder are on the pointer's hover card (`copyText`, `:2364` and `:2055`). So a session row's `title` is the display
+   * title its label shows (and may clip), the name its card shows; every other row has none. Never the session's
+   * definition folder (`<folder>/_sessions_/session-…`), nor its working folder: the first is an internal path, and either can
+   * carry the home directory. The page keeps the definition in `data-definition`, which nothing shows or reads aloud.
+   */
+  function rowTooltip(node) {
+    return node !== null && typeof node === 'object' && node.kind === 'session' ? rowLabel(node) : undefined
   }
 
   /**
@@ -11944,6 +11968,8 @@ const WorkspaceTree = (() => {
     hiddenBlank,
     storedTitle,
     sessionLabel,
+    rowLabel,
+    rowTooltip,
     headerTitle,
     documentTitle,
     workspaceRefusal,
@@ -12063,10 +12089,11 @@ const definitionOf = new Map()
 let listedSessions = new Set()
 
 /**
- * Remember where a session's definition sits, and let its row carry that folder as its tooltip. The row is updated in
- * place, because the listing that reveals a definition arrives after the session rows are drawn. Only the tooltip: the
- * label stays DSH's `New Session` or `Untitled` (`WorkspaceTree.sessionLabel`), never the folder's
- * `session-<yyyymmdd>-<hhmm>` name, which is an internal identifier (#24).
+ * Remember where a session's definition sits, and let its row carry that folder in `data-definition`. The row is updated
+ * in place, because the listing that reveals a definition arrives after the session rows are drawn. Only that data
+ * attribute: the label stays DSH's `New Session` or `Untitled` (`WorkspaceTree.sessionLabel`), never the folder's
+ * `session-<yyyymmdd>-<hhmm>` name, which is an internal identifier (#24), and the tooltip stays the row's title, because
+ * the folder is an internal path with the home directory in it, and a focusable row's tooltip is read aloud (#109).
  */
 function learnDefinition(id, folder) {
   if (definitionOf.get(id) === folder) return
@@ -12074,7 +12101,7 @@ function learnDefinition(id, folder) {
   const entry = rowIndex.get('session:' + id)
   if (entry === undefined) return
   const row = entry.li.querySelector(':scope > .row')
-  if (row !== null) row.title = folder
+  if (row !== null) row.dataset.definition = folder
 }
 
 /** What a folder listing draws: no nested root (it is a group), and no definition of a session the tree already lists. */
@@ -12416,12 +12443,18 @@ function nodeRow(node, depth = 0) {
    * A session row shows the name a person gave it; everything else shows the folder's name.
    *
    * This is what makes `Rename…` mean something: the title was already carried by the node and written by the
-   * route, and the row ignored it — measured, renaming succeeded and the label did not move. The folder stays
-   * reachable as the row's tooltip, because it is still the identity.
+   * route, and the row ignored it — measured, renaming succeeded and the label did not move.
    */
-  label.textContent = node.kind === 'session' && node.session?.title ? node.session.title : node.label
-  /** The folder a session works in is its tooltip: the tree groups by workspace, and the folder is still its identity. */
-  if (node.kind === 'session') row.title = (node.session !== null && node.session !== undefined ? definitionOf.get(node.session.id) : undefined) ?? node.cwd ?? node.path
+  label.textContent = WorkspaceTree.rowLabel(node)
+  /**
+   * The row's tooltip is its display title, or nothing (`WorkspaceTree.rowTooltip`, #109). It used to be the session's
+   * definition folder, else its working folder: an internal path with the home directory in it, which a keyboard or
+   * screen-reader user still heard after the hover card took the tooltip from pointer users. The definition folder is
+   * still the session's identity, so the row keeps it where nothing shows or reads it: `data-definition`.
+   */
+  const tooltip = WorkspaceTree.rowTooltip(node)
+  if (tooltip !== undefined && tooltip !== '') row.title = tooltip
+  if (node.kind === 'session' && node.session !== null && node.session !== undefined && definitionOf.has(node.session.id)) row.dataset.definition = definitionOf.get(node.session.id)
   row.append(label)
   /**
    * DSH's session row opens the Rename session dialog on a **double-click on its title** (`onDoubleClick` →
@@ -12444,11 +12477,11 @@ function nodeRow(node, depth = 0) {
    */
   if (node.session) {
     /**
-     * The row says **how long ago**, and the turn count moves to the tooltip.
+     * The row says **how long ago**.
      *
      * DSH's list reads `context-mgmt 4d` and `Running Heddle browser tool 24min`: the age is what tells a reader
-     * which conversations are live, while a count of turns says how long one was. Both are here, in the order a
-     * person asks for them — the age on the row, the count on hover.
+     * which conversations are live. A count of turns is not on the row or its tooltip, as it is not on DSH's row or its
+     * hover card (`SessionHoverContent`, `dsh-client-ui-workspace` `lib/client.js:2141-2165`); the tooltip is the title.
      */
     const age = document.createElement('span')
     age.className = 'age'
@@ -12461,7 +12494,6 @@ function nodeRow(node, depth = 0) {
     age.textContent = relativeAge(stamp)
     age.dataset.stamp = stamp
     rowRight.append(age)
-    if (node.session.turns > 0) row.title = row.title.length > 0 ? row.title : `${node.session.turns} turn${node.session.turns === 1 ? '' : 's'}`
   }
 
   /**

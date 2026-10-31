@@ -73,7 +73,8 @@ grounded_in:
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
   card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
-  none for Ungrouped; the card closing when the pointer leaves the list.
+  none for Ungrouped; the card closing when the pointer leaves the list. And no tree row's title or description
+  names a `_sessions_` definition folder or the home directory: the session row's tooltip is its display title (#109).
 - [`check-workspace-drag.mjs`](check-workspace-drag.mjs) — reordering workspaces by drag (DSH's
   `workspace/insertBefore`, C37): a workspace header dragged onto a sibling's section lands before or after it with
   the drop line drawn, the host stores the order (`GET /api/workspaces`) and a reload keeps it, while a nested

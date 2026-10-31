@@ -2411,7 +2411,8 @@ test('New session here, on an instance row, starts a session and writes its defi
         branchOpen: reopened.parentElement.dataset.open === 'true',
         selectedKind: chosen?.dataset.kind ?? null,
         selected: chosen?.querySelector(':scope > .row')?.querySelector('.label')?.textContent ?? null,
-        selectedTooltip: chosen?.querySelector(':scope > .row')?.title ?? null,
+        selectedDefinition: chosen?.querySelector(':scope > .row')?.dataset.definition ?? null,
+        selectedTooltip: chosen?.querySelector(':scope > .row')?.getAttribute('title') ?? null,
       })
     })()`)
     const outcome = JSON.parse(clicked)
@@ -2425,13 +2426,14 @@ test('New session here, on an instance row, starts a session and writes its defi
     assert.equal(outcome.branchOpen, true, 'the branch is open when the tree comes back')
     /**
      * Since the left column became DSH's workspace tree (owner goal, 2026-10-28), a session is drawn once, as a session
-     * row of its **workspace**, rather than inside the folder it works in; its definition folder is its tooltip. So the
-     * visible result is the new session's row, selected, reading DSH's `New Session` (dsh-client-ui-workspace
-     * lib/client.js:1801-1804, :4876; #24) rather than the folder's clock name, which the tooltip carries.
+     * row of its **workspace**, rather than inside the folder it works in; its definition folder is its `data-definition`.
+     * So the visible result is the new session's row, selected, reading DSH's `New Session` (dsh-client-ui-workspace
+     * lib/client.js:1801-1804, :4876; #24) rather than the folder's clock name, which only `data-definition` carries: the
+     * folder is an internal path with the home directory in it, so it is never the row's tooltip (#109).
      */
     assert.equal(outcome.selectedKind, 'session', `the new session is the selected row\nsaw: ${JSON.stringify(outcome)}`)
     assert.equal(outcome.selected, 'New Session', `it reads New Session, not its folder's name (#24)\nsaw: ${JSON.stringify(outcome)}`)
-    const name = basename(String(outcome.selectedTooltip))
+    const name = basename(String(outcome.selectedDefinition))
     assert.ok(!outcome.rows.includes('session:' + name), 'and it is drawn once, under its workspace, not again inside the folder')
     assert.match(name, /^session-\d{8}-\d{4}$/, `its definition folder is named for the clock, as the convention requires\nsaw: ${name}`)
 
@@ -2439,7 +2441,8 @@ test('New session here, on an instance row, starts a session and writes its defi
     assert.ok(existsSync(definition), `and its definition is on disk at ${definition}`)
     const fields = JSON.parse(readFileSync(definition, 'utf8'))
     assert.equal(fields.cwd, join(h.work, '_tools_', 'some-tool'), 'the definition names the folder the session is bound to')
-    assert.equal(outcome.selectedTooltip, join(h.work, '_tools_', 'some-tool', '_sessions_', name), 'and the row carries its definition folder as its tooltip')
+    assert.equal(outcome.selectedDefinition, join(h.work, '_tools_', 'some-tool', '_sessions_', name), 'and the row carries its definition folder in data-definition')
+    assert.equal(outcome.selectedTooltip, 'New Session', 'while its tooltip is its title, never that folder (#109)')
     /**
      * And the **tree** says which conversation the row is, which is what makes clicking it open that
      * conversation rather than only expand a folder. Before this the node carried `session: null`, so a row
@@ -2878,7 +2881,7 @@ test('a session is renamed from its own menu, and the row and its definition fol
         input.dispatchEvent(new Event('input', { bubbles: true }))
         confirm.click(); await wait(1800)
         const after = rows().find((entry) => entry.parentElement.dataset.kind === 'session')
-        return { label, items, draft, closed: !dialog.open, renamed: after.querySelector('.label').textContent, folder: after.title }
+        return { label, items, draft, closed: !dialog.open, renamed: after.querySelector('.label').textContent, folder: after.dataset.definition ?? null, tooltip: after.getAttribute('title') }
       })().then((value) => JSON.stringify(value))`, 30_000),
     )
 
@@ -2904,7 +2907,8 @@ test('a session is renamed from its own menu, and the row and its definition fol
     assert.equal(reading.renamed, 'a session with a name', 'after the rename the row shows the name it was given')
     const folderName = basename(dirname(String(made.definition)))
     assert.match(folderName, /^session-\d{8}-\d{4}$/, 'the definition folder is named for the clock')
-    assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', folderName), 'and stays reachable as the tooltip, because it is the identity')
+    assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', folderName), 'and stays reachable in data-definition, because it is the identity')
+    assert.equal(reading.tooltip, 'a session with a name', 'while the tooltip is the new name, never the folder (#109)')
 
     /** Both halves hold the new name: the store the UI reads, and the definition a reader of the repository reads. */
     const listed = await sessionsOf(h)

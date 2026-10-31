@@ -420,7 +420,7 @@ test('a session is labelled and headed by DSH\'s words and its title, never its 
     return page.slice(from, page.indexOf('\n}\n', from))
   }
   assert.match(body('function sessionNode(meta) {'), /label: WorkspaceTree\.sessionLabel\(meta\)/, 'a tree row takes DSH\'s label')
-  assert.doesNotMatch(body('function learnDefinition(id, folder) {'), /textContent|\.label =/, 'learning a definition folder sets the tooltip, not the label')
+  assert.doesNotMatch(body('function learnDefinition(id, folder) {'), /textContent|\.label =/, 'learning a definition folder does not set the label')
   assert.match(body('async function renderFlatList() {'), /label\.textContent = WorkspaceTree\.sessionLabel\(meta\)/, 'and so does a flat row')
   assert.match(page, /title\.textContent = WorkspaceTree\.storedTitle\(meta\) \?\? 'Untitled'/, 'a search hit reads its title, else Untitled')
   const show = body('async function showSession(id) {')
@@ -432,6 +432,29 @@ test('a session is labelled and headed by DSH\'s words and its title, never its 
   for (const reader of ['async function renderTree() {', 'async function refreshSessions() {', 'async function loadSearchIndex() {']) {
     assert.match(body(reader), /noteSessions\((sessions|searchIndex\.sessions)\)/, `${reader} repaints the header from the list it read`)
   }
+})
+
+test('a tree row never shows or reads aloud a session\'s definition folder: its tooltip is its title, the folder is data (#109)', () => {
+  /**
+   * The session row's `title` was its definition folder (`<home>/…/_sessions_/session-<date>-<time>`), else its working
+   * folder. The hover card takes the tooltip from a pointer user, but the row is focusable, so a keyboard or screen-reader
+   * user still heard the internal path. DSH's rows carry no `title` (dsh-client-ui-workspace lib/client.js:2273-2280,
+   * :1965-1971). The rule is judged in test/workspace-tree.test.ts and the page in 80's check-hover-cards.mjs; this detects
+   * the row going back to a path.
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const learn = body('function learnDefinition(id, folder) {')
+  assert.match(learn, /row\.dataset\.definition = folder/, 'a definition folder the listing reveals goes to the row\'s data-definition')
+  assert.doesNotMatch(learn, /\.title\b|setAttribute\(/, 'and to no tooltip and no accessible text')
+  const build = body('function nodeRow(node, depth = 0) {')
+  assert.match(build, /const tooltip = WorkspaceTree\.rowTooltip\(node\)/, 'a row asks the rule for its tooltip')
+  assert.deepEqual([...build.matchAll(/\brow\.title = ([^\n]+)/g)].map((match) => match[1]), ['tooltip'], 'and the rule is the only source of the row\'s title')
+  assert.match(build, /row\.dataset\.definition = definitionOf\.get\(node\.session\.id\)/, 'the definition folder rides in data-definition')
+  assert.doesNotMatch(build, /setAttribute\('(title|aria-label|aria-description)', [^)]*(definitionOf|node\.cwd|node\.path)/, 'and in no accessible attribute')
 })
 
 test('a Rename or Delete of a workspace another tab removed says so in words and redraws the tree (#49)', () => {

@@ -47,6 +47,8 @@ interface Tree {
   completionUnread: (unread: boolean, change: { wasRunning?: boolean; running?: boolean; viewing?: boolean }) => boolean
   storedTitle: (meta: unknown) => string | undefined
   sessionLabel: (meta: unknown) => string
+  rowLabel: (node: unknown) => string
+  rowTooltip: (node: unknown) => string | undefined
   headerTitle: (meta: unknown) => string | null
   documentTitle: (meta: unknown, product?: string) => string
   workspaceRefusal: (status: number, body: unknown, fallback: string) => { gone: boolean; text: string }
@@ -391,6 +393,38 @@ test('a session row reads New Session while it is the open blank, its title once
   assert.equal(tree.storedTitle({ id: 'x', title: 'kept' }), 'kept')
   assert.equal(tree.storedTitle({ id: 'x' }), undefined)
   assert.equal(tree.storedTitle(null), undefined)
+})
+
+test('a session row\'s tooltip is its display title and no other row has one — never its definition folder or the home directory (#109)', () => {
+  /**
+   * DSH's rows carry no `title` and no `aria-label` (dsh-client-ui-workspace lib/client.js:2273-2280 for `SessionNodeItem`,
+   * :1965-1971 for `ProjectRowItem`); the full title and folder are on the pointer's hover card (`copyText`, :2364, :2055).
+   * The page's session row carried its definition folder (`<home>/…/_sessions_/session-<date>-<time>`) as its `title`, which
+   * a keyboard or screen-reader user still heard once the hover card took the tooltip away from the pointer (#109).
+   */
+  assert.equal(typeof tree.rowTooltip, 'function', 'the block decides a row\'s tooltip')
+  const home = '/Users/someone'
+  const work = `${home}/repo`
+  const definition = `${work}/_sessions_/session-dated-folder`
+  const row = (kind: string, extra: Record<string, unknown> = {}) => ({ kind, path: kind === 'session' ? 'session:s-1' : work, cwd: work, label: 'repo', ...extra })
+  const titled = row('session', { label: 'Why Rivers Meander', session: { id: 's-1', title: 'Why Rivers Meander', cwd: work } })
+  const blank = row('session', { label: tree.sessionLabel({ id: 's-2', turns: 0 }), session: { id: 's-2', turns: 0, cwd: work } })
+  const untitled = row('session', { label: tree.sessionLabel({ id: 's-3', turns: 2 }), session: { id: 's-3', turns: 2, cwd: work } })
+  /** A session drawn from a folder listing (one `/api/sessions` does not list): its node's path is its definition folder. */
+  const listed = { kind: 'session', path: definition, cwd: work, label: 'session-dated-folder', session: { id: 's-4', cwd: work } }
+  assert.equal(tree.rowTooltip(titled), 'Why Rivers Meander', 'a titled row: its title, which the row may clip')
+  assert.equal(tree.rowTooltip(blank), 'New Session', 'the open blank: what its label reads')
+  assert.equal(tree.rowTooltip(untitled), 'Untitled', 'an untitled row: what its label reads')
+  for (const node of [titled, blank, untitled, listed]) {
+    assert.equal(tree.rowTooltip(node), tree.rowLabel(node), 'the tooltip is the label, the name the hover card shows')
+    assert.doesNotMatch(String(tree.rowTooltip(node)), /_sessions_|\//, 'never a path: no definition folder, no working folder')
+    assert.ok(!String(tree.rowTooltip(node)).includes(home), 'and never the home directory')
+  }
+  for (const kind of ['workspace', 'ungrouped', 'type', 'instance', 'folder', 'file']) {
+    assert.equal(tree.rowTooltip(row(kind)), undefined, `a ${kind} row has no tooltip, as DSH's rows have none`)
+  }
+  assert.equal(tree.rowLabel(row('workspace')), 'repo', 'a workspace row reads its label')
+  assert.equal(tree.rowTooltip(null), undefined)
 })
 
 test('the header hides its title while the session is blank and then follows its title; the window title is DSH\'s (#24)', () => {
