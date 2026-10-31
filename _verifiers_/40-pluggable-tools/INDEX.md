@@ -31,6 +31,9 @@ ten minutes by default; live-testing issue #13).
 and names a file holding all of it, `[output truncated; full output: <path>]`, as DSH's bash does (live-testing issue #83).
 `check-failed-output.mjs` holds a failed bash call to keeping what it printed: the error line first, then its stdout
 and stderr, as DSH's renderResult keeps the body of a non-zero exit (live-testing issue #82).
+`check-stdin-eof.mjs` holds a bash command that reads stdin to end-of-file at once, as DSH's shell leaves stdin closed.
+It covers a harness started with its own stdin ignored and one started with an open pipe on stdin, which the command
+must not inherit (live-testing issue #97).
 
 ## Under `HEDDLE_BIN`
 

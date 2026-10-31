@@ -575,6 +575,10 @@ async fn run_command(
         .args(&argv[1..])
         .current_dir(&context.cwd)
         .env("NO_COLOR", "1")
+        // No input to give, so stdin is /dev/null and a reader gets end-of-file at once, as DSH's shell leaves it
+        // closed (#97). Left unset, `spawn` inherited the server's own stdin: EOF when a daemon started it with
+        // /dev/null, but an open pipe or a terminal otherwise, where `read` waits for the wall time.
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -964,6 +968,27 @@ mod tests {
             "/work/../outside/x.txt",
             "a walk up is kept as written"
         );
+    }
+
+    #[tokio::test]
+    async fn a_shell_read_gets_end_of_file_at_once() {
+        // Live-testing issue #97: stdin is /dev/null, not the server's own stdin, so `read` cannot wait for input.
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let started = std::time::Instant::now();
+        let result = bash
+            .run(
+                args(json!({
+                    "command": "if read -r line; then printf input; else printf eof; fi",
+                    "timeoutMs": 2000
+                })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert_eq!(result.output, "eof");
+        assert!(started.elapsed() < std::time::Duration::from_millis(1500));
     }
 
     #[tokio::test]

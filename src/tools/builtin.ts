@@ -347,8 +347,19 @@ export function builtinTools(
          * The command leads its own process group (`detached`), so a Stop or the wall time reaches everything it
          * started, as DSH's launcher does. Killing only the shell left its children running orphaned, and the turn
          * waited for them because they still held the output pipes (live-testing draft developer-five-5).
+         *
+         * Stdin is `ignore` (`/dev/null`), so a command that reads it gets end-of-file at once. The tool has no
+         * input to give, and DSH's shell leaves stdin closed when no input is supplied. Node's default, an open pipe
+         * that nothing writes or ends, made `read` and any stdin reader wait until the wall time killed them (#97).
+         * The Rust build gave EOF only when the server's own stdin was /dev/null, as under a daemon; it now uses
+         * `Stdio::null()` too.
          */
-        const child = spawn(argv[0] as string, argv.slice(1), { cwd, env: { ...process.env, NO_COLOR: '1' }, detached: true })
+        const child = spawn(argv[0] as string, argv.slice(1), {
+          cwd,
+          env: { ...process.env, NO_COLOR: '1' },
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
         let stdout = ''
         let stderr = ''
         let timedOut = false
