@@ -121,8 +121,19 @@ export function builtinTools(
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)
-      context.log(`wrote ${target} (${content.length} bytes)`)
-      return { output: `wrote ${content.length} bytes to ${relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target) || target}`, data: { path: target, bytes: content.length } }
+      /**
+       * Bytes, as the sentence says: UTF-8 bytes on disk, not UTF-16 code units (five Chinese characters are 15
+       * bytes). The path is relative to the workspace only when the target is inside it; a file elsewhere (the host
+       * temp area under workspace-write) is named absolutely, never as a climb of `../`. The Rust build's twin
+       * already reports both this way (issue #3).
+       */
+      const bytes = Buffer.byteLength(content, 'utf8')
+      context.log(`wrote ${target} (${bytes} bytes)`)
+      const inside = relative(sandbox.policy(context.mode, context.cwd).workspaceRoot, target)
+      // Outside is exactly `..` or a climb (`../…`): a file inside whose name starts with two dots stays relative.
+      const climbs = inside === '..' || inside.startsWith(`..${sep}`)
+      const shown = inside.length > 0 && !climbs && !isAbsolute(inside) ? inside : target
+      return { output: `wrote ${bytes} bytes to ${shown}`, data: { path: target, bytes } }
     },
   }
 
