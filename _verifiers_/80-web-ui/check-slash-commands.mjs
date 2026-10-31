@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -224,6 +225,114 @@ test('/export answers a download of exactly the bytes Download log serves, witho
   }
 })
 
+/** A Chat Completions double that answers every request with the same short text and records each body. */
+async function providerDouble(text) {
+  const bodies = []
+  const server = createServer((request, response) => {
+    let raw = ''
+    request.on('data', (chunk) => {
+      raw += chunk
+    })
+    request.on('end', () => {
+      try {
+        bodies.push(JSON.parse(raw))
+      } catch {
+        bodies.push({ raw })
+      }
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`)
+      response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      response.end('data: [DONE]\n\n')
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, bodies, close: () => server.close() }
+}
+
+/** A server whose one endpoint is the double, for checks that need real turns and a summary. */
+async function startDoubleServer(label, text) {
+  const home = isolatedHome(`slash-${label}`)
+  const work = fixtureDir(`slash-${label}-work`)
+  mkdirSync(work, { recursive: true })
+  const provider = await providerDouble(text)
+  const config = join(home, 'heddle.json')
+  writeFileSync(config, `${JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'double-model', apiKey: 'a-test-key' }] }, null, 2)}\n`)
+  const child = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(home, 'sessions')],
+    { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config }, cwd: work },
+  )
+  return {
+    work,
+    url: child.url,
+    provider,
+    close: () => {
+      child.kill()
+      provider.close()
+      removeDir(home)
+      removeDir(work)
+    },
+  }
+}
+
+test('/compact summarises the conversation now: a compaction is logged and the context shrinks (C79)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startDoubleServer('compact', 'noted')
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    for (const topic of ['the registry', 'the menu', 'the routes']) {
+      const response = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: `Tell me about ${topic}. ${'Some long context to summarise. '.repeat(60)}`, folder: server.work, session: id }),
+      })
+      assert.equal(response.status, 200, `the turn about ${topic} ran`)
+      await response.text()
+    }
+    const turns = server.provider.bodies.length
+    const result = await runLine(server, cookie, id, '/compact')
+    assert.equal(result.body.matched, true)
+    assert.equal(result.body.kind, 'success', `the command succeeded: ${JSON.stringify(result.body)}`)
+    assert.match(String(result.body.text), /^Compacted /, 'and says what it compacted')
+    assert.equal(server.provider.bodies.length, turns + 1, 'one summary request reached the model')
+    assert.ok(!JSON.stringify(server.provider.bodies.at(-1)).includes('/compact'), 'the line itself is not in it')
+    const { events } = await sessionLog(server, cookie, id)
+    assert.ok(events.some((event) => event.type === 'compaction/summary'), 'the summary is recorded')
+    assert.ok(events.some((event) => event.type === 'compaction/end'), 'and the compaction closed')
+    const measured = events.filter((event) => event.type === 'compaction/measured').at(-1)
+    assert.ok(measured !== undefined && measured.after < measured.before, `the context shrank: ${JSON.stringify(measured)}`)
+    assert.ok(events.some((event) => event.type === 'command/done' && event.kind === 'success'), 'the run is recorded as a command')
+  } finally {
+    server.close()
+  }
+})
+
+test("the feedback dialog's route records DSH's feedback/record, and /feedback <text> records the text (C81)", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('feedback')
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    const post = (body) => api(server.url, cookie, `/api/sessions/${encodeURIComponent(id)}/feedback`, { method: 'POST', body: JSON.stringify(body) })
+    const recorded = await post({ text: 'the plan card reads well', category: 'task-result' })
+    assert.equal(recorded.status, 200)
+    assert.deepEqual(recorded.body, { recorded: true })
+    assert.equal((await post({ category: 'speed' })).status, 400, 'an unknown category is refused')
+    const typed = await runLine(server, cookie, id, '/feedback the menu works')
+    assert.equal(typed.body.kind, 'success')
+    assert.match(String(typed.body.text), new RegExp(`^Feedback recorded for session ${id}\nAnonymous user: `))
+    const { events } = await sessionLog(server, cookie, id)
+    const remarks = events.filter((event) => event.type === 'feedback/record').map(({ text, category, ...rest }) => ({ text, category, extra: Object.keys(rest).filter((key) => key !== 'seq' && key !== 'at' && key !== 'type') }))
+    assert.deepEqual(remarks, [
+      { text: 'the plan card reads well', category: 'task-result', extra: [] },
+      { text: 'the menu works', category: undefined, extra: [] },
+    ])
+    assert.equal(reachedModel(events, 'the menu works'), false, 'no model ran')
+  } finally {
+    server.close()
+  }
+})
+
 test('a line that names no command is left for the model, and nothing is recorded for it', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('unknown')
@@ -367,3 +476,79 @@ test('typing / opens the grouped menu at the caret, a picked command runs on the
   }
 })
 
+test("/feedback opens DSH's feedback dialog; a category and details land in the session log (C81)", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('feedback-dialog')
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const id = await openSession(server, cookie)
+    await browser.goto(server.url)
+    await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
+    await browser.waitFor(`${FIELD} !== null`, 10_000)
+
+    // Picked from the menu, /feedback opens the dialog rather than inserting text.
+    await typeInto(browser, '/feedb')
+    await browser.waitFor('document.getElementById("slash-menu") !== null && document.getElementById("slash-menu").hidden === false', 10_000)
+    await press(browser, 'Enter')
+    await browser.waitFor('document.querySelector(".hc-feedback") !== null', 10_000)
+    const dialog = JSON.parse(
+      await browser.evaluate(`JSON.stringify({
+        title: document.querySelector('.hc-feedback h2')?.textContent,
+        modal: document.querySelector('.hc-feedback')?.getAttribute('aria-modal'),
+        group: document.querySelector('.hc-feedback [role="group"]')?.getAttribute('aria-label'),
+        chips: [...document.querySelectorAll('.hc-feedback [role="group"] button')].map((chip) => chip.textContent),
+        detail: document.querySelector('.hc-feedback textarea')?.getAttribute('aria-label'),
+        placeholder: document.querySelector('.hc-feedback textarea')?.placeholder,
+        submit: document.querySelector('.hc-feedback-submit')?.textContent,
+        draft: ${FIELD}.value,
+      })`),
+    )
+    assert.deepEqual(dialog, {
+      title: 'Submit feedback',
+      modal: 'true',
+      group: 'Feedback category',
+      chips: [
+        'Task result',
+        'Instruction understanding and following',
+        'Product features and interaction',
+        'Stability and speed',
+        'Resource usage and cost',
+        'Security, privacy, and permissions',
+        'Other',
+      ],
+      detail: 'Feedback details',
+      placeholder: 'Add details to help us improve. Your submission will include the current conversation log.',
+      submit: 'Submit',
+      draft: '',
+    })
+
+    // Escape closes it; a bare typed /feedback opens it again.
+    await browser.evaluate('document.querySelector(".hc-feedback").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))')
+    await browser.waitFor('document.querySelector(".hc-feedback") === null', 5_000)
+    await typeInto(browser, '/feedback')
+    await browser.evaluate('document.getElementById("slash-menu")?.setAttribute("hidden", "")')
+    await press(browser, 'Enter')
+    await browser.waitFor('document.querySelector(".hc-feedback") !== null', 10_000)
+
+    // A category (a second click clears it, a third sets it again), details, Submit.
+    await browser.evaluate('(() => { const chip = [...document.querySelectorAll(".hc-feedback [role=group] button")].find((b) => b.textContent === "Stability and speed"); chip.click(); chip.click(); chip.click() })()')
+    assert.equal(await browser.evaluate('document.querySelector(".hc-feedback [aria-pressed=true]")?.textContent ?? null'), 'Stability and speed')
+    await browser.evaluate('(() => { const box = document.querySelector(".hc-feedback textarea"); box.value = "the stream stalled once"; box.dispatchEvent(new Event("input", { bubbles: true })) })()')
+    await browser.evaluate('document.querySelector(".hc-feedback-submit").click()')
+    await browser.waitFor('document.querySelector(".hc-feedback") === null', 10_000)
+    await browser.waitFor('[...document.querySelectorAll(".hc-toast")].some((node) => node.textContent === "Thanks for your feedback")', 5_000)
+
+    const { events } = await sessionLog(server, cookie, id)
+    const remarks = events.filter((event) => event.type === 'feedback/record')
+    assert.equal(remarks.length, 1)
+    assert.equal(remarks[0].category, 'service-stability')
+    assert.equal(remarks[0].text, 'the stream stalled once')
+    assert.equal(reachedModel(events, 'feedback'), false, 'the dialog never reaches the model')
+  } finally {
+    await browser.close()
+    server.close()
+  }
+})

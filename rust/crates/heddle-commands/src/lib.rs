@@ -41,8 +41,9 @@ pub(crate) mod test_support;
 use std::sync::Arc;
 
 pub use builtins::{
-    AnonymousUser, CompactionHost, CompactionOutcome, FEEDBACK_EVENT, PermissionHost,
-    compact_command, export_command, feedback_command, permission_command,
+    AnonymousUser, CompactionHost, CompactionOutcome, FEEDBACK_CATEGORIES, FEEDBACK_EVENT,
+    PermissionHost, compact_command, export_command, feedback_command, permission_command,
+    record_feedback,
 };
 pub use goal::{
     GOAL_ATTACHMENTS_REFUSED, GOAL_ATTACHMENTS_TEXT, GOAL_INPUT_HINT, GOAL_STATE_ERROR, GOAL_USAGE,

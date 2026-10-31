@@ -1,8 +1,8 @@
 ---
 title: Commands
 created: 2026-10-29T12:05:41Z
-modified: 2026-10-29T15:45:00Z
-version: 0.3.0
+modified: 2026-10-29T15:39:01Z
+version: 0.4.0
 description: The host's slash commands — the registry, the line parser, the built-in commands and the two routes the composer's menu uses.
 grounded_in:
   - source: the DSH package's dsh-commands, dsh-command-compact, dsh-command-goal, dsh-command-feedback, dsh-permission-presets, dsh-session-log-export, dsh-client-ui-commands and dsh-client-ui-goal (its goal-command-input projection and GoalCommandInputView), read 2026-10-29
@@ -21,7 +21,8 @@ DSH's rule, and how `/skillname` reaches the model.
 | File | What it holds |
 |---|---|
 | [`registry.ts`](registry.ts) | `CommandRegistry`, `parseCommandLine`, the two event names, the result shapes |
-| [`builtins.ts`](builtins.ts) | `/compact`, `/goal`, `/feedback`, `/permission`, `/export`, each over the smallest host it needs |
+| [`builtins.ts`](builtins.ts) | `/compact`, `/feedback` (and `recordFeedback`, DSH's seven `FEEDBACK_CATEGORIES`), `/permission`, `/export`, each over the smallest host it needs |
+| [`goal.ts`](goal.ts) | `/goal`: DSH's parse, card and every text, over the goal service (developer-nine, D-059: the goal side supplies the semantics) |
 | [`http.ts`](http.ts) | `handleCommandRequest`: `GET /api/commands` and `POST /api/sessions/{id}/commands` |
 | [`service.ts`](service.ts) | the `commands` plugin: the registry with the built-ins wired to the session, goal, context, model and sandbox services |
 | [`menu.js`](menu.js) | the composer's slash menu, a browser module the page imports from `GET /commands/menu.js`: the trigger rule, DSH's sections and ranking, the keys, `/name ` with its hint, the command row |
@@ -32,7 +33,7 @@ DSH's rule, and how `/skillname` reaches the model.
 |---|---|---|---|
 | `/compact` | none | Commands | the context service's forced reduction; "Compacted N history items (~T tokens)." or "No compactable history yet." |
 | `/goal` | `[<objective>\|clear\|edit <objective>\|pause\|resume]` | Add | the goal service's create, show, edit, pause, resume and clear |
-| `/feedback` | `<text>` | Add | a `feedback/record` event signed with an anonymous id; the text is kept out of `command/run` |
+| `/feedback` | `<text>` | Add | `<text>` records DSH's `feedback/record {text}` and tells the person their anonymous id; bare, or picked from the menu, it opens DSH's feedback dialog, which records `{text?, category?}` through `POST /api/sessions/{id}/feedback`; the text is kept out of `command/run` |
 | `/permission` | `<preset>` | Commands | the session's sandbox mode; widening to `danger-full-access` is left to the access chip's risk gate |
 | `/export` | none | Commands | asks the page to download the session log, the same bytes as Download log |
 

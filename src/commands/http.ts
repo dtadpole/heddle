@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { AttachmentInputError, readAttachments } from '../server/attachments.ts'
 import type { SessionHandle } from '../session/store.ts'
+import { FEEDBACK_CATEGORIES, recordFeedback, type FeedbackCategory } from './builtins.ts'
 import { CommandInputError, type CommandLog, type CommandRegistry } from './registry.ts'
 
 /**
@@ -18,6 +19,8 @@ import { CommandInputError, type CommandLog, type CommandRegistry } from './regi
  *   unknown `/word` still reaches the model. A registered one answers `{matched: true, commandId, name, kind, text?,
  *   action?, seq}`; a handler's refusal is `kind: 'error'` with status 200, because the command ran and its row says
  *   so.
+ * - `POST /api/sessions/{id}/feedback` with `{text?, category?}` records one session remark, DSH's feedback dialog's
+ *   route (`sessionFeedback.record`): `feedback/record {text?, category?}`, answered `{recorded: true}`.
  *
  * The server calls this behind its door, after the token check, like every other `/api` route.
  */
@@ -103,6 +106,41 @@ export async function handleCommandRequest(host: CommandRouteHost, request: Inco
       ...(result.kind === 'success' && result.action !== undefined ? { action: result.action } : {}),
       seq: execution.seq,
     })
+    return true
+  }
+  if (url.pathname.startsWith('/api/sessions/') && url.pathname.endsWith('/feedback') && request.method === 'POST') {
+    const id = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/feedback'.length))
+    if (!SESSION_ID.test(id)) {
+      json(response, 400, { error: 'not a session id' })
+      return true
+    }
+    const handle = host.open(id)
+    if (handle === null) {
+      json(response, 404, { error: `no session ${id}` })
+      return true
+    }
+    const body = await readBody(request)
+    if (body === 'too-large') {
+      json(response, 413, { error: `feedback is at most ${MAX_COMMAND_LINE} bytes` })
+      return true
+    }
+    if (body === null) {
+      json(response, 400, { error: 'the body must be a JSON object' })
+      return true
+    }
+    if (body.text !== undefined && typeof body.text !== 'string') {
+      json(response, 400, { error: 'text must be a string' })
+      return true
+    }
+    if (body.category !== undefined && !(FEEDBACK_CATEGORIES as readonly unknown[]).includes(body.category)) {
+      json(response, 400, { error: `category must be one of ${FEEDBACK_CATEGORIES.join(', ')}` })
+      return true
+    }
+    recordFeedback(host.log, handle, {
+      ...(typeof body.text === 'string' ? { text: body.text } : {}),
+      ...(body.category !== undefined ? { category: body.category as FeedbackCategory } : {}),
+    })
+    json(response, 200, { recorded: true })
     return true
   }
   return false

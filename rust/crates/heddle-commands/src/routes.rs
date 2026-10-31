@@ -13,6 +13,11 @@
 //! | … a body that is not a JSON object with a string `line` | `400 {"error": "the body must be JSON with a string \"line\""}` |
 //! | … `attachments` the turn's reader refuses (not a list, a path outside the upload directory, a file gone) | `400 {"error": "<the reader's sentence>"}` |
 //! | … attachments sent to a command that does not accept them | `400 {"error": "/<name> does not accept attachments; remove them first"}`, nothing written |
+//! | `POST /api/sessions/{id}/feedback`, body `{"text"?: "...", "category"?: "..."}` | `200 {"recorded": true}` — the feedback dialog's route (DSH's `sessionFeedback.record`): one `feedback/record {text?, category?}` event, blank text recorded as absent |
+//! | … the same id and session refusals | `400 {"error": "not a session id"}`, `404 {"error": "no session <id>"}` |
+//! | … a body that is not a JSON object | `400 {"error": "the body must be a JSON object"}` |
+//! | … `text` that is not a string | `400 {"error": "text must be a string"}` |
+//! | … `category` that is not one of DSH's seven | `400 {"error": "category must be one of task-result, …, other"}`; a refusal writes nothing |
 //!
 //! `attachments` is the same list of uploaded paths a turn takes, read by the same reader
 //! ([`Commands::read_attachments`]) into the parts a user message records. Every JSON answer, the refusals
@@ -35,6 +40,7 @@ use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::builtins::FEEDBACK_CATEGORIES;
 use crate::registry::CommandError;
 use crate::service::Commands;
 use crate::text;
@@ -52,12 +58,13 @@ pub const MENU_PATH: &str = "/commands/menu.js";
 /// picks it up.
 pub const MENU_SOURCE: &str = include_str!("../../../../src/commands/menu.js");
 
-/// The three routes, with their state applied.
+/// The four routes, with their state applied.
 pub fn routes(host: Arc<Commands>) -> Router {
     Router::new()
         .route(MENU_PATH, get(menu_script))
         .route("/api/commands", get(list_commands))
         .route("/api/sessions/{id}/commands", post(run_command))
+        .route("/api/sessions/{id}/feedback", post(record_feedback))
         .with_state(host)
 }
 
@@ -168,6 +175,57 @@ async fn run_command(
     }
 }
 
+/// `POST /api/sessions/{id}/feedback`: one session remark from the feedback dialog, checked in `http.ts`'s order.
+async fn record_feedback(
+    State(host): State<Arc<Commands>>,
+    id: Result<Path<String>, PathRejection>,
+    body: Body,
+) -> Response {
+    let Ok(Path(id)) = id else {
+        return refuse(StatusCode::BAD_REQUEST, "not a session id");
+    };
+    if !text::is_session_id(&id) {
+        return refuse(StatusCode::BAD_REQUEST, "not a session id");
+    }
+    let Some(handle) = host.open(&id) else {
+        return refuse(StatusCode::NOT_FOUND, &format!("no session {id}"));
+    };
+    let body = match read_body(body).await {
+        BodyRead::TooLarge => {
+            return refuse(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("feedback is at most {MAX_COMMAND_LINE} bytes"),
+            );
+        }
+        BodyRead::Invalid => {
+            return refuse(StatusCode::BAD_REQUEST, "the body must be a JSON object");
+        }
+        BodyRead::Object(body) => body,
+    };
+    let text = match body.get("text") {
+        None => None,
+        Some(Value::String(text)) => Some(text.as_str()),
+        Some(_) => return refuse(StatusCode::BAD_REQUEST, "text must be a string"),
+    };
+    let category = match body.get("category") {
+        None => None,
+        Some(Value::String(category)) if FEEDBACK_CATEGORIES.contains(&category.as_str()) => {
+            Some(category.as_str())
+        }
+        Some(_) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                &format!("category must be one of {}", FEEDBACK_CATEGORIES.join(", ")),
+            );
+        }
+    };
+    match host.record_feedback(&handle, text, category) {
+        Ok(()) => json_pretty(StatusCode::OK, &json!({ "recorded": true })),
+        // The session log refused the append: the TypeScript server's catch-all answers a 500 for a throw.
+        Err(message) => refuse(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
+}
+
 /// A request body as `http.ts`'s `readBody` reads it.
 enum BodyRead {
     /// A JSON object; an empty body reads as `{}`.
@@ -233,6 +291,99 @@ mod tests {
 
     async fn json_of(response: Response) -> Value {
         serde_json::from_str(&body_text(response).await).expect("a JSON answer")
+    }
+
+    #[tokio::test]
+    async fn the_feedback_route_records_dshs_event_and_refuses_what_it_cannot_record() {
+        let fixture = Fixture::new("routes-feedback");
+        let app = app(&fixture);
+        let id = fixture.handle.id.clone();
+        let feedback = |id: String, body: &'static str| {
+            let app = app.clone();
+            async move {
+                call(
+                    app,
+                    Method::POST,
+                    &format!("/api/sessions/{id}/feedback"),
+                    Some(body),
+                )
+                .await
+            }
+        };
+
+        let recorded = feedback(
+            id.clone(),
+            r#"{"text":"  the plan card is clear  ","category":"product-interaction"}"#,
+        )
+        .await;
+        assert_eq!(recorded.status(), StatusCode::OK);
+        assert_eq!(body_text(recorded).await, "{\n  \"recorded\": true\n}\n");
+        assert_eq!(
+            feedback(id.clone(), r#"{"category":"task-result"}"#)
+                .await
+                .status(),
+            StatusCode::OK,
+            "a category alone"
+        );
+        assert_eq!(
+            feedback(id.clone(), r#"{"text":"   "}"#).await.status(),
+            StatusCode::OK,
+            "blank text is recorded as absent"
+        );
+        let remarks: Vec<(Option<Value>, Option<Value>)> = fixture
+            .events()
+            .iter()
+            .filter(|event| event.kind == crate::builtins::FEEDBACK_EVENT)
+            .map(|event| (event.get("text").cloned(), event.get("category").cloned()))
+            .collect();
+        assert_eq!(
+            remarks,
+            vec![
+                (
+                    Some(json!("the plan card is clear")),
+                    Some(json!("product-interaction"))
+                ),
+                (None, Some(json!("task-result"))),
+                (None, None),
+            ]
+        );
+
+        let before = fixture.events().len();
+        for (body, sentence) in [
+            (
+                r#"{"category":"speed"}"#,
+                "category must be one of task-result, instruction-following, product-interaction, service-stability, resource-cost, security-privacy-permission, other",
+            ),
+            (
+                r#"{"category":null}"#,
+                "category must be one of task-result, instruction-following, product-interaction, service-stability, resource-cost, security-privacy-permission, other",
+            ),
+            (r#"{"text":7}"#, "text must be a string"),
+            (r#"{"text":null}"#, "text must be a string"),
+            ("[1]", "the body must be a JSON object"),
+        ] {
+            let refused = feedback(id.clone(), body).await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                json_of(refused).await,
+                json!({ "error": sentence }),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            feedback("nope".to_owned(), "{}").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            feedback(
+                "session-00000000-0000-4000-8000-000000000000".to_owned(),
+                "{}"
+            )
+            .await
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(fixture.events().len(), before, "a refusal writes nothing");
     }
 
     fn post_path(id: &str) -> String {

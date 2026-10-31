@@ -122,6 +122,25 @@ function clientEntries(api) {
 }
 
 const STYLE = `
+.hc-backdrop { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .45); }
+.hc-feedback { width: min(488px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 20px; padding: 20px;
+  background: var(--surface, #232324); color: var(--text, #f9fafb); border: 1px solid var(--border, #353535);
+  border-radius: var(--radius-lg, 16px); box-shadow: var(--shadow-menu, 0 8px 24px -4px #0006); font: 14px/1.45 var(--font, system-ui); }
+.hc-feedback-head { display: flex; align-items: center; justify-content: space-between; }
+.hc-feedback-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.hc-feedback-close { background: none; border: 0; color: inherit; cursor: pointer; font-size: 16px; padding: 4px 6px; border-radius: 6px; }
+.hc-feedback-categories { display: flex; flex-wrap: wrap; gap: 8px; }
+.hc-feedback-categories button { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border, #353535);
+  background: none; color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
+.hc-feedback-categories button[aria-pressed='true'] { border-color: var(--accent, #2694fe); background: rgba(38, 148, 254, .16); }
+.hc-feedback-detail { min-height: 120px; resize: vertical; padding: 10px; border-radius: 10px; border: 1px solid var(--border, #353535);
+  background: rgba(255, 255, 255, .03); color: inherit; font: inherit; }
+.hc-feedback-foot { display: flex; justify-content: flex-end; }
+.hc-feedback-submit { padding: 6px 16px; border-radius: 8px; border: 0; background: var(--accent, #2694fe); color: #fff; font: inherit; cursor: pointer; }
+.hc-feedback-submit:disabled { opacity: .6; cursor: default; }
+.hc-toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 80; padding: 8px 14px; border-radius: 10px;
+  background: var(--surface, #232324); color: var(--text, #f9fafb); border: 1px solid var(--border, #353535); font: 13px/1.4 var(--font, system-ui); }
 .hc-menu, .hc-hint { position: fixed; z-index: 60; background: var(--surface, #232324); color: var(--text, #f9fafb);
   border: 1px solid var(--border, #353535); border-radius: var(--radius-md, 12px); box-shadow: var(--shadow-menu, 0 2px 8px -2px #0003);
   font: 13px/1.4 var(--font, system-ui); }
@@ -323,6 +342,13 @@ export function install(api) {
       row.run()
       return
     }
+    // DSH's /feedback decoration: picked from the menu, it opens the feedback dialog.
+    if (row.name === 'feedback') {
+      replaceToken('')
+      close()
+      openFeedback()
+      return
+    }
     // DSH opens the access chip's presets for /permission picked from the menu; typed with a preset it runs.
     if (row.name === 'permission' && typeof api.openAccessMenu === 'function') {
       replaceToken('')
@@ -383,6 +409,11 @@ export function install(api) {
     const entry = catalog.find((candidate) => candidate.client === true && text.trim() === `/${candidate.name}`)
     if (entry !== undefined) {
       entry.run()
+      return
+    }
+    // A bare `/feedback` opens the dialog, as DSH's decoration does; `/feedback <text>` records the text on the host.
+    if (text.trim() === '/feedback' && catalog.some((candidate) => candidate.name === 'feedback')) {
+      openFeedback()
       return
     }
     // Files in the composer travel only with a command that takes them (DSH's /goal and /plan); any other command
@@ -505,6 +536,126 @@ export function install(api) {
     } catch {
       api.notice?.('Failed to exit plan mode')
     }
+  }
+
+  /**
+   * DSH's session feedback dialog (dsh-client-ui-message-feedback, read 2026-10-29): "Submit feedback", seven category
+   * chips (one at a time, a second click clears it), a details box whose placeholder says the log goes with it, and
+   * Submit. It records through `POST /api/sessions/{id}/feedback` — `feedback/record {text?, category?}` — and says
+   * "Thanks for your feedback", or "Could not save feedback" and stays open.
+   */
+  const FEEDBACK_CATEGORIES = [
+    ['task-result', 'Task result'],
+    ['instruction-following', 'Instruction understanding and following'],
+    ['product-interaction', 'Product features and interaction'],
+    ['service-stability', 'Stability and speed'],
+    ['resource-cost', 'Resource usage and cost'],
+    ['security-privacy-permission', 'Security, privacy, and permissions'],
+    ['other', 'Other'],
+  ]
+
+  function toast(text, holdMs = 3000) {
+    const node = document.createElement('div')
+    node.className = 'hc-toast'
+    node.setAttribute('role', 'status')
+    node.textContent = text
+    document.body.append(node)
+    setTimeout(() => node.remove(), holdMs)
+  }
+
+  function openFeedback() {
+    if (document.querySelector('.hc-feedback') !== null) return
+    const id = api.sessionId()
+    if (id === null) {
+      toast('Could not save feedback', 6000)
+      return
+    }
+    let category = null
+    const backdrop = document.createElement('div')
+    backdrop.className = 'hc-backdrop'
+    const dialog = document.createElement('div')
+    dialog.className = 'hc-feedback'
+    dialog.setAttribute('role', 'dialog')
+    dialog.setAttribute('aria-modal', 'true')
+    dialog.setAttribute('aria-labelledby', 'hc-feedback-title')
+    const head = document.createElement('div')
+    head.className = 'hc-feedback-head'
+    const title = document.createElement('h2')
+    title.id = 'hc-feedback-title'
+    title.textContent = 'Submit feedback'
+    const closeButton = document.createElement('button')
+    closeButton.type = 'button'
+    closeButton.className = 'hc-feedback-close'
+    closeButton.setAttribute('aria-label', 'Close')
+    closeButton.textContent = '✕'
+    head.append(title, closeButton)
+    const group = document.createElement('div')
+    group.className = 'hc-feedback-categories'
+    group.setAttribute('role', 'group')
+    group.setAttribute('aria-label', 'Feedback category')
+    for (const [value, label] of FEEDBACK_CATEGORIES) {
+      const chip = document.createElement('button')
+      chip.type = 'button'
+      chip.dataset.category = value
+      chip.setAttribute('aria-pressed', 'false')
+      chip.textContent = label
+      chip.addEventListener('click', () => {
+        category = category === value ? null : value
+        for (const other of group.children) other.setAttribute('aria-pressed', String(other.dataset.category === category))
+      })
+      group.append(chip)
+    }
+    const detail = document.createElement('textarea')
+    detail.className = 'hc-feedback-detail'
+    detail.setAttribute('aria-label', 'Feedback details')
+    detail.placeholder = 'Add details to help us improve. Your submission will include the current conversation log.'
+    const foot = document.createElement('div')
+    foot.className = 'hc-feedback-foot'
+    const submitButton = document.createElement('button')
+    submitButton.type = 'button'
+    submitButton.className = 'hc-feedback-submit'
+    submitButton.textContent = 'Submit'
+    foot.append(submitButton)
+    dialog.append(head, group, detail, foot)
+    backdrop.append(dialog)
+    document.body.append(backdrop)
+    detail.focus()
+
+    const dismiss = () => {
+      backdrop.remove()
+      field.focus()
+    }
+    closeButton.addEventListener('click', dismiss)
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) dismiss()
+    })
+    dialog.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        dismiss()
+      }
+    })
+    submitButton.addEventListener('click', async () => {
+      submitButton.disabled = true
+      submitButton.textContent = 'Submitting…'
+      detail.readOnly = true
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/feedback`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...(detail.value.trim() !== '' ? { text: detail.value } : {}), ...(category !== null ? { category } : {}) }),
+        })
+        if (!response.ok) throw new Error(`feedback answered ${response.status}`)
+        dismiss()
+        toast('Thanks for your feedback')
+      } catch {
+        submitButton.disabled = false
+        submitButton.textContent = 'Submit'
+        detail.readOnly = false
+        toast('Could not save feedback', 6000)
+      }
+    })
   }
 
   /** The row a run is shown in, created on its first event. */

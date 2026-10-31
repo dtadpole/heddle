@@ -80,6 +80,36 @@ pub fn compact_command(host: Arc<dyn CompactionHost>) -> CommandDefinition {
 /// The log event `/feedback` appends.
 pub const FEEDBACK_EVENT: &str = "feedback/record";
 
+/// DSH's session-feedback categories, in the order its dialog offers them (`FEEDBACK_CATEGORIES`).
+pub const FEEDBACK_CATEGORIES: [&str; 7] = [
+    "task-result",
+    "instruction-following",
+    "product-interaction",
+    "service-stability",
+    "resource-cost",
+    "security-privacy-permission",
+    "other",
+];
+
+/// Append one session remark, as DSH's `recordFeedback` does: `feedback/record {text?, category?}`, blank text
+/// recorded as absent (`recordFeedback`). `/feedback <text>` and the feedback dialog's route both write through here;
+/// the category is the caller's to have checked against [`FEEDBACK_CATEGORIES`].
+pub fn record_feedback(
+    log: &dyn CommandLog,
+    session: &SessionHandle,
+    text: Option<&str>,
+    category: Option<&str>,
+) -> Result<(), String> {
+    let mut event = NewEvent::new(FEEDBACK_EVENT);
+    if let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) {
+        event = event.field("text", text.to_owned());
+    }
+    if let Some(category) = category {
+        event = event.field("category", category.to_owned());
+    }
+    log.append_event(session, event).map(|_| ())
+}
+
 /// Where `/feedback`'s anonymous id comes from; an `Err` is why it could not be read or made.
 pub type AnonymousUser = Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
 
@@ -98,13 +128,9 @@ pub fn feedback_command(
                     "Feedback text is required. Usage: /feedback <text>",
                 ));
             }
+            // The anonymous id is told to the person, not written into the remark (DSH's event is {text, category}).
             let user = anonymous_user()?;
-            log.append_event(
-                &context.session,
-                NewEvent::new(FEEDBACK_EVENT)
-                    .field("text", context.args.clone())
-                    .field("anonymousUser", user.clone()),
-            )?;
+            record_feedback(&*log, &context.session, Some(context.args.as_str()), None)?;
             Ok(CommandResult::success_text(format!(
                 "Feedback recorded for session {}\nAnonymous user: {user}.",
                 context.session.id
@@ -492,7 +518,8 @@ mod tests {
         assert_eq!(feedback[0].get("text"), Some(&json!("the menu is lovely")));
         assert_eq!(
             feedback[0].get("anonymousUser"),
-            Some(&json!("00000000-0000-4000-8000-000000000000"))
+            None,
+            "DSH's event is {{text, category}}: the anonymous id is told to the person, not written"
         );
         let runs: Vec<&Arc<SessionEvent>> = events
             .iter()
