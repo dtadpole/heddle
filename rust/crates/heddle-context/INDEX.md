@@ -1,8 +1,8 @@
 ---
 title: The heddle-context crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-24T05:14:16Z
-version: 0.9.1
+modified: 2026-10-31T01:50:00Z
+version: 0.9.2
 description: The Rust port crate for the surface over the log, the window budget, pruning and compaction — its public API and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -85,6 +85,7 @@ Everything is re-exported at the crate root. The module docs carry the rules; th
 | trimming one result can clear the pressure | `prune_session` before `plan` | `write_file`/`read_file`; `context.pruned` |
 | a cut never splits a pair, and the model keeps its system prompt | `plan` (backs off before an answered call; protects only a head system node, as the TypeScript planner does) | the loop's `--turn` with `write_file`/`read_file`; the `context` command |
 | a summary that does not shrink is refused, the conversation left as it was | `compact` | the scripted endpoint's `purpose: compaction` step; the `context` command |
+| a reasoning model's summary has room to answer (`check-summary-budget.mjs`, #15) | `prepare`'s default summariser names no output cap unless `summarizeMaxTokens` is set, so the endpoint's applies; a fixed 1024 left the model's reasoning no room to answer | the chat adapter sending no `max_tokens` when neither the request nor the endpoint names one |
 | one reduction and one retry on overflow | `recover_overflow` | the chat adapter mapping the 400 to `CONTEXT_WINDOW_EXCEEDED`; the loop's single retry and `turn/retry` event; the waterfall |
 | the baseline comes from the session's folder and follows an edit | `ensure_context` | the session's recorded folder; the loop and the `context` command passing it |
 | repeated compaction; notes are not turns | `plan` over out-of-order seqs | the page's display fold, imported from `dist/server/web.js` |

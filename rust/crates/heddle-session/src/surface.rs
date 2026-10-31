@@ -249,6 +249,15 @@ pub fn index_by_seq<E: Borrow<SessionEvent>>(events: &[E]) -> HashMap<u64, &Sess
 /// `text-delta` → a `text` part, `reasoning-delta` → `reasoning`, `tool-call` → `tool-call`; the
 /// result is an `assistant` message, or `None` when the run produced no part.
 ///
+/// The run derives **one part per block, not one per delta**: a `text-delta` that follows a `text` part
+/// joins it, and a `reasoning-delta` that follows a `reasoning` part joins that, while a `tool-call` (or a
+/// switch between text and reasoning) starts the next part. That is DSH's assembly — `BlockAssembler.push`
+/// appends every delta of a block to one partial (`partial.text += chunk.text`, dsh-llm
+/// `lib/types/assembler.js:46-52`) — and the chat adapter keeps separate text blocks apart with a newline,
+/// so a part per delta handed the model its own earlier answer broken wherever the stream split it
+/// (live-testing draft developer-five-2). The log still holds one event per chunk; only the derivation
+/// coalesces, exactly as `deriveMessage` in `src/session/store.ts` does.
+///
 /// A `message` field that does not parse as a [`Message`] derives to `None` (the TypeScript build passed
 /// such an object through unchecked; no writer produces one).
 pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<Message> {
@@ -279,8 +288,14 @@ pub fn derive_message(by_seq: &HashMap<u64, &SessionEvent>, seq: u64) -> Option<
             .get("chunk")
             .and_then(|value| serde_json::from_value::<Chunk>(value.clone()).ok());
         match chunk {
-            Some(Chunk::TextDelta { text }) => content.push(ContentPart::Text { text }),
-            Some(Chunk::ReasoningDelta { text }) => content.push(ContentPart::Reasoning { text }),
+            Some(Chunk::TextDelta { text }) => match content.last_mut() {
+                Some(ContentPart::Text { text: last }) => last.push_str(&text),
+                _ => content.push(ContentPart::Text { text }),
+            },
+            Some(Chunk::ReasoningDelta { text }) => match content.last_mut() {
+                Some(ContentPart::Reasoning { text: last }) => last.push_str(&text),
+                _ => content.push(ContentPart::Reasoning { text }),
+            },
             Some(Chunk::ToolCall(call)) => content.push(ContentPart::ToolCall(call)),
             Some(Chunk::Done { .. }) => break,
             Some(Chunk::ToolCallDelta { .. }) => {}
@@ -680,6 +695,77 @@ mod tests {
                     arguments: "{}".to_string()
                 }),
             ]
+        );
+    }
+
+    /// Consecutive deltas of one block derive to one part (DSH `BlockAssembler.push`, dsh-llm
+    /// `lib/types/assembler.js:46-52`); a part per delta reached the model as `al\nph\na`.
+    #[test]
+    fn consecutive_text_deltas_derive_to_one_text_part() {
+        let events = vec![
+            chunk(0, json!({"type": "text-delta", "text": "al"})),
+            chunk(1, json!({"type": "text-delta", "text": "ph"})),
+            chunk(2, json!({"type": "text-delta", "text": "a"})),
+            chunk(3, json!({"type": "done", "finishReason": "stop"})),
+        ];
+        let by_seq = index_by_seq(&events);
+        let derived = derive_message(&by_seq, 0).unwrap();
+        assert_eq!(derived.content, vec![ContentPart::text("alpha")]);
+    }
+
+    #[test]
+    fn a_tool_call_between_two_texts_keeps_them_two_parts() {
+        let events = vec![
+            chunk(0, json!({"type": "text-delta", "text": "let me "})),
+            chunk(1, json!({"type": "text-delta", "text": "look"})),
+            chunk(
+                2,
+                json!({"type": "tool-call", "id": "call-1", "name": "list_dir", "arguments": "{}"}),
+            ),
+            chunk(3, json!({"type": "text-delta", "text": "done "})),
+            chunk(4, json!({"type": "text-delta", "text": "now"})),
+            chunk(5, json!({"type": "done", "finishReason": "tool_calls"})),
+        ];
+        let by_seq = index_by_seq(&events);
+        let derived = derive_message(&by_seq, 0).unwrap();
+        assert_eq!(
+            derived.content,
+            vec![
+                ContentPart::text("let me look"),
+                ContentPart::ToolCall(ToolCall {
+                    id: "call-1".to_string(),
+                    name: "list_dir".to_string(),
+                    arguments: "{}".to_string()
+                }),
+                ContentPart::text("done now"),
+            ]
+        );
+    }
+
+    #[test]
+    fn consecutive_reasoning_deltas_derive_to_one_part_and_a_switch_starts_a_new_one() {
+        let events = vec![
+            chunk(0, json!({"type": "reasoning-delta", "text": "Th"})),
+            chunk(1, json!({"type": "reasoning-delta", "text": "ink"})),
+            chunk(2, json!({"type": "text-delta", "text": "an"})),
+            chunk(3, json!({"type": "text-delta", "text": "swer"})),
+            chunk(4, json!({"type": "reasoning-delta", "text": "again"})),
+            chunk(5, json!({"type": "done", "finishReason": "stop"})),
+        ];
+        let by_seq = index_by_seq(&events);
+        let derived = derive_message(&by_seq, 0).unwrap();
+        assert_eq!(
+            derived.content,
+            vec![
+                ContentPart::reasoning("Think"),
+                ContentPart::text("answer"),
+                ContentPart::reasoning("again"),
+            ]
+        );
+        // The same message serializes byte for byte as the TypeScript build's derivation of this run.
+        assert_eq!(
+            serde_json::to_string(&derived).unwrap(),
+            r#"{"role":"assistant","content":[{"type":"reasoning","text":"Think"},{"type":"text","text":"answer"},{"type":"reasoning","text":"again"}]}"#
         );
     }
 
