@@ -725,6 +725,118 @@ test('choosing a model type and an effort is recorded, sent, and survives a relo
   }
 })
 
+/**
+ * The selection is session state every page follows (#46, DSH's `modelSelection`).
+ *
+ * Measured on both builds before: a second tab kept the model it opened with, and its next message, which carried that
+ * stale seat, switched the session back over the other tab's choice. Here the other tab is the route a page posts to;
+ * this page's seat must move without a reload, and its next message must run on, and keep, that selection.
+ */
+test('a selection made from another page moves this page’s seat, and this page’s next message keeps it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('follow')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`document.getElementById('model-trigger') !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'first'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from one')`, 20_000), 'the first endpoint answered')
+    assert.ok(await until(() => server.one.turns.length === 1), 'the session exists')
+    const session = (await sessionsOf(server))[0]?.id
+    assert.ok(typeof session === 'string', 'the session is listed')
+
+    // Another page switches the session, through the route the seat posts to.
+    const cookie = await cookieFor(server.url)
+    const switched = await fetch(new URL(`/api/sessions/${encodeURIComponent(session)}/model`, server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ endpoint: 'double-two', model: 'model-two', reasoningEffort: 'high' }),
+    })
+    assert.equal(switched.status, 200, `the other page's switch was recorded\n${await switched.text()}`)
+
+    assert.ok(
+      await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model Two, reasoning effort High')`, 10_000),
+      `this page's seat followed the other page's choice without a reload (it reads ${JSON.stringify(await browser.evaluate(`${SEAT}.getAttribute('aria-label')`))})`,
+    )
+
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'who answers now?'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    assert.ok(await browser.waitFor(`document.getElementById('log').innerText.includes('answer from two')`, 20_000), 'the other page’s endpoint answered')
+    assert.ok(await until(() => server.two.turns.length === 1), 'the chosen double was asked')
+    assert.equal(server.one.turns.length, 1, 'and the old selection was not asked again')
+    const record = (await sessionsOf(server))[0]
+    assert.equal(record?.endpoint, 'double-two', 'the session keeps the other page’s endpoint')
+    assert.equal(record?.model, 'model-two', 'and model')
+    assert.equal(record?.reasoningEffort, 'high', 'and level: this page’s message did not switch it back')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * A blank session has no recorded selection, so its first message runs on the seat's choice (developer-ten's review
+ * of b8620d48, B1). A seat carried over from before the session existed is the common case: pick a model, then press
+ * New session, then type. With turns into a shown session carrying no model, the first answer came from the server's
+ * default instead.
+ */
+test('a blank session from New session runs its first message on the seat’s choice and records it', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('blank')
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await fetch(new URL('/api/workspaces', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ path: server.work }),
+    })
+    assert.equal(added.status, 200, `the workspace is registered\n${await added.text()}`)
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`document.getElementById('model-trigger') !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+
+    // The seat's choice, made before any session exists.
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    await choose(browser, 'Model Two')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model Two')`, 5_000), 'the seat shows the choice')
+
+    // New session: a blank session, shown, with no recorded selection.
+    await trustedClick(browser, `document.getElementById('new-session')`, 'New session')
+    let listed = []
+    for (let tries = 0; tries < 100 && listed.length === 0; tries += 1) {
+      listed = await sessionsOf(server)
+      if (listed.length === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+    }
+    assert.equal(listed.length, 1, 'New session made a session')
+    const blank = listed[0]
+    assert.equal(blank?.endpoint ?? null, null, 'the blank session has no recorded selection')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model Two')`, 5_000), 'and the seat still shows the choice')
+
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'first in the blank session'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
+    /**
+     * A blank session's first message also asks its model for a title (C6), on the same endpoint; that call is not the
+     * conversation, so it is not counted (measured on the Rust build, whose title call came before this read).
+     */
+    const conversation = (double) => double.turns.filter((turn) => !turn.body.includes('Create a concise title for an AI coding-assistant session'))
+    assert.ok(await until(() => conversation(server.two).length + conversation(server.one).length >= 1, 20_000), 'the message was answered')
+    assert.equal(conversation(server.one).length, 0, 'the server default was not asked')
+    assert.equal(conversation(server.two).length, 1, 'the seat’s endpoint answered')
+    const record = (await sessionsOf(server)).find((meta) => meta.id === blank.id)
+    assert.equal(record?.endpoint, 'double-two', 'and the session records the seat’s choice')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('the menu is keyboard-operable and a selection restores focus without a ring', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return

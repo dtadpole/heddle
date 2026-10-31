@@ -6130,6 +6130,8 @@ async function showSession(id) {
    */
   log.replaceChildren()
   try {
+    /** The seat's choice count when this view was asked for: a choice made after it outranks the view. */
+    const selectionAt = selectionSeq
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
     if (superseded()) return
     if (!response.ok) {
@@ -6157,7 +6159,8 @@ async function showSession(id) {
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
      * session: the choice travels with the request and the server records it on the session it made.
      */
-    applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+    /** The view's selection, published only while this session is still shown and has no newer choice (#46). */
+    adoptViewSelection(id, body, selectionAt)
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
     updateStatusBar()
@@ -6311,6 +6314,16 @@ function scheduleTreeRefresh() {
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
+  /**
+   * Another page (or this one) changed the shown session's model selection: the seat follows it, as every DSH
+   * client follows the session's `modelSelection` (#46).
+   */
+  if (event.type === 'model/selection' && typeof payload.session === 'string') {
+    recordedSelections.add(payload.session)
+    serverSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    heldSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    if (payload.session === current && current !== null) applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
+  }
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -7539,22 +7552,35 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   updateStatusBar()
   const startedAt = performance.now()
   const target = key === QUEUE_KEY_NONE ? null : key
+  /** The folder and the seat as they were when the person sent, not as they are after the waits below. */
+  const folder = activeFolder
+  const seatAtSend = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  // Every record in flight, including one chosen while this turn waited, reaches the server before the turn does.
+  while (pendingSaves.size > 0) await Promise.all([...pendingSaves])
+  const carrySeat = target === null || !recordedSelections.has(target)
+  /** The target's own seat, as its records settled (a refusal restores it), else the seat shown at the send. */
+  const seat = (target !== null ? heldSeats.get(target) : undefined) ?? seatAtSend
   const response = await sendTurn({
     /**
      * The folder is named when a tree node is selected, and the server continues **that folder's**
      * session. With no selection the request is what it always was — a session in the server's own
      * working directory — so a window opened without touching the tree still works.
      *
-     * The endpoint and model named here are the composer's own choice, which is what makes the model seat
-     * more than a label: the turn asks the backend a person picked, and the server records it on the session
-     * so a reload comes back to it.
+     * The endpoint and model are named only for a session with no recorded selection: one this turn creates, or a
+     * blank one (New session, a folder) whose first turn must run on the seat's choice. A turn into a session that
+     * has a record names none and runs on the session's own selection: DSH's prompt carries no model, and the
+     * selection is session state every page follows (`model/selection`). Sending the seat with every turn let a
+     * second tab, still showing the model it opened with, silently switch the session back over another tab's
+     * choice (#46). A choice made here is recorded at once by `recordSelection`, so nothing is lost.
      */
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
-    folder: activeFolder,
-    ...selectionForTurn(),
+    folder,
+    ...(carrySeat ? selectionForSeat(seat) : {}),
   })
+  /** The server records the selection a turn carried, so the session now has one. */
+  if (carrySeat && target !== null && response.ok) recordedSelections.add(target)
   if (!response.ok) {
     /**
      * The server's own sentence, not only its status.
@@ -9561,6 +9587,67 @@ function closeAfterSelection() {
 }
 
 /**
+ * Sessions whose model selection the server has recorded, as far as this page knows: from a session's view, a
+ * `model/selection` event, a successful record, or a turn that carried the seat. A turn into any other session (a
+ * blank one opened from New session or a folder) carries the seat's choice, which the server then records (#46,
+ * developer-ten's B1); a turn into a recorded session carries none and runs on the session's own selection.
+ */
+const recordedSelections = new Set()
+/** Every record `recordSelection` has in flight; a turn waits until none is left. */
+const pendingSaves = new Set()
+/** The newest record, which the next one waits behind, so records reach the server in the order they were chosen. */
+let saveChain = Promise.resolve()
+/** Each choice's number, and each session's newest one: only the newest may roll the seat back. */
+let selectionSeq = 0
+const latestSelection = new Map()
+/** What the server is known to hold per session (its view, a model/selection event, an accepted record). */
+const serverSeats = new Map()
+/**
+ * The seat this page holds for each session: what its seat shows when the session is shown, kept per session so a turn
+ * sent into one session never reads the seat of another shown since (developer-twelve's review of 565d4847).
+ */
+const heldSeats = new Map()
+
+/** A turn's selection fields for a given seat, through the same rules as the shown seat's (synchronous). */
+function selectionForSeat(seat) {
+  const shown = [chosenEndpoint, chosenModel, chosenEffort]
+  chosenEndpoint = seat.endpoint
+  chosenModel = seat.model
+  chosenEffort = seat.effort
+  try {
+    return selectionForTurn()
+  } finally {
+    ;[chosenEndpoint, chosenModel, chosenEffort] = shown
+  }
+}
+
+/**
+ * A session's view arrived: record what the server holds for it, and publish its selection to the seat only while that
+ * session is still the one shown and no choice was made for it after the view was asked for (`selectionAt`). A late
+ * view of a session switched away from, or one overtaken by a newer choice, changes no seat.
+ */
+function adoptViewSelection(id, body, selectionAt) {
+  if (body === null || typeof body !== 'object') return
+  const endpoint = typeof body.endpoint === 'string' && body.endpoint.length > 0 ? body.endpoint : null
+  const newerChoice = (latestSelection.get(id) ?? 0) > (selectionAt ?? 0)
+  if (endpoint !== null) {
+    recordedSelections.add(id)
+    if (!newerChoice) {
+      const seat = { endpoint, model: body.model ?? null, effort: body.reasoningEffort ?? null }
+      serverSeats.set(id, seat)
+      heldSeats.set(id, seat)
+    }
+  } else if (!newerChoice) {
+    recordedSelections.delete(id)
+    serverSeats.delete(id)
+  }
+  if (current !== id || newerChoice) return
+  applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+  // A blank session holds the seat it was opened with, which its first turn carries.
+  if (endpoint === null) heldSeats.set(id, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+}
+
+/**
  * Record one selection on the session.
  *
  * The local state is updated first so the seat answers at once — a control that waits for a round trip reads as
@@ -9572,17 +9659,50 @@ function closeAfterSelection() {
  * is shown, and the person is still standing where they can undo the choice.
  */
 async function recordSelection(selection) {
+  const previous = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  const seq = ++selectionSeq
+  const recording = current
+  /**
+   * A refused or failed record puts the seat back (S1), but only when it is still this session's newest choice and
+   * this session is still shown: a later choice owns the seat, and after a switch the seat belongs to another session
+   * (developer-twelve's review of 1ebfcbc9). It goes back to what the server is known to hold for the session, else to
+   * the seat before this choice.
+   */
+  const restore = () => {
+    if (seq !== latestSelection.get(recording)) return
+    const known = serverSeats.get(recording) ?? previous
+    heldSeats.set(recording, { endpoint: known.endpoint, model: known.model, effort: known.effort })
+    if (current !== recording) return
+    chosenEndpoint = known.endpoint
+    chosenModel = known.model
+    chosenEffort = known.effort
+    renderModelSeat()
+  }
   chosenEndpoint = selection.endpoint
   chosenModel = selection.model ?? null
   chosenEffort = selection.reasoningEffort ?? null
   renderModelSeat()
-  if (current === null) return true
+  if (recording === null) return true
+  latestSelection.set(recording, seq)
+  heldSeats.set(recording, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+  /**
+   * Records are sent one at a time, in the order they were chosen, so the server ends on the last one (a model, then
+   * an effort, picked in quick succession). Each is tracked by its own promise; a turn waits for every record in flight.
+   */
+  let release = () => {}
+  const saved = new Promise((resolve) => {
+    release = resolve
+  })
+  const before = saveChain
+  saveChain = saved
+  pendingSaves.add(saved)
   modelPending = true
   modelTrigger.setAttribute('aria-busy', 'true')
   modelSpinner.hidden = false
   if (!modelMenu.hidden) renderModelPane()
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(current)}/model`, {
+    await before
+    const response = await fetch(`/api/sessions/${encodeURIComponent(recording)}/model`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -9593,18 +9713,26 @@ async function recordSelection(selection) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      if (current === recording) setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      restore()
       return false
     }
-    setNote('')
+    if (current === recording) setNote('')
+    recordedSelections.add(recording)
+    serverSeats.set(recording, { endpoint: selection.endpoint, model: selection.model ?? null, effort: selection.reasoningEffort ?? null })
     return true
   } catch (error) {
-    setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    if (current === recording) setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    restore()
     return false
   } finally {
-    modelPending = false
-    modelTrigger.setAttribute('aria-busy', 'false')
-    modelSpinner.hidden = true
+    pendingSaves.delete(saved)
+    release()
+    if (pendingSaves.size === 0) {
+      modelPending = false
+      modelTrigger.setAttribute('aria-busy', 'false')
+      modelSpinner.hidden = true
+    }
     if (!modelMenu.hidden) {
       renderModelPane()
       placeModelMenu()
