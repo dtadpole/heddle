@@ -65,11 +65,13 @@ function startServer(args, env) {
 
 const ROWS = `(() => {
   const workspace = [...document.querySelectorAll('#tree li')].find((row) => (row.dataset.rowKey ?? '').startsWith('node:') && row.textContent.includes('locale-ws'))
-  const session = document.querySelector('#tree li[data-row-key^="session:"]')
   const names = (row) => (row === undefined || row === null ? null : [...row.querySelectorAll('button[aria-label]')].map((button) => button.getAttribute('aria-label')))
   // A session row's menu trigger carries the session's label, which the tree may only learn on a later draw (its
   // definition folder), so the session row is judged by its own quick controls.
   const own = (list) => (list === null ? null : list.filter((name) => !name.startsWith('actions for ') && !name.endsWith('的操作')))
+  // Since stack 11 the open blank conversation is listed too, with no quick controls; the started session is the row
+  // that has them.
+  const session = [...document.querySelectorAll('#tree li[data-row-key^="session:"]')].find((row) => own(names(row)).length > 0) ?? null
   return { workspace: names(workspace)?.filter((name) => name.includes('locale-ws')) ?? null, session: own(names(session)), access: document.getElementById('access-menu').getAttribute('aria-label') }
 })()`
 
@@ -104,6 +106,10 @@ test('the tree rows\' own controls follow the interface language', async (contex
     assert.ok((await api('/api/workspaces', { path: folder })).ok, 'the workspace is registered')
     const started = await api('/api/sessions', { branch: folder })
     assert.ok(started.ok, `a session is started in it (${started.status} ${await started.clone().text()})`)
+    // An untitled session with no turn is a placeholder, which since stack 11 is drawn with no row controls, as DSH's
+    // blank row is; a title makes it an ordinary row.
+    const id = (await started.json()).session
+    assert.ok((await api(`/api/sessions/${encodeURIComponent(id)}/title`, { title: 'Locale row' })).ok, 'the session is titled')
     await browser.send('Network.enable', {})
     await browser.send('Network.setExtraHTTPHeaders', { headers: { 'Accept-Language': 'en-US,en;q=0.9' } })
     await browser.goto(server.url)
