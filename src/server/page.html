@@ -3794,6 +3794,11 @@ let todoCollapsed = true
 /** The generation of the todo read: an older response must not paint over a newer list. */
 let todoGeneration = 0
 /**
+ * The generation of `showSession`. Only the latest open draws the conversation. An older open, even of the same session,
+ * stops at its next step and does not empty or append to the log.
+ */
+let showGeneration = 0
+/**
  * The header's background-jobs control's state (DSH's `JobListAction`, dsh-client-ui-jobs/lib/client.js:323-338),
  * declared up here with the other per-session views so `showSession` can reset it whenever it runs. The functions
  * that draw it sit with the header's other actions, after `#session-more` is filled.
@@ -6517,9 +6522,18 @@ function historyFailureText(status, statusText, failure) {
 
 /**
  * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
- * be loaded and the column shows DSH's failure line instead (#56).
+ * be loaded and the column shows DSH's failure line instead (#56). It also resolves false when a later open replaced
+ * this one before it drew; the later open draws instead.
+ *
+ * Opens can overlap. A reload runs `restoreSelection` and may also run a caller's open of the same session; a double
+ * click, or the stream's `reset` during a click's open, does the same. Each open empties the log and then awaits its
+ * reads. When two opens each appended their history, both drew. Measured in check-goal-command's reload: four Command
+ * input bubbles over eight `.hc-command` rows, four of them empty placeholders. An older session's history that landed
+ * late was appended under the newer session too. So every step after an await first checks that this is still the
+ * latest open (`showGeneration`).
  */
 async function showSession(id) {
+  const generation = ++showGeneration
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6562,8 +6576,11 @@ async function showSession(id) {
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
+  /** A later open started while the list was read. That open empties and fills the log, so this one must not touch it. */
+  if (generation !== showGeneration) return false
   syncSelectionToSession()
   if (view === 'trajectory') await showLedger(id)
+  if (generation !== showGeneration) return false
   /**
    * The log is cleared and refilled from the session's own history.
    *
@@ -6573,6 +6590,7 @@ async function showSession(id) {
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    if (generation !== showGeneration) return false
     if (!response.ok) {
       /**
        * A session that is no longer there is **not** the session being shown.
@@ -6594,6 +6612,7 @@ async function showSession(id) {
        */
       const failure = await response.json().catch(() => ({}))
       /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
+      if (generation !== showGeneration) return false
       if (current !== id) return false
       unavailableSession = id
       current = null
@@ -6619,6 +6638,8 @@ async function showSession(id) {
       return false
     }
     const body = await response.json()
+    /** The same check after the body is read: only the latest open appends its turns. */
+    if (generation !== showGeneration) return false
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6669,6 +6690,8 @@ async function showSession(id) {
     }
     followChatTail(true)
   } catch (error) {
+    /** An older open's failed read says nothing in the conversation a later open is drawing. */
+    if (generation !== showGeneration) return false
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
     note.className = 'turn denied'
