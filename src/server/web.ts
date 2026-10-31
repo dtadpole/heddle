@@ -1475,7 +1475,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
             response,
             409,
             'application/json',
-            `${JSON.stringify({ error: `session ${id} is running; pass stop: true to stop it and archive`, code: 'active', running, ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}) })}\n`,
+            `${JSON.stringify({
+              error:
+                running > 0
+                  ? `session ${id} is running; pass stop: true to stop it and archive`
+                  : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
+              code: 'active',
+              running,
+              ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
+            })}\n`,
           )
           return
         }

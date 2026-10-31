@@ -465,6 +465,7 @@ test('archive: a live job blocks the archive and is listed; stop: true archives,
     const refused = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true }) })
     assert.equal(refused.status, 409, `a session with a live job is not archived without stop\nsaw: ${JSON.stringify(refused)}`)
     assert.equal(refused.body.code, 'active')
+    assert.equal(refused.body.error, `session ${session} has running background jobs; pass stop: true to stop them and archive`, 'the sentence says what blocks it')
     assert.deepEqual(refused.body.jobs, [{ id, label: 'sleep 30' }], 'the refusal names the job that blocks it')
     // Were a notice to start a turn in the archived session, this step would answer it.
     steps(server, [{ purpose: 'jobs-notice', text: 'woken in an archived session' }])
