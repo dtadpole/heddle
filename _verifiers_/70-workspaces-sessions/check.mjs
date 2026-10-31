@@ -5888,7 +5888,20 @@ test('archiving a session with running work is refused with the work named, and 
     assert.equal(refused.status, 409, 'a running session is not archived quietly')
     const refusal = await refused.json()
     assert.equal(refusal.code, 'active', `and the refusal says why\n${JSON.stringify(refusal)}`)
-    assert.deepEqual(refusal.activity, [{ kind: 'turn' }], `and names the work, DSH's activity list\n${JSON.stringify(refusal)}`)
+    /**
+     * DSH's list names every family of work. The turn's running bash call is a job as well: dsh-tool-bash registers every
+     * call's process with `ctx.jobs` as it starts, and a foreground call waits on that job (dsh-tool-bash
+     * lib/index.js:210-216), so the refusal names the turn and the job 'sleep 40'. Judged as a set, family by family with
+     * its labels: DSH's order is turn, job, subagent, schedule (each listener prepends its own entry, and they register
+     * in that order; dsh-workspace lib/types/types.d.ts:28-35), and the server's order, with the schedule family, is
+     * fixed in hd/developer-eight-archive-activity (R-developer-eight-13).
+     */
+    const families = (refusal.activity ?? []).map((entry) => [entry.kind, (entry.items ?? []).map((item) => item.label)])
+    assert.deepEqual(
+      [...families].sort(([left], [right]) => String(left).localeCompare(String(right))),
+      [['job', ['sleep 40']], ['turn', []]],
+      `and names the work, DSH's activity list: the turn and its bash call's job\n${JSON.stringify(refusal)}`,
+    )
     const untouched = (await metas()).find((meta) => meta.id === running.id)
     assert.equal(untouched?.running, true, 'the refusal stops nothing')
     assert.notEqual(untouched?.archived, true, 'and archives nothing')
