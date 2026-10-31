@@ -197,11 +197,16 @@ test('five turns running from one tab leave its other requests answering, a sixt
     await browser.goto(at.server.url)
     assert.ok(await browser.waitFor(`document.body.dataset.ready === 'true'`, 20_000), 'the page is ready')
     const statuses = []
-    /** A turn in a new session of its own, sent from the composer the way a person sends it. */
+    /**
+     * A turn in a new session of its own, sent from the composer the way a person sends it.
+     *
+     * The page opens a fresh New session on load (stack 2's restoreSelection, #17), and New session reuses a blank one,
+     * so the first press may make no session. The evidence that each turn has a session of its own is the model's
+     * count of held turns instead: a message sent to a session whose turn still runs would wait behind it, not reach
+     * the model.
+     */
     const sendInNewSession = async (turn) => {
-      const before = (await (await at.api('/api/sessions')).json()).length
       await browser.evaluate(`document.getElementById('new-session').click()`)
-      assert.ok(await until(async () => (await (await at.api('/api/sessions')).json()).length === before + 1, 15_000), `New session ${turn} made a session`)
       assert.ok(
         await browser.waitFor(`document.getElementById('stop').hidden === true && document.querySelector('#prompt textarea') !== null`, 15_000),
         `session ${turn} is shown with Send, not the running turn before it`,
@@ -295,15 +300,24 @@ test('eight tabs of one server all load and follow the stream, and a turn sent f
     /** One session, so every tab opens on it and draws what the stream says about it. */
     const first = await at.api('/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'SHORT first', folder: at.work }) })
     assert.equal(first.status, 200)
-    await first.text()
-    const session = (await (await at.api('/api/sessions')).json())[0]?.id
+    /** The session the turn's own stream names: the list now also holds the fresh sessions page loads start. */
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(await first.text())?.[1]
     assert.ok(typeof session === 'string', 'the first turn made a session')
     const pages = []
     const readiness = []
+    /**
+     * A load opens the session saved in this browser, or a fresh one, never on its own the newest session (stack 2,
+     * #17), so each tab opens the first turn's session as a person's click would: showSession, once the page is ready.
+     */
+    const shows = async (page) => {
+      if (!(await truthy(page, `document.body.dataset.ready === 'true'`, 10_000))) return false
+      await page.evaluate(`(globalThis.showSession(${JSON.stringify(session)}), true)`, { timeoutMs: 5_000 }).catch(() => {})
+      return truthy(page, `${LOG}.includes('answer to: SHORT first')`, 10_000)
+    }
     for (let index = 1; index <= 8; index += 1) {
       const page = await tabs.open(at.server.url)
       pages.push(page)
-      readiness.push(await truthy(page, `document.body.dataset.ready === 'true' && ${LOG}.includes('answer to: SHORT first')`, 10_000))
+      readiness.push(await shows(page))
     }
     assert.deepEqual(readiness, [true, true, true, true, true, true, true, true], 'every tab finished loading and shows the session')
     const answered = await pages[1].evaluate(raced(2000), { timeoutMs: 10_000 })
