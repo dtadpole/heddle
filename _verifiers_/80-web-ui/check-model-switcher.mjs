@@ -817,9 +817,14 @@ test('a blank session from New session runs its first message on the seat’s ch
     assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model Two')`, 5_000), 'and the seat still shows the choice')
 
     await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'first in the blank session'; field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true })()`)
-    assert.ok(await until(() => server.two.turns.length + server.one.turns.length >= 1, 20_000), 'the message was answered')
-    assert.equal(server.one.turns.length, 0, 'the server default was not asked')
-    assert.equal(server.two.turns.length, 1, 'the seat’s endpoint answered')
+    /**
+     * A blank session's first message also asks its model for a title (C6), on the same endpoint; that call is not the
+     * conversation, so it is not counted (measured on the Rust build, whose title call came before this read).
+     */
+    const conversation = (double) => double.turns.filter((turn) => !turn.body.includes('Create a concise title for an AI coding-assistant session'))
+    assert.ok(await until(() => conversation(server.two).length + conversation(server.one).length >= 1, 20_000), 'the message was answered')
+    assert.equal(conversation(server.one).length, 0, 'the server default was not asked')
+    assert.equal(conversation(server.two).length, 1, 'the seat’s endpoint answered')
     const record = (await sessionsOf(server)).find((meta) => meta.id === blank.id)
     assert.equal(record?.endpoint, 'double-two', 'and the session records the seat’s choice')
     assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
