@@ -1,8 +1,8 @@
 ---
 title: Goal
 created: 2026-10-17T22:49:02Z
-modified: 2026-10-31T05:45:34Z
-version: 1.2.1
+modified: 2026-10-31T07:46:54Z
+version: 1.2.2
 description: A persisted goal, its verbs, and the round driver that keeps pushing it across rounds and restarts.
 grounded_in:
   - source: human-authored
@@ -18,7 +18,7 @@ Goal management, modelled on DSH's five `dsh-goal*` packages — the reading wit
 |---|---|
 | [`service.ts`](service.ts) | The **event-sourced state machine**: one `goal/change` event carrying a complete snapshot (or a clear tombstone); `foldGoal` replays it strictly; every mutation is a compare-and-set on `GoalRef{id, revision}`; the transition table is DSH's, including `block` only from `active` and `resume` refused once the round budget is exhausted |
 | [`tool.ts`](tool.ts) | The **model's verbs**, DSH's `dsh-tool-goal`: `create_goal`, `get_goal`, and `update_goal` with exactly `edit`, `pause`, `resume`, `complete`, `blocked` (the old `update` is an unadvertised alias of `edit`). **Authority** is read from the session's log: create, edit, pause and resume need a direct human turn (a top-level session whose open turn holds a person's unsourced message); complete and blocked also accept the goal's exact current round; a goal round may not block before `blockedAfterConsecutiveRounds` (default 3); a paused goal is resumed by the *person*, not the model; only a goal round's terminal verb is told to end its run |
-| [`driver.ts`](driver.ts) | The **round driver**: a level-triggered reconciler. A round is a user message the harness writes, carrying `source={kind:'goal', goalId, revision, round}`, which is what `foldGoal` counts as an admitted round (in log order and across revisions, as DSH does, so an edit never resets the cap: R-developer-two-31); the driver re-evaluates a pure condition on every edge, yields between rounds, and blocks with `round-limit` at the cap; `turnEnded` acts on how a turn ended (#93): a stopped goal round pauses its goal, and a stopped turn outside a round, a failed one or a length cut disarms continuation (DSH: cancellation never auto-restarts a round; no abnormal auto-retry) |
+| [`driver.ts`](driver.ts) | The **round driver**: a level-triggered reconciler. A round is a user message the harness writes, carrying `source={kind:'goal', goalId, revision, round}`, which is what `foldGoal` counts as an admitted round (in log order and across revisions, as DSH does, so an edit never resets the cap: R-developer-two-31); the driver re-evaluates a pure condition on every edge, yields between rounds, and blocks with `round-limit` at the cap; `turnEnded` acts on how a turn ended (#93): a stopped goal round pauses its goal, and a stopped turn outside a round, a failed one or a length cut disarms continuation (DSH: cancellation never auto-restarts a round; no abnormal auto-retry); a round the archived-session gate refuses before its step blocks its goal `prompt-rejected` (#26, DSH lib/index.js:326-333), and the plugin ends the busy span on `turn/failed` without requesting a round, disarming unless it is that refusal |
 
 ## The rule it follows
 
