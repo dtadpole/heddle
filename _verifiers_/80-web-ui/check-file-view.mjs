@@ -721,3 +721,63 @@ test('a chat link to #L120 or #L80-L90 opens the file at that line, and an absol
     await server.close()
   }
 })
+
+test('a chat link whose file arrives after a newer link opened leaves the newer file where it is', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * developer-two's review of #41: the chat-link click placed the reader after openPath resolved, with no ticket. A link
+   * clicked first whose file arrived late scrolled the newer file to the old link's line. The page's fetch holds the
+   * first file until a second link has opened its own.
+   */
+  const server = await startServer('chat-link-race', () => [{ text: 'See [the notes](notes.txt#L120) and [the code](src/app.ts).' }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    mkdirSync(join(server.work, 'src'), { recursive: true })
+    writeFileSync(join(server.work, 'src', 'app.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where are the notes', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    const link = (href) => `[...document.querySelectorAll('#log .turn.assistant a[href]')].find((anchor) => anchor.getAttribute('href') === ${JSON.stringify(href)})`
+    assert.ok(await browser.waitFor(`${link('notes.txt#L120')} !== undefined && ${link('src/app.ts')} !== undefined`, 10_000), 'the answer carries both links')
+    /** The notes file is held until the code file has opened. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('/api/file') && address.includes('notes.txt')) {
+          held = false
+          return new Promise((resolve) => { window.__releaseNotes = () => resolve(original(input, init)) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${link('notes.txt#L120')}.click()`)
+    assert.ok(await browser.waitFor('typeof window.__releaseNotes === "function"', 10_000), 'the notes are in flight')
+    await browser.evaluate(`${link('src/app.ts')}.click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes('value200')`, 10_000), 'the newer link opened its file')
+    assert.equal(Number(await browser.evaluate(TOP_LINE)), 1, 'it opens at the top')
+    await browser.evaluate('window.__releaseNotes()')
+    await new Promise((done) => setTimeout(done, 800))
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({ code: document.getElementById('file-body').innerText.includes('value200'), top: ${TOP_LINE} })`))
+    assert.ok(state.code, 'the newer file is still the one shown')
+    assert.equal(Number(state.top), 1, `the late notes link does not scroll the newer file to its line (top line ${state.top})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
