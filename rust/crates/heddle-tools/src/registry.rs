@@ -98,6 +98,7 @@ impl ToolRegistry {
         if config.include_builtins {
             let options = BuiltinOptions {
                 bash_timeout_ms: config.bash_timeout_ms,
+                bash_max_timeout_ms: config.bash_max_timeout_ms,
                 bash_output_limit: config.bash_output_limit,
             };
             for tool in builtin_tools(Arc::clone(&registry.gates.sandbox), options) {
@@ -1282,6 +1283,7 @@ pub(crate) mod tests {
             allow: vec!["read_file".into(), "absent".into()],
             include_builtins: true,
             bash_timeout_ms: 5,
+            bash_max_timeout_ms: crate::builtin::BASH_MAX_TIMEOUT_MS,
             bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
             max_parallel_tool_calls: 10,
         };
@@ -1306,6 +1308,7 @@ pub(crate) mod tests {
             allow: Vec::new(),
             include_builtins: false,
             bash_timeout_ms: 0,
+            bash_max_timeout_ms: crate::builtin::BASH_MAX_TIMEOUT_MS,
             bash_output_limit: crate::builtin::BASH_OUTPUT_LIMIT,
             max_parallel_tool_calls: 10,
         };

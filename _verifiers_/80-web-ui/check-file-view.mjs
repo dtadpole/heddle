@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -337,6 +337,177 @@ test('an SVG opened directly runs no script and cannot reach the API, while the 
       await browser.waitFor(`(() => { const img = document.querySelector('#file-body img'); return !!img && img.complete && img.naturalWidth > 0 })()`, 10_000).catch(() => false),
       'the README still shows the SVG as an image',
     )
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a file named beyond ASCII downloads whole under its real name, with only ASCII in its disposition', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-2 (P1) and developer-two-3, measured on 8082 and 3097 on 2026-10-29: the raw route and
+   * the upload route wrote a download's own name into `content-disposition`. The TypeScript server's writeHead threw
+   * on `说明.txt` part-way and then wrote a 404 over the started 200, still declaring the file's length; `café.txt`
+   * went out as a raw Latin-1 byte, and the Rust binary sent `说明.txt` as raw UTF-8. A header must be visible ASCII;
+   * the real name travels in `filename*=UTF-8''…` (RFC 6266, RFC 5987) beside an ASCII fallback.
+   */
+  const server = await startServer('unicode-names')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const files = [['说明.txt', '第一行\n'], ['café.txt', 'x\n'], ['notes.txt', 'plain\n']]
+    for (const [name, text] of files) writeFileSync(join(server.work, name), text)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    /** Read one download, turning a broken answer (a body that never matches its length) into a failed assertion. */
+    const download = async (what, path, expected) => {
+      let response
+      let body
+      try {
+        response = await fetch(new URL(path, server.url), { headers: { cookie } })
+        body = Buffer.from(await response.arrayBuffer())
+      } catch (error) {
+        assert.fail(`${what}: the answer could not be read whole (${error.cause?.code ?? error.message})`)
+      }
+      assert.equal(response.status, 200, `${what} answers 200 (${response.status}: ${body.toString('utf8').slice(0, 40)})`)
+      assert.equal(body.toString('utf8'), expected, `${what}: the body is the whole file`)
+      assert.equal(response.headers.get('content-length'), String(Buffer.byteLength(expected)), `${what}: the length it declares is the file's`)
+      const disposition = response.headers.get('content-disposition') ?? ''
+      assert.match(disposition, /^attachment; filename="[\x20-\x7e]*"/, `${what}: an attachment with an ASCII filename (${JSON.stringify(disposition)})`)
+      assert.match(disposition, /^[\x20-\x7e]*$/, `${what}: only visible ASCII in the header (${JSON.stringify(disposition)})`)
+      const encoded = /filename\*=UTF-8''([^;]*)$/.exec(disposition)?.[1]
+      return encoded === undefined ? /filename="([^"]*)"/.exec(disposition)?.[1] : decodeURIComponent(encoded)
+    }
+    for (const [name, text] of files) {
+      const named = await download(`the raw route for ${name}`, `/api/raw?path=${encodeURIComponent(join(server.work, name))}`, text)
+      assert.equal(named, name, `the raw route's disposition names ${name} as it is`)
+    }
+    // The upload route serves a stored file through the same answer; it is read for the session that sent it.
+    const stored = await fetch(new URL(`/api/uploads?name=${encodeURIComponent('说明.txt')}`, server.url), { method: 'POST', headers: { cookie }, body: '第一行\n' })
+    const storedPath = String((await stored.json()).path ?? '')
+    const leaf = storedPath.split('/').pop()
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'the notes', folder: server.work, attachments: [storedPath] }),
+    })
+    const turnText = await turn.text()
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(turnText)?.[1]
+    assert.ok(session !== undefined, `the turn that sends the upload names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
+    const named = await download(`the upload route for ${leaf}`, `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, '第一行\n')
+    assert.equal(named, leaf, `the upload route's disposition names the stored file ${leaf} as it is`)
+  } finally {
+    await server.close()
+  }
+})
+
+/**
+ * An HTML file's preview loads its relative stylesheet through `/api/raw`, and a browser refuses a stylesheet whose
+ * type is not `text/css` in a standards-mode document. Measured 2026-10-29 (DSH parity R-developer-twelve-14): the
+ * route served `.css` as a download type, so every preview showed unstyled. A stylesheet runs no script, so it may be
+ * inline; a page or a script must still never be.
+ */
+const STYLED_PAGE = '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Styled</h1><script>window.__ran = true; document.title = "RAN"</script></body></html>\n'
+const STYLESHEET = 'h1 { color: rgb(255, 0, 0); }\n'
+
+test('the raw route serves a stylesheet inline as CSS, and a page or a script only as a download', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('raw-types')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'style.css'), STYLESHEET)
+    writeFileSync(join(server.work, 'page.html'), STYLED_PAGE)
+    writeFileSync(join(server.work, 'app.js'), 'window.__ran = true\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const raw = async (name) => {
+      const response = await fetch(new URL(`/api/raw?path=${encodeURIComponent(join(server.work, name))}`, server.url), { headers: { cookie } })
+      await response.arrayBuffer()
+      return { status: response.status, type: response.headers.get('content-type'), disposition: response.headers.get('content-disposition') }
+    }
+    const css = await raw('style.css')
+    assert.equal(css.status, 200)
+    assert.match(String(css.type), /^text\/css\b/, `a stylesheet is served as CSS (${css.type})`)
+    assert.equal(css.disposition, 'inline', 'and inline, so a document can apply it')
+    for (const name of ['page.html', 'app.js']) {
+      const answer = await raw(name)
+      assert.equal(answer.type, 'application/octet-stream', `${name} is never served as something a browser runs (${answer.type})`)
+      assert.match(String(answer.disposition), /^attachment;/, `${name} is offered as a download`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('a file that cannot be read answers 404 at once, and never leaves the request hanging', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, process.getuid?.() !== 0, 'a user whom file permissions bind (not root)')) return
+  /**
+   * Live issue developer-two-13 (2026-10-29): the TypeScript raw route wrote its 200 head before reading the file,
+   * so a file without read permission threw after the head was out, the catch's 404 threw in turn, and the response
+   * was never ended: the request hung with no status at all. The Rust binary answered 404 at once.
+   */
+  const server = await startServer('unreadable')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const locked = join(server.work, 'locked.txt')
+    writeFileSync(locked, 'secret\n')
+    chmodSync(locked, 0o000)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    let response
+    try {
+      response = await fetch(new URL(`/api/raw?path=${encodeURIComponent(locked)}`, server.url), { headers: { cookie }, signal: AbortSignal.timeout(5000) })
+    } catch (error) {
+      assert.fail(`the raw route never answered for an unreadable file (${error.name}: ${error.message})`)
+    } finally {
+      chmodSync(locked, 0o644)
+    }
+    const body = await response.text()
+    assert.equal(response.status, 404, `an unreadable file answers 404 (${response.status}: ${body.slice(0, 40)})`)
+    assert.equal(body, 'no such asset\n', 'with the route\'s own sentence')
+    assert.equal(response.headers.get('content-security-policy'), FILE_POLICY, 'sandboxed, as every answer of the route')
+  } finally {
+    await server.close()
+  }
+})
+
+test('an HTML preview applies its relative stylesheet and does not run its script', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('styled-page')
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'style.css'), STYLESHEET)
+    writeFileSync(join(server.work, 'page.html'), STYLED_PAGE)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#tree .row')).some((row) => row.dataset.path.endsWith('page.html'))`, 10_000),
+      'the page is in the tree',
+    )
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .row')).find((row) => row.dataset.path.endsWith('page.html')).click()`)
+    assert.ok(
+      await browser.waitFor(`(() => {
+        const frame = document.querySelector('#file iframe')
+        const h1 = frame && frame.contentDocument && frame.contentDocument.querySelector('h1')
+        return !!h1 && getComputedStyle(h1).color === 'rgb(255, 0, 0)'
+      })()`, 10_000).catch(() => false),
+      'the preview applies the page\'s relative stylesheet (its h1 turns red)',
+    )
+    const inert = await browser.evaluate(`(() => {
+      const frame = document.querySelector('#file iframe')
+      return { frameRan: frame.contentWindow.__ran === true, frameTitle: frame.contentDocument.title, pageRan: window.__ran === true }
+    })()`)
+    assert.deepEqual(inert, { frameRan: false, frameTitle: '', pageRan: false }, 'and the page\'s script does not run')
   } finally {
     browser.close()
     await server.close()

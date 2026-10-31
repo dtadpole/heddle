@@ -351,6 +351,11 @@ export interface EndpointConfig {
   readonly proxy?: string
   /** Milliseconds before a request is abandoned. */
   readonly timeoutMs?: number
+  /**
+   * Whether an Anthropic route marks the prompt for caching (#70). Absent means on, as DSH caches by default;
+   * `false` is the switch for a gateway that refuses `cache_control`.
+   */
+  readonly promptCache?: boolean
 }
 
 /**

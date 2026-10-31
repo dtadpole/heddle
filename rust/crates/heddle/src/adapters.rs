@@ -822,6 +822,7 @@ impl Component for ToolsComponent {
                 "allow": { "type": "array", "items": { "type": "string" } },
                 "includeBuiltins": { "type": "boolean" },
                 "bashTimeoutMs": { "type": "number" },
+                "bashMaxTimeoutMs": { "type": "number" },
                 "bashOutputLimit": { "type": "number" },
                 "maxParallelToolCalls": { "type": "number" },
             },
@@ -1446,13 +1447,12 @@ impl Component for GoalDriverComponent {
             let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
                 move |payload: &Value| {
                     let session = payload.get("session").and_then(Value::as_str);
-                    let kind = payload
-                        .get("event")
-                        .and_then(|event| event.get("type"))
-                        .and_then(Value::as_str);
-                    if let (Some(session), Some(kind)) = (session, kind) {
-                        // The chain runs on the process runtime; the append is not held open by it.
-                        if let Some(run) = trigger.on_session_event(session, kind) {
+                    let event = payload.get("event");
+                    if let (Some(session), Some(event)) = (session, event) {
+                        // The whole event, so the trigger can read how a turn ended (#93): a stopped goal round
+                        // pauses its goal, a failed one disarms continuation. The chain runs on the process
+                        // runtime; the append is not held open by it.
+                        if let Some(run) = trigger.on_event(session, event) {
                             crate::runtime::tokio().spawn(run);
                         }
                     }

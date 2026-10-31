@@ -49,6 +49,12 @@ export class Page {
     this.uidToNode = new Map()
     this.uidByKey = new Map()
     this.uidSnapshotId = 0
+    /**
+     * Bumped on every top-frame navigation of this page, so a collector can tell this page's live document
+     * from its earlier ones. It is the page's own: with one counter for the browser, a navigation in another
+     * tab made this page's live entries look old, and four of them hid even the preserved ones.
+     */
+    this.navigationEpoch = 0
     /** Console and network collectors, filled while the page lives and emptied only by a caller. */
     this.console = []
     this.network = []
@@ -80,7 +86,7 @@ export class Page {
          */
         this.uidToNode.clear()
         this.uidByKey.clear()
-        this.browser.navigationEpoch += 1
+        this.navigationEpoch += 1
       }
     })
     this.#on('Runtime.executionContextCreated', ({ context }) => {
@@ -130,7 +136,7 @@ export class Page {
       line: event.stackTrace?.callFrames?.[0]?.lineNumber,
       stack: stackLines(event.stackTrace),
       timestamp: event.timestamp,
-      navigation: this.browser.navigationEpoch,
+      navigation: this.navigationEpoch,
     })
   }
 
@@ -147,7 +153,7 @@ export class Page {
       line: details.lineNumber,
       stack: stackLines(details.stackTrace),
       timestamp: event.timestamp,
-      navigation: this.browser.navigationEpoch,
+      navigation: this.navigationEpoch,
     })
   }
 
@@ -161,7 +167,7 @@ export class Page {
       url: entry.url,
       line: entry.lineNumber,
       timestamp: entry.timestamp,
-      navigation: this.browser.navigationEpoch,
+      navigation: this.navigationEpoch,
     })
   }
 
@@ -183,7 +189,7 @@ export class Page {
       size: undefined,
       duration: undefined,
       failed: undefined,
-      navigation: this.browser.navigationEpoch,
+      navigation: this.navigationEpoch,
     }
     this.network.push(entry)
     this.networkById.set(event.requestId, entry)
