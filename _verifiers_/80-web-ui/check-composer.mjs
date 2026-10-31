@@ -742,7 +742,8 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
      * the backend from the first paint; the live turn is added on top while it runs.
      */
     await browser.goto(server.url)
-    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent !== ""', 20_000))
+    // Initial zero is already nonempty; wait for this fixture's known durable count rather than racing history load.
+    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="turns"]\') || {}).textContent === "2 turns"', 20_000))
     const reloaded = JSON.parse(await dock())
     const durableTurns = await browser.evaluate(`(async () => {
       const rows = await (await fetch('/api/sessions')).json()
