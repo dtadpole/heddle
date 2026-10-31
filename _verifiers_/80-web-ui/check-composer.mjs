@@ -709,6 +709,7 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
       await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000),
       'the dock fills once the turn ended and its usage was reported',
     )
+    await browser.waitFor('(document.querySelector(\'[data-stat="steps"]\') || {}).textContent === "1 steps"', 20_000)
     const first = JSON.parse(await dock())
     assert.equal(first.turns, '1 turns', 'the reference\u2019s label is always plural')
     assert.equal(first.steps, '1 steps', 'one model round is one agent step')
@@ -1270,6 +1271,13 @@ test('the dock elements open the reference\u2019s detail surfaces, and close aga
     await type(browser, 'open the tables')
     await press(browser, { key: 'Enter' })
     assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000))
+    /**
+     * The live figures fill the dock first and the turn's end re-reads the durable fold; a surface opened between the
+     * two reads "No statistics yet". With detached turns (#128) the end comes as a verdict on the stream, which can land
+     * right as the dock is read, so the panel is opened once the fold's own step count is in (developer-twelve's
+     * f49d4bb5 waits on the same fold in the statistics test).
+     */
+    await browser.waitFor('(document.querySelector(\'[data-stat="steps"]\') || {}).textContent === "1 steps"', 20_000)
 
     await click('time')
     const time = JSON.parse(await panel())
