@@ -234,7 +234,7 @@ test('the model starts a goal through its tool, and a person drives it from the 
     assert.equal(first.roundsStarted, 1)
     assert.equal(first.blockedReason?.code, 'round-limit')
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.getElementById("goal-bar") !== null && document.getElementById("goal-bar").hidden === false', 20_000)
     const shown = JSON.parse(
       await browser.evaluate(`JSON.stringify({
@@ -432,7 +432,7 @@ test('an active goal is visible in the chat window, live, without a reload', asy
     const browser = await openBrowser()
     try {
       // Opened before the goal exists: what appears later must come from the stream rather than a reload.
-      await browser.goto(server.url)
+      await browser.gotoSession(server.url, session)
       // The page's own contract (page.html, where `data-ready` is set): waiting for an element waits for the markup,
       // not the behaviour. The event stream opens during boot, so a goal created before boot finished could be missed
       // by a page that was not yet listening — the goal bar then never showed (once in eight runs against the Rust

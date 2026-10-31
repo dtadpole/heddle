@@ -136,7 +136,7 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     assert.ok(toolRows.every((row) => String(row.record.result).includes('a.txt')), 'and each carries its result')
     assert.equal(rows.filter((row) => row.turnStart).length, 2, 'two prompts, two turn boundaries')
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
     // The split bar, judged by the reference's feel and by actually resizing: a 6px band with a grip that
     // appears on drag, a real width change, a double-click reset and arrow keys.

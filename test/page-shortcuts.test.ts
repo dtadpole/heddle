@@ -232,6 +232,11 @@ test('bindings a person records are kept as overrides, DSH\'s way (S41)', () => 
   assert.deepEqual(plain(api.recordedChord({ key: 'Dead', code: 'KeyN', metaKey: true, altKey: true }, true)), { chord: { code: 'KeyN', alt: true, shift: false } }, 'Option+Command+N reported as a dead key records')
   assert.ok(api.recordedChord({ key: 'F5', code: 'F5', ctrlKey: true }, false).error, 'a key outside letters, digits and punctuation is refused')
   assert.match(String(api.recordedChord({ key: 'Dead', code: 'KeyE', metaKey: true, altKey: true }, true).error), /accent/, 'a dead key other than ⌥⌘N is refused, since it would never fire')
+  /** DSH's recorder (`dsh-client-ui-shortcuts`) leaves a key alone while an input method composes or AltGraph is held, as dispatch does. */
+  const owned = { pending: true, inputMethod: true }
+  assert.deepEqual(plain(api.recordedChord({ key: 'å', code: 'KeyA', metaKey: true, altKey: true, isComposing: true }, true)), owned, 'an input method composing owns the key')
+  assert.deepEqual(plain(api.recordedChord({ key: 'Process', code: 'KeyA', metaKey: true, keyCode: 229 }, true)), owned, 'so does keyCode 229, its legacy signal')
+  assert.deepEqual(plain(api.recordedChord({ key: '@', code: 'KeyQ', ctrlKey: true, altKey: true, getModifierState: (name: string) => name === 'AltGraph' }, false)), owned, 'and AltGraph')
   assert.equal(api.bindingConflict({ code: 'KeyK', alt: true }, 'rename', api.SESSION_SHORTCUTS), 'search', 'a taken chord names its command')
   assert.equal(api.bindingConflict({ code: 'KeyG', alt: true }, 'rename', api.SESSION_SHORTCUTS), null, 'a command does not collide with itself')
 

@@ -15,6 +15,9 @@ import { test } from 'node:test'
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
 const begin = page.indexOf('/* hero-picker:begin */')
 const end = page.indexOf('/* hero-picker:end */')
+/** The tree's block too: its `workspaceDisplayTitle` is the one label rule the picker shares with the sidebar (#134). */
+const treeBegin = page.indexOf('/* workspace-tree:begin */')
+const treeEnd = page.indexOf('/* workspace-tree:end */')
 
 interface Choice {
   id: string
@@ -36,7 +39,8 @@ interface Picker {
 
 function load(): Picker {
   assert.ok(begin !== -1 && end > begin, 'page.html carries the hero-picker block between its markers')
-  return new Function(`${page.slice(begin, end)}\nreturn HeroPicker`)() as Picker
+  assert.ok(treeBegin !== -1 && treeEnd > treeBegin, 'and the workspace-tree block between its own')
+  return new Function(`${page.slice(treeBegin, treeEnd)}\n${page.slice(begin, end)}\nreturn HeroPicker`)() as Picker
 }
 
 /** A workspace as `/api/workspaces` answers it. */
@@ -86,8 +90,35 @@ test('the chip names the workspace that holds the open session, as DSH\'s sessio
   assert.equal(picker.ownerOf(list, null), null)
   assert.equal(picker.label({ current: 's1', pending: null, owner: 'alpha' }), 'alpha')
   assert.equal(picker.label({ current: 's1', pending: 'beta', owner: 'alpha' }), 'beta', 'a pick in flight shows its target at once')
-  assert.equal(picker.label({ current: null, pending: null, owner: 'alpha' }), picker.CHOOSE, 'no session: DSH\'s call to action')
+  assert.equal(picker.label({ current: null, pending: null, owner: 'alpha' }), picker.CHOOSE, 'no session and nowhere to start one: DSH\'s call to action')
   assert.equal(picker.CHOOSE, 'Choose workspace')
+})
+
+test('the chip and the menu call the first-use workspace Default workspace, as the tree does (#134)', () => {
+  const picker = load()
+  const list = [
+    workspace('w-default', '/home/u/.heddle/default-workspace', { title: 'default-workspace', sessionIds: ['s1'] }),
+    workspace('w-renamed', '/home/u/.heddle/other', { title: 'Default Workspace' }),
+  ]
+  assert.deepEqual(
+    picker.choices(list).map((choice) => choice.label),
+    ['Default workspace', 'Default Workspace'],
+    'the stored first-use title reads Default workspace; a title someone typed reads as typed',
+  )
+  assert.equal(picker.ownerOf(list, 's1')?.label, 'Default workspace', 'and so does the chip over its blank session')
+})
+
+test('with no session open, the chip names the workspace the first message will start in (#134)', () => {
+  const picker = load()
+  assert.equal(
+    picker.label({ current: null, pending: null, owner: null, target: 'Default workspace' }),
+    'Default workspace',
+    'a reload before the first message still names the Default workspace, not Choose workspace',
+  )
+  assert.equal(picker.label({ current: null, pending: 'beta', owner: null, target: 'Default workspace' }), 'beta', 'a pick in flight still shows its target first')
+  assert.equal(picker.label({ current: null, pending: null, owner: null, target: null }), picker.CHOOSE, 'nowhere to start one: the call to action')
+  assert.equal(picker.label({ current: 's1', pending: null, owner: null, target: 'Default workspace' }), picker.CHOOSE, 'an open session outside every workspace is not named after another place')
+  assert.equal(picker.label({ current: 's1', pending: null, owner: 'alpha', target: 'Default workspace' }), 'alpha', 'an open session names its own workspace')
 })
 
 test('blank means no turn has started: no turns, not running, not archived, not a subagent\'s', () => {

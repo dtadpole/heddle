@@ -73,7 +73,7 @@ async function startServer(label, options = {}) {
   const config = httpConfig({ home, baseUrl: double.baseUrl, stream: true })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'double', '--session-root', join(home, 'sessions')],
-    { env: { HOME: home, HEDDLE_CONFIG: config, HEDDLE_WEB_BROWSER: options.browserFlag ?? '' } },
+    { env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config, HEDDLE_WEB_BROWSER: options.browserFlag ?? '' } },
   )
   return { home, work, double, config, ...child, close: async () => {
     child.kill()

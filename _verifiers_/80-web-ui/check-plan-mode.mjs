@@ -309,7 +309,8 @@ test("the composer shows DSH's Plan chip and placeholder in plan mode, keeps the
     const cookie = await cookieFor(server.url)
     const id = await openSession(server, cookie)
     const show = async () => {
-      await browser.goto(server.url)
+      /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+      await browser.gotoSession(server.url, id)
       await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
       await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
       await browser.waitFor(`${FIELD} !== null`, 10_000)

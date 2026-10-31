@@ -186,7 +186,7 @@ test('a tool call and its result fold into one turn, and the page draws them as 
       'and the person and the model still have their own turns',
     )
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelectorAll("#log .turn").length > 0', 20_000)
     const drawn = JSON.parse(
       await browser.evaluate(`JSON.stringify({
@@ -269,15 +269,21 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
      * a person pasting it somewhere expects. The clipboard itself is the browser's, so the check reads the
      * snapshot the button copies from rather than asserting what the platform did with it.
      */
+    /**
+     * The answer closes a completed turn, so its bar also carries DSH's Branch action, which joins once the turn's end
+     * arrives on the stream (dsh-client-ui-chat MessageIconActions: copy, then branch).
+     */
+    assert.ok(
+      await browser.waitFor('document.querySelector("#log .turn.assistant [data-action=branch]") !== null', 20_000),
+      'the completed turn offers its Branch action',
+    )
     const actions = JSON.parse(
       await browser.evaluate(`JSON.stringify({
-        buttons: document.querySelectorAll('#log .turn.assistant .action').length,
-        label: (document.querySelector('#log .turn.assistant .action') || {}).getAttribute?.('aria-label') ?? null,
+        labels: [...document.querySelectorAll('#log .turn.assistant .action')].map((button) => button.getAttribute('aria-label')),
         copyText: (document.querySelector('#log .turn.assistant') || {}).dataset?.copyText ?? null
       })`),
     )
-    assert.equal(actions.buttons, 1, 'a settled answer offers exactly one action')
-    assert.equal(actions.label, 'Copy this answer', 'and it says what it does')
+    assert.deepEqual(actions.labels, ['Copy this answer', 'Branch into a new conversation'], 'a settled answer offers copy, then Branch, and each says what it does')
     assert.match(String(actions.copyText), /bold word/, 'what it copies is the answer')
     assert.doesNotMatch(String(actions.copyText), /\*\*/, 'as it reads rather than as its source')
   } finally {
@@ -285,6 +291,74 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
     child.kill()
     removeDir(home)
     removeDir(work)
+  }
+})
+
+test('a completed turn branches into a new conversation that ends after it, and the child opens', async (context) => {
+  /**
+   * DSH's chat footer, on every completed turn: "Branch into a new conversation" forks the session with atSeq set to the
+   * seq that ended that turn and an incremented title, then opens the child (dsh-client-ui-chat TurnTailNodeView and its
+   * forkAt). Phase A (R-developer-eight-16): heddle's turn controls were Copy alone, and its fork ignored atSeq.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('branch', [{ text: 'a scripted answer' }])
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const asked = ['turn one', 'turn two', 'turn three']
+    for (const prompt of asked) {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+      await turn.text()
+    }
+    const renamed = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}/title`, { method: 'POST', body: JSON.stringify({ title: 'Branch source' }) })
+    assert.equal(renamed.status, 200, 'the source is named')
+
+    await browser.gotoSession(server.url, session)
+    assert.ok(
+      await browser.waitFor('document.querySelectorAll("#log .turn.assistant [data-action=branch]").length === 3', 20_000),
+      `each of the three completed turns offers Branch\nDIAG ${await browser.evaluate('document.getElementById("log")?.innerText.slice(0, 300) ?? ""')}`,
+    )
+    const labels = JSON.parse(
+      await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#log .turn.assistant')][1].querySelector('[data-action=branch]').getAttribute('aria-label'))`),
+    )
+    assert.equal(labels, 'Branch into a new conversation', "in DSH's words")
+
+    await browser.evaluate(`[...document.querySelectorAll('#log .turn.assistant')][1].querySelector('[data-action=branch]').click()`)
+    assert.ok(
+      await browser.waitFor('(document.getElementById("session-title")?.textContent ?? "") === "Branch source (1)"', 20_000),
+      `the child opens, titled after its source\nsaw: ${await browser.evaluate('document.getElementById("session-title")?.textContent ?? ""')}`,
+    )
+    assert.ok(
+      await browser.waitFor('document.querySelectorAll("#log .turn.user").length === 2', 20_000),
+      'and its chat ends after the second turn',
+    )
+    const drawn = JSON.parse(
+      await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#log .turn.user')].map((row) => row.dataset.copyText))`),
+    )
+    assert.deepEqual(drawn, asked.slice(0, 2), 'with the first two prompts')
+
+    const listed = await api(server.url, cookie, '/api/sessions')
+    const child = (Array.isArray(listed.body) ? listed.body : []).find((entry) => entry.parentSession === session)
+    assert.ok(child !== undefined, 'the child records its source')
+    assert.equal(child.title, 'Branch source (1)', 'with the incremented title')
+    const read = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(child.id)}`)
+    assert.deepEqual(
+      (read.body.turns ?? []).filter((turn) => turn.kind === 'user').map((turn) => turn.text),
+      asked.slice(0, 2),
+      'and its log ends after the second turn',
+    )
+  } finally {
+    browser.close()
+    await server.close()
   }
 })
 
@@ -330,7 +404,7 @@ test('the chat is drawn in DSH\'s own numbers, folds by default, and swaps its a
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelector("#log .turn.reasoning") !== null && document.querySelector("#log .turn.tool") !== null', 20_000)
 
     const diag = JSON.parse(
@@ -710,7 +784,7 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, opened.body.session?.id ?? opened.body.id)
     await browser.waitFor('document.querySelectorAll(".column-grip").length === 2', 20_000)
 
     const grips = JSON.parse(
@@ -905,7 +979,7 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
       await response.text()
     }
 
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, opened.body.session?.id ?? opened.body.id)
     await browser.waitFor('document.querySelectorAll("#log > .turn").length >= 24', 25_000)
     await browser.waitFor('document.getElementById("minimap") !== null && !document.getElementById("minimap").hidden', 10_000)
     await browser.waitFor('document.querySelectorAll("#minimap .mm-row").length > 0', 10_000)
@@ -1349,7 +1423,7 @@ test('a finished turn shows the edited files as one summary: single name, or a f
     })
     assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
     await turn.text()
-    await browser.goto(server.url)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
     await new Promise((resolve) => setTimeout(resolve, 400))
   }
@@ -1486,7 +1560,8 @@ test('a write the sandbox refused is not shown as an edited file, whether by wri
     })
     assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
     await turn.text()
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
     await new Promise((resolve) => setTimeout(resolve, 400))
     return (await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)).body
@@ -1565,7 +1640,7 @@ test('a long turn is not cut at eight rounds, and a turn the loop does stop says
     /** Ten rounds finish, because the interactive budget is 32 rather than the one-shot eight. */
     const done = await runTurn(long)
     assert.match(done.stream, /the long task finished/, 'a forty-round turn reaches its answer, because interactive turns are uncapped')
-    await browser.goto(long.url)
+    await browser.gotoSession(long.url, done.session)
     await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
     await browser.waitFor('document.getElementById("log").innerText.includes("the long task finished")', 10_000)
     const noticeOnLong = await browser.evaluate('document.querySelectorAll("#log .turn-notice").length')
@@ -1576,7 +1651,7 @@ test('a long turn is not cut at eight rounds, and a turn the loop does stop says
     const answer = stopped.turns.find((entry) => entry.kind === 'assistant')
     assert.ok(answer !== undefined, 'a row exists for the stopped turn')
     assert.ok(Array.isArray(answer.ended) && answer.ended.some((entry) => /round limit of 3/.test(entry)), `the transcript carries the reason (${JSON.stringify(answer && answer.ended)})`)
-    await browser.goto(short.url)
+    await browser.gotoSession(short.url, stopped.session)
     await browser.waitFor('document.querySelectorAll("#log .turn-notice").length >= 1', 25_000)
     const noticeText = await browser.evaluate('document.getElementById("log").innerText')
     assert.match(noticeText, /Stopped after the round limit of 3/, `the page says why (${noticeText.slice(-120)})`)
