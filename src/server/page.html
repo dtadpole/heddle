@@ -7250,7 +7250,7 @@ const slashReady = import('/commands/menu.js')
         await startNewSession()
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
-      sendAsPrompt: (text, attachments = []) => (anyRunning() ? enqueue(text, 'queue', attachments) : void sendNow(text, attachments)),
+      sendAsPrompt: (text, attachments = []) => submitText(text, attachments, 'enter'),
       pendingAttachments: () => pendingAttachments.length,
       takeAttachments: () => takeAttachments(),
       addRow: (node) => window.heddlePage.addRow('command', node),
@@ -7575,7 +7575,15 @@ function submitDraft(gesture) {
   field.value = ''
   growComposer()
   updateSendDisabled()
-  const attachments = takeAttachments()
+  submitText(text, takeAttachments(), gesture)
+}
+
+/**
+ * Send words as the person's message, by the composer's own rules: a new send resumes a queue that Stop paused (#75),
+ * and it steers, queues behind what waits, or goes as its own turn. A slash command that hands words on to the model
+ * (`sendAsPrompt`) comes through here too, so it keeps the same order as typed text (developer-ten's review).
+ */
+function submitText(text, attachments, gesture) {
   stoppedQueues.delete(queueOf())
   const mode = resolveSubmitMode(BUSY_ENTER, anyRunning(), gesture)
   if (mode === 'steer') {

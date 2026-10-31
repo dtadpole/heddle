@@ -753,8 +753,15 @@ export function install(api) {
     }
   }
 
-  /** Draw a finished run from a session's history (`{kind: 'command', commandId, name, args?, state, text?}`). */
+  /**
+   * Draw a finished run from a session's history (`{kind: 'command', commandId, name, args?, state, text?}`), into the
+   * placeholder the history render left for it. When the module loads after the person switched sessions, that
+   * placeholder is gone, and drawing would append the row to the other session's log, so nothing is drawn
+   * (developer-ten's review). The session's next render draws it again.
+   */
   function drawTurn(turn) {
+    const holder = [...document.querySelectorAll('.hc-command')].find((element) => element.dataset.commandId === turn.commandId)
+    if (holder === undefined || !holder.isConnected) return
     draw({ type: 'command/run', commandId: turn.commandId, name: turn.name, ...(turn.args !== undefined ? { args: turn.args } : {}) })
     if (turn.state === 'done' || turn.state === 'error') {
       draw({ type: 'command/done', commandId: turn.commandId, kind: turn.state === 'error' ? 'error' : 'success', ...(turn.text !== undefined ? { text: turn.text } : {}) })
