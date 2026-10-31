@@ -102,7 +102,6 @@ function startCli(args, env) {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const { join: joinPath } = await import('node:path')
       const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
@@ -110,25 +109,42 @@ function startCli(args, env) {
       })
       let output = ''
       let settled = false
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        child.kill('SIGKILL')
+        reject(new Error(`the server did not print a URL within 20 seconds\n${output}`))
+      }, 20_000)
+      child.once('error', (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        reject(error)
+      })
       const onData = (chunk) => {
         output += chunk.toString()
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
+          clearTimeout(timeout)
           resolvePromise({ child, url: match[1], output: () => output, kill: () => child.kill('SIGKILL') })
         }
       }
       child.stdout.on('data', onData)
       child.stderr.on('data', onData)
       child.on('exit', (code) => {
-        if (!settled) reject(new Error(`the server exited ${code} before printing a URL\n${output}`))
+        if (!settled) {
+          settled = true
+          clearTimeout(timeout)
+          reject(new Error(`the server exited ${code} before printing a URL\n${output}`))
+        }
       })
-    })()
+    })().catch(reject)
   })
 }
 
 async function handshakeCookie(url) {
-  const response = await fetch(url, { redirect: 'manual' })
+  const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10_000) })
   const set = response.headers.get('set-cookie')
   if (set === null) throw new Error(`no cookie from ${url} (HTTP ${response.status})`)
   return set.split(';')[0]
@@ -154,15 +170,17 @@ test('standalone PNG decodes in the File panel behind the existing authorization
   const outside = join(home, 'outside.png')
   writeFileSync(outside, png)
   const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
-  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+  let server
   let browser
+  const pngFetch = (url, options = {}) => fetch(url, { ...options, signal: AbortSignal.timeout(10_000) })
   try {
+    server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
     const cookie = await handshakeCookie(server.url)
     const origin = new URL(server.url).origin
-    await fetch(`${origin}/api/workspaces`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ path: work }) })
+    await pngFetch(`${origin}/api/workspaces`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ path: work }) })
     const fileUrl = `${origin}/api/file?path=${encodeURIComponent(path)}`
-    assert.equal((await fetch(fileUrl, { redirect: 'manual' })).status, 401)
-    const metadata = await fetch(fileUrl, { headers: { cookie } })
+    assert.equal((await pngFetch(fileUrl, { redirect: 'manual' })).status, 401)
+    const metadata = await pngFetch(fileUrl, { headers: { cookie } })
     assert.equal(metadata.status, 200, '#126: PNG must not be refused by the text reader with 415')
     const body = await metadata.json()
     assert.equal(body.renderer, 'image')
@@ -170,14 +188,14 @@ test('standalone PNG decodes in the File panel behind the existing authorization
     assert.equal(body.image.src, `/api/raw?path=${encodeURIComponent(path)}`)
     assert.equal(body.text, undefined)
     const rawUrl = origin + body.image.src
-    assert.equal((await fetch(rawUrl, { redirect: 'manual' })).status, 401)
-    const raw = await fetch(rawUrl, { headers: { cookie } })
+    assert.equal((await pngFetch(rawUrl, { redirect: 'manual' })).status, 401)
+    const raw = await pngFetch(rawUrl, { headers: { cookie } })
     assert.equal(raw.headers.get('content-type'), 'image/png')
     assert.equal(raw.headers.get('x-content-type-options'), 'nosniff')
     assert.deepEqual(Buffer.from(await raw.arrayBuffer()), png)
-    assert.equal((await fetch(`${origin}/api/file?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 400)
-    assert.equal((await fetch(`${origin}/api/raw?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 404)
-    assert.equal((await fetch(`${origin}/api/file?path=${encodeURIComponent(join(work, 'missing.png'))}`, { headers: { cookie } })).status, 404)
+    assert.equal((await pngFetch(`${origin}/api/file?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 400)
+    assert.equal((await pngFetch(`${origin}/api/raw?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 404)
+    assert.equal((await pngFetch(`${origin}/api/file?path=${encodeURIComponent(join(work, 'missing.png'))}`, { headers: { cookie } })).status, 404)
     browser = await openBrowser({ width: 1400, height: 900 })
     await browser.goto(server.url)
     await browser.waitFor('typeof showFile === "function" && document.querySelectorAll("#tree .row").length > 0', 20_000)
@@ -197,7 +215,7 @@ test('standalone PNG decodes in the File panel behind the existing authorization
     assert.ok(await browser.waitFor('document.querySelector("#file-body [role=alert]")?.textContent.includes("could not be displayed")', 20_000), 'decode failure is accessible and visible')
   } finally {
     if (browser) await browser.close()
-    server.kill()
+    server?.kill()
     removeDir(home)
     removeDir(work)
   }
