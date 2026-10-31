@@ -204,8 +204,42 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
         : AbortSignal.any([options.signal, live.signal])
   try {
     return await runTurnBody(ctx, options, signal)
+  } catch (error) {
+    recordUnfinished(ctx, options.session, error, signal)
+    throw error
   } finally {
     live?.settle()
+  }
+}
+
+/**
+ * End a turn that threw, durably (#16, #29).
+ *
+ * A turn whose model call failed (a refused connection, a socket timeout, a provider error) or that a stop cut
+ * mid-stream threw out of the loop before its `assistant/completed` and `turn/completed`. The live stream showed the
+ * error, but the log kept only the prompt, so a reload, a second tab or a client whose stream dropped saw a message
+ * with no answer and no failure, and the next turn's model read two prompts in a row. DSH's loop appends `turn/end`
+ * with its reason (`{ kind: 'error', error }`) in a `finally`. Here the turn ends the way a stopped turn already
+ * does: `assistant/completed` names the reason in `ended`, which the transcript draws as the turn's notice, and
+ * `turn/completed` closes it. The error still reaches the caller.
+ */
+function recordUnfinished(ctx: Context, session: SessionHandle, error: unknown, signal: AbortSignal | undefined): void {
+  const stopped = signal?.aborted === true
+  const message = error instanceof Error ? error.message : String(error)
+  try {
+    ctx.session.store.append(session, {
+      type: 'assistant/completed',
+      text: '',
+      reasoning: '',
+      finishReason: stopped ? 'aborted' : 'error',
+      rounds: 0,
+      denials: 0,
+      ended: [stopped ? 'stopped by the caller' : `failed: ${message}`],
+      ...(stopped ? {} : { error: message }),
+    })
+    ctx.session.store.append(session, { type: 'turn/completed', rounds: 0, ...(stopped ? { stopped: true } : { error: message }) })
+  } catch {
+    // The log could not take the record either; the caller still gets the turn's own error.
   }
 }
 
