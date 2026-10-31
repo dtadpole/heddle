@@ -506,6 +506,15 @@ test('a session row\'s tooltip is its display title and no other row has one —
   }
   assert.equal(tree.rowLabel(row('workspace')), 'repo', 'a workspace row reads its label')
   assert.equal(tree.rowTooltip(null), undefined)
+  /**
+   * A title with nothing visible in it is no title: the row reads Untitled, as the session's label and the search do
+   * (developer-ten's review of stack-2); DSH cleans titles to one trimmed line, so it never shows a blank one.
+   */
+  const blankTitle = { id: 's-5', turns: 2, cwd: work, title: '   ' }
+  const spaced = row('session', { label: tree.sessionLabel(blankTitle), session: blankTitle })
+  assert.equal(tree.sessionLabel(blankTitle), 'Untitled')
+  assert.equal(tree.rowLabel(spaced), 'Untitled', 'a whitespace-only title reads Untitled on the row')
+  assert.equal(tree.rowTooltip(spaced), 'Untitled', 'and in its tooltip')
 })
 
 test('Enter or Space opens a tree row only when pressed on the row itself, never on a control inside it (#98)', () => {

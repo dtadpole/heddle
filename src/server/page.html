@@ -13589,11 +13589,14 @@ const WorkspaceTree = (() => {
 
   /**
    * What a tree row's label reads: a session row the title a person or the first prompt gave it, else its node's label
-   * (`sessionLabel` for a listed session); every other row its node's label, the folder's or workspace's name.
+   * (`sessionLabel` for a listed session); every other row its node's label, the folder's or workspace's name. A title
+   * with nothing visible in it is no title, as `sessionLabel` and the search read it (`storedTitle`): DSH cleans every
+   * title to one trimmed line (`cleanTitleText`, `dsh-session-title` lib/index.js:24-26), so its `displayTitle`
+   * (`dsh-client-ui-workspace` lib/client.js:1802-1804) never meets a blank one and reads `Untitled` for none.
    */
   function rowLabel(node) {
     if (node === null || typeof node !== 'object') return ''
-    return String(node.kind === 'session' && node.session?.title ? node.session.title : (node.label ?? ''))
+    return String(node.kind === 'session' && storedTitle(node.session) !== undefined ? node.session.title : (node.label ?? ''))
   }
 
   /**
