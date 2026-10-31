@@ -472,6 +472,10 @@ impl GoalDriver {
 pub enum SessionEdge {
     /// `turn/completed`: the session is idle — request a pass.
     TurnCompleted,
+    /// `turn/failed`: a turn's other end (the archived-session gate's `{"kind": "blocked"}`, a teammate's failed
+    /// turn). The session is idle again, but no pass is requested: a round started from a refused turn's end
+    /// would be refused again.
+    TurnFailed,
     /// `model/request`, `assistant/chunk`, `turn/retry`, `tool/result`: a turn is in flight.
     TurnActivity,
     /// `goal/change`: request a pass if the session is at rest; a running turn's completion re-evaluates.
@@ -484,6 +488,7 @@ pub enum SessionEdge {
 pub fn classify_session_event(event_type: &str) -> SessionEdge {
     match event_type {
         "turn/completed" => SessionEdge::TurnCompleted,
+        "turn/failed" => SessionEdge::TurnFailed,
         "model/request" | "assistant/chunk" | "turn/retry" | "tool/result" => {
             SessionEdge::TurnActivity
         }
@@ -519,6 +524,17 @@ impl DriverTrigger {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(session);
                 self.request_if_known(session)
+            }
+            // A turn that ended `turn/failed` ends the busy span as a completed one does (DSH's driver is ready again
+            // at every idle, dsh-goal-round-driver lib/index.js:84-86, 223-241), so a goal resumed or edited after
+            // an unarchive is not ignored. It requests nothing: the turn was refused or failed, and a round started
+            // from its end would meet the same refusal (the TypeScript twin measured 353 refused rounds in 300 ms).
+            SessionEdge::TurnFailed => {
+                self.in_turn
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(session);
+                None
             }
             SessionEdge::TurnActivity => {
                 self.in_turn
@@ -1185,6 +1201,104 @@ mod tests {
         assert!(
             trigger.on_session_event("nope", "turn/completed").is_none(),
             "an unknown session is a no-op"
+        );
+    }
+
+    // developer-five's review of the archived-session gate (issue #26): a turn refused at a later step writes
+    // `turn/failed` {"reason":{"kind":"blocked"}}, which the trigger ignored, so the session stayed busy and a goal
+    // resumed after the unarchive was ignored until some other turn completed.
+    #[tokio::test]
+    async fn a_turn_that_ends_failed_leaves_the_session_at_rest_and_a_later_resume_starts_a_round()
+    {
+        let (log, goals) = setup();
+        let created = create(&goals, 1.0);
+        let paused = goals
+            .pause(
+                "s1",
+                &GoalRef {
+                    id: created.goal.id.clone(),
+                    revision: created.goal.revision,
+                },
+            )
+            .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let trigger = DriverTrigger::new(driver.clone());
+
+        // A person's turn asks the model, then the gate refuses its next step.
+        assert!(trigger.on_session_event("s1", "model/request").is_none());
+        assert!(
+            trigger.on_session_event("s1", "turn/failed").is_none(),
+            "the refused turn's end requests nothing by itself"
+        );
+        // After the unarchive, the person resumes the goal.
+        goals
+            .resume(
+                "s1",
+                &GoalRef {
+                    id: paused.goal.id.clone(),
+                    revision: paused.goal.revision,
+                },
+            )
+            .unwrap();
+        let run = trigger.on_session_event("s1", "goal/change");
+        assert!(
+            run.is_some(),
+            "the session is at rest after turn/failed, so the resume requests a pass"
+        );
+        let outcome = run.unwrap().await;
+        assert_eq!(outcome.rounds, 1, "{outcome:?}");
+        assert_eq!(calls.lock().unwrap().len(), 1, "the resume started round 1");
+        assert_eq!(
+            classify_session_event("turn/failed"),
+            SessionEdge::TurnFailed
+        );
+    }
+
+    // The other half of the same review: clearing busy must not start the refused round again. The runner stands
+    // for a round the gate refuses at its first step: no message is admitted, and the turn's `turn/failed` end
+    // reaches the trigger while the chain is still running, as the boot forwards it.
+    #[tokio::test]
+    async fn a_refused_round_is_not_started_again_by_its_own_turn_failed_end() {
+        let (log, goals) = setup();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let cell: Arc<OnceLock<Arc<DriverTrigger>>> = Arc::new(OnceLock::new());
+        let hook: Hook = {
+            let cell = Arc::clone(&cell);
+            Arc::new(move |session: &str, _round: u64| {
+                if let Some(trigger) = cell.get() {
+                    drop(trigger.on_session_event(session, "turn/failed"));
+                }
+            })
+        };
+        let refused = TestRunner {
+            log: log.clone(),
+            calls: calls.clone(),
+            hook: Some(hook),
+            fail: false,
+            record: false,
+        };
+        let driver = GoalDriver::new(goals.clone(), Arc::new(refused));
+        let trigger = Arc::new(DriverTrigger::new(driver.clone()));
+        assert!(cell.set(Arc::clone(&trigger)).is_ok());
+        create(&goals, 5.0);
+        let outcome = trigger
+            .on_session_event("s1", "goal/change")
+            .expect("at rest, a goal change requests a pass")
+            .await;
+        assert_eq!(outcome.stopped, "round-not-admitted", "{outcome:?}");
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "the refused round ran once and its own end did not start it again"
+        );
+        assert_eq!(
+            goals.get("s1").unwrap().unwrap().goal.phase,
+            GoalPhase::Active,
+            "the goal is left as it was"
         );
     }
 
