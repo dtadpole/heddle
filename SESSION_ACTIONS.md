@@ -242,7 +242,11 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   `activity`; `stop: true` archives it and then removes its reminders, awaited before the answer, as DSH writes the
   archive set first and then awaits every stop listener (`dsh-workspace/lib/index.js:527-541`, `:621-628`). A failing
   removal is logged (`workspace: stopping session '<id>' for archive failed: …`), never a reason to keep the session
-  visible.
+  visible. A failing activity listener refuses the archive instead, as DSH does, and nothing is written: its schedule
+  listener awaits `this.list({sessionId})` with no catch (`dsh-schedule/lib/index.js:2044-2045`) inside the waterfall
+  that `archiveSession` awaits before its write (`dsh-workspace/lib/index.js:530-531`); heddle's `rowActivity` passes a
+  rejecting reminder list on, before `flags()`, and the route answers it as its catch-all `500` (the Rust adapter's
+  `ScheduleService::list` filters the loaded tasks and cannot fail).
 - **Every family stops after the write** (developer-ten's F1 on stack-2). DSH writes the archive set first and only
   then asks every `workspace/session-stop` listener — the turn's cancel and the subagents' included — so the stops'
   wakes already meet its `agent/pre-step` gate, and a `setState` that throws reaches no stop at all

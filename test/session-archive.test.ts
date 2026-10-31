@@ -172,6 +172,17 @@ test('a reminder stop that fails is reported, never thrown, as the registry logs
   assert.deepEqual(warnings, ["workspace: stopping session 'session-a' for archive failed: Error: disk full"])
 })
 
+test('a reminder list that fails refuses the archive before anything is written, as DSH\'s activity waterfall does', async () => {
+  /**
+   * The other way round from a failing stop: DSH's schedule listener awaits `this.list({sessionId})` with no catch inside
+   * the `workspace/session-activity` waterfall (`dsh-schedule/lib/index.js:2044-2045`), which `archiveSession` awaits
+   * before its write (`dsh-workspace/lib/index.js:530-531`), so the archive fails and nothing is written. `rowActivity`
+   * passes the rejection on; the flags route reads it before `flags()` and answers it as its catch-all 500.
+   */
+  const failing = { list: async () => Promise.reject(new Error('reminders unreadable')), stopSessionTasks: async () => {} }
+  await assert.rejects(activity.rowActivity({ schedule: failing }, 'session-a'), /reminders unreadable/)
+})
+
 test('the refusal says what blocks the archive', () => {
   const id = 'session-a'
   assert.equal(activity.refusalSentence(id, [{ kind: 'turn' }]), 'session session-a is running; pass stop: true to stop it and archive')
