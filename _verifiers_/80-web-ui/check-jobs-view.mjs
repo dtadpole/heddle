@@ -20,6 +20,11 @@ import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, rep
  * (:375-406); the killed row moves to `Finished` with the word `cancelled`; Escape closes the popover and gives the
  * trigger focus back (:417-425).
  *
+ * A second test archives, from the row's quick action, a session whose background job still runs: the route refuses
+ * it as active and names the job (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`), the page asks to stop
+ * the job, declining leaves the session and the job as they were, and agreeing archives the session and kills the
+ * job with `session archived`.
+ *
  * Every UI step is followed by a read of `/api/jobs` from Node, with the page's cookie: a view that repaints without the
  * server agreeing is the failure this exists to catch. The follow requests are counted through the page's own `fetch`.
  * The check is gated on the Web command and on a browser, **never** on the jobs capability, so a page or a server
@@ -347,6 +352,70 @@ test('the header jobs control shows a background job, streams its output while e
     await openSessionRow(quiet)
     await browser.waitFor(`document.getElementById('session-jobs')?.hidden === true && document.getElementById('jobs-trigger') === null`, 10_000)
     assert.deepEqual(await jobsOf(quiet), [], 'the quiet session still sees no job')
+  } finally {
+    await browser.close()
+    await server.close()
+  }
+})
+
+test('archiving from the row with a background job running asks to stop it; no keeps both, yes archives and kills the job', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer()
+  const browser = await openBrowser()
+  try {
+    await server.api('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await server.api('/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    assert.equal(typeof session, 'string', `a session was opened\nsaw: ${JSON.stringify(opened).slice(0, 300)}`)
+    server.sessions.add(session)
+    server.setScript([{ toolCall: { name: 'bash', arguments: { command: LOOP, run_in_background: true } } }, { text: 'started it' }])
+    const response = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie: server.cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'archive probe', folder: server.work, session }),
+    })
+    assert.equal(response.status, 200)
+    await response.text()
+    // Were a notice to start a turn in the archived session, this step would answer it.
+    server.setScript([{ purpose: 'jobs-notice', text: 'woken in an archived session' }])
+    const jobOf = async () => (await server.api(`/api/jobs?session=${encodeURIComponent(session)}`)).body.jobs?.[0]
+    const metaOf = async () => (await server.api('/api/sessions')).body.find((entry) => entry.id === session)
+    assert.equal((await jobOf())?.status, 'running', 'the background job runs')
+
+    await browser.goto(server.url)
+    const row = `document.querySelector('li[data-session-id=${JSON.stringify(session)}]')`
+    const archive = `${row}?.querySelector('button[aria-label="Archive session"]')`
+    await browser.waitFor(`${archive} != null`, 20_000)
+
+    // No: the confirm names the job, and nothing changes.
+    await browser.evaluate(`(() => { window.__confirms = []; window.confirm = (text) => { window.__confirms.push(text); return false }; return true })()`)
+    await browser.evaluate(`${archive}.click()`)
+    await browser.waitFor('window.__confirms.length === 1', 10_000)
+    assert.equal(
+      await browser.evaluate('window.__confirms[0]'),
+      `This session has a running background job (${LOOP}). Stop it and archive the session?`,
+    )
+    await sleep(500)
+    assert.notEqual((await metaOf())?.archived, true, 'declining leaves the session unarchived')
+    assert.equal((await jobOf())?.status, 'running', 'declining leaves the job running')
+    assert.equal(await browser.evaluate(`${row} !== null`), true, 'the row stays')
+
+    // Yes: archived, the row leaves the tree, and the job is killed with "session archived".
+    await browser.evaluate(`(() => { window.confirm = (text) => { window.__confirms.push(text); return true }; return true })()`)
+    await browser.evaluate(`${archive}.click()`)
+    await browser.waitFor('window.__confirms.length === 2', 10_000)
+    let job
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      job = await jobOf()
+      if (job?.status === 'killed') break
+      await sleep(200)
+    }
+    assert.equal(job?.status, 'killed', `the job was killed\nsaw: ${JSON.stringify(job)}`)
+    assert.equal(job.detail, 'signal: SIGTERM; session archived')
+    assert.equal((await metaOf())?.archived, true, 'the session is archived')
+    await browser.waitFor(`${row} === null`, 10_000)
+    assert.equal(await browser.evaluate(`document.getElementById('tree-note')?.textContent ?? ''`), '', 'no refusal sentence is left in the note line')
   } finally {
     await browser.close()
     await server.close()
