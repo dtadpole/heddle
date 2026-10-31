@@ -520,6 +520,8 @@ async function runWeb(args: Args): Promise<void> {
     const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
       settings: settingsServiceFor(bootOptions(args)),
+      // Browser framing and the page's Browser tab are opt-in, as DSH's Web profile ships them (D-068, #86); exactly
+      // `1` enables them.
       browser: process.env['HEDDLE_WEB_BROWSER'] === '1',
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
