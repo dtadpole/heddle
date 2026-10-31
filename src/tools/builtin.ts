@@ -230,6 +230,13 @@ export function attachBashBackground(sandbox: SandboxService, background: BashBa
 export const BASH_MAX_TIMEOUT_MS = 600_000
 
 /**
+ * The longest delay one Node timer can hold (2^31-1 ms, about 24.8 days). `setTimeout` runs a larger one after a
+ * millisecond, so no cap or request may exceed it: the setting refuses a larger `bashMaxTimeoutMs`, and the wall time is
+ * cut to it here as well (developer-five's review of #13; DSH bounds its grace by the same `MAX_TIMER_DELAY_MS`).
+ */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/**
  * The wall time a `bash` call runs with, or the refusal its `timeoutMs` earns.
  *
  * DSH's rule (`dsh-tool-bash` `validateBashArgs`, `dsh-timeout` `clampTimeout`): an absent value takes the default; a
@@ -238,11 +245,12 @@ export const BASH_MAX_TIMEOUT_MS = 600_000
  * command was killed before it ran and the result claimed it had timed out (live-testing issue #13).
  */
 export function bashWallTime(requested: unknown, defaultMs: number, maxMs: number): { readonly ms: number } | { readonly refusal: string } {
-  if (requested === undefined || requested === null) return { ms: Math.min(defaultMs, maxMs) }
+  const cap = Math.min(maxMs, MAX_TIMER_DELAY_MS)
+  if (requested === undefined || requested === null) return { ms: Math.min(defaultMs, cap) }
   if (typeof requested !== 'number' || !Number.isFinite(requested) || requested <= 0) {
     return { refusal: `invalid timeoutMs: expected a positive number, got ${JSON.stringify(requested)}` }
   }
-  return { ms: Math.min(Math.max(1, Math.round(requested)), maxMs) }
+  return { ms: Math.min(Math.max(1, Math.round(requested)), cap) }
 }
 
 /** Build the standard tools around one sandbox. */
@@ -251,7 +259,7 @@ export function builtinTools(
   options: { readonly bashTimeoutMs?: number; readonly bashMaxTimeoutMs?: number; readonly bashOutputLimit?: number } = {},
 ): readonly ToolDefinition[] {
   const timeoutMs = options.bashTimeoutMs ?? 30_000
-  const maxTimeoutMs = options.bashMaxTimeoutMs ?? BASH_MAX_TIMEOUT_MS
+  const maxTimeoutMs = Math.min(options.bashMaxTimeoutMs ?? BASH_MAX_TIMEOUT_MS, MAX_TIMER_DELAY_MS)
   /** Characters of a command's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
   const outputLimit = options.bashOutputLimit ?? BASH_OUTPUT_LIMIT
   const escalation = escalationFields(sandbox)

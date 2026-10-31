@@ -108,6 +108,7 @@ to confirm or move a row.
 | `GET /api/events` | heddle-server | SSE, every session event and approval question |
 | `GET /api/status` | heddle-server | the deployment mode and cwd |
 | `GET`, `POST /api/sessions` | heddle-server | list with run state; create at a branch |
+| `GET /api/sessions/search?q=` | heddle-server | content search, DSH's `session.search`, over `SessionService::search` (`heddle_session::SessionSearchIndex`) |
 | `GET /api/sessions/{id}` | heddle-server | the chat view; `?view=<name>` goes to a registered `SessionView` |
 | `GET /api/sessions/{id}?view=ledger` | heddle-web-trajectory | as a `SessionView` |
 | `GET /api/sessions/{id}/log` | heddle-web-trajectory | the decoded log download |
