@@ -7249,7 +7249,71 @@ let sessionMetas = new Map()
 function noteSessions(list) {
   if (!Array.isArray(list)) return
   sessionMetas = new Map(list.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string').map((meta) => [meta.id, meta]))
+  /** A read that says the open session is archived, whoever archived it, lets it go (DSH's `clearArchivedCurrent`). */
+  if (clearArchivedCurrent()) return
   if (current !== null && sessionMetas.has(current)) paintSessionHeading()
+}
+
+/**
+ * DSH's `clearArchivedCurrent` (`dsh-client-ui-workspace` `lib/client.js:1638-1643`): when the latest session list says
+ * the open session is archived, the main view lets it go (`clearMain`) and answers true. DSH runs it on every change of
+ * its workspace or session list (`watchNavigation`'s reconcile, `:1576-1578`), so a session archived by another client
+ * or tab is let go too; here every read of `/api/sessions` passes through `noteSessions`, which asks it.
+ */
+function clearArchivedCurrent() {
+  if (current === null || sessionMetas.get(current)?.archived !== true) return false
+  clearMain()
+  return true
+}
+
+/**
+ * Let the open session go: DSH's `clearMain` (`dsh-client-ui-workspace` `lib/client.js:1644-1650`), which drops the main
+ * view's session and empties the saved selection. DSH calls it when the open session is archived, by this browser
+ * (`archiveSession`, `:1532-1535`) or by anything else (`clearArchivedCurrent`), so an archived session is never a
+ * writable target. #139's blocker B1 (developer-ten, f0442783): heddle kept it open with its composer writable; a message
+ * sent into it was accepted, blocked by the server's archived-session gate before any step, and lost, with nothing on
+ * screen to say so.
+ *
+ * Nothing is open afterwards and a reload reopens nothing. The composer is on no session, so the next message starts a
+ * new conversation (#134's path), and the prompt box stays aimed at the folder the session lived in, as a click on its
+ * row aims it (`selectSession`), so the hero and the note name its workspace rather than whatever was aimed at before.
+ */
+function clearMain() {
+  if (current === null) return
+  const left = current
+  const cwd = sessionMetas.get(left)?.cwd ?? listedMetas.get(left)?.cwd
+  /** An open of it still reading its history draws nothing (`showGeneration`), and its kept events are dropped. */
+  showGeneration += 1
+  sessionLoading = null
+  current = null
+  rememberCurrent()
+  if (typeof cwd === 'string' && cwd.length > 0) activeFolder = cwd
+  selectedPath = null
+  composerKey = QUEUE_KEY_NONE
+  sessionStats = null
+  liveRounds = 0
+  liveUsage = undefined
+  liveTurns = 0
+  liveGenerationMs = 0
+  liveDecodeTokens = 0
+  liveRoundStartedAt = null
+  log.replaceChildren()
+  paintSessionHeading()
+  const branch = document.getElementById('session-branch')
+  if (branch !== null) branch.textContent = ''
+  resetScheduleList(null)
+  applySessionAccess(null)
+  paintComposerAccess()
+  jobsSessionChanged()
+  paintScheduleHeader()
+  void refreshGoal()
+  void refreshTodo()
+  paintEmptyState()
+  updateStatusBar()
+  markSelection()
+  chooseWorkspace(null)
+  renderQueue()
+  scheduleTreeRefresh()
 }
 
 /**
@@ -7629,15 +7693,20 @@ const TurnFailure = {
     return !(event !== null && typeof event === 'object' && event.reason !== null && typeof event.reason === 'object' && event.reason.kind === 'blocked')
   },
   /**
-   * Whether the page's own turn draws the `ended` notice its `done` frame carries (#139, live against reload; developer-ten's
-   * review of follow-up 2). A turn the gate blocked before its first step (`finishReason: 'blocked'`, no round) ran
-   * nothing and wrote no answer, and a reload draws nothing for it (`shows` above; the transcript adds nothing for a
-   * `blocked` end in both builds), but `runTurn` hung `ARCHIVED_BLOCKED` under the previous turn's answer. A turn
-   * blocked at a later step has rounds and an answer record of its own carrying the reason, so it keeps the notice.
+   * Where the page's own turn draws the `ended` notice its `done` frame carries: `'answer'`, on the turn's answer (or as
+   * its own row when it has none), `'row'`, always as its own row, or `null` for none.
+   *
+   * A turn the gate blocked before its first step (`finishReason: 'blocked'`, no round) ran nothing and wrote no answer,
+   * so the last assistant row is the previous turn's, and a reload draws nothing for the blocked turn (`shows` above;
+   * the transcript adds nothing for a `blocked` end in both builds). Its notice is a row of its own: hung under the
+   * previous answer it read as that answer's ending (developer-ten's follow-up 2 review), and drawing none (f0442783)
+   * left the message, already cleared from the field and never written as one, gone without a word (#139's B1). A
+   * turn blocked at a later step has rounds and an answer record of its own carrying the reason, so its notice goes on
+   * that answer, as on a reload.
    */
-  endedNotice(done) {
-    if (done === null || typeof done !== 'object' || !Array.isArray(done.ended) || done.ended.length === 0) return false
-    return !(done.finishReason === 'blocked' && (done.rounds ?? 0) === 0)
+  endedPlacement(done) {
+    if (done === null || typeof done !== 'object' || !Array.isArray(done.ended) || done.ended.length === 0) return null
+    return done.finishReason === 'blocked' && (done.rounds ?? 0) === 0 ? 'row' : 'answer'
   },
 }
 /* turn-failure:end */
@@ -7856,6 +7925,11 @@ events.addEventListener('session', (message) => {
       if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
       settleChat()
     }
+    /**
+     * A blocked end is the archived-session gate's, so the session is archived: if it is the open one, it is let go
+     * now, as DSH lets an archived open session go (`clearArchivedCurrent`), rather than at the next list read (B1).
+     */
+    if (!TurnFailure.shows(event) && payload.session === current) clearMain()
     if (payload.session === composerKey) void pumpQueue()
     renderComposerState()
   }
@@ -9347,10 +9421,31 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
          * reason travels on the completed event, so a reload shows it again from the transcript.
          */
-        if (TurnFailure.endedNotice(payload)) {
+        const placement = TurnFailure.endedPlacement(payload)
+        if (placement === 'answer') {
           const last = lastTurnRow()
           if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
           else log.append(turnNotice(payload.ended))
+        } else if (placement === 'row') {
+          /**
+           * The archived-session gate blocked the message before any step (#139's B1): the server accepted it, dropped it
+           * unwritten, and ended the turn. The session is archived, so it is let go, as DSH lets an archived open session
+           * go (`clearMain`, `clearArchivedCurrent`); the stream's blocked turn end may have done that already. The
+           * notice is said in its own row, in the panel the session left, and the words, cleared from the field by the
+           * send, go back to the composer unless something was typed since or the composer is another session's.
+           */
+          const blockedSession = typeof payload.session === 'string' ? payload.session : target
+          if (blockedSession !== null && current === blockedSession) clearMain()
+          if (current === null) {
+            log.append(turnNotice(payload.ended))
+            paintEmptyState()
+          }
+          const ownComposer = composerKey === key || (composerKey === QUEUE_KEY_NONE && current === null)
+          if (ownComposer && field.value.trim() === '') {
+            field.value = text
+            growComposer()
+            updateSendDisabled()
+          }
         }
         /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
         settleReasoning()
@@ -13059,6 +13154,8 @@ async function setSessionFlags(node, patch, extra = {}, options = {}) {
   }
   setNote('')
   options.applied?.()
+  /** Archiving the open session lets it go before the tree is drawn again, as DSH's `archiveSession` does (B1). */
+  if (patch.archived === true && node.session.id === current) clearMain()
   /**
    * A flag changes the row's **place**, and the reference glides it there instead of letting it jump: the rows are measured
    * before the redraw and animated from where they were after it (`AnimatedRows`, 200 ms ease-out). Only this handler wraps
