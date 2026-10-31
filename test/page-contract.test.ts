@@ -192,6 +192,8 @@ test('New session starts in the workspace row the person opened or added, not th
    */
   assert.match(page, /function chooseWorkspace\(path\) \{\s*chosenWorkspace = path === null \? null : \{ path, during: current \}/, 'a choice remembers the session it was made beside')
   assert.match(page, /if \(node\.kind === 'workspace'\) \{\s*if \(li\.dataset\.open !== 'true'\) chooseWorkspace\(node\.path\)/, 'opening a workspace row chooses it')
+  const show = page.slice(page.indexOf('async function showSession(id) {'))
+  assert.match(show.slice(0, show.indexOf('\n}\n')), /if \(current !== id\) chooseWorkspace\(null\)\s*current = id/, 'and opening another session forgets the choice')
   const adopt = page.slice(page.indexOf('async function adoptWorkspace(path) {'))
   assert.match(adopt.slice(0, adopt.indexOf('\n}\n')), /chooseWorkspace\(added\)/, 'and so does adding one')
   const select = page.slice(page.indexOf('async function selectSession(node) {'))

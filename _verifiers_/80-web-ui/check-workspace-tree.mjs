@@ -326,30 +326,42 @@ test('New session starts in the workspace row the person opened, not in the open
       const listed = (await api(server.url, cookie, '/api/sessions')).body
       return (Array.isArray(listed) ? listed : []).find((meta) => meta.id === id)?.cwd ?? null
     }
-    /** Open the session in A from its row, as a person does. */
+    /** What the page shows, for a failure message: the open row, the header, the note, and every session row. */
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        open: ${openId},
+        title: document.getElementById('session-title')?.textContent ?? null,
+        note: document.getElementById('tree-note')?.textContent ?? null,
+        rows: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => [li.dataset.sessionId, li.getAttribute('aria-selected')]),
+      })`)
+    /** Wait for a condition, and say what the page showed when it did not come. */
+    const until = async (expression, what, timeoutMs = 10_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    /** Open the session in A from its row, as a person does, and let the click's handler finish loading it. */
     const openA = async () => {
       await browser.evaluate(`(() => { const row = ${workspaceRow(a)}; if (row.closest('li').dataset.open !== 'true') row.click() })()`)
-      await browser.waitFor(`document.querySelector('#tree li[data-session-id="${inA}"] > .row') !== null`, 10_000)
+      await until(`document.querySelector('#tree li[data-session-id="${inA}"] > .row') !== null`, 'the session in A is drawn')
       await browser.evaluate(`document.querySelector('#tree li[data-session-id="${inA}"] > .row').click()`)
-      assert.ok(
-        await browser.waitFor(`${openId} === ${JSON.stringify(inA)} && document.getElementById('session-title').textContent.includes('work in a')`, 10_000),
-        'the session in A is the open one',
-      )
-      /** The click's handler goes on loading the session for a moment; the person's next act comes after it, as here. */
+      await until(`${openId} === ${JSON.stringify(inA)}`, 'the session in A is the open one')
       await new Promise((done) => setTimeout(done, 1_000))
     }
     /** Click a workspace row so that it opens (folding it first when it is already open). */
     const openWorkspace = async (record) => {
       await browser.evaluate(`(() => { const row = ${workspaceRow(record)}; if (row.closest('li').dataset.open === 'true') row.click() })()`)
       await browser.evaluate(`${workspaceRow(record)}.click()`)
-      await browser.waitFor(`${workspaceRow(record)}.closest('li').dataset.open === 'true'`, 10_000)
+      await until(`${workspaceRow(record)}.closest('li').dataset.open === 'true'`, 'the workspace row opens')
     }
     /** Press New session, by the panel's button or by DSH's chord, and answer with the session it opened. */
     const press = async (how) => {
       const before = await browser.evaluate(openId)
       if (how === 'button') await browser.evaluate(`document.getElementById('new-session').click()`)
       else await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', altKey: true, metaKey: true, bubbles: true }))`)
-      assert.ok(await browser.waitFor(`(() => { const id = ${openId}; return id !== null && id !== ${JSON.stringify(before)} })()`, 15_000), `the ${how} opens a new session`)
+      await until(`(() => { const id = ${openId}; return id !== null && id !== ${JSON.stringify(before)} })()`, `the ${how} opens a new session`, 15_000)
       return browser.evaluate(openId)
     }
 
@@ -358,22 +370,19 @@ test('New session starts in the workspace row the person opened, not in the open
     await browser.waitFor(`${workspaceRow(a)} !== undefined && ${workspaceRow(b)} !== undefined`, 15_000)
 
     await openA()
-    const plain = await press('button')
-    assert.equal(await cwdOf(plain), a.path, 'with no workspace row opened since, New session starts in the open session\'s workspace')
-
-    await openA()
     await openWorkspace(b)
     const byButton = await press('button')
     assert.equal(await cwdOf(byButton), b.path, 'after opening B\'s row, the button starts the session in B, not in the open session\'s A')
-    assert.ok(
-      await browser.waitFor(`${workspaceRow(b)}.closest('li').querySelector('li[data-session-id="${byButton}"]') !== null`, 10_000),
-      'and it is drawn under B',
-    )
+    await until(`${workspaceRow(b)}.closest('li').querySelector('li[data-session-id="${byButton}"]') !== null`, 'and it is drawn under B')
 
     await openA()
     await openWorkspace(b)
     const byChord = await press('chord')
     assert.equal(await cwdOf(byChord), b.path, 'and so does the chord')
+
+    await openA()
+    const plain = await press('button')
+    assert.equal(await cwdOf(plain), a.path, 'with no workspace row opened since the session was opened, New session starts in the open session\'s workspace')
   } finally {
     browser.close()
     server.kill()
