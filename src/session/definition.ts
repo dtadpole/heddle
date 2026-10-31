@@ -185,10 +185,34 @@ folder is a filing decision rather than something to navigate — and the branch
 for, not the drawer the session is kept in.
 `
 
-/** Create a branch's `_sessions_` folder and its entry point when they are not there yet. */
+/**
+ * Make one directory inside a parent that must already exist, accepting one that is there.
+ *
+ * Deliberately **not** recursive: a recursive mkdir under a branch that was deleted puts the branch back on disk (#56).
+ * A parent that vanished in the meantime is the same refusal as one that was gone to begin with.
+ */
+function makeDirectory(dir: string, branch: string): void {
+  try {
+    mkdirSync(dir)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EEXIST') return
+    if (code === 'ENOENT' || code === 'ENOTDIR') throw new MissingFolderError(basename(branch) || branch)
+    throw error
+  }
+}
+
+/**
+ * Create a branch's `_sessions_` folder and its entry point when they are not there yet.
+ *
+ * The branch itself must exist: a branch that was deleted or moved is refused (`MissingFolderError`) rather than
+ * recreated with a `_sessions_` drawer in it (#56).
+ */
 export function ensureSessionsFolder(branch: string): string {
-  const dir = join(canonicalPath(branch), SESSIONS_FOLDER)
-  mkdirSync(dir, { recursive: true })
+  const canonical = canonicalPath(branch)
+  requireFolder(canonical)
+  const dir = join(canonical, SESSIONS_FOLDER)
+  makeDirectory(dir, canonical)
   const index = join(dir, 'INDEX.md')
   if (!existsSync(index)) writeFileSync(index, SESSIONS_INDEX)
   return dir
@@ -209,7 +233,7 @@ export function writeSessionDefinition(
   const canonical = canonicalPath(branch)
   const name = sessionName(new Date(options.createdAt), options.taken ?? [])
   const dir = join(ensureSessionsFolder(canonical), name)
-  mkdirSync(dir, { recursive: true })
+  makeDirectory(dir, canonical)
 
   /** The store's rule for a title (`./title-text.ts`), so the definition and the record name the session alike. */
   const title = options.title === undefined ? '' : normalizeSessionTitle(options.title)

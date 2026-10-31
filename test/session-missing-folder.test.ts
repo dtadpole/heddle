@@ -128,3 +128,24 @@ test('a turn in a session whose folder still exists runs as before', async () =>
   const result = await runTurn(ctx, { session, endpoint: 'scripted', prompt: 'are you there', maxRounds: 2 })
   assert.equal(result.text, 'here')
 })
+
+/**
+ * New session at a folder that is gone: refused here **on purpose**, where DSH's session create makes the directory
+ * (`mkdir(cwd, { recursive: true })`, dsh-api-session-controller lib/index.js:511-516). heddle writes the session's
+ * committed definition into the folder, so a recreated folder is a decoy at the old path of a folder a person moved, and
+ * Add workspace already refuses a folder that does not exist.
+ */
+test('a new session at a folder that is gone is refused with the reason, and nothing is written there or in the store', () => {
+  const w = folder('create-w')
+  const service = new SessionService(new Context(), { root: join(scratch, 'sessions-create') })
+  service.createAt(w)
+  const before = service.list().length
+  rmSync(w, { recursive: true, force: true })
+
+  assert.throws(() => service.createAt(w), (error: Error) => error.message === reason(w), 'the new session is refused, naming the folder')
+  assert.equal(existsSync(w), false, 'the deleted folder is not recreated')
+  assert.equal(service.list().length, before, 'and no session is left in the store')
+
+  writeFileSync(w, 'not a folder any more\n')
+  assert.throws(() => service.createAt(w), (error: Error) => error.message === reason(w), 'a file where the folder was is refused the same way')
+})
