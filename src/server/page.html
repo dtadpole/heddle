@@ -3506,25 +3506,40 @@ function useLocale(id) {
   window.dispatchEvent(new CustomEvent('heddle:locale', { detail: { locale: id } }))
 }
 
+/** The preference writes, one after another, so the stored choice is always the last one made. */
+let localeWrites = Promise.resolve()
+/** Which choice is the latest: only its outcome may speak in the Language row. */
+let localeGeneration = 0
+
 /**
  * A person's choice: shown at once, then kept as the `locale` row's `preference`. Written even when it matches what
  * is on screen, because that may be the browser's language rather than a stored choice, as DSH's `setLocale` does.
- * Resolves to `null` when it was kept, or the reason it was not: the page keeps the language until it is reloaded.
+ *
+ * Writes are chained, so two quick changes (en, then zh, then en) reach the server in the order they were made and
+ * the stored choice is the one on screen. Resolves to the reason the write failed, or `null` when it was kept — and
+ * `null` as well for a choice a later one has already replaced, so an older failure never shows under a newer
+ * success. The page keeps the language until it is reloaded either way.
  */
 async function chooseLocale(id) {
   useLocale(id)
-  try {
-    const response = await fetch('/api/settings/locale', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ update: { preference: id } }),
-    })
-    if (response.ok) return null
-    const body = await response.json().catch(() => null)
-    return body !== null && typeof body.error === 'string' ? body.error : `the server answered ${response.status}`
-  } catch (error) {
-    return (error && error.message) || String(error)
-  }
+  const generation = ++localeGeneration
+  const write = localeWrites.then(async () => {
+    try {
+      const response = await fetch('/api/settings/locale', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ update: { preference: id } }),
+      })
+      if (response.ok) return null
+      const body = await response.json().catch(() => null)
+      return body !== null && typeof body.error === 'string' ? body.error : `the server answered ${response.status}`
+    } catch (error) {
+      return (error && error.message) || String(error)
+    }
+  })
+  localeWrites = write.then(() => undefined)
+  const failure = await write
+  return generation === localeGeneration ? failure : null
 }
 
 /** For the page's other scripts, which are not modules. */
