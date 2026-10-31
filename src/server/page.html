@@ -14465,8 +14465,9 @@ function nodeRow(node, depth = 0) {
   if (node.pinned === true && node.archived !== true) {
     pinSlot.append(kindIcon('pin-fill'))
     pinSlot.setAttribute('role', 'img')
-    pinSlot.setAttribute('aria-label', 'pinned')
-    pinSlot.title = 'pinned'
+    /** DSH's PinnedIndicator is named by its `row.pinned` string, "Pinned" (dsh-client-ui-workspace client.js:2126-2134, :4933; #109). */
+    pinSlot.setAttribute('aria-label', 'Pinned')
+    pinSlot.title = 'Pinned'
     li.dataset.pinned = 'true'
   }
   rowRight.append(pinSlot)
