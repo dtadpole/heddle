@@ -533,16 +533,7 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
       ctx.session.store.message(options.session, {
         role: 'tool',
         toolCallId: call.id,
-        content: [
-          {
-            type: 'text',
-            text: result.error
-              ? `error (${result.error.code}): ${result.error.message}`
-              : result.output.length > 0
-                ? result.output
-                : '(the tool produced no output)',
-          },
-        ],
+        content: [{ type: 'text', text: toolMessageText(result) }],
       })
     }
     const limit = Math.max(1, ctx.tools.maxParallelToolCalls ?? 1)
@@ -682,4 +673,22 @@ async function runPool<T, R>(items: readonly T[], limit: number, run: (item: T) 
   }
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
   return results
+}
+
+/**
+ * The text a tool result is recorded and replayed to the model as.
+ *
+ * A failed result keeps what it printed (live-testing issue #82): a bash call that exited 7 used to reach the model as
+ * the bare `error (EXIT): the command exited 7`, its stdout and stderr dropped, so the model ran a second command to
+ * see them. DSH's bash `renderResult` keeps the body and adds an `[exit code: N]` marker. Here the error line stays first,
+ * because the page reads the first line as the failed row's summary and a leading `error` as the failure, and the
+ * output follows it.
+ */
+export function toolMessageText(result: ToolResult): string {
+  const output = result.output ?? ''
+  if (result.error) {
+    const line = `error (${result.error.code}): ${result.error.message}`
+    return output.length > 0 ? `${line}\n${output}` : line
+  }
+  return output.length > 0 ? output : '(the tool produced no output)'
 }

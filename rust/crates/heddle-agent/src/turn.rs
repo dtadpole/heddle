@@ -761,8 +761,16 @@ pub fn parse_arguments(raw: &str) -> ToolArgs {
 
 /// The text of the `tool` message that answers a call: `error (<code>): <message>` for an error, the output
 /// otherwise, and `(the tool produced no output)` for an empty one.
+///
+/// A failed result keeps what it printed below its error line (live-testing issue #82: a bash call that exited 7
+/// reached the model as the bare error sentence, its stdout and stderr dropped). DSH's bash `renderResult` keeps the
+/// body and adds an exit marker; the error line stays first because the page reads the first line as the failed
+/// row's summary.
 pub fn tool_message_text(result: &ToolResult) -> String {
     match &result.error {
+        Some(error) if !result.output.is_empty() => {
+            format!("error ({}): {}\n{}", error.code, error.message, result.output)
+        }
         Some(error) => format!("error ({}): {}", error.code, error.message),
         None if result.output.is_empty() => "(the tool produced no output)".to_owned(),
         None => result.output.clone(),
@@ -796,6 +804,25 @@ pub(crate) mod tests {
     use super::*;
     use crate::ports::ModelRequestRecord;
     use crate::upstream::{Chunk, Message, SurfaceView};
+
+
+    #[test]
+    fn a_failed_result_keeps_its_output_below_the_error_line() {
+        // Live-testing issue #82: the output of a failed bash call was dropped from the model-facing text.
+        let failed = ToolResult::ok("stdout-marker\nstderr-marker\n")
+            .with_error("EXIT", "the command exited 7");
+        assert_eq!(
+            tool_message_text(&failed),
+            "error (EXIT): the command exited 7\nstdout-marker\nstderr-marker\n"
+        );
+        let bare = ToolResult::refused("INTERRUPTED", "the command was stopped before it finished");
+        assert_eq!(
+            tool_message_text(&bare),
+            "error (INTERRUPTED): the command was stopped before it finished"
+        );
+        assert_eq!(tool_message_text(&ToolResult::ok("ok\n")), "ok\n");
+        assert_eq!(tool_message_text(&ToolResult::ok("")), "(the tool produced no output)");
+    }
 
     #[test]
     fn new_input_is_a_position_that_was_not_there_before() {
