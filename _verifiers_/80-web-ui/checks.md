@@ -45,14 +45,17 @@ grounded_in:
   sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
   workspace* and *Delete workspace* dialogs end to end; with the server gone, *Add workspace* and *New session* say
-  that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection.
+  that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection; and
+  *Rename* or *Delete workspace* on a row another client already removed says *This workspace was already removed.*
+  (never the server's `no workspace <absolute path>`), leaves nothing to confirm and redraws the tree without the row.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, and the `Workspace` grouping
-  drawing sibling sections.
+  starting in the workspace row the person opened rather than the open session's, the `Workspace` grouping
+  drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id and no title in the
+  header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written.
 
 ## What it deliberately does not judge
 

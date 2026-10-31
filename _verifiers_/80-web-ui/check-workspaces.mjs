@@ -471,3 +471,96 @@ test('Add workspace and New session say they failed when their request gets no a
     removeDir(place)
   }
 })
+
+test('Rename and Delete on a workspace another client removed say so in words and redraw the tree (#49)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Workspace changes are not pushed to an open page, so a workspace another tab or client removed stays a row here. Both
+   * servers answer a Rename or Delete of it with `404 {"error":"no workspace <absolute path>"}`; the dialogs printed that
+   * text, home directory included, kept the stale row, and a second press failed the same way (#49). DSH keeps every
+   * page's list live and names a workspace by id in its own refusal (dsh-api-workspace-controller lib/index.js:359). Here
+   * the page says the workspace was already removed, leaves nothing to confirm, and redraws the tree without the row.
+   */
+  const place = fixtureDir('workspaces-stale')
+  const server = await startServer('stale', { home: place })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const row = (label) => `Array.from(document.querySelectorAll('#tree li[data-kind=workspace] > .row')).find((entry) => entry.querySelector('.label')?.textContent === ${JSON.stringify(label)})`
+  const type = (id, value) => `(() => { const input = document.getElementById(${JSON.stringify(id)}); input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input', { bubbles: true })) })()`
+  const menu = async (label, item) => {
+    await browser.evaluate(`${row(label)}.querySelector('[aria-haspopup]').click()`)
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')).find((entry) => entry.textContent.trim() === ${JSON.stringify(item)}).click()`)
+  }
+  const dialog = (name) => `JSON.stringify({
+    open: document.getElementById('workspace-${name}').open,
+    error: document.getElementById('workspace-${name}-error').hidden ? null : document.getElementById('workspace-${name}-error').textContent,
+    confirm: document.getElementById('workspace-${name}-confirm').disabled ? 'disabled' : 'enabled',
+  })`
+  const gone = 'This workspace was already removed.'
+  try {
+    for (const name of ['keep', 'gone', 'also-gone']) mkdirSync(join(place, name), { recursive: true })
+    const real = realpathSync(place)
+    const cookie = await cookieFor(server.url)
+    for (const name of ['keep', 'gone']) {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: join(place, name) }) })
+      assert.equal(added.status, 200, `registered ${name} (${JSON.stringify(added.body)})`)
+    }
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`${row('keep')} !== undefined && ${row('gone')} !== undefined`, 10_000)
+    await browser.evaluate(`window.__unhandled = []; window.addEventListener('unhandledrejection', (event) => window.__unhandled.push(String(event.reason && event.reason.message ? event.reason.message : event.reason)))`)
+
+    /** Another client removes `gone`; this page is not told, so the row stays. */
+    const removed = await api(server.url, cookie, `/api/workspaces/${encodeURIComponent(join(real, 'gone'))}`, { method: 'DELETE' })
+    assert.equal(removed.status, 200, `another client deleted the workspace (${JSON.stringify(removed.body)})`)
+    assert.ok(await browser.evaluate(`${row('gone')} !== undefined`), 'the stale row is still drawn here, because nothing is pushed')
+
+    await menu('gone', 'Rename')
+    await browser.waitFor(`document.getElementById('workspace-rename').open`, 10_000)
+    await browser.evaluate(type('workspace-rename-input', 'gone-renamed'))
+    await browser.evaluate(`document.getElementById('workspace-rename-confirm').click()`)
+    await browser.waitFor(`!document.getElementById('workspace-rename-error').hidden`, 10_000)
+    const renamed = JSON.parse(await browser.evaluate(dialog('rename')))
+    assert.equal(renamed.error, gone, `Rename says the workspace was already removed, in words\nsaw: ${JSON.stringify(renamed)}`)
+    assert.ok(!renamed.error.includes(real) && !renamed.error.includes(place) && !renamed.error.includes('/'), 'and never prints the folder path, which carries the home directory')
+    assert.equal(renamed.confirm, 'disabled', 'there is nothing left to confirm')
+    assert.ok(await browser.waitFor(`${row('gone')} === undefined`, 10_000), 'and the tree is redrawn without the stale row')
+    assert.ok(await browser.evaluate(`${row('keep')} !== undefined`), 'while the other workspace stays')
+    await browser.evaluate(`document.querySelector('#workspace-rename [data-ws-close]').click()`)
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-rename').open`), false, 'Cancel closes the dialog')
+
+    /** The same for Delete: a workspace this page drew, removed elsewhere afterwards. */
+    const again = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: join(place, 'also-gone') }) })
+    assert.equal(again.status, 200, `registered also-gone (${JSON.stringify(again.body)})`)
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`${row('also-gone')} !== undefined`, 10_000)
+    await browser.evaluate(`window.__unhandled = []; window.addEventListener('unhandledrejection', (event) => window.__unhandled.push(String(event.reason && event.reason.message ? event.reason.message : event.reason)))`)
+    const removedToo = await api(server.url, cookie, `/api/workspaces/${encodeURIComponent(join(real, 'also-gone'))}`, { method: 'DELETE' })
+    assert.equal(removedToo.status, 200, `another client deleted it (${JSON.stringify(removedToo.body)})`)
+    await menu('also-gone', 'Delete workspace')
+    await browser.waitFor(`document.getElementById('workspace-delete').open`, 10_000)
+    await browser.evaluate(`document.getElementById('workspace-delete-confirm').click()`)
+    await browser.waitFor(`!document.getElementById('workspace-delete-error').hidden`, 10_000)
+    const deleted = JSON.parse(await browser.evaluate(dialog('delete')))
+    assert.equal(deleted.error, gone, `Delete says the workspace was already removed, in words\nsaw: ${JSON.stringify(deleted)}`)
+    assert.equal(deleted.confirm, 'disabled', 'with nothing left to confirm')
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-delete-status').hidden`), true, 'and no Deleting… line left behind')
+    assert.ok(await browser.waitFor(`${row('also-gone')} === undefined`, 10_000), 'and the tree is redrawn without the stale row')
+    await browser.evaluate(`document.querySelector('#workspace-delete [data-ws-close]').click()`)
+    assert.equal(await browser.evaluate(`document.getElementById('workspace-delete').open`), false, 'Cancel closes the dialog')
+
+    const unhandled = JSON.parse(await browser.evaluate('JSON.stringify(window.__unhandled)'))
+    assert.deepEqual(unhandled, [], 'no failure is left to the console')
+    const views = (await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []
+    assert.ok(views.some((view) => view.path === join(real, 'keep')), 'the server still holds the workspace that was not removed')
+    assert.ok(
+      !views.some((view) => view.title === 'gone-renamed' || view.path === join(real, 'gone') || view.path === join(real, 'also-gone')),
+      `and the refused acts brought neither removed workspace back\nsaw: ${JSON.stringify(views.map((view) => view.title))}`,
+    )
+  } finally {
+    browser.close()
+    await server.close()
+    removeDir(place)
+  }
+})

@@ -39,6 +39,11 @@ interface Tree {
   overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
+  storedTitle: (meta: unknown) => string | undefined
+  sessionLabel: (meta: unknown) => string
+  headerTitle: (meta: unknown) => string | null
+  documentTitle: (meta: unknown, product?: string) => string
+  workspaceRefusal: (status: number, body: unknown, fallback: string) => { gone: boolean; text: string }
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -232,4 +237,63 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+test('a session row reads New Session while it is the open blank, its title once it has one, else Untitled — never a folder name (#24)', () => {
+  /**
+   * DSH's row title (`displayTitle`, dsh-client-ui-workspace lib/client.js:1801-1804): `blank ? "New Session" : title ||
+   * "Untitled"` (`session.new` and `session.untitled`, :4876-4877), "rather than a directory name" (README.md:32). The page
+   * labelled an unnamed session with its definition folder's `session-<yyyymmdd>-<hhmm>` name (#24).
+   */
+  assert.equal(tree.sessionLabel(session('s-blank', 1, { turns: 0 })), 'New Session', 'the blank reads New Session')
+  assert.equal(tree.sessionLabel(session('s-told', 1, { title: 'Why Rivers Meander' })), 'Why Rivers Meander', 'a titled row its title')
+  assert.equal(tree.sessionLabel(session('s-untitled', 1)), 'Untitled', 'a started session with no title reads Untitled')
+  assert.equal(tree.sessionLabel(session('s-spaces', 1, { title: '   ' })), 'Untitled', 'a blank title is no title')
+  assert.equal(tree.sessionLabel(session('s-running', 1, { turns: 0, running: true })), 'Untitled', 'a first turn in flight is no longer the blank')
+  assert.equal(tree.sessionLabel(session('s-named-blank', 1, { turns: 0, title: 'named on purpose' })), 'named on purpose', 'a blank a person named keeps the name')
+  assert.equal(tree.sessionLabel(session('s-pinned-blank', 1, { turns: 0, pinned: true })), 'Untitled', 'a pinned blank is a row a person acted on, not the New Session')
+  for (const meta of [session('s-a', 1, { turns: 0, cwd: '/w/_sessions_/session-dated-folder' }), session('s-b', 1, { cwd: '/w/_sessions_/session-dated-folder' })]) {
+    assert.doesNotMatch(tree.sessionLabel(meta), /session-|\//, 'no internal folder name and no path, whatever the folder')
+  }
+  assert.equal(tree.storedTitle({ id: 'x', title: 'kept' }), 'kept')
+  assert.equal(tree.storedTitle({ id: 'x' }), undefined)
+  assert.equal(tree.storedTitle(null), undefined)
+})
+
+test('the header hides its title while the session is blank and then follows its title; the window title is DSH\'s (#24)', () => {
+  /**
+   * DSH's header (dsh-client-ui-conversation lib/client.js:17897-17908, :17994; README.md:87): no title while blank, then
+   * `displayTitleOf(title, cwd, id)` — the title, else the folder's name, else the id (dsh-api-session-controller
+   * lib/client.js:3696-3707). Its window title (dsh-client-ui-layout lib/client.js:57-68): `<title> — <product>`, or the
+   * product alone. The page printed the raw session id in the header, before and after the first prompt titled it (#24).
+   */
+  const id = 'session-raw-id-for-this-test'
+  assert.equal(tree.headerTitle({ id, cwd: '/home/me/repo', turns: 0 }), null, 'a blank session shows no title in the header')
+  assert.equal(tree.headerTitle({ id, cwd: '/home/me/repo', turns: 1, title: 'Why rivers meander, in one…' }), 'Why rivers meander, in one…', 'the first prompt\'s title, once written')
+  assert.equal(tree.headerTitle({ id, cwd: '/home/me/repo', turns: 1, title: 'Why Rivers Meander' }), 'Why Rivers Meander', 'then the generated one')
+  assert.equal(tree.headerTitle({ id, cwd: '/home/me/repo/', turns: 1 }), 'repo', 'an untitled conversation is named by its folder, as DSH\'s is')
+  assert.equal(tree.headerTitle({ id, turns: 1 }), id, 'and by its id only when there is no folder at all')
+  assert.equal(tree.headerTitle({ id, cwd: '/home/me/repo', turns: 0, running: true }), 'repo', 'a first turn in flight ends the blank')
+  assert.equal(tree.documentTitle(null), 'Heddle', 'nothing open: the product')
+  assert.equal(tree.documentTitle({ id, turns: 0 }), 'Heddle', 'a blank session: the product')
+  assert.equal(tree.documentTitle({ id, turns: 1, title: 'Why Rivers Meander' }), 'Why Rivers Meander — Heddle', 'a titled one: its title, then the product')
+  assert.equal(tree.documentTitle({ id, turns: 1 }, 'Product'), 'Product', 'an untitled one: the product, which the caller may name')
+})
+
+test('a Rename or Delete refused with 404 says the workspace was already removed, never the server\'s path (#49)', () => {
+  /**
+   * Both servers answer a stale `PATCH` or `DELETE /api/workspaces/<path>` with `404 {"error":"no workspace <absolute
+   * path>"}`, and the dialogs printed that text, home directory included (#49). DSH's own refusal names a workspace by id
+   * (dsh-api-workspace-controller lib/index.js:359), and its live list never offers a removed workspace.
+   */
+  const stale = { error: 'no workspace /Users/someone/work/scratch' }
+  for (const fallback of ['could not rename that workspace', 'could not delete that workspace']) {
+    const refusal = tree.workspaceRefusal(404, stale, fallback)
+    assert.deepEqual(refusal, { gone: true, text: 'This workspace was already removed.' })
+    assert.doesNotMatch(refusal.text, /\//, 'no path in the words')
+  }
+  const clash = { error: 'A workspace named “other” already exists.', code: 'workspace/name-conflict' }
+  assert.deepEqual(tree.workspaceRefusal(409, clash, 'could not rename that workspace'), { gone: false, text: clash.error }, 'another refusal is the server\'s own sentence')
+  assert.deepEqual(tree.workspaceRefusal(500, {}, 'could not delete that workspace'), { gone: false, text: 'could not delete that workspace' }, 'or the fallback')
+  assert.deepEqual(tree.workspaceRefusal(400, null, 'could not rename that workspace'), { gone: false, text: 'could not rename that workspace' })
 })

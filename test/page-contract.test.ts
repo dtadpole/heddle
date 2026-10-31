@@ -240,7 +240,7 @@ test('a panel with nothing open shows an invitation, and gives way when somethin
   assert.ok(page.includes("document.body.dataset.ready = 'true'\n</script>"), 'and boot ends by announcing that it finished')
   assert.match(page, /paintEmptyState\(\)\n\/\*\*[\s\S]*?document\.body\.dataset\.ready/, 'which happens after the invitation is painted')
   /** A session that no longer exists must not keep the invitation hidden. */
-  assert.ok(page.includes('current = null\n      const title'), 'a vanished session releases the pointer')
+  assert.ok(page.includes('current = null\n      paintSessionHeading()'), 'a vanished session releases the pointer, and the header says No session again')
 })
 
 test('the navigation panel is a fixed column, and only its workspaces region scrolls', () => {
@@ -401,4 +401,49 @@ test("a session is renamed in DSH's Rename session dialog, opened by the menu, t
   assert.match(page, /items\.push\(\{ label: 'Rename', glyph: 'rename', run: \(\) => renameSession\(node\) \}\)/, 'and so does the menu item')
   assert.match(page, /else if \(action === 'rename'\) renameSession\(node\)/, 'and the chord')
   assert.doesNotMatch(page, /window\.prompt\('Rename this session'/, 'the native prompt is gone')
+})
+
+test('a session is labelled and headed by DSH\'s words and its title, never its folder name or raw id (#24)', () => {
+  /**
+   * DSH's row reads `New Session` for the open blank and `Untitled` without a stored title (dsh-client-ui-workspace
+   * lib/client.js:1801-1804, README.md:32); its header hides the title while blank and then reads the live list
+   * (dsh-client-ui-conversation lib/client.js:17897-17908, :17990-17994), and its window title is `<title> — <product>`
+   * (dsh-client-ui-layout lib/client.js:57-68). The rules are judged in test/workspace-tree.test.ts and the gestures in
+   * 80's check-workspace-tree.mjs; this detects the page no longer calling them.
+   */
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  assert.match(body('function sessionNode(meta) {'), /label: WorkspaceTree\.sessionLabel\(meta\)/, 'a tree row takes DSH\'s label')
+  assert.doesNotMatch(body('function learnDefinition(id, folder) {'), /textContent|\.label =/, 'learning a definition folder sets the tooltip, not the label')
+  assert.match(body('async function renderFlatList() {'), /label\.textContent = WorkspaceTree\.sessionLabel\(meta\)/, 'and so does a flat row')
+  assert.match(page, /title\.textContent = WorkspaceTree\.storedTitle\(meta\) \?\? 'Untitled'/, 'a search hit reads its title, else Untitled')
+  const show = body('async function showSession(id) {')
+  assert.doesNotMatch(show, /: id\n/, 'the header never falls back to the raw id')
+  assert.match(show, /paintSessionHeading\(\{ \.\.\.listed,/, 'it is painted from the session\'s listed entry and its own answer')
+  const paint = body('function paintSessionHeading(')
+  assert.match(paint, /WorkspaceTree\.headerTitle\(meta\)/, 'the header asks DSH\'s rule')
+  assert.match(paint, /document\.title = WorkspaceTree\.documentTitle\(meta\)/, 'and so does the window title')
+  for (const reader of ['async function renderTree() {', 'async function refreshSessions() {', 'async function loadSearchIndex() {']) {
+    assert.match(body(reader), /noteSessions\((sessions|searchIndex\.sessions)\)/, `${reader} repaints the header from the list it read`)
+  }
+})
+
+test('a Rename or Delete of a workspace another tab removed says so in words and redraws the tree (#49)', () => {
+  /**
+   * Both servers answer `404 {"error":"no workspace <absolute path>"}` for a workspace that is no longer registered; the
+   * dialogs printed it and kept the stale row. The words are judged in test/workspace-tree.test.ts and the gesture in 80's
+   * check-workspaces.mjs; this detects either dialog going back to the raw text.
+   */
+  const rename = page.slice(page.indexOf('async function confirmRename() {'))
+  const renameBody = rename.slice(0, rename.indexOf('\n}\n'))
+  const del = page.slice(page.indexOf("document.getElementById('workspace-delete-confirm').addEventListener('click'"))
+  const delBody = del.slice(0, del.indexOf('\n})\n'))
+  for (const [name, text] of [['Rename', renameBody], ['Delete', delBody]] as const) {
+    assert.match(text, /WorkspaceTree\.workspaceRefusal\(response\.status, body, /, `${name} reads the refusal through the rule`)
+    assert.match(text, /if \(refusal\.gone\) \{[\s\S]*?await renderTree\(\)\s*return\s*\}/, `${name} redraws the tree when the workspace is gone`)
+    assert.doesNotMatch(text, /body\.error \?\?/, `${name} no longer prints the server's raw text`)
+  }
 })
