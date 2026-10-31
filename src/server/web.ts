@@ -2360,7 +2360,12 @@ export function sessionRequestSelection(
     preset?: string
   }
   try {
-    body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return
+    }
+    body = parsed as typeof body
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
