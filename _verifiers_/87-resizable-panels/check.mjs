@@ -214,12 +214,22 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
       'and the conversation\'s column is back',
     )
 
-    /** DSH\'s chord, `Alt+Meta+N`, does the same thing from the keyboard. */
-    const sessionsBefore = await browser.evaluate(`document.querySelectorAll('#tree li[data-kind="session"]').length`)
+    /**
+     * DSH\'s chord, `Alt+Meta+N`, does the same thing from the keyboard: a fresh session opens. The one the click made is
+     * still empty, and DSH draws an empty session as a row only while it is the open one (`sessionVisible`,
+     * dsh-client-ui-workspace lib/client.js:959-966), so the new row takes its place instead of adding to the count.
+     */
+    const openRow = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const openBefore = await browser.evaluate(openRow)
+    assert.equal(typeof openBefore, 'string', 'the clicked New session is the open row')
     await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', altKey: true, metaKey: true, bubbles: true }))`)
     assert.ok(
-      await browser.waitFor(`document.querySelectorAll('#tree li[data-kind="session"]').length > ${sessionsBefore}`, 20_000),
-      'the chord starts another one',
+      await browser.waitFor(`(() => { const id = ${openRow}; return id !== null && id !== ${JSON.stringify(openBefore)} })()`, 20_000),
+      'the chord starts another one, and it is the open row',
+    )
+    assert.ok(
+      await browser.waitFor(`![...document.querySelectorAll('#tree li[data-kind="session"]')].some((li) => li.dataset.sessionId === ${JSON.stringify(openBefore)})`, 10_000),
+      'and the earlier empty session is no longer a row',
     )
 
     /**

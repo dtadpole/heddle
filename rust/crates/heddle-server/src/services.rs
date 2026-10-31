@@ -335,6 +335,14 @@ pub trait WorkspaceService: Send + Sync {
         let _ = before;
         Err(workspace_not_found(id))
     }
+
+    /// First use — DSH's `workspace/initializeDefault`, `POST /api/workspaces/default`: the default workspace's
+    /// record when this install is a first use (created or reused), `Ok(None)` when it is not, `Err` when its
+    /// folder cannot be made (`500`). The default answers `None`, for doubles that do not model first use.
+    fn initialize_default(&self, sessions: &[SessionMeta]) -> Result<Option<Value>, ServiceError> {
+        let _ = sessions;
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------

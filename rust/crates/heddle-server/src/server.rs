@@ -102,6 +102,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/tree"),
     ("GET", "/api/workspaces"),
     ("POST", "/api/workspaces"),
+    ("POST", "/api/workspaces/default"),
     ("PATCH", "/api/workspaces/{id}"),
     ("DELETE", "/api/workspaces/{id}"),
     ("POST", "/api/workspaces/insertBefore"),
@@ -396,6 +397,10 @@ impl ServerBuilder {
             .route("/api/turn", post(turn))
             .route("/api/tree", get(tree))
             .route("/api/workspaces", get(list_workspaces).post(add_workspace))
+            .route(
+                "/api/workspaces/default",
+                post(initialize_default_workspace),
+            )
             .route("/api/workspaces/{id}", patch(rename_workspace))
             .route("/api/workspaces/{id}", delete(remove_workspace))
             .route(
@@ -1572,6 +1577,27 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
             )
         }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// First use (web.ts's `POST /api/workspaces/default`, DSH's `workspace/initializeDefault`): `{workspace}`, the
+/// record or `null` when this install is not a first use; `500 {error, code: "workspace/default-failed"}` when
+/// the folder cannot be made; `503` without a workspace plugin.
+async fn initialize_default_workspace(State(state): State<AppState>) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let sessions = state.harness().sessions.list();
+    match workspaces.initialize_default(&sessions) {
+        Ok(record) => respond::json(
+            StatusCode::OK,
+            &json!({"workspace": record.unwrap_or(Value::Null)}),
+        ),
+        Err(error) => respond::error_with_code(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.message,
+            "workspace/default-failed",
+        ),
     }
 }
 
@@ -2870,6 +2896,99 @@ mod tests {
                 "parent": null, "createdAt": "a", "updatedAt": "a", "sessionIds": ids}]),
             )
         }
+        fn initialize_default(
+            &self,
+            sessions: &[SessionMeta],
+        ) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(
+                json!({"id": "w-default", "title": "default-workspace", "seen": sessions.len()}),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn first_use_answers_the_registry_default_and_null_from_a_double_that_has_none() {
+        let (router, _) = app("workspaces-default-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, _) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin, no first use"
+        );
+
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-default")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["workspace"]["id"], "w-default", "{body}");
+        assert_eq!(
+            body["workspace"]["seen"], 1,
+            "the route hands the registry the store's sessions: {body}"
+        );
+        // The trait's own default — a registry that does not model first use — answers `null`.
+        let none = crate::services::WorkspaceService::initialize_default(&NoDefault, &[]).unwrap();
+        assert_eq!(none, None);
+    }
+
+    /// A registry double that keeps every trait default, so the default `initialize_default` is the one judged.
+    struct NoDefault;
+
+    impl crate::services::WorkspaceService for NoDefault {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            false
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
     }
 
     #[tokio::test]
