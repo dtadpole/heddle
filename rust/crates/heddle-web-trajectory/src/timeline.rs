@@ -38,11 +38,33 @@ pub struct TimelineSpan {
     pub running: bool,
 }
 
+/// One timed record on the overview, as DSH's overview draws it: a bar in its lane, positioned by its own start and
+/// end (fractions of the domain, like a span's). An assistant record whose time-to-first-token is known and within its
+/// duration also carries the split DSH draws inside the bar; any other record is one plain bar. A running record ends
+/// where it started, on the same clock as its turn's span. Mirrors `TimelineRecord` in `src/server/ledger.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineRecord {
+    pub turn: u32,
+    pub lane: LedgerLane,
+    pub kind: LedgerKind,
+    pub start: f64,
+    pub end: f64,
+    pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoding_ms: Option<u64>,
+}
+
 /// The axis and its spans.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
     pub spans: Vec<TimelineSpan>,
+    /// Every timed record, ordered by start then turn; absent when nothing is timed, as the TypeScript answer omits it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<TimelineRecord>,
     /// The domain's width in milliseconds; `0` when nothing is timed.
     pub duration_ms: u64,
     /// The domain's start as `Date#toISOString` writes it; absent when nothing is timed.
@@ -59,6 +81,8 @@ struct Timed {
     end: i64,
     kind: LedgerKind,
     running: bool,
+    duration_ms: Option<u64>,
+    ttft_ms: Option<u64>,
 }
 
 /// What one turn's records add up to on the axis.
@@ -92,6 +116,8 @@ pub fn project_timeline(ledger: &Ledger) -> Timeline {
                     end,
                     kind: record.kind,
                     running: record.in_flight,
+                    duration_ms: record.duration_ms,
+                    ttft_ms: record.ttft_ms,
                 });
             }
         }
@@ -100,6 +126,7 @@ pub fn project_timeline(ledger: &Ledger) -> Timeline {
     if timed.is_empty() {
         return Timeline {
             spans: Vec::new(),
+            records: Vec::new(),
             duration_ms: 0,
             starts_at: None,
             ends_at: None,
@@ -199,8 +226,37 @@ pub fn project_timeline(ledger: &Ledger) -> Timeline {
         });
     }
 
+    // One bar per timed record (DSH's overview). The TTFT split rides only on a record whose time-to-first-token is
+    // known and lies within its duration.
+    let mut records: Vec<TimelineRecord> = timed
+        .iter()
+        .map(|entry| {
+            let split = match (entry.ttft_ms, entry.duration_ms) {
+                (Some(ttft), Some(duration)) if ttft <= duration => Some((ttft, duration - ttft)),
+                _ => None,
+            };
+            TimelineRecord {
+                turn: entry.turn,
+                lane: lane_of(entry.kind),
+                kind: entry.kind,
+                start: (entry.start - domain_start) as f64 / duration_ms as f64,
+                end: (entry.end - domain_start) as f64 / duration_ms as f64,
+                running: entry.running,
+                ttft_ms: split.map(|(ttft, _)| ttft),
+                decoding_ms: split.map(|(_, decoding)| decoding),
+            }
+        })
+        .collect();
+    records.sort_by(|left, right| {
+        left.start
+            .partial_cmp(&right.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(left.turn.cmp(&right.turn))
+    });
+
     Timeline {
         spans,
+        records,
         duration_ms,
         starts_at: Some(js::to_iso_string(domain_start)),
         ends_at: Some(js::to_iso_string(domain_end)),
@@ -303,6 +359,7 @@ mod tests {
             project_timeline(&project_ledger(&[json!({"type": "session/created"})])),
             Timeline {
                 spans: Vec::new(),
+                records: Vec::new(),
                 duration_ms: 0,
                 starts_at: None,
                 ends_at: None
