@@ -756,3 +756,65 @@ test('the overview draws one bar per record, and an answer bar splits at its TTF
     await server.close()
   }
 })
+
+test('a slash command between two turns is drawn where it ran, in its own Between turns section, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH draws a record outside every turn chronologically, in its own `Between turns`
+   * section ("A standalone compaction request appears chronologically in its own Between turns section"), and its turn
+   * fold leaves such a section open. Both builds listed every loose record after the last turn, with no section head,
+   * so a command run between turns 1 and 2 read as if it had run after turn 2.
+   */
+  const server = await startServer('between-turns')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const runTurn = async (prompt) => {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+      await turn.text()
+    }
+    await runTurn('what is in here')
+    const command = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/permission' }) })
+    assert.equal(command.status, 200, `the command ran (${command.status} ${JSON.stringify(command.body)})`)
+    await runTurn('and again')
+
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const rows = view.body.rows ?? []
+    const shape = rows.map((row) => `${row.loose ? 'between' : 'turn ' + row.turn}${row.turnStart ? '*' : ''} ${row.record.label}`).join(' / ')
+    const firstOfTurn2 = rows.findIndex((row) => row.turn === 2)
+    const lastOfTurn1 = rows.findLastIndex((row) => row.turn === 1)
+    const section = rows.slice(lastOfTurn1 + 1, firstOfTurn2)
+    assert.ok(lastOfTurn1 >= 0 && firstOfTurn2 > lastOfTurn1, `both turns are in the rows\nsaw: ${shape}`)
+    assert.deepEqual(section.map((row) => row.record.label), ['command/run', 'command/done'], `the command sits between turn 1 and turn 2\nsaw: ${shape}`)
+    assert.ok(section.every((row) => row.loose && row.record.afterTurn === 1), `it belongs to no turn and follows turn 1\nsaw: ${shape}`)
+    assert.deepEqual(section.map((row) => row.turnStart), [true, false], `and its first row heads its own section\nsaw: ${shape}`)
+
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the table drew rows')
+    const drawn = (expression) => browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tr-table tbody tr')].map((tr) => ${expression}))`)
+    const heads = JSON.parse(await drawn(`(tr.dataset.turnStart === 'true' ? (tr.querySelector('.tr-turn-label')?.textContent ?? '?') : '') + '|' + tr.dataset.turn`))
+    const labelled = heads.filter((entry) => !entry.startsWith('|')).map((entry) => entry.split('|')[0])
+    assert.deepEqual(labelled, ['Turn 1', 'Between turns', 'Turn 2'], `the table heads read Turn 1, Between turns, Turn 2 in that order (${heads.join(' ')})`)
+    await browser.evaluate(`document.getElementById('tr-turns').click()`)
+    const folded = JSON.parse(await drawn(`tr.dataset.turn + (tr.dataset.turnStart === 'true' ? '*' : '')`))
+    assert.deepEqual(folded, ['1*', '0*', '0', '2*'], `with turns folded, each turn shows its head and the section stays whole (${folded.join(' ')})`)
+    await browser.evaluate(`[...document.querySelectorAll('#tr-table tbody tr')].find((tr) => tr.dataset.turn === '0')?.click()`)
+    const where = await browser.evaluate(`document.querySelector('#tr-details .tr-d-where')?.textContent ?? ''`)
+    assert.equal(where, 'Between turns', 'and its record says where it sits in the details pane')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
