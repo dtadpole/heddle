@@ -6927,6 +6927,14 @@ async function restoreSelection() {
     }
   }
   const [workspaceBody, sessions] = await Promise.all([read('/api/workspaces'), read('/api/sessions')])
+  /**
+   * If a session was opened while the lists were read, that session stays shown. It may be a row a person picked, a turn
+   * that created a session, or a check that opens one by name. The boot does not reopen the saved session over it, or
+   * start a fresh one beside it. The boot before #17 kept this rule: `refreshSessions` opened a session only
+   * `if (current === null)`. Without it, a reload ran two opens of one session at once, and check-goal-command's reload
+   * drew the history twice. The open in flight reads the list itself.
+   */
+  if (current !== null) return
   if (!Array.isArray(sessions)) {
     await refreshSessions()
     return

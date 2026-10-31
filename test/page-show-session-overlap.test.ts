@@ -208,3 +208,98 @@ test('a replaced open whose list read lands last does not empty what the newer o
   await Promise.all([first, second])
   assert.deepEqual(at.rows(), drawn(S), 'the transcript is still drawn, once')
 })
+
+/**
+ * The boot's half: `restoreSelection` with its two list reads held. A session opened while they were read stays shown,
+ * as it did when the boot was `refreshSessions` (it opened the newest only `if (current === null)`) before #17. After #17,
+ * the boot reopened the saved session over it, and that was the second open of every reload in check-goal-command.
+ */
+interface Restoring {
+  restore(): Promise<void>
+  /** What an open does first, synchronously: the page's `current` is that session. */
+  open(id: string): void
+  opened: string[]
+  started: string[]
+}
+
+function booting(saved: string | null): Restoring & Pick<Page, 'release' | 'waiting'> {
+  const pending: { what: string; resolve: (answer: unknown) => void }[] = []
+  const restoring = runInNewContext(
+    `
+    let current = null;
+    const opened = [], started = [];
+    const WorkspaceTree = {
+      SELECTION_KEY: 'heddle.sessions.current',
+      savedSelection: (raw) => raw,
+      restoreChoice: (saved, workspaces, sessions) =>
+        saved !== null && sessions.some((meta) => meta.id === saved) ? { kind: 'saved', id: saved } : { kind: 'start', path: '/work' },
+    };
+    const localStorage = { getItem: () => saved };
+    async function showSession(id) { current = id; opened.push(id); return true }
+    async function startSessionAt(node) { started.push(node.path); current = 'session-fresh' }
+    async function refreshSessions() {}
+    function rememberCurrent() {}
+    const fetch = (path) => hold(path);
+    ${source('restoreSelection')}
+    ({ restore: restoreSelection, open: (id) => { current = id }, opened, started })
+  `,
+    { hold: (what: string) => new Promise((resolve) => pending.push({ what, resolve })), saved },
+  ) as Restoring
+  return {
+    restore: () => restoring.restore(),
+    open: (id) => restoring.open(id),
+    get opened() {
+      return Array.from(restoring.opened)
+    },
+    get started() {
+      return Array.from(restoring.started)
+    },
+    release(what, answer) {
+      const index = pending.findIndex((entry) => entry.what === what)
+      assert.ok(index >= 0, `a ${what} read is in flight`)
+      const [entry] = pending.splice(index, 1)
+      assert.ok(entry !== undefined)
+      entry.resolve(answer)
+    },
+    waiting: (what) => pending.filter((entry) => entry.what === what).length,
+  }
+}
+
+const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body })
+
+async function answerLists(at: Pick<Page, 'release'>, sessions: unknown[]): Promise<void> {
+  at.release('/api/workspaces', ok({ workspaces: [{ id: 'w-1', path: '/work' }] }))
+  at.release('/api/sessions', ok(sessions))
+  await settle()
+}
+
+test('a reload reopens the saved session when nothing else opened one meanwhile', { timeout: 5000 }, async () => {
+  const at = booting(S)
+  const boot = at.restore()
+  await settle()
+  await answerLists(at, [{ id: S }])
+  await boot
+  assert.deepEqual(at.opened, [S], 'the saved session is reopened, once')
+  assert.deepEqual(at.started, [])
+})
+
+test('a session opened while the boot reads its lists is not opened a second time by the boot (the reload in check-goal-command)', { timeout: 5000 }, async () => {
+  const at = booting(S)
+  const boot = at.restore()
+  await settle()
+  // The check opens the session by name while the boot is reading.
+  at.open(S)
+  await answerLists(at, [{ id: S }])
+  await boot
+  assert.deepEqual(at.opened, [], 'the boot does not run a second open of the session that is already opening')
+})
+
+test('a first visit does not start a fresh session over one that was opened while the lists were read', { timeout: 5000 }, async () => {
+  const at = booting(null)
+  const boot = at.restore()
+  await settle()
+  at.open(T)
+  await answerLists(at, [{ id: T }])
+  await boot
+  assert.deepEqual([at.opened, at.started], [[], []], 'the open session stays the open one: nothing is opened or started over it')
+})
