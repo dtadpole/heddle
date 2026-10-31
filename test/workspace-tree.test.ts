@@ -39,7 +39,16 @@ interface Tree {
   overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
-  flatList: (sessions: unknown[], options?: Record<string, unknown>) => { id: string }[]
+  withOpenBlank: (rows: { id: string }[], current: unknown) => { id: string }[]
+  flatRows: (sessions: unknown[], options?: Record<string, unknown>) => { order: string[]; rows: { id: string }[] }
+  accountOrders: (workspaces: unknown[], sessions: unknown[], order: OrderState) => Record<string, string[]>
+  chooseOrderBy: (state: OrderState, mode: 'updated' | 'manual', shown: Record<string, string[]>) => OrderState
+  withPinFronted: (state: OrderState, id: string, shown: Record<string, string[]>) => OrderState
+}
+
+interface OrderState {
+  orderBy: 'updated' | 'manual'
+  orders: Record<string, string[]>
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -163,47 +172,77 @@ test('archived only drops a workspace with nothing archived, and its child rises
   assert.deepEqual(groups.map((group) => [group.key, group.depth]), [['w-child', 0]])
 })
 
-test('pinned sessions lead, the newest pin first, then the most recently updated', () => {
+test('pinned sessions lead, and each part is by last update alone: pin time does not order Last updated', () => {
+  /**
+   * DSH's README (*Reordering and view options*): Last updated "sorts each partition strictly by the latest user prompt or
+   * steer time, newest first; pin time does not affect it" (C17, R-developer-eight-20). This test asserted newest pin
+   * first until then; pin order is Manual's (test/workspace-order.test.ts).
+   */
   const sessions = [
     session('s-recent', 50),
-    session('s-pin-old', 1, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
-    session('s-pin-new', 2, { pinned: true, pinnedAt: '2026-10-28T09:30:00.000Z' }),
+    session('s-pin-old', 1, { pinned: true, pinnedAt: '2026-10-28T09:30:00.000Z' }),
+    session('s-pin-new', 2, { pinned: true, pinnedAt: '2026-10-28T09:00:00.000Z' }),
     session('s-pin-untimed', 3, { pinned: true }),
     session('s-older', 10),
     session('s-archived-pin', 60, { pinned: true, archived: true }),
   ]
   const order = [...sessions].sort(tree.sessionOrder).map((meta) => meta.id)
   /** An archived row carries no pin (DSH keeps the two sets exclusive), so it sorts by its age among the rest. */
-  assert.deepEqual(order, ['s-pin-new', 's-pin-old', 's-pin-untimed', 's-archived-pin', 's-recent', 's-older'])
+  assert.deepEqual(order, ['s-pin-untimed', 's-pin-new', 's-pin-old', 's-archived-pin', 's-recent', 's-older'])
 })
 
 /**
- * R-developer-eight-17 (DSH parity C13): `In one list` ordered pins by when the sessions were created, so two pins read
- * in one order in the tree and in the other order in the flat list. DSH fronts a new pin in the group and in the flat list
- * alike (`dsh-client-ui-workspace` `pinSessionOrder`), so the flat list takes the tree's rule: the newest pin first, then
- * the last write, newest first.
+ * R-developer-eight-17 (DSH parity C13): `In one list` sorted pins by creation, so two pins read one way in the tree and
+ * the other way in the flat list. Since C17 (#63) the flat list is its own account in the selected order, and it follows
+ * the tree's rule in both modes, as DSH's `deriveFlat` runs `sectionMembers` over the flat account's order
+ * (dsh-client-ui-workspace/lib/client.js:1146-1154, 3583-3584). README *Reordering and view options*: **Last updated**
+ * sorts each partition by the latest prompt, "pin time does not affect it". **Pinning** "moves the Session to the front of
+ * its complete saved sequence without changing the selected mode. It leads the pinned partition in Manual but need not
+ * lead it in Last updated. Unpinning leaves the saved position unchanged". DSH fronts the pin in the group's account and
+ * in the flat list's (`pinSessionOrder` / `pinOrderAccounts`, client.js:1303-1309, 1343-1345).
  */
-test('the flat list orders like the tree: the newest pin first, then the most recently updated', () => {
+test('the flat list orders like the tree in either mode: Last updated by prompt time, Manual with the later pin first', () => {
   const sessions = [
-    /** Created first, written last: an unpinned row that leads the rest by its last write, not its creation. */
+    /** Created first, prompted last: an unpinned row that leads the rest by its prompt, not by its creation. */
     { ...session('s-written-last', 1), updated: '2026-10-28T10:59:00.000Z' },
-    /** Created before the other pin, pinned after it: the later pin leads. */
+    /** Pinned after s-pin-earlier, but prompted before it. */
     session('s-pin-later', 2, { pinned: true, pinnedAt: '2026-10-28T11:30:00.000Z' }),
     session('s-pin-earlier', 3, { pinned: true, pinnedAt: '2026-10-28T11:00:00.000Z' }),
-    session('s-untouched', 4),
+    /** The oldest prompt: it is pinned under Manual below. */
+    session('s-quiet', 0),
     session('s-archived', 5, { archived: true }),
   ]
   const workspaces = [workspace('w', '/w', { sessionIds: sessions.map((meta) => meta.id) })]
-  const treeOrder = ids(tree.deriveGroups(workspaces, sessions)[0])
-  const flatOrder = tree.flatList(sessions).map((meta) => meta.id)
-  assert.deepEqual(flatOrder, ['s-pin-later', 's-pin-earlier', 's-written-last', 's-untouched'], 'the later pin first, then by last write; archived hidden')
-  assert.deepEqual(flatOrder, treeOrder, 'and the same order the tree draws for the same sessions')
-  assert.deepEqual(
-    tree.flatList(sessions, { archived: 'show' }).map((meta) => meta.id),
-    ['s-pin-later', 's-pin-earlier', 's-written-last', 's-archived', 's-untouched'],
-    'show lists the archived row by its age among the rest',
-  )
-  assert.deepEqual(tree.flatList(sessions, { archived: 'only' }).map((meta) => meta.id), ['s-archived'], 'only lists the archived rows')
+  const lastUpdated: OrderState = { orderBy: 'updated', orders: {} }
+  const treeRows = (metas: unknown[], order: OrderState, archived?: string) => ids(tree.deriveGroups(workspaces, metas, { order, archived })[0])
+  const flatRows = (metas: unknown[], order: OrderState, archived?: string) => tree.flatRows(metas, { order, archived }).rows.map((meta) => meta.id)
+
+  /** Last updated: the pinned part by prompt time, so the later pin does not lead. */
+  assert.deepEqual(flatRows(sessions, lastUpdated), ['s-pin-earlier', 's-pin-later', 's-written-last', 's-quiet'], 'pins by prompt time, then the rest by prompt time; archived hidden')
+  assert.deepEqual(flatRows(sessions, lastUpdated), treeRows(sessions, lastUpdated), 'and the same order the tree draws')
+  assert.deepEqual(flatRows(sessions, lastUpdated, 'show'), ['s-pin-earlier', 's-pin-later', 's-written-last', 's-archived', 's-quiet'], 'show lists the archived row by its age among the rest')
+  assert.deepEqual(flatRows(sessions, lastUpdated, 'show'), treeRows(sessions, lastUpdated, 'show'))
+  assert.deepEqual(flatRows(sessions, lastUpdated, 'only'), ['s-archived'], 'only lists the archived rows')
+
+  /** Manual freezes what Last updated showed, in both accounts. */
+  const manual = tree.chooseOrderBy(lastUpdated, 'manual', tree.accountOrders(workspaces, sessions, lastUpdated))
+  assert.deepEqual(treeRows(sessions, manual), ['s-pin-earlier', 's-pin-later', 's-written-last', 's-quiet'], 'entering Manual keeps the order on screen')
+  assert.deepEqual(flatRows(sessions, manual), treeRows(sessions, manual))
+
+  /** A pin under Manual fronts the session in the group and in the flat list: the latest pin leads, oldest prompt or not. */
+  const pinned = sessions.map((meta) => (meta.id === 's-quiet' ? { ...meta, pinned: true, pinnedAt: '2026-10-28T12:00:00.000Z' } : meta))
+  const fronted = tree.withPinFronted(manual, 's-quiet', tree.accountOrders(workspaces, sessions, manual))
+  assert.deepEqual(treeRows(pinned, fronted), ['s-quiet', 's-pin-earlier', 's-pin-later', 's-written-last'], 'under Manual the latest pin leads the pinned part')
+  assert.deepEqual(flatRows(pinned, fronted), treeRows(pinned, fronted), 'and leads the flat list alike')
+
+  /** Under Last updated the same pins go by prompt time again, in both views. */
+  assert.deepEqual(treeRows(pinned, lastUpdated), ['s-pin-earlier', 's-pin-later', 's-quiet', 's-written-last'], 'Last updated: the latest pin need not lead')
+  assert.deepEqual(flatRows(pinned, lastUpdated), treeRows(pinned, lastUpdated))
+
+  /** Unpinning under Manual leaves the saved position: the row heads the ordinary part, ahead of a later prompt. */
+  const unpinned = pinned.map((meta) => (meta.id === 's-quiet' ? { ...meta, pinned: false, pinnedAt: undefined } : meta))
+  assert.deepEqual(treeRows(unpinned, fronted), ['s-pin-earlier', 's-pin-later', 's-quiet', 's-written-last'], 'an unpin moves nothing in the saved sequence')
+  assert.deepEqual(flatRows(unpinned, fronted), treeRows(unpinned, fronted))
 })
 
 test('Show more: five rows, raised to the last running or open session within fifty, five more per click', () => {

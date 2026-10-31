@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -520,5 +520,65 @@ test('sessions inside one folder order by the time they were last written to, ne
     assert.deepEqual(labelsFor(pinned), ['beta', 'alpha', 'gamma'], 'a pin holds the top of its folder')
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a symlink to a folder lists as a folder at its own path, and expanding it lists its target, as DSH lists one', () => {
+  /**
+   * DSH's workspace listing reports what a child resolves to (dsh-api-workspace-files, types.d.ts: "A symlink reports the
+   * type of its destination"; dsh-fs-local listDirectory probes each child's resolved target), a size only for a regular
+   * file, and the child's path as the listing's path joined with its name. Measured before this rule: the link was a
+   * 0-byte file at its target's path, so it could not be expanded and shared that path with the target's own row.
+   */
+  const root = scaffold(['nest/inner'])
+  const outside = scaffold(['far'])
+  try {
+    writeFileSync(join(root, 'nest', 'a.txt'), 'hello\n')
+    writeFileSync(join(root, 'plain.txt'), 'x\n')
+    symlinkSync('nest', join(root, 'nest-link'))
+    symlinkSync('plain.txt', join(root, 'file-link'))
+    symlinkSync('missing', join(root, 'dangling'))
+    symlinkSync(join(outside, 'far'), join(root, 'out-link'))
+    const canonical = realpathSync(root)
+    const input: TreeInput = { roots: [{ path: root, title: 'fixture' }], sessions: [] }
+    const children = tree(root, input).children ?? []
+    const byLabel = new Map(children.map((node) => [node.label, node]))
+
+    const link = byLabel.get('nest-link')
+    assert.equal(link?.kind, 'folder', 'a link to a folder is a folder row')
+    assert.equal(link?.children, null, 'which can be expanded, like any folder nobody opened yet')
+    assert.equal(link?.bytes, undefined, 'and carries no size, as a folder does not')
+    assert.equal(link?.path, join(canonical, 'nest-link'), 'at its own path, so it does not share the target row\'s path')
+    assert.equal(byLabel.get('nest')?.path, join(canonical, 'nest'), 'the target keeps its own row and path')
+    assert.equal(new Set(children.map((node) => node.path)).size, children.length, 'no two rows share one path')
+
+    const out = byLabel.get('out-link')
+    assert.equal(out?.kind, 'folder', 'a link to a folder outside the root is still listed as the folder it resolves to')
+    assert.equal(out?.path, join(canonical, 'out-link'), 'at its own path; expanding it is the caller\'s containment check')
+
+    const fileLink = byLabel.get('file-link')
+    assert.equal(fileLink?.kind, 'file', 'a link to a file is a file row')
+    assert.equal(fileLink?.bytes, 2, 'with its target\'s size')
+    assert.equal(fileLink?.path, join(canonical, 'file-link'), 'at its own path')
+
+    const dangling = byLabel.get('dangling')
+    assert.equal(dangling?.kind, 'file', 'a link that resolves to nothing is a leaf')
+    assert.equal(dangling?.bytes, 0, 'of no size')
+
+    assert.deepEqual(
+      children.map((node) => node.label),
+      ['nest', 'nest-link', 'out-link', 'dangling', 'file-link', 'plain.txt'],
+      'a linked folder sorts with the folders',
+    )
+
+    const expanded = tree(join(root, 'nest-link'), input)
+    assert.deepEqual(
+      (expanded.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['folder:inner', 'file:a.txt'],
+      'expanding the link lists what its target holds',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 })

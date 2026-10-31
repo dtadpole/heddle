@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, httpConfig, readTranscript, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isTitleRequest, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — one session runs one turn at a time; a prompt sent while a turn runs waits for it (#28).
@@ -35,6 +35,8 @@ async function slowDouble() {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not one of the turns this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       const parsed = JSON.parse(body || '{}')
       requests.push(parsed.messages ?? [])
       const first = requests.length === 1

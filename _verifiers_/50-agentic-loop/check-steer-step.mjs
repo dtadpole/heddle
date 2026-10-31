@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, httpConfig, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — a steer sent while the model streams is read after the whole step (#30).
@@ -35,6 +35,8 @@ async function slowDouble() {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not one of the turns this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(JSON.parse(body || '{}').messages ?? [])
       const first = requests.length === 1
       response.writeHead(200, { 'content-type': 'text/event-stream' })

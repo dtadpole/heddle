@@ -78,6 +78,9 @@ a display or a window.
   command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
   started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
   API, no browser.
+- [`check-shutdown-kills-group.mjs`](check-shutdown-kills-group.mjs) — a **restart** during a bash call: SIGTERM
+  to the server ends the command's whole process group, the server goes within seconds instead of waiting for the
+  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6). No browser.
 
 ## Running it
 
@@ -112,6 +115,9 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
   command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
   started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
   API, no browser.
+- [`check-shutdown-kills-group.mjs`](check-shutdown-kills-group.mjs) — a **restart** during a bash call: SIGTERM
+  to the server ends the command's whole process group, the server goes within seconds instead of waiting for the
+  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6). No browser.
 
 ## Running it
 
