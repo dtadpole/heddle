@@ -4806,3 +4806,89 @@ test("a session's turn runs its tools in the session's own folder, through the s
     removeDir(h.work)
   }
 })
+
+test('opening a session that holds a long answer leaves the server answering: /healthz never waits (#19)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #19: the live TS server stopped answering for 15 s and more and was killed as hung. Measured on a scratch
+   * server, the cause is the session route: a page that opens a session (every load, every turn's end) has the server
+   * render each of its answers' markdown, and the TS build did that on its only thread, where a 30,000-item list took
+   * 7 s — /healthz unanswered and every stream on the server stopped for as long. The same document is then rendered
+   * once more for every page that follows the session (the settled answer it posts to /api/markdown).
+   *
+   * Judged from a supervisor's seat: while one page opens the session and two followers render its answer, /healthz
+   * is probed every 100 ms and must answer every probe within 1.5 s (the deployment's supervisor kills a server that
+   * misses three 2 s probes in a row). The answers must still arrive, rendered.
+   */
+  const h = harness('long-answer-liveness')
+  const answer = Array.from({ length: 30_000 }, (_, index) => `- ${index + 1}`).join('\n')
+  scriptedConfig({ home: h.home, steps: [{ text: answer }] })
+  let live
+  try {
+    const seeded = await runCli(adminArgs(h, ['--turn', 'write every whole number from 1 to 30000 as a list']), { env: h.env, cwd: h.work })
+    assert.equal(seeded.code, 0, `the long answer was recorded\n${seeded.stdout.slice(-400)}${seeded.stderr}`)
+
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const sessions = await (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()
+    assert.equal(sessions.length, 1, `the one session is listed\nsaw: ${JSON.stringify(sessions).slice(0, 300)}`)
+    const id = sessions[0].id
+
+    const probes = []
+    let probing = true
+    const prober = (async () => {
+      while (probing) {
+        const started = Date.now()
+        let ok = false
+        try {
+          ok = (await fetch(origin + '/healthz', { signal: AbortSignal.timeout(3000) })).ok
+        } catch {
+          ok = false
+        }
+        probes.push({ ms: Date.now() - started, ok })
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+    })()
+    /** A request the server cut is an outcome to report, not an exception that leaves the prober running. */
+    const read = async (pending) => {
+      try {
+        const response = await pending
+        return { status: response.status, body: await response.json() }
+      } catch (error) {
+        return { status: 0, error: String(error?.cause?.code ?? error?.message ?? error) }
+      }
+    }
+    const render = () =>
+      read(fetch(origin + '/api/markdown', { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ text: answer }) }))
+    let outcomes
+    try {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+      outcomes = await Promise.all([read(fetch(`${origin}/api/sessions/${encodeURIComponent(id)}`, { headers: { cookie } })), render(), render()])
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
+    } finally {
+      probing = false
+      await prober
+    }
+
+    const slowest = Math.max(...probes.map((probe) => probe.ms))
+    const missed = probes.filter((probe) => !probe.ok || probe.ms > 1500).length
+    assert.equal(missed, 0, `/healthz waited while the answer rendered: ${missed} of ${probes.length} probes missed 1.5 s, the slowest took ${slowest} ms`)
+    const [opened, ...rendered] = outcomes
+    assert.equal(opened.status, 200, `the session opened\nsaw: ${JSON.stringify(opened).slice(0, 300)}`)
+    const html = (opened.body.turns ?? []).find((turn) => turn.kind === 'assistant')?.html ?? ''
+    assert.match(html, /30000/, 'its answer arrived rendered, all of it')
+    for (const outcome of rendered) {
+      assert.equal(outcome.status, 200, `a follower's render answered\nsaw: ${JSON.stringify(outcome).slice(0, 300)}`)
+      assert.match(String(outcome.body.html ?? ''), /30000/, 'and so did every follower\'s render')
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
