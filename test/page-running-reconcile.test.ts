@@ -55,6 +55,12 @@ function harness(): Page {
     async function showSession() {}
     // The detached turns' waits (#128) are judged in page-feed-share.test.ts; this read only has to reach them.
     const turnVerdicts = { endIdle() {} };
+    // What stack-2's refreshSessions also reads: subagents' listed records and composer lock, page-polish's header
+    // notes, and row-status's unread completions. None of them decides which turn a read may end.
+    const listedMetas = new Map();
+    function paintComposerAccess() {}
+    function noteSessions() {}
+    function noteCompletion() {}
     const fetch = () => new Promise((resolve) => queue((sessions) => resolve({ ok: true, json: async () => sessions })));
     ${source('markRunning')}
     ${source('refreshSessions')}

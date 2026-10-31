@@ -152,6 +152,19 @@
   #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 8%, transparent); outline: none; }
   #search-results .hit-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
+  /**
+   * An archived hit, DSH's `SearchResultItem`: grayed like an archived row, explained to a screen reader, and carrying
+   * its Unarchive button at the end — search is where the filter surfaces an archived session for recovery. It is a
+   * treeitem `div` rather than a `button` because a button cannot hold the Unarchive button.
+   */
+  #search-results div.hit { box-sizing: border-box; align-items: center; }
+  #search-results .hit[data-archived='true'] .hit-title, #search-results .hit[data-archived='true'] .hit-workspace { opacity: .5; }
+  #search-results .hit-unarchive {
+    display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0;
+    color: var(--text-2); background: none; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  #search-results .hit-unarchive:hover, #search-results .hit-unarchive:focus-visible { background: var(--hover); color: var(--text); outline: none; }
+  #search-results .hit-unarchive svg { width: 14px; height: 14px; }
   #session-search { width: 100%; margin: 0 0 .5rem; padding: .3rem .45rem; font: inherit; font-size: .8rem; color: inherit; background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: .3rem; }
   #session-search::placeholder { opacity: .6; }
   /**
@@ -1426,6 +1439,13 @@
     background: none;
   }
   /**
+   * While its menu is open the slot rises to the menus' own layer. Its `z-index: 1` makes it a stacking context, so the
+   * fixed-positioned menu inside it painted at layer 1 — under the conversation panel's column grip (layer 4) wherever
+   * the menu crossed the sidebar's edge. Measured on 29 Oct: a click on the right part of `Archive session` landed on
+   * the grip and did nothing (R-developer-eight-14). DSH portals its menus for the same reason.
+   */
+  #tree li:has(.menu:not([hidden])) > .row .row-tools { z-index: 40; }
+  /**
    * The row's action buttons, measured from DSH's own sheet: its `._actionButton` is **20×16**, radius 4px, with **no
    * background at all** — hover only lifts the colour from secondary to primary. The 26px centre-to-centre step in its
    * row is a 20px button plus a 6px gap, which the slot keeps.
@@ -1495,6 +1515,11 @@
     #tree .status-dot .spinner-motion, #tree .status-dot .spinner-arc { animation: none; }
     #tree .status-dot .spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
   }
+  /** The still states, from the same `StateDot`: a filled dot at 20% inset, warning while a person is awaited, done until read. */
+  #tree .status-dot:is([data-state='warning'], [data-state='done']) { position: relative; }
+  #tree .status-dot:is([data-state='warning'], [data-state='done'])::after { content: ''; position: absolute; inset: 20%; border-radius: 50%; background: currentColor; }
+  #tree .status-dot[data-state='warning'] { color: #b7791f; }
+  #tree .status-dot[data-state='done'] { color: #2fa36b; }
 
   /* hover-card-style:begin */
   /**
@@ -1550,6 +1575,18 @@
   .menu .menu-glyph { display: inline-flex; flex: none; width: 16px; height: 16px; opacity: .75; }
   .menu .menu-glyph svg { width: 16px; height: 16px; }
   .menu .menu-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /**
+   * DSH's Toast (its primitives' `Toast`): centred 40px below the top, above everything, held three seconds and then faded
+   * over one. Copy Session ID reports through it, as DSH's `sessionIdCopied` and `sessionIdCopyFailed` notices do.
+   */
+  #session-toast {
+    position: fixed; top: 40px; left: 50%; transform: translateX(-50%); z-index: 1100; pointer-events: none;
+    width: max-content; max-width: min(640px, calc(100vw - 48px)); box-sizing: border-box; padding: 12px 16px;
+    font-size: 14px; line-height: 22px; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: var(--shadow-menu); animation: session-toast-fade 1s ease 3s forwards;
+  }
+  #session-toast[data-tone='warning'] { border-color: color-mix(in oklab, #d29922 45%, var(--border)); }
+  @keyframes session-toast-fade { to { opacity: 0; } }
   /** A floating menu is in the viewport now, so its own height has to fit it. */
   .menu { max-height: calc(100vh - 16px); overflow-y: auto; z-index: 40; }
   /** A section name inside a menu, as DSH's View options has for its `WorkSpace` group. */
@@ -1687,6 +1724,15 @@
   #tree .turns { font-size: .72rem; opacity: .5; }
   #tree li[data-kind='generated'] .label { opacity: .55; }
   #tree li[data-kind='folder'] .label { opacity: .8; }
+  /**
+   * #107: DSH's empty list, a centred glyph over the text (`EmptySessions`, dsh-client-ui-workspace lib/client.js:3005-3021),
+   * with the archived view's "View other sessions" as a text action under it.
+   */
+  #tree > li.tree-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 24px 8px; text-align: center; }
+  #tree > li.tree-empty .tree-empty-glyph { opacity: .45; }
+  #tree > li.tree-empty .tree-empty-text { opacity: .65; font-size: .82rem; }
+  #tree > li.tree-empty .tree-empty-action { border: 0; background: none; padding: 2px 6px; border-radius: 6px; color: var(--accent); font: inherit; font-size: .82rem; cursor: pointer; }
+  #tree > li.tree-empty .tree-empty-action:hover { background: color-mix(in oklab, currentColor 10%, transparent); }
   /** C37: where a dragged workspace lands, a line above or below its whole section (DSH's workspaceDropBefore / After). */
   #tree li[data-workspace-drop] { position: relative; }
   #tree li[data-workspace-drop]::after { content: ''; position: absolute; left: 0; right: 4px; height: 2px; background: var(--accent); pointer-events: none; }
@@ -1703,6 +1749,8 @@
   #tree li[data-contains-current='true'] > .row > .icon { color: var(--accent); }
   #tree li[data-kind='more'] > .row { height: 28px; color: var(--text-3); font-size: 13px; }
   #tree li[data-kind='more'] > .row:hover { color: var(--text-2); background: transparent; }
+  /** `Show more` is a real `<button>`, as DSH's is (#92), so the platform's button box comes off and the row's drawing stays. */
+  #tree li[data-kind='more'] > button.row { width: 100%; box-sizing: border-box; margin: 0; border: 0; background: transparent; text-align: left; }
   #tree li.tree-heading { display: flex; align-items: center; height: 24px; padding: 0 .5rem 0 calc(.5rem + var(--tree-depth, 0) * 14px); font-size: 11px; color: var(--text-3); cursor: default; user-select: none; }
   #tree li[data-kind='ungrouped'] > .row .label { color: var(--text-2); }
   /** C17: where a dragged session lands, a line above or below the row, as DSH's dropBefore / dropAfter rows draw it. */
@@ -1750,6 +1798,19 @@
     background: var(--composer); border-radius: 28px; padding: 8px 0 0;
     box-shadow: 0 0 0 .5px color-mix(in oklab, var(--text) 12%, transparent), 0 4px 16px rgba(0, 0, 0, .03), 0 0 24px rgba(0, 0, 0, .03);
   }
+  /**
+   * DSH's read-only composer for a one-shot subagent's record (`SubagentReadOnlyComposer.module.css`, dsh-client-ui-subagent
+   * `lib/client.js:661`): a half-pixel border, the large radius, the layer surface, 54px tall at least, tertiary 13/20 text
+   * centred with an 8px gap, and the title in the primary ink at weight 510.
+   */
+  #subagent-readonly {
+    display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap;
+    width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto; box-sizing: border-box;
+    min-height: 54px; padding: 10px 16px; border: .5px solid var(--line); border-radius: 16px; background: var(--surface);
+    color: var(--text-3); font-size: 13px; line-height: 20px;
+  }
+  #subagent-readonly[hidden], #prompt[hidden] { display: none; }
+  #subagent-readonly strong { color: var(--text); font-weight: 510; }
   #prompt textarea {
     display: block; width: 100%; box-sizing: border-box;
     border: 0; outline: none; background: transparent; color: var(--text);
@@ -2112,6 +2173,20 @@
   .ws-dialog .ws-actions button.ws-primary { background: var(--text); color: #0f1115; border: 0; }
   .ws-dialog .ws-actions button.ws-danger { color: #ff7b72; border-color: color-mix(in oklab, #ff7b72 45%, var(--border)); }
   .ws-dialog .ws-actions button:disabled { opacity: .45; cursor: default; }
+  /** DSH's stop-and-archive list: one line per family of work that will be stopped (its `archiveActivity` list). */
+  #session-archive-activity { margin: .7rem 0 0; padding-left: 1.2rem; font-size: 13px; line-height: 1.6; color: var(--text); }
+  /**
+   * The archive notice — DSH's workspace toast: one line, its action words inline ("Session archived. You can undo or
+   * filter archived sessions"), held six seconds, bottom-left over the column it is about.
+   */
+  #archive-notice {
+    position: fixed; left: 12px; bottom: 12px; z-index: 70; box-sizing: border-box; max-width: min(440px, calc(100vw - 24px));
+    padding: 10px 14px; font-size: 13px; line-height: 1.45; color: var(--text); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow-menu);
+  }
+  #archive-notice[hidden] { display: none; }
+  #archive-notice[data-tone='warning'] { border-color: color-mix(in oklab, #d29922 45%, var(--border)); }
+  #archive-notice button { padding: 0; font: inherit; color: var(--accent); background: none; border: 0; cursor: pointer; text-decoration: underline; }
   /** Rows, not the page's column `form`: the field and its button share one line. */
   .ws-dialog .ws-path-row, .ws-dialog .ws-new-row { display: flex; flex-direction: row; gap: .5rem; align-items: center; margin-top: .9rem; }
   .ws-dialog .ws-new-row[hidden] { display: none; }
@@ -2542,8 +2617,18 @@
    * quiet affordance — the row is what a person is looking at — so it paints nothing, and only its opacity
    * answers the pointer.
    */
-  /** An archived row is drawn only when asked for, and then quietly: it is not part of the live list. */
-  #tree li[data-archived='true'] { opacity: .55; }
+  /**
+   * An archived row is drawn only when asked for, and then quietly: it is not part of the live list.
+   *
+   * The dimming is on the row's **words and glyph**, never on the item. Measured on 29 Oct (R-developer-eight-14): the
+   * opacity sat on the `li`, which makes the item a stacking context, so the row's `…` menu — fixed-positioned, but
+   * still inside that item — was painted under the conversation panel wherever it crossed the sidebar's edge
+   * ("Renai", "Unarc"), and a click on the right of an item landed in the panel.
+   */
+  #tree li[data-archived='true'] > .row > .icon,
+  #tree li[data-archived='true'] > .row > .label,
+  #tree li[data-archived='true'] > .row .age,
+  #tree li[data-archived='true'] > .row .pin-slot { opacity: .55; }
   /**
    * The row's quick controls: present for a reader, invisible to the eye until the row is hovered or focused —
    * DSH's own behaviour, and the reason the row reads as a name rather than as a strip of buttons. A touch device
@@ -3438,6 +3523,12 @@
       </div>
     </div>
   </form>
+  <!--
+    DSH's read-only composer (dsh-client-ui-subagent `SubagentReadOnlyComposer`, `lib/client.js:678`): an open one-shot
+    subagent's record takes the composer's place, because a one-shot task accepts no follow-up. The words are DSH's
+    (`readonly.oneShot.title`, `readonly.oneShot.body`, `lib/client.js:928-930`).
+  -->
+  <div id="subagent-readonly" role="status" hidden><strong>One-shot subagent record</strong><span>One-shot tasks do not accept follow-ups; review the full execution record here.</span></div>
   <div id="composer-status" aria-live="polite" hidden>
     <span class="stat-pill" data-stat-pill="time">
       <svg class="stat-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke-width="1"><path d="M3.4041 13.096C2.49514 12.187 1.87614 11.0288 1.62537 9.76798C1.37459 8.50716 1.50331 7.20028 1.99525 6.01261C2.48719 4.82494 3.32025 3.80981 4.3891 3.09557C5.45795 2.38134 6.71458 2.00008 8.0001 2C9.28563 2.00008 10.5423 2.38134 11.6111 3.09557C12.68 3.80981 13.513 4.82494 14.005 6.01261C14.4969 7.20028 14.6256 8.50716 14.3748 9.76798C14.1241 11.0288 13.5051 12.187 12.5961 13.096" stroke="currentColor"/><path d="M8 8.49994L11.6114 4.88855" stroke="currentColor"/><path d="M8 9.75C8.69036 9.75 9.25 9.19036 9.25 8.5C9.25 7.80964 8.69036 7.25 8 7.25C7.30964 7.25 6.75 7.80964 6.75 8.5C6.75 9.19036 7.30964 9.75 8 9.75Z" fill="currentColor"/></svg>
@@ -3584,6 +3675,21 @@
     <button type="button" id="session-rename-confirm" class="ws-primary" disabled>Rename</button>
   </div>
 </dialog>
+<dialog id="session-archive" class="ws-dialog" aria-labelledby="session-archive-title" aria-describedby="session-archive-desc">
+  <div class="ws-head">
+    <h2 id="session-archive-title">Stop and archive this session?</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+  </div>
+  <p id="session-archive-desc" class="ws-desc"></p>
+  <ul id="session-archive-activity" aria-label="Work that will be stopped"></ul>
+  <p id="session-archive-status" class="ws-status" role="status" hidden>Stopping and archiving…</p>
+  <p id="session-archive-error" class="ws-error" role="alert" hidden></p>
+  <div class="ws-actions">
+    <button type="button" data-ws-close>Cancel</button>
+    <button type="button" id="session-archive-confirm" class="ws-danger">Stop and archive</button>
+  </div>
+</dialog>
+<div id="archive-notice" role="status" aria-live="polite" hidden></div>
 <!-- DSH's task deletion confirmation (dsh-client-ui-schedule `TaskDetail`), its texts verbatim, as a native dialog. -->
 <dialog id="schedule-delete" class="ws-dialog" aria-labelledby="schedule-delete-title" aria-describedby="schedule-delete-desc">
   <div class="ws-head">
@@ -3670,6 +3776,15 @@ function followLedgerTail() {
  * above, or `heddle workspace add`) promotes it into the tree, sessions and all.
  */
 let current = null
+/**
+ * The session the reader opened whose history could not be loaded, or null (#56; ported from developer-six's 4cd4cafb).
+ *
+ * DSH's Chat shows "Failed to load history: {message} ({code})" for such a session (`dsh-client-ui-chat` `lib/client.js:2893-2898`,
+ * the words at `:5991`), and its composer is disabled and reads "Session unavailable" (`dsh-client-ui-conversation`
+ * `lib/client.js:18819-18824`, `:18972`, the words at `:16406`). While this is set `current` is null, the composer says so
+ * and takes no message; opening any session clears it.
+ */
+let unavailableSession = null
 /** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
 let goalView = null
 /** The generation of the goal read: an older response must not paint over a newer goal. */
@@ -3678,6 +3793,11 @@ let todoView = null
 let todoCollapsed = true
 /** The generation of the todo read: an older response must not paint over a newer list. */
 let todoGeneration = 0
+/**
+ * The generation of `showSession`. Only the latest open draws the conversation. An older open, even of the same session,
+ * stops at its next step and does not empty or append to the log.
+ */
+let showGeneration = 0
 /**
  * The header's background-jobs control's state (DSH's `JobListAction`, dsh-client-ui-jobs/lib/client.js:323-338),
  * declared up here with the other per-session views so `showSession` can reset it whenever it runs. The functions
@@ -3830,6 +3950,8 @@ function add(kind, text, merge = true, label, tool) {
      * attaches; `dataset.copyText` is snapshotted before the button is inside the row.
      */
     node.dataset.copyText = node.innerText
+    /** The answer that closed a completed turn carries that turn's end seq, which its Branch action forks at. */
+    if (Number.isSafeInteger(tool.forkSeq)) node.dataset.forkSeq = String(tool.forkSeq)
     node.append(messageActions(node))
     if (tool !== undefined && Array.isArray(tool.files) && tool.files.length > 0) node.append(editedFilesPanel(tool.files))
     if (tool !== undefined && Array.isArray(tool.ended) && tool.ended.length > 0) node.append(turnNotice(tool.ended))
@@ -4006,7 +4128,89 @@ function messageActions(row) {
   const bar = document.createElement('div')
   bar.className = 'actions'
   bar.append(copyAction(row, 'Copy this answer'))
+  if (row.dataset.forkSeq !== undefined) bar.append(branchAction(row))
   return bar
+}
+
+/** DSH's `IconBranchOutlineRegular`: two strokes leaving one stem, each ending at a ring. */
+function branchIcon() {
+  const svg = iconSvg()
+  for (const d of [
+    'M1.01503 8.0001L5.6964 8.0001C6.41913 8.0001 6.78049 8.0001 7.12115 7.91951C7.4232 7.84804 7.71233 7.73014 7.97821 7.57C8.27809 7.38939 8.5364 7.13669 9.05303 6.63129L11.3281 4.40564',
+    'M1.01221 7.9999L5.6964 7.9999C6.41913 7.9999 6.78049 7.9999 7.12115 8.08049C7.4232 8.15196 7.71233 8.26986 7.97821 8.43C8.27809 8.61061 8.5364 8.86331 9.05303 9.36871L11.3281 11.5944',
+  ]) {
+    const path = document.createElementNS(ICON_NS, 'path')
+    path.setAttribute('d', d)
+    path.setAttribute('stroke', 'currentColor')
+    svg.append(path)
+  }
+  for (const cy of ['3.3079', '12.6921']) {
+    const ring = document.createElementNS(ICON_NS, 'circle')
+    ring.setAttribute('cx', '12.4502')
+    ring.setAttribute('cy', cy)
+    ring.setAttribute('r', '1.56962')
+    ring.setAttribute('stroke', 'currentColor')
+    svg.append(ring)
+  }
+  return svg
+}
+
+/**
+ * Branch from a completed turn: DSH's turn footer action, "Branch into a new conversation".
+ *
+ * The reference's footer (dsh-client-ui-chat `TurnTailNodeView` and its `forkAt`, client.js:6963-7001 and 13266-13285)
+ * forks with `atSeq` set to the seq that ended the turn and an incremented title, then **opens** the child, unlike the
+ * row menu's fork, which leaves the view where it was. The seq rides on the answer that closes the turn (`forkSeq`
+ * from the transcript, or the live `turn/completed`), so only a completed turn offers it.
+ */
+function branchAction(row) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'action'
+  button.dataset.action = 'branch'
+  button.append(branchIcon())
+  button.title = 'Branch into a new conversation'
+  button.setAttribute('aria-label', 'Branch into a new conversation')
+  button.onclick = async () => {
+    const source = current
+    const atSeq = Number(row.dataset.forkSeq)
+    if (source === null || !Number.isSafeInteger(atSeq)) return
+    button.disabled = true
+    try {
+      const response = await fetch('/api/sessions/' + encodeURIComponent(source) + '/fork', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ atSeq }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || typeof body.session !== 'string') {
+        setNote(body.error ?? 'could not branch from that turn')
+        return
+      }
+      setNote('')
+      await renderTree()
+      await showSession(body.session)
+    } finally {
+      button.disabled = false
+    }
+  }
+  return button
+}
+
+/**
+ * A turn just completed on the stream: the answer that closed it can now be branched from.
+ *
+ * The same rule as the transcript's `forkSeq`: the turn's last row must be an answer with text (DSH refuses the branch
+ * when a call came after the answer, or there was no answer). The button joins an action bar that is already drawn,
+ * because the row may have settled before the turn's end arrived.
+ */
+function markBranchable(seq) {
+  if (!Number.isSafeInteger(seq)) return
+  const row = lastTurnRow()
+  if (row === null || !row.classList.contains('assistant') || row.textContent.trim() === '') return
+  row.dataset.forkSeq = String(seq)
+  const bar = row.querySelector(':scope > .actions')
+  if (bar !== null && bar.querySelector('[data-action="branch"]') === null) bar.append(branchAction(row))
 }
 
 /**
@@ -6303,7 +6507,33 @@ function renderTodo() {
   )
 }
 
+/**
+ * DSH's Chat line for a session whose history cannot be loaded: "Failed to load history: {message} ({code})"
+ * (`dsh-client-ui-chat` `lib/client.js:5991`). The message is the server's own reason (`{"error": "no session …"}`), else
+ * the status text; the code is the HTTP status. Ported from developer-six's 4cd4cafb.
+ */
+function historyFailureText(status, statusText, failure) {
+  const reason =
+    failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
+      ? failure.error
+      : statusText || 'no reason given'
+  return `Failed to load history: ${reason} (${status})`
+}
+
+/**
+ * Open a session in the conversation column. Resolves true when its history was read, false when the session could not
+ * be loaded and the column shows DSH's failure line instead (#56). It also resolves false when a later open replaced
+ * this one before it drew; the later open draws instead.
+ *
+ * Opens can overlap. A reload runs `restoreSelection` and may also run a caller's open of the same session; a double
+ * click, or the stream's `reset` during a click's open, does the same. Each open empties the log and then awaits its
+ * reads. When two opens each appended their history, both drew. Measured in check-goal-command's reload: four Command
+ * input bubbles over eight `.hc-command` rows, four of them empty placeholders. An older session's history that landed
+ * late was appended under the newer session too. So every step after an await first checks that this is still the
+ * latest open (`showGeneration`).
+ */
 async function showSession(id) {
+  const generation = ++showGeneration
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6322,10 +6552,21 @@ async function showSession(id) {
    * is current (`dsh-client-ui-workspace` `lib/client.js:964-966`); the tree is redrawn once, shortly, only in that case.
    */
   if (current !== null && current !== id && placeholderDrawn(current)) scheduleTreeRefresh()
+  /** Opening a session ends an unavailable one's state; the read below sets it again if this one cannot be loaded either. */
+  if (unavailableSession !== null) {
+    unavailableSession = null
+    renderComposerState()
+  }
   /** Opening another session gives New session's target back to it (`chosenWorkspace`, #25), even a session opened before. */
   if (current !== id) chooseWorkspace(null)
   current = id
   paintEmptyState()
+  /** Kept the moment it opens, as DSH's `replaceMain` writes its selection, so a reload comes back here (`restoreSelection`). */
+  rememberCurrent()
+  /** A one-shot subagent's child shows DSH's read-only record in the composer's place. */
+  paintComposerAccess()
+  /** Opening a session is what reads its completion (DSH's `reconcileStatus`, `client.js:965`). */
+  if (unreadSessions.delete(id)) paintRunningMarks()
   /** The header's jobs control follows the open session: its rows are re-read now, not after the transcript. */
   jobsSessionChanged()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
@@ -6335,8 +6576,11 @@ async function showSession(id) {
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
+  /** A later open started while the list was read. That open empties and fills the log, so this one must not touch it. */
+  if (generation !== showGeneration) return false
   syncSelectionToSession()
   if (view === 'trajectory') await showLedger(id)
+  if (generation !== showGeneration) return false
   /**
    * The log is cleared and refilled from the session's own history.
    *
@@ -6346,6 +6590,7 @@ async function showSession(id) {
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    if (generation !== showGeneration) return false
     if (!response.ok) {
       /**
        * A session that is no longer there is **not** the session being shown.
@@ -6353,19 +6598,48 @@ async function showSession(id) {
        * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
        * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+       *
+       * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
+       * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
+       * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
+       * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
+       * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
+       *
+       * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
+       * unlisted saved session starts a fresh New session instead (`WorkspaceTree.restoreChoice`), as DSH's
+       * `restoreSelection` does. The tree is read again here, so a row whose session is no longer listed goes, and the
+       * selection with it.
        */
+      const failure = await response.json().catch(() => ({}))
+      /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
+      if (generation !== showGeneration) return false
+      if (current !== id) return false
+      unavailableSession = id
       current = null
-      const title = document.getElementById('session-title')
-      if (title !== null) title.textContent = 'No session'
+      paintSessionHeading()
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
+      const note = document.createElement('div')
+      note.className = 'turn denied load-error'
+      note.setAttribute('role', 'alert')
+      note.textContent = historyFailureText(response.status, response.statusText, failure)
+      log.append(note)
       paintEmptyState()
       applySessionAccess(null)
+      /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
+      rememberCurrent()
+      paintComposerAccess()
+      renderComposerState()
+      selectedPath = null
+      await renderTree()
+      markSelection()
       jobsSessionChanged()
       paintScheduleHeader()
-      return
+      return false
     }
     const body = await response.json()
+    /** The same check after the body is read: only the latest open appends its turns. */
+    if (generation !== showGeneration) return false
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6377,10 +6651,15 @@ async function showSession(id) {
     updateStatusBar()
     /** The session's own access mode, which is what the chip must show after a reload. */
     applySessionAccess(body.permission?.mode ?? null)
-    /** The header follows the conversation, the way DSH's does. */
-    const titleCell = document.getElementById('session-title')
+    /**
+     * The header follows the conversation, the way DSH's does: no title while it is blank, then its display title, never
+     * the raw id (#24). The list read just above knows whether it is blank; this answer is the fresher title.
+     */
+    if (current === id) {
+      const listed = sessionMetas.get(id) ?? { id, turns: Array.isArray(body.turns) ? body.turns.length : 0 }
+      paintSessionHeading({ ...listed, ...(typeof body.title === 'string' ? { title: body.title } : {}), ...(typeof body.cwd === 'string' ? { cwd: body.cwd } : {}) })
+    }
     const branchCell = document.getElementById('session-branch')
-    if (titleCell !== null) titleCell.textContent = typeof body.title === 'string' && body.title.length > 0 ? body.title : id
     if (branchCell !== null) branchCell.textContent = typeof body.cwd === 'string' ? body.cwd : ''
     /**
      * Each turn renders inside its own guard.
@@ -6411,6 +6690,8 @@ async function showSession(id) {
     }
     followChatTail(true)
   } catch (error) {
+    /** An older open's failed read says nothing in the conversation a later open is drawing. */
+    if (generation !== showGeneration) return false
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
     note.className = 'turn denied'
@@ -6427,6 +6708,76 @@ async function showSession(id) {
   renderScheduleDrawer()
   void refreshScheduleList()
   void refreshScheduleCatalog()
+  return true
+}
+
+/** Each session's record as `/api/sessions` last listed it — what tells the composer that the open one is a one-shot child. */
+const listedMetas = new Map()
+
+/**
+ * The composer, or DSH's read-only record in its place.
+ *
+ * A one-shot subagent's session takes no follow-up, so DSH replaces its composer with one status line
+ * (`SubagentReadOnlyComposer`, dsh-client-ui-subagent `lib/client.js:678`, chosen by `selectReadOnlySubagent`, `:944`).
+ * The form is hidden and its field disabled as well, so neither Enter nor a script can send into it; any other session
+ * gets the composer back. Phase A measured the version before it: the child's composer was writable and a turn sent from
+ * it was run (R-developer-eight-26).
+ */
+function paintComposerAccess() {
+  const readOnly = current !== null && SessionRules.composerReadOnly(listedMetas.get(current))
+  /**
+   * A session that could not be loaded keeps the composer on screen but disabled, as DSH's does: its editor is not
+   * editable and its primary action is disabled while the session is not live (`dsh-client-ui-conversation`
+   * `lib/client.js:18819-18824`, `:18948`), and the placeholder says why (`renderComposerState`) (#56).
+   */
+  const unavailable = unavailableSession !== null
+  composer.hidden = readOnly
+  field.disabled = readOnly || unavailable
+  field.readOnly = readOnly || unavailable
+  document.getElementById('subagent-readonly').hidden = !readOnly
+  document.body.dataset.composer = readOnly ? 'read-only' : unavailable ? 'unavailable' : 'writable'
+}
+
+/**
+ * The conversation header and the window title follow the open session's entry in the latest session list (#24).
+ *
+ * DSH's header reads the live session list (`dsh-client-ui-conversation` `lib/client.js:17990`) and its window title the
+ * selected session's title (`dsh-client-ui-layout` `lib/client.js:57-68`), so both change when the title does. The header
+ * here was written once, when a session was opened, from the id when there was no title yet: after *New session* it
+ * printed `session-<uuid>`, and it kept printing it after the first prompt had titled the session, until a reload. Every
+ * read of `/api/sessions` — the tree's, the turn-end refresh's, the flat list's — now repaints both.
+ */
+let sessionMetas = new Map()
+function noteSessions(list) {
+  if (!Array.isArray(list)) return
+  sessionMetas = new Map(list.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string').map((meta) => [meta.id, meta]))
+  if (current !== null && sessionMetas.has(current)) paintSessionHeading()
+}
+
+/**
+ * Paint the header's title and the window title for the open session: `No session` and `Heddle` with nothing open; no
+ * title while the session is blank, then its display title (`WorkspaceTree.headerTitle`); `<title> — Heddle` once it has a
+ * stored title (`WorkspaceTree.documentTitle`). `meta` defaults to the open session's listed entry; an open session the
+ * list does not know yet is left as it is, for the next read to paint.
+ */
+function paintSessionHeading(meta = current === null ? null : sessionMetas.get(current)) {
+  const cell = document.getElementById('session-title')
+  if (current === null || meta === null) {
+    if (cell !== null) {
+      cell.hidden = false
+      /** A session the reader opened that could not be loaded is named for what it is, not as nothing open (#56). */
+      cell.textContent = current === null && unavailableSession !== null ? 'Session unavailable' : 'No session'
+    }
+    document.title = WorkspaceTree.documentTitle(null)
+    return
+  }
+  if (meta === undefined) return
+  const heading = WorkspaceTree.headerTitle(meta)
+  if (cell !== null) {
+    cell.hidden = heading === null
+    cell.textContent = heading ?? ''
+  }
+  document.title = WorkspaceTree.documentTitle(meta)
 }
 
 /**
@@ -6505,6 +6856,12 @@ async function refreshSessions() {
   const response = await fetch('/api/sessions')
   if (!response.ok) return
   const sessions = await response.json()
+  listedMetas.clear()
+  for (const meta of Array.isArray(sessions) ? sessions : []) {
+    if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string') listedMetas.set(meta.id, meta)
+  }
+  paintComposerAccess()
+  noteSessions(sessions)
   /**
    * The server's `running` flag is the authority: a turn whose end this page never saw — a failed turn, a reload
    * mid-turn, a dropped stream — must not leave a session looking active, and a turn already running when the page
@@ -6523,6 +6880,7 @@ async function refreshSessions() {
     const ended = []
     for (const id of [...runningSessions]) {
       if (!live.has(id) && (runningMarkedAt.get(id) ?? 0) <= readTick) {
+        noteCompletion(id, true, false)
         runningSessions.delete(id)
         runningSince.delete(id)
         ended.push(id)
@@ -6533,6 +6891,7 @@ async function refreshSessions() {
       if (id.length === 0) continue
       if (!runningSessions.has(id)) {
         runningSessions.add(id)
+        noteCompletion(id, false, true)
         changed = true
       }
       /**
@@ -6581,24 +6940,75 @@ async function refreshSessions() {
     if (ended.length > 0) renderComposerState()
   }
   /**
-   * The newest session is selected when nothing is yet.
-   *
-   * Without this the page starts attached to nothing: the tree appears, the log stays empty even though
-   * sessions exist, and a prompt sent from that state creates a NEW session instead of continuing the one
-   * a person is looking at. Measured: asking a question produced a two-message live view while the session
-   * beside it held the whole transcript, because `current` was null and the click that followed selected
-   * the session the prompt had just created rather than the one holding history.
-   *
-   * The list itself is drawn from the tree — this walk only needs to know which session is newest, and it
-   * deliberately asks for **every** session rather than only the ad-hoc ones: a page that started with no
-   * selection because all its sessions happened to be registered would be the same bug again.
+   * Nothing is opened here. This used to open the newest session in the store whenever nothing was open, and on a
+   * shared server the newest session is often another person's: a load showed their transcript, and the next message
+   * went into their conversation (#17). DSH opens a session only when a person picks one or when its startup restores
+   * the saved selection, else starts a fresh one (`restoreSelection`, `dsh-client-ui-workspace` `lib/client.js:1605-1628`),
+   * and so does this page: a load asks `restoreSelection`, which reopens the saved session or starts a fresh one in the
+   * most recently active workspace, and nothing else opens a session nobody picked.
+   */
+}
+
+/** Keep the open session, or that nothing is open, where `restoreSelection` reads it back (`WorkspaceTree.SELECTION_KEY`). */
+function rememberCurrent() {
+  try {
+    localStorage.setItem(WorkspaceTree.SELECTION_KEY, WorkspaceTree.selectionRecord(current))
+  } catch (error) {
+    /* A browser with no storage still opens sessions; only the reload's memory of the open one is lost. */
+  }
+}
+
+/**
+ * Open what a page load should open: the session that was open before the reload, DSH's `restoreSelection`
+ * (`dsh-client-ui-workspace` `lib/client.js:1574-1628`), decided by `WorkspaceTree.restoreChoice`.
+ *
+ * The saved session reopens, a saved New session placeholder included. With nothing to reopen — a first visit, a cleared
+ * entry, a saved session that is gone or archived — a fresh session starts in the most recently active workspace, as
+ * DSH's does (`:1620`, `:1626`), without unfolding a workspace the person folded (a remembered collapse survives the
+ * reload, C33). It never opens on its own a session nobody saved: that was the newest session in the store, on a shared
+ * server another person's (#17). A list that cannot be read decides nothing: it falls back to `refreshSessions`, so a
+ * failed request neither starts nor opens a session.
+ */
+async function restoreSelection() {
+  let saved = null
+  try {
+    saved = WorkspaceTree.savedSelection(localStorage.getItem(WorkspaceTree.SELECTION_KEY))
+  } catch (error) {
+    saved = null
+  }
+  const read = async (path) => {
+    try {
+      const response = await fetch(path)
+      return response.ok ? await response.json() : null
+    } catch (error) {
+      return null
+    }
+  }
+  const [workspaceBody, sessions] = await Promise.all([read('/api/workspaces'), read('/api/sessions')])
+  /**
+   * If a session was opened while the lists were read, that session stays shown. It may be a row a person picked, a turn
+   * that created a session, or a check that opens one by name. The boot does not reopen the saved session over it, or
+   * start a fresh one beside it. The boot before #17 kept this rule: `refreshSessions` opened a session only
+   * `if (current === null)`. Without it, a reload ran two opens of one session at once, and check-goal-command's reload
+   * drew the history twice. The open in flight reads the list itself.
    */
   if (current !== null) return
-  const select = sessions[0]?.id ?? null
-  if (select !== null) {
-    current = select
-    await showSession(select)
+  if (!Array.isArray(sessions)) {
+    await refreshSessions()
+    return
   }
+  const workspaces = Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : []
+  const choice = WorkspaceTree.restoreChoice(saved, workspaces, sessions)
+  if (choice.forget === true) rememberCurrent()
+  if (choice.kind === 'saved') {
+    await showSession(choice.id)
+    return
+  }
+  if (choice.kind === 'start') {
+    await startSessionAt({ path: choice.path, reveal: false, boot: true })
+    if (current !== null) return
+  }
+  await refreshSessions()
 }
 
 /**
@@ -6954,8 +7364,13 @@ events.addEventListener('sessions', (message) => {
   try {
     const data = JSON.parse(message.data)
     if (data.type === 'session/renamed' && data.session === current && typeof data.title === 'string' && data.title.length > 0) {
-      const titleCell = document.getElementById('session-title')
-      if (titleCell !== null) titleCell.textContent = data.title
+      /**
+       * Through the header's one painter (#24), so a titled New session's header is shown and the window title follows
+       * too; the listed entry is kept in step until the tree's own read lands.
+       */
+      const listed = { ...(sessionMetas.get(current) ?? { id: current }), title: data.title }
+      sessionMetas.set(current, listed)
+      paintSessionHeading(listed)
     }
   } catch {
     // a frame that is not JSON changes nothing but the tree
@@ -7006,6 +7421,7 @@ events.addEventListener('session', (message) => {
      */
     const wasRunning = runningSessions.has(payload.session)
     markRunning(payload.session)
+    noteCompletion(payload.session, wasRunning, true)
     if (!wasRunning || !runningSince.has(payload.session)) {
       const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
       runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
@@ -7047,8 +7463,11 @@ events.addEventListener('session', (message) => {
     renderComposerState()
   }
   else if (event.type === 'turn/completed') {
+    noteCompletion(payload.session, runningSessions.has(payload.session), false)
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
+    /** A turn that ended waits on nobody; the approval poll would say so within two seconds, the end says it now. */
+    pendingInteractions.delete(payload.session)
     paintRunningMarks()
     if (payload.session === (current ?? composerKey)) {
       liveRounds = 0
@@ -7075,6 +7494,7 @@ events.addEventListener('session', (message) => {
      */
     if (current === null || payload.session === current) {
       settleChat()
+      markBranchable(event.seq)
       void renderSettledAnswers()
       /** DSH's turn tail exists only for a completed turn, so a turn's created-reminder cards land here. */
       renderScheduleCards()
@@ -7832,6 +8252,10 @@ function queuePreview(text) {
 
 /** Submit the draft, or steer what is waiting when there is nothing to submit. */
 function submitDraft(gesture) {
+  /** A one-shot subagent's record takes no follow-up (`paintComposerAccess`); nothing is sent into it. */
+  if (document.body.dataset.composer === 'read-only') return
+  /** Nor into a session that could not be loaded (#56): DSH's composer for it does not submit, and Enter reaches here past the button. */
+  if (unavailableSession !== null) return
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
@@ -7843,6 +8267,17 @@ function submitDraft(gesture) {
     growComposer()
     updateSendDisabled()
     void slashCommands.submit(text)
+    return
+  }
+  /**
+   * Nowhere to send (#134): no session and no workspace to start one in. The words stay in the composer, the refusal is
+   * DSH's `draft.workspaceRequired`, and the hero's picker opens, as DSH's inert composer opens it on Enter
+   * (`onRequestWorkspace`, `dsh-client-ui-conversation` `lib/client.js:18941-18947`); with no workspace to list, the picker
+   * goes straight to Add workspace. Before, the message went out with no folder and ran in the server's start folder.
+   */
+  if (composerAimless()) {
+    setNote(NO_WORKSPACE_REFUSAL)
+    if (!heroRow.hidden && heroMenu.hidden) void openHeroMenu()
     return
   }
   field.value = ''
@@ -8329,17 +8764,40 @@ events.addEventListener('turn', (message) => {
 })
 
 async function runTurn(text, key, attachments = [], onAccepted) {
+  const target = key === QUEUE_KEY_NONE ? null : key
+  /**
+   * A message with no session starts one, and it starts it **where the page says** (#134): the workspace the hero chip
+   * and the note name (`newConversationTarget`), read after boot has drawn the tree and run first use, so a message sent
+   * the moment the page is up waits for the Default workspace rather than racing it. It is sent as `new`, because the
+   * route otherwise continues the newest session already in that folder, which on a shared server may be another
+   * person's (#17); "a new conversation in …" is what the note promises. With nowhere to start one nothing is sent:
+   * DSH's composer is inert without a workspace (`composerAimless`), and a message that reaches here anyway (queued
+   * before the state was known) is refused in DSH's words rather than run in the server's start folder, outside every
+   * workspace and out of the tree, which is what #134 measured after a reload. A server that serves no workspaces keeps
+   * the old request: its own folder is the only place there is.
+   */
+  let folder = activeFolder
+  let fresh = false
+  if (target === null) {
+    await firstTreeReady
+    const aim = newConversationTarget()
+    if (aim !== null) {
+      folder = aim.path
+      fresh = true
+      activeFolder = aim.path
+    } else if (workspaceRoutes !== 'absent') {
+      throw new Error(NO_WORKSPACE_REFUSAL)
+    }
+  }
   liveTurns += 1
   updateStatusBar()
   /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
   await events.whenOpen(3000)
   const startedAt = performance.now()
-  const target = key === QUEUE_KEY_NONE ? null : key
   const response = await sendTurn({
     /**
-     * The folder is named when a tree node is selected, and the server continues **that folder's**
-     * session. With no selection the request is what it always was — a session in the server's own
-     * working directory — so a window opened without touching the tree still works.
+     * A session's turn names it, and the server resumes that session wherever it lives. A turn with no session names the
+     * folder it starts in, above.
      *
      * The endpoint and model named here are the composer's own choice, which is what makes the model seat
      * more than a label: the turn asks the backend a person picked, and the server records it on the session
@@ -8348,7 +8806,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
-    folder: activeFolder,
+    folder,
+    ...(fresh ? { new: true } : {}),
     ...selectionForTurn(),
     /** Answer at acceptance; the verdict comes on the stream (#128). A server without it streams, read below. */
     detach: true,
@@ -8382,6 +8841,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
        */
       if (target === null) {
         current = payload.session
+        rememberCurrent()
         chooseWorkspace(null)
         adoptSession(payload.session)
         /** The pending send belongs to the session it just created; the row follows it. */
@@ -8445,8 +8905,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       settleChat()
       void renderSettledAnswers()
       if (typeof payload.session === 'string') {
+        noteCompletion(payload.session, runningSessions.has(payload.session), false)
         runningSessions.delete(payload.session)
         runningSince.delete(payload.session)
+        pendingInteractions.delete(payload.session)
         paintRunningMarks()
       }
       renderComposerState()
@@ -8456,8 +8918,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       drawTurnFailure(payload.session, payload.message)
       /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
       if (typeof payload.session === 'string') {
+        noteCompletion(payload.session, runningSessions.has(payload.session), false)
         runningSessions.delete(payload.session)
         runningSince.delete(payload.session)
+        pendingInteractions.delete(payload.session)
         paintRunningMarks()
       }
       renderComposerState()
@@ -8544,8 +9008,11 @@ function growComposer() {
   field.style.height = `${Math.min(field.scrollHeight, COMPOSER_MAX_HEIGHT)}px`
 }
 function updateSendDisabled() {
-  /** While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. */
-  sendButton.disabled = !anyRunning() && field.value.trim().length === 0
+  /**
+   * While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. With nowhere
+   * to send (`composerAimless`) Send is disabled, as DSH's primary action is while its composer is inert (#134).
+   */
+  sendButton.disabled = unavailableSession !== null || composerAimless() || (!anyRunning() && field.value.trim().length === 0)
 }
 field.addEventListener('input', () => {
   growComposer()
@@ -8594,9 +9061,18 @@ function renderComposerState() {
    * chord would do — "Cmd/Ctrl+Enter steers all queued messages". That is `canSteerQueue` in its own words.
    */
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
-  field.placeholder = canSteerQueue
-    ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : (placeholderOverride ?? 'Message or run a task, / commands')
+  /**
+   * DSH's `placeholder.unavailable` comes before the others: a disabled composer says why (`lib/client.js:18972`, #56).
+   * Then its `placeholder.workspace`: with no session and no workspace to start one in, the composer says what to do
+   * first (`lib/client.js:17819-17828`, #134).
+   */
+  field.placeholder = unavailableSession !== null
+    ? 'Session unavailable'
+    : composerAimless()
+      ? NO_WORKSPACE_PLACEHOLDER
+      : canSteerQueue
+        ? 'Cmd/Ctrl+Enter steers all queued messages'
+        : (placeholderOverride ?? 'Message or run a task, / commands')
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
@@ -10697,22 +11173,75 @@ function runningMark() {
   return mark
 }
 
+/**
+ * Sessions awaiting a person (`id → 'approval'`, from `/api/approvals` and the `approval` stream event) and sessions whose
+ * turn ended while they were off screen — DSH's `pendingInteraction` and `completionUnread`, kept by the page as DSH's
+ * client keeps them (`UiSession`, dsh-client-ui-session `client.js:773-775`): in memory, so a reload starts clean.
+ */
+const pendingInteractions = new Map()
+const unreadSessions = new Set()
+
+/** Keep one session's completion reminder in step with a running edge; the panel's own session is never unread. */
+function noteCompletion(id, wasRunning, running) {
+  const unread = WorkspaceTree.completionUnread(unreadSessions.has(id), { wasRunning, running, viewing: id === (current ?? composerKey) })
+  if (unread) unreadSessions.add(id)
+  else unreadSessions.delete(id)
+}
+
+/** A session row's status; an archived row keeps its cell blank, as DSH's does (`client.js:2306`). */
+function sessionRowStatus(node) {
+  const id = node.session.id
+  if (node.archived) return WorkspaceTree.rowStatus()
+  return WorkspaceTree.rowStatus({ pending: pendingInteractions.get(id), running: runningSessions.has(id), completed: unreadSessions.has(id) })
+}
+
+/** DSH's `StateDot` for a still state: a filled dot at 20% inset, warning for a pending interaction, done for unread. */
+function statusMark(status) {
+  if (status.state === 'ongoing') return runningMark()
+  const mark = document.createElement('span')
+  mark.className = 'status-dot'
+  mark.dataset.state = status.state
+  mark.setAttribute('role', 'img')
+  mark.setAttribute('aria-label', status.label)
+  mark.title = status.label
+  return mark
+}
+
+/** Paint one row's mark after its glyph, and put a pending interaction's word where its time is. */
+function paintRowStatus(row, status) {
+  const existing = row.querySelector(':scope > .status-dot')
+  const wanted = status.state === 'idle' ? null : status.label
+  if ((existing === null ? null : existing.getAttribute('aria-label')) !== wanted) {
+    existing?.remove()
+    if (wanted !== null) {
+      const mark = statusMark(status)
+      row.querySelector(':scope > .icon')?.after(mark)
+      /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
+      for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
+    }
+  }
+  const age = row.querySelector(':scope > .row-right > .age')
+  if (age === null) return
+  if (status.trailingLabel !== undefined) {
+    age.textContent = status.trailingLabel
+    age.dataset.trailing = 'true'
+    age.setAttribute('aria-hidden', 'true')
+  } else if (age.dataset.trailing === 'true') {
+    delete age.dataset.trailing
+    age.removeAttribute('aria-hidden')
+    age.textContent = relativeAge(age.dataset.stamp)
+  }
+}
+
 function paintRunningMarks() {
+  /** A status change can raise a group's watermark first, so a row it brings into view is drawn before it is painted. */
+  raiseOpenGroups()
   for (const entry of rowIndex.values()) {
     const { node, li } = entry
     if (node.kind !== 'session' || node.session === undefined || node.session === null) continue
     const row = li.querySelector(':scope > .row')
     if (row === null) continue
-    const existing = row.querySelector(':scope > .status-dot')
-    const running = runningSessions.has(node.session.id)
-    if (running && existing === null) {
-      const mark = runningMark()
-      row.querySelector(':scope > .icon')?.after(mark)
-      /** One shared start time keeps every visible spinner in phase — the reference pins them the same way. */
-      for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
-    } else if (!running && existing !== null) {
-      existing.remove()
-    }
+    paintRowStatus(row, sessionRowStatus(node))
   }
   /** The leading cell a running row gives its spinner is the one an idle row gives its reminder mark. */
   paintScheduleMarks()
@@ -10905,6 +11434,134 @@ function setNote(text) {
   treeNote.hidden = text === undefined || text === null || text === ''
 }
 
+/**
+ * Draw what `WorkspaceTree.emptyList` says for an empty list (#107): DSH's placeholder as the list's one item, a glyph over
+ * the text with the archived view's "View other sessions" action under it, or heddle's own note under the list. The
+ * action sets the filter back to `Hide archived`, as DSH's `leaveArchivedOnly` sets its default
+ * (`dsh-client-ui-workspace` `lib/client.js:3539-3541`), keeps that choice, and draws the list again.
+ */
+function paintEmptyList(empty) {
+  if (empty === null) return
+  if (empty.kind === 'note') {
+    setNote(empty.text)
+    return
+  }
+  setNote('')
+  const item = document.createElement('li')
+  item.className = 'tree-empty'
+  item.setAttribute('role', 'none')
+  const glyph = kindIcon(empty.glyph, false)
+  glyph.setAttribute('width', '24')
+  glyph.setAttribute('height', '24')
+  glyph.classList.add('tree-empty-glyph')
+  const text = document.createElement('div')
+  text.className = 'tree-empty-text'
+  text.textContent = empty.text
+  item.append(glyph, text)
+  if (empty.action !== undefined) {
+    const action = document.createElement('button')
+    action.type = 'button'
+    action.className = 'tree-empty-action'
+    action.textContent = empty.action
+    action.onclick = async () => {
+      archiveMode = 'hide'
+      rememberArchived()
+      await renderTree()
+    }
+    item.append(action)
+  }
+  treeList.append(item)
+}
+
+/* session-id-copy:begin */
+/**
+ * Copy Session ID — DSH's last session-row menu item, `session-id` (dsh-client-ui-workspace `lib/client.js:4730-4740`,
+ * registered after Archive at order 450, `:5283`): it closes the menu, writes the **complete** id to the clipboard and
+ * reports one of two notices (`:4590-4605`; the en words at `:4929-4931`). The write is DSH's `writeClipboard`:
+ * `navigator.clipboard.writeText` when the browser has it, else a hidden read-only textarea and `execCommand('copy')`.
+ *
+ * Pure apart from the `navigator` and `document` it is handed, so `test/session-id-copy.test.ts` loads it out of the page.
+ */
+const SessionIdCopy = (() => {
+  const TEXT = { menu: 'Copy Session ID', copied: 'Session ID copied', failed: 'Copy failed. Try again.' }
+  /** The primitives' Toast: held three seconds, then a one-second fade. */
+  const HOLD_MS = 3000
+  const FADE_MS = 1000
+
+  /** Write the text; true when it reached the clipboard. */
+  async function write(text, env) {
+    const clipboard = env?.navigator?.clipboard
+    if (typeof clipboard?.writeText === 'function') {
+      try {
+        await clipboard.writeText(text)
+        return true
+      } catch (error) {
+        return false
+      }
+    }
+    const doc = env?.document
+    if (typeof doc?.execCommand !== 'function') return false
+    const area = doc.createElement('textarea')
+    area.value = text
+    area.setAttribute('readonly', '')
+    area.style.position = 'fixed'
+    area.style.left = '-9999px'
+    doc.body.appendChild(area)
+    area.select()
+    try {
+      return doc.execCommand('copy') === true
+    } catch (error) {
+      return false
+    } finally {
+      area.remove()
+    }
+  }
+
+  /** Copy one session's id and answer with the notice: DSH's `sessionIdCopied` (success) or `sessionIdCopyFailed` (warning). */
+  async function copy(sessionId, env) {
+    return (await write(String(sessionId), env))
+      ? { kind: 'sessionIdCopied', text: TEXT.copied, tone: 'success' }
+      : { kind: 'sessionIdCopyFailed', text: TEXT.failed, tone: 'warning' }
+  }
+
+  return { TEXT, HOLD_MS, FADE_MS, copy }
+})()
+/* session-id-copy:end */
+
+/** The Toast seat, drawn on demand and replaced by the next notice, so a second copy restarts its three seconds. */
+let sessionToastTimer = null
+function showSessionToast(notice) {
+  if (sessionToastTimer !== null) clearTimeout(sessionToastTimer)
+  document.getElementById('session-toast')?.remove()
+  const toast = document.createElement('div')
+  toast.id = 'session-toast'
+  toast.setAttribute('role', 'alert')
+  toast.dataset.kind = notice.kind
+  toast.dataset.tone = notice.tone
+  toast.textContent = notice.text
+  document.body.append(toast)
+  sessionToastTimer = setTimeout(() => {
+    toast.remove()
+    sessionToastTimer = null
+  }, SessionIdCopy.HOLD_MS + SessionIdCopy.FADE_MS)
+}
+
+/** The row menu's Copy Session ID: the session's full id to the clipboard, and DSH's notice for how it went. */
+async function copySessionId(node) {
+  const id = node.session?.id
+  if (typeof id !== 'string' || id.length === 0) return
+  showSessionToast(await SessionIdCopy.copy(id, { navigator, document }))
+}
+
+/**
+ * Say why an archived session did not open, and open nothing (DSH's `notifyArchivedNotOpenable`). The app-wide archive
+ * notice says it where the page has one (`showArchiveNotice`, hd/developer-eight-archive); otherwise the tree's note does.
+ */
+function notifyArchivedNotOpenable() {
+  if (typeof showArchiveNotice === 'function') showArchiveNotice('archivedNotOpenable')
+  else setNote(WorkspaceTree.ARCHIVED_NOT_OPENABLE)
+}
+
 const FOLDER_PATH = 'M2 4.6A1.6 1.6 0 0 1 3.6 3h2.6l1.6 2h4.6A1.6 1.6 0 0 1 14 6.6v4.8A1.6 1.6 0 0 1 12.4 13H3.6A1.6 1.6 0 0 1 2 11.4z'
 /** The one mark that distinguishes a type folder from a plain one: the braces around its name. */
 const TYPE_MARK = 'M6.3 7.4 5 9.5l1.3 2.1M9.7 7.4 11 9.5l-1.3 2.1'
@@ -10932,7 +11589,7 @@ function svgPath(d) {
  * stop saying it without a reload. One interval repaints the text only — it does not re-fetch or redraw the tree.
  */
 function paintAges() {
-  for (const cell of document.querySelectorAll('#tree .age[data-stamp]')) {
+  for (const cell of document.querySelectorAll('#tree .age[data-stamp]:not([data-trailing])')) {
     cell.textContent = relativeAge(cell.dataset.stamp)
   }
 }
@@ -10988,6 +11645,8 @@ function kindIcon(kind, open = false) {
     'chevrons-up-down': 'M5 6l3-3 3 3M5 10l3 3 3-3',
     'archive-restore': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M8 2.5v4M6 4.5L8 2.5l2 2',
     'archive-only': 'M2.5 5.5h11v3h-11zM3.5 8.5v5h9v-5M6 3.5h4',
+    /** Two sheets, the front one whole: DSH's copy mark (`IconCopyOutlineRegular`) in this menu's stroke. */
+    copy: 'M5.5 5.5h7.5v8H5.5zM3 10.5V2.5h7.5v3',
   }
   if (menuMarks[kind] !== undefined) {
     const mark = document.createElementNS('http://www.w3.org/2000/svg', 'path')
@@ -11472,7 +12131,8 @@ function menuItemsFor(node) {
       run: () => openDeleteWorkspace(node),
     })
   }
-  if (node.kind === 'session' && node.session) {
+  /** The open New session placeholder offers nothing, as DSH's blank row has no menu (`WorkspaceTree.rowOffersActions`, #79). */
+  if (node.kind === 'session' && node.session && node.blank !== true) {
     /**
      * A session's row offers what DSH's own session menu offers — pin, rename, fork, archive — because that is the
      * set a person expects from this control. The `node.session` guard is load-bearing: a `_sessions_` folder written
@@ -11495,6 +12155,8 @@ function menuItemsFor(node) {
     items.push({ label: 'Rename', glyph: 'rename', run: () => renameSession(node) })
     items.push({ label: 'Fork session', glyph: 'fork', run: () => forkSession(node) })
     items.push({ label: node.archived ? 'Unarchive session' : 'Archive session', glyph: 'archive', run: () => archiveSession(node) })
+    /** DSH's last item, on every session row, archived ones too (`session-id`, order 450). */
+    items.push({ label: SessionIdCopy.TEXT.menu, glyph: 'copy', run: () => copySessionId(node) })
   }
   if (node.kind === 'instance') {
     /**
@@ -11665,12 +12327,29 @@ document.getElementById('session-rename-confirm').addEventListener('click', () =
 /**
  * Fork a session: DSH's item and DSH's naming — `<title> (1)` — appearing beside its parent, with the view left
  * where it was, because a fork is a branch rather than a departure.
+ *
+ * A session that has not run a turn is refused here, before the request, and a refusal is said in DSH's words, never in
+ * the server's, which carry the raw session id (`WorkspaceTree.forkBlocked`, `forkRefusal`, #79). The row menu of a
+ * New session placeholder no longer offers Fork at all; the menu of a titled session with no turn, and the chord, still
+ * reach this.
  */
 async function forkSession(node) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
-  const body = await response.json().catch(() => ({}))
+  const blocked = WorkspaceTree.forkBlocked(node.session)
+  if (blocked !== null) {
+    setNote(blocked)
+    return
+  }
+  let response
+  let body
+  try {
+    response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/fork', { method: 'POST' })
+    body = await response.json().catch(() => ({}))
+  } catch (error) {
+    setNote(WorkspaceTree.FORK_FAILED)
+    return
+  }
   if (!response.ok) {
-    setNote(body.error ?? 'could not fork that session')
+    setNote(WorkspaceTree.forkRefusal(body))
     return
   }
   setNote('')
@@ -11684,32 +12363,38 @@ function pinSession(node) {
   const front = () => {
     if (!node.pinned && orderState.orderBy === 'manual') rememberOrder(WorkspaceTree.withPinFronted(orderState, node.session.id, shownOrders))
   }
-  return setSessionFlags(node, { pinned: !node.pinned }, {}, front)
+  return setSessionFlags(node, { pinned: !node.pinned }, {}, { applied: front })
 }
 
 /**
- * Archive (or unarchive) a session.
+ * Archive (or unarchive) a session — DSH's order of events.
  *
- * Archiving a session with a turn in flight is refused by the route unless the caller says to stop it — DSH puts this
- * behind a dialog that offers exactly that choice. A native confirm is that dialog here: it says what will happen to the
- * work, and declining leaves everything as it was.
+ * A quiet session is archived at once, with no question, and a notice offers `undo` (DSH's `toast.archived`). A session
+ * with running work is the one case that asks first, and the **server** decides it, as DSH's Host does: the plain archive
+ * is refused `409 active` with the work it found (`activity`: the turn in progress, running subagents), and only then
+ * does the stop-and-archive dialog open, listing that work. The page used to guess from its own running set and ask a
+ * native confirm that named only "the turn"; a subagent still working under an idle session was archived unasked.
  */
 async function archiveSession(node) {
-  if (!node.archived && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
-    const answer = window.confirm('This session is running. Stop the turn and archive it?')
-    if (!answer) return
-    return setSessionFlags(node, { archived: true }, { stop: true })
+  if (node.archived) return setSessionFlags(node, { archived: false })
+  const result = await setSessionFlags(node, { archived: true }, {}, { quiet: (status, body) => SessionArchive.refusedActivity(status, body) !== undefined })
+  if (result.ok) {
+    showArchiveNotice('archived', node)
+    return
   }
-  return setSessionFlags(node, { archived: !node.archived })
+  const activity = SessionArchive.refusedActivity(result.status, result.body)
+  if (activity !== undefined) openStopAndArchive(node, activity)
 }
 
 /**
  * Pin, unpin, archive or unarchive a session, then redraw what the change affects.
  *
  * One function for both flags because the route is one: the record and the definition are written together, and
- * a row's menu only decides which of the two it is changing.
+ * a row's menu only decides which of the two it is changing. Answers `{ ok, status, body }`; a refusal the caller
+ * handles itself (`options.quiet`) is not written to the tree's note, and `options.applied` runs once the server took the
+ * change, before the redraw (a pin under Manual fronts the session in its saved orders, C17).
  */
-async function setSessionFlags(node, patch, extra = {}, applied = () => {}) {
+async function setSessionFlags(node, patch, extra = {}, options = {}) {
   const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -11720,22 +12405,26 @@ async function setSessionFlags(node, patch, extra = {}, applied = () => {}) {
    * The route refuses an archive while the session still has work the page did not know about — a background job
    * (DSH's job archive admission lists it). DSH's archive dialog offers to stop that work; the confirm names it, and
    * agreeing archives with `stop: true`, which kills the jobs with `session archived`.
+   *
+   * A refusal that names its work in DSH's `activity` list (the turn, background jobs, running subagents) goes to the
+   * caller instead: `archiveSession` opens DSH's own stop-and-archive dialog, which lists every family
+   * (`SessionArchive`, R-developer-eight-13). The native confirm is kept only for a refusal without that list.
    */
-  if (response.status === 409 && body.code === 'active' && patch.archived === true && extra.stop !== true) {
+  if (response.status === 409 && body.code === 'active' && patch.archived === true && extra.stop !== true && !Array.isArray(body.activity)) {
     const jobs = Array.isArray(body.jobs) ? body.jobs : []
     const work =
       jobs.length === 0
         ? 'a running turn'
         : `${jobs.length === 1 ? 'a running background job' : `${jobs.length} running background jobs`} (${jobs.map((job) => job.label).join(', ')})`
-    if (!window.confirm(`This session has ${work}. Stop ${jobs.length > 1 ? 'them' : 'it'} and archive the session?`)) return
-    return setSessionFlags(node, patch, { ...extra, stop: true })
+    if (!window.confirm(`This session has ${work}. Stop ${jobs.length > 1 ? 'them' : 'it'} and archive the session?`)) return { ok: false, status: response.status, body }
+    return setSessionFlags(node, patch, { ...extra, stop: true }, options)
   }
   if (!response.ok) {
-    setNote(body.error ?? 'could not change that session')
-    return
+    if (typeof options.quiet !== 'function' || !options.quiet(response.status, body)) setNote(body.error ?? 'could not change that session')
+    return { ok: false, status: response.status, body }
   }
   setNote('')
-  applied()
+  options.applied?.()
   /**
    * A flag changes the row's **place**, and the reference glides it there instead of letting it jump: the rows are measured
    * before the redraw and animated from where they were after it (`AnimatedRows`, 200 ms ease-out). Only this handler wraps
@@ -11745,6 +12434,116 @@ async function setSessionFlags(node, patch, extra = {}, applied = () => {}) {
   await renderTree()
   await refreshSessions()
   glideRows(previousBoxes)
+  return { ok: true, status: response.status, body }
+}
+
+/**
+ * The stop-and-archive dialog — DSH's `SessionArchiveConfirmDialog`: its title, the description naming the session and
+ * the restore path, the work that will be stopped one family per line, and Cancel / Stop and archive. Confirming asks
+ * the server to stop that work the way the Stop button does and archive (`stop: true`); the archive is written first and
+ * the stops settle behind it. Cancelling leaves the session running and in its place. A failure stays in the dialog.
+ */
+const sessionArchiveDialog = document.getElementById('session-archive')
+let stopArchiveTarget = null
+for (const close of sessionArchiveDialog.querySelectorAll('[data-ws-close]')) {
+  close.addEventListener('click', () => {
+    if (stopArchiveTarget?.busy !== true) sessionArchiveDialog.close()
+  })
+}
+sessionArchiveDialog.addEventListener('click', (clickEvent) => {
+  if (clickEvent.target === sessionArchiveDialog && stopArchiveTarget?.busy !== true) sessionArchiveDialog.close()
+})
+sessionArchiveDialog.addEventListener('cancel', (cancelEvent) => {
+  if (stopArchiveTarget?.busy === true) cancelEvent.preventDefault()
+})
+
+function openStopAndArchive(node, activity) {
+  stopArchiveTarget = { node, busy: false }
+  const title = node.session?.title !== undefined && node.session.title.length > 0 ? node.session.title : node.label ?? node.session.id
+  document.getElementById('session-archive-desc').textContent = SessionArchive.confirmDescription(title)
+  document.getElementById('session-archive-activity').replaceChildren(
+    ...activity.map((entry) => {
+      const item = document.createElement('li')
+      item.textContent = SessionArchive.activityLine(entry)
+      return item
+    }),
+  )
+  document.getElementById('session-archive-status').hidden = true
+  dialogError('session-archive-error', '')
+  document.getElementById('session-archive-confirm').disabled = false
+  for (const close of sessionArchiveDialog.querySelectorAll('[data-ws-close]')) close.disabled = false
+  if (!sessionArchiveDialog.open) sessionArchiveDialog.showModal()
+}
+
+document.getElementById('session-archive-confirm').addEventListener('click', async () => {
+  if (stopArchiveTarget === null || !sessionArchiveDialog.open || stopArchiveTarget.busy) return
+  const target = stopArchiveTarget
+  const button = document.getElementById('session-archive-confirm')
+  const settle = (busy) => {
+    target.busy = busy
+    button.disabled = busy
+    for (const close of sessionArchiveDialog.querySelectorAll('[data-ws-close]')) close.disabled = busy
+    document.getElementById('session-archive-status').hidden = !busy
+  }
+  settle(true)
+  dialogError('session-archive-error', '')
+  try {
+    const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
+    settle(false)
+    if (!result.ok) {
+      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      return
+    }
+    stopArchiveTarget = null
+    sessionArchiveDialog.close()
+    showArchiveNotice('stoppedAndArchived', target.node)
+  } catch (error) {
+    settle(false)
+    dialogError('session-archive-error', 'could not stop and archive that session: ' + (error && error.message))
+  }
+})
+
+/**
+ * The archive notice — DSH's workspace toast. After an archive it reads "Session archived. You can undo", and while
+ * archived rows are hidden it adds "or filter archived sessions", which switches the filter to show them; undo
+ * unarchives without resuming any stopped work. The same seat says why an archived session cannot be opened.
+ */
+const archiveNotice = document.getElementById('archive-notice')
+let archiveNoticeTimer = null
+function showArchiveNotice(kind, node) {
+  const spec = SessionArchive.notice(kind, archiveMode)
+  if (archiveNoticeTimer !== null) clearTimeout(archiveNoticeTimer)
+  const dismiss = () => {
+    if (archiveNoticeTimer !== null) clearTimeout(archiveNoticeTimer)
+    archiveNoticeTimer = null
+    archiveNotice.hidden = true
+    archiveNotice.replaceChildren()
+  }
+  const parts = [document.createTextNode(spec.text)]
+  for (const action of spec.actions) {
+    if (action.prefix !== undefined) parts.push(document.createTextNode(action.prefix))
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.dataset.action = action.action
+    button.textContent = action.label
+    button.addEventListener('click', async () => {
+      dismiss()
+      if (action.action === 'undo' && node !== undefined) {
+        await setSessionFlags({ ...node, archived: true }, { archived: false })
+        if (document.getElementById('session-search').value.trim().length > 0) await applySearch()
+      } else if (action.action === 'filter') {
+        archiveMode = 'show'
+        rememberArchived()
+        await renderTree()
+      }
+    })
+    parts.push(button)
+  }
+  archiveNotice.replaceChildren(...parts)
+  archiveNotice.dataset.tone = spec.tone
+  archiveNotice.dataset.kind = kind
+  archiveNotice.hidden = false
+  archiveNoticeTimer = setTimeout(dismiss, spec.holdMs)
 }
 
 /**
@@ -11790,49 +12589,92 @@ async function startSessionAt(node) {
   }
   setNote('')
   activeFolder = node.path
-  expanded.add(node.path)
-  rememberExpanded()
+  /**
+   * A press opens the workspace so the new row is seen. A reload's fallback (`restoreSelection` passes a node with
+   * `reveal: false`) leaves the folding as the person left it: DSH's restore opens its session with `"preserve"`
+   * (`lib/client.js:1627`), not the `"reveal"` a press uses (`:1489`, `:1673`), and a folded workspace stays folded with
+   * its folder tinted as the one holding the open session (C33).
+   */
+  if (node.reveal !== false) {
+    expanded.add(node.path)
+    rememberExpanded()
+  }
   if (typeof body.definition === 'string') learnDefinition(body.session, body.definition.replace(/\/session\.json$/, ''))
   /** The new session's row is the selected one; the tree keys a session row by its id. */
   chooseSelected('session:' + body.session)
   await showSession(body.session)
-  await renderTree()
+  /**
+   * At boot (`restoreSelection` passes `boot: true`) the page draws the tree itself right after, so the start leaves the
+   * drawing to it: one first paint, which now follows every first visit (#17), rather than two racing redraws.
+   */
+  if (node.boot !== true) await renderTree()
 }
 
 /**
- * Which workspace a new session should start in.
- *
- * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
- * context exists: the workspace row the person opened or added since the open session was chosen (`chosenWorkspace`),
- * then the open session's workspace (DSH's `currentWorkspaceId`, `lib/client.js:1505-1508`), then the selected row's
- * workspace, then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers
- * to "where am I", and the first one that applies wins.
+ * Which workspace a new session should start in: `WorkspaceTree.newSessionWorkspace` over the rows the tree last drew and
+ * the reader's context — the workspace chosen beside the open session (`chosenWorkspace`), the open session's, the
+ * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws.
  */
 function newSessionWorkspace() {
-  /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
-  const owner = (path) =>
-    treeTops
-      .filter((node) => path === node.path || path.startsWith(node.path + '/'))
-      .sort((left, right) => right.path.length - left.path.length)[0] ?? null
-  /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
-  if (chosenWorkspace !== null && chosenWorkspace.during === current) {
-    const byChoice = treeTops.find((node) => node.path === chosenWorkspace.path)
-    if (byChoice !== undefined) return byChoice
-  }
-  /** Then the open session's own workspace: it is the group the reader is looking at. */
-  if (current !== null) {
-    const byCurrent = treeTops.find((node) => node.group !== undefined && WorkspaceTree.containsSession(node.group, current, false))
-    if (byCurrent !== undefined) return byCurrent
-  }
-  if (selectedPath !== null && !selectedPath.startsWith('session:')) {
-    const bySelection = owner(selectedPath)
-    if (bySelection !== null) return bySelection
-  }
-  if (activeFolder !== null) {
-    const byFolder = owner(activeFolder)
-    if (byFolder !== null) return byFolder
-  }
-  return treeTops[0] ?? null
+  return WorkspaceTree.newSessionWorkspace(treeTops, { chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder })
+}
+
+/**
+ * Where the composer's next message starts its conversation while no session is open, and what the page calls it
+ * (`WorkspaceTree.newConversationTarget`): the hero chip names it, the note under the tree names it, and the turn posts it
+ * as its folder (#134). Null when there is nowhere to start one, and then nothing is sent (`composerAimless`).
+ */
+function newConversationTarget() {
+  return WorkspaceTree.newConversationTarget(treeTops, { chosen: chosenWorkspace, selected: selectedPath, active: activeFolder })
+}
+
+/**
+ * Whether the workspace routes answered at all. A profile without the workspace plugin (503) or a server older than the
+ * tree (any other refusal) has no workspace to aim at, and there the server's own folder is still where a first message
+ * goes, as it always was; `unknown` until the tree is first read, and the flat list never reads it.
+ */
+let workspaceRoutes = 'unknown'
+
+/** Resolved once boot has drawn the tree and run first use, so a first message waits for the workspace it would start in. */
+let settleFirstTree = () => {}
+const firstTreeReady = new Promise((resolve) => {
+  settleFirstTree = resolve
+})
+let firstTreeSettled = false
+
+/**
+ * DSH's words for a composer with no workspace to start in: the placeholder `Choose a workspace to start`
+ * (`dsh-client-ui-conversation` `lib/client.js:16409`, shown while it is inert, `:17819-17828`) and the notice
+ * `Choose a workspace first.` (`draft.workspaceRequired`, `dsh-client-ui-workspace` `lib/client.js:4873`, raised by
+ * `startSession` when a draft has no workspace, `:1509-1515`).
+ */
+const NO_WORKSPACE_PLACEHOLDER = 'Choose a workspace to start'
+const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
+
+/**
+ * Whether the composer has nowhere to send: no session open, and no workspace a first message could start in. DSH's
+ * composer is inert then (`inert = sessionId === undefined || hero && chipTitle === undefined`, `lib/client.js:17819`);
+ * here a message sent in that state used to go out with no folder and run in the server's start folder, outside every
+ * workspace (#134). Judged only once boot has drawn the tree and run first use, so a load does not flash it; and not at
+ * all where the server serves no workspaces, since its own folder is then the only place there is.
+ */
+function composerAimless() {
+  if (!firstTreeSettled || workspaceRoutes === 'absent') return false
+  if (current !== null || composerKey !== QUEUE_KEY_NONE || unavailableSession !== null) return false
+  return newConversationTarget() === null
+}
+
+/**
+ * Repaint what names the new conversation's place after the tree changed: the hero chip, and the composer's inert state
+ * when it flipped.
+ */
+let aimlessPainted = false
+function paintConversationTarget() {
+  paintHeroWorkspace()
+  const aimless = composerAimless()
+  if (aimless === aimlessPainted) return
+  aimlessPainted = aimless
+  renderComposerState()
 }
 
 /**
@@ -11875,6 +12717,12 @@ const HeroPicker = (() => {
   /**
    * The workspaces the menu offers, in the record's order, as DSH lists its catalog. An adopted (`auto`) root is drawn
    * as Ungrouped rather than as a workspace, so it is not offered either.
+   *
+   * Each is labelled as the tree labels it, by `workspaceDisplayTitle`: the first-use workspace, stored as
+   * `default-workspace`, reads *Default workspace* in the chip and the menu as in the sidebar — DSH's README lists "the
+   * hero picker menu" among the places that label applies (`dsh-client-ui-workspace` README.md:82), and its chip shows
+   * `workspaceDisplayTitle(storedChipTitle, …)` (`dsh-client-ui-conversation` `lib/client.js:17784`). #134's P3: the
+   * page named it by its stored title, beside a tree that called it Default workspace.
    */
   function choices(workspaces) {
     if (!Array.isArray(workspaces)) return []
@@ -11883,7 +12731,7 @@ const HeroPicker = (() => {
       .map((entry) => ({
         id: entry.id,
         path: entry.path,
-        label: typeof entry.title === 'string' && entry.title.trim() !== '' ? entry.title : baseName(entry.path),
+        label: typeof entry.title === 'string' && entry.title.trim() !== '' ? workspaceDisplayTitle(entry.title) : baseName(entry.path),
         sessionIds: Array.isArray(entry.sessionIds) ? entry.sessionIds : [],
       }))
   }
@@ -11932,10 +12780,20 @@ const HeroPicker = (() => {
     if (state.current === null) return state.emptyShown === true
     return state.blank === true
   }
-  /** The chip's words: the workspace being moved to, else the open session's, else DSH's call to action. */
+  /**
+   * The chip's words: the workspace being moved to; else, with a session open, that session's workspace; else, with none
+   * open, the workspace the first message will start the session in (`target`, #134); else DSH's call to action.
+   *
+   * DSH's chip always names the workspace the new session uses — the picked one, else the session's
+   * (`pendingWorkspace?.title ?? sessionWorkspace?.title`, `dsh-client-ui-conversation` `lib/client.js:17783`) — because
+   * its startup has already made that session there (`dsh-client-ui-workspace` `lib/client.js:1620-1627`). heddle makes it
+   * with the first prompt, so with none open the chip names where that prompt will go; with nowhere to go it is the call
+   * to action, and the composer is inert, as DSH's is.
+   */
   function label(state) {
     if (typeof state.pending === 'string' && state.pending !== '') return state.pending
-    if (state.current !== null && typeof state.owner === 'string' && state.owner !== '') return state.owner
+    if (state.current !== null) return typeof state.owner === 'string' && state.owner !== '' ? state.owner : CHOOSE
+    if (typeof state.target === 'string' && state.target !== '') return state.target
     return CHOOSE
   }
   return { CHOOSE, choices, ownerOf, isBlank, reusable, step, shown, label }
@@ -11970,8 +12828,13 @@ function paintHeroWorkspace() {
   const shown = HeroPicker.shown({ view, current, hasContent, emptyShown, blank: known?.blank ?? null, pending: heroPending !== null })
   heroRow.hidden = !shown
   if (!shown) closeHeroMenu(false)
-  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null })
-  const chosen = heroPending !== null || (current !== null && typeof known?.label === 'string')
+  /**
+   * With no session open the chip names where the first message will start one (#134). Read once boot has drawn the
+   * tree, which is what knows the workspaces; this paint also runs while the page is still being built.
+   */
+  const target = current === null && firstTreeSettled ? (newConversationTarget()?.label ?? null) : null
+  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null, target })
+  const chosen = heroPending !== null || (current !== null && typeof known?.label === 'string') || (current === null && target !== null)
   const key = `${chosen}|${text}`
   if (heroChip.dataset.painted !== key) {
     heroChip.dataset.painted = key
@@ -12082,7 +12945,10 @@ async function openHeroMenu() {
     heroAddWorkspace()
     return
   }
-  const selected = heroPending?.id ?? (current !== null && heroKnown.id === current ? heroKnown.workspace : null)
+  /** The workspace the chip names is the one checked: the open session's, or with none open the first message's (#134). */
+  const aimed = current === null ? newConversationTarget() : null
+  const selected =
+    heroPending?.id ?? (current !== null ? (heroKnown.id === current ? heroKnown.workspace : null) : (choices.find((choice) => choice.path === aimed?.path)?.id ?? null))
   const items = choices.map((choice) => heroMenuItem('menuitemradio', choice.label, kindIcon('folder', false), choice.id === selected, () => void heroPick(choice)))
   const separator = document.createElement('div')
   separator.setAttribute('role', 'separator')
@@ -12110,6 +12976,8 @@ async function heroPick(choice) {
   closeHeroMenu(true)
   const owner = current !== null && heroKnown.id === current ? heroKnown : null
   if (owner !== null && owner.workspace === choice.id) return
+  /** With no session open, picking the workspace the first message already goes to moves nothing (#134). */
+  if (current === null && heroPending === null && newConversationTarget()?.path === choice.path) return
   const before = current
   heroPending = { id: choice.id, label: choice.label }
   heroChip.setAttribute('aria-busy', 'true')
@@ -12574,6 +13442,17 @@ function menuButton(node, items, options = {}) {
     entry.onclick = async (event) => {
       event.stopPropagation()
       closeMenus()
+      /**
+       * A choice made from the keyboard (a click with no pointer, `detail` 0) gives focus back to the trigger unless the
+       * act took it elsewhere, a dialog say: DSH's Menu does that after every choice (index-CN7NIWNw.js:129, its `U`). A
+       * pointer's choice leaves focus as it was, because the trigger it would land on keeps the row's controls drawn.
+       */
+      if (event.detail === 0) {
+        queueMicrotask(() => {
+          const active = document.activeElement
+          if (button.isConnected && (active === null || active === document.body || list.contains(active))) button.focus()
+        })
+      }
       await item.run()
     }
     list.append(entry)
@@ -12594,6 +13473,76 @@ function menuButton(node, items, options = {}) {
 document.addEventListener('click', closeMenus)
 
 /**
+ * The keyboard of every menu `menuButton` makes — the tree rows', the workspace rows', View options and the session's
+ * More actions (#95) — which is DSH's shared `Menu` (dsh-web-frontend dist/assets/index-CN7NIWNw.js:129, the function
+ * exported as `Menu` at :188; the row menus open it without `autoFocus`, dsh-client-ui-workspace lib/client.js:1996-2010,
+ * :2328-2334, so focus stays on the trigger until a key moves it):
+ *
+ * - Escape (not Shift+Escape) closes the open menu, in the capture phase so nothing under it takes the key, and gives
+ *   focus back to the trigger when focus was in the menu or on its trigger;
+ * - with focus there, ArrowDown and ArrowUp rove the enabled items and wrap, Home and End jump, and from the trigger
+ *   ArrowDown lands on the first item and ArrowUp on the last (`HeroPicker.step`, DSH's arithmetic);
+ * - Tab from the trigger enters the list, Tab on a `menuitem` chooses it, and Shift+Tab closes the menu onto its trigger;
+ * - Ctrl, Alt and Meta chords and a key already handled are left alone.
+ */
+function openMenuWrap() {
+  const list = document.querySelector('.menu-wrap > .menu:not([hidden])')
+  if (list === null) return null
+  const wrap = list.parentElement
+  return { wrap, list, trigger: wrap.querySelector(':scope > button') }
+}
+function menuKeyIgnored(keyEvent) {
+  return keyEvent.defaultPrevented || keyEvent.ctrlKey || keyEvent.altKey || keyEvent.metaKey
+}
+document.addEventListener(
+  'keydown',
+  (keyEvent) => {
+    if (keyEvent.key !== 'Escape' || keyEvent.shiftKey || menuKeyIgnored(keyEvent)) return
+    const open = openMenuWrap()
+    if (open === null) return
+    keyEvent.preventDefault()
+    keyEvent.stopPropagation()
+    if (keyEvent.repeat) return
+    const inside = open.wrap.contains(document.activeElement)
+    closeMenus()
+    if (inside && open.trigger !== null) open.trigger.focus()
+  },
+  true,
+)
+document.addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key === 'Escape' || menuKeyIgnored(keyEvent)) return
+  const open = openMenuWrap()
+  if (open === null || open.trigger === null) return
+  const active = document.activeElement
+  if (!open.wrap.contains(active)) return
+  const inList = open.list.contains(active)
+  const items = [...open.list.querySelectorAll('button:not(:disabled)')]
+  if (keyEvent.key === 'Tab') {
+    if (keyEvent.shiftKey) {
+      keyEvent.preventDefault()
+      closeMenus()
+      open.trigger.focus()
+      return
+    }
+    if (inList) {
+      if (active.getAttribute('role') === 'menuitem') {
+        keyEvent.preventDefault()
+        active.click()
+      }
+      return
+    }
+    if (items.length === 0) return
+    keyEvent.preventDefault()
+    items[0].focus()
+    return
+  }
+  const next = HeroPicker.step(keyEvent.key, items.indexOf(active), items.length)
+  if (next === null) return
+  keyEvent.preventDefault()
+  items[next].focus()
+})
+
+/**
  * The page's **seam for the verifiers**.
  *
  * Parts 85 and 90 drive this page by calling a handler directly — `showSession(id)` — because what they judge is the
@@ -12604,6 +13553,47 @@ document.addEventListener('click', closeMenus)
  * are: a seam rather than a public API.
  */
 Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
+
+/* session-rules:begin */
+/**
+ * Which sessions the sidebar lists and which open session may be written to — DSH's rules for subagent children, kept
+ * pure (no DOM, no fetch, no page state) so `test/session-rules.test.ts` loads this block out of the page and judges it
+ * in Node, as the workspace tree's is. Which session a page load opens is the tree block's `restoreChoice` (DSH's
+ * `restoreSelection`), which never opens a hidden child on its own and does reopen a saved one.
+ */
+const SessionRules = (() => {
+  /**
+   * A subagent child's mode, DSH's `address.mode` (dsh-client-ui-subagent `selectReadOnlySubagent`, `lib/client.js:944`):
+   * `'one-shot'` for a delegated child, because heddle's `delegate` runs it for one task and settles it, so no follow-up
+   * can reach it; `'continuable'` for a teammate, whose `teamId` names its Lead, because DSH's teammates are continuable
+   * children (`_context_/dsh-mechanisms/dsh-agent-teams.md`); `null` for a session that is no subagent's.
+   */
+  function subagentMode(meta) {
+    if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent') return null
+    return typeof meta.teamId === 'string' && meta.teamId.length > 0 ? 'continuable' : 'one-shot'
+  }
+
+  /**
+   * The sessions the sidebar may list, out of `/api/sessions`: every one that is not a subagent's child. DSH's
+   * `sessionVisible` drops `origin: 'subagent'` before any other rule (dsh-client-ui-workspace `lib/client.js:964-965`),
+   * and its tree, its flat list (`deriveFlat`, `:1146`) and its search (`deriveSearchResults`, `:1185`, `:1200`) all ask
+   * it — a child is reached from its parent, not from the sidebar.
+   */
+  function sidebarSessions(sessions) {
+    return (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && meta.origin !== 'subagent')
+  }
+
+  /**
+   * Whether the composer is DSH's read-only record for this session: a one-shot child only. A continuable child keeps
+   * Send and Stop (`selectReadOnlySubagent` answers `null` for it while its parent is available, `lib/client.js:949`).
+   */
+  function composerReadOnly(meta) {
+    return subagentMode(meta) === 'one-shot'
+  }
+
+  return { subagentMode, sidebarSessions, composerReadOnly }
+})()
+/* session-rules:end */
 
 /* workspace-tree:begin */
 /**
@@ -12631,9 +13621,14 @@ function workspaceDisplayTitle(title) {
  *   states; the open New session placeholder leads its group, then pinned rows, and the order is DSH's two modes
  *   (C17): **Last updated** (newest prompt first, then id; pin time does not order it) or **Manual** (a saved sequence
  *   per account, reconciled with the members).
- * - **Show more**: an open group shows 5 conversations, raised to cover the last running or open one within the first 50,
- *   plus the open New session placeholder, which takes none of the places; the control reads `Show {n} more sessions`
- *   and each click adds 5. The number lives with the page, never in storage, as DSH's watermark does.
+ * - **Show more**: an open group shows 5 conversations, raised to cover the last one within the first 50 that is running,
+ *   has a running subagent, awaits the person, carries an unread completion or is open, plus the open New session
+ *   placeholder, which takes none of the places; a raise is kept until `Show less` or a fold; the control reads
+ *   `Show {n} more sessions` and each click adds 5. The number lives with the page, never in storage, as DSH's
+ *   watermark does.
+ * - **Reload**: the open session is kept in storage and a load reopens it (`restoreChoice`, DSH's `restoreSelection`);
+ *   with nothing to reopen (a first visit, a cleared entry, a saved session that is gone) a fresh one starts in the most
+ *   recently active workspace, and a load never opens on its own a session nobody saved (#17).
  */
 const WorkspaceTree = (() => {
   const UNGROUPED = ''
@@ -12838,6 +13833,323 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * Whether a session row offers its actions: the `…` menu, the Archive and Pin hover buttons, and Rename on a
+   * double-click of its title. A New session placeholder offers none, as DSH's blank row draws no `rowActions` and no
+   * rename (`SessionNodeItem`, `!row.blank &&` and `row.blank ? void 0 :`, `dsh-client-ui-workspace` `lib/client.js:2311`,
+   * `:2317-2323`), by the predicate `hiddenBlank` uses. #79: the open blank offered the full menu, and its Fork came back
+   * as the server's refusal with the raw session id in it.
+   */
+  function rowOffersActions(meta) {
+    return meta !== null && typeof meta === 'object' && !placeholder(meta)
+  }
+
+  /** DSH's `shortcut.noCompletedTurn` (`lib/client.js:4881`): why a session that never finished a turn cannot be forked. */
+  const NO_COMPLETED_TURN = 'This session has no completed turn'
+  /** DSH's `shortcut.forkFailed` (`lib/client.js:4882`), for a fork refused for any other reason. */
+  const FORK_FAILED = 'Could not fork the session. Try again.'
+
+  /**
+   * Why Fork is refused before it is asked for, or `null` when it may be asked: a session that has not run a turn has
+   * none to fork from, which DSH's fork shortcut answers `blocked` with `shortcut.noCompletedTurn` (`:161-164`) rather
+   * than sending the request (#79). The server still judges a running first turn, below.
+   */
+  function forkBlocked(meta) {
+    return meta !== null && typeof meta === 'object' && (meta.turns ?? 0) > 0 ? null : NO_COMPLETED_TURN
+  }
+
+  /**
+   * What a refused fork says: the server's `unavailable` (no completed turn to cut at) in DSH's own sentence, as its
+   * notice maps `reason === "unavailable"` to `shortcut.noCompletedTurn` (`:4647`, from `session/fork-unavailable`,
+   * `:169-170`), and any other refusal as DSH's `shortcut.forkFailed`. Never the server's text, which names the session
+   * by its raw id (#79). Both servers answer that refusal `409` with `code: 'unavailable'`.
+   */
+  function forkRefusal(body) {
+    return body !== null && typeof body === 'object' && body.code === 'unavailable' ? NO_COMPLETED_TURN : FORK_FAILED
+  }
+
+  /** A session's stored title when it has one that is not blank, else `undefined`. */
+  function storedTitle(meta) {
+    return meta !== null && typeof meta === 'object' && typeof meta.title === 'string' && meta.title.trim().length > 0 ? meta.title : undefined
+  }
+
+  /**
+   * A session row's label, DSH's `displayTitle` (`dsh-client-ui-workspace` `lib/client.js:1801-1804`): the open blank reads
+   * `New Session` (`session.new`, `:4876`), every other row its stored title, else `Untitled` (`session.untitled`, `:4877`),
+   * "rather than a directory name" (its README.md:32). The tree and the flat list both ask this. #24: the page labelled an
+   * unnamed session with its definition folder's name, `session-<yyyymmdd>-<hhmm>`; the page keeps that folder in the
+   * row's `data-definition`, never in what it shows or reads aloud (#109, `rowTooltip`).
+   */
+  function sessionLabel(meta) {
+    if (placeholder(meta)) return 'New Session'
+    return storedTitle(meta) ?? 'Untitled'
+  }
+
+  /**
+   * What a tree row's label reads: a session row the title a person or the first prompt gave it, else its node's label
+   * (`sessionLabel` for a listed session); every other row its node's label, the folder's or workspace's name.
+   */
+  function rowLabel(node) {
+    if (node === null || typeof node !== 'object') return ''
+    return String(node.kind === 'session' && node.session?.title ? node.session.title : (node.label ?? ''))
+  }
+
+  /**
+   * A tree row's `title`, or `undefined` for none (#109). The row is focusable, so its `title` is also what a keyboard or
+   * screen-reader user hears for it. DSH's rows carry no `title` and no `aria-label` at all: its session row
+   * (`SessionNodeItem`, `dsh-client-ui-workspace` `lib/client.js:2273-2280`) has only `aria-selected` and, archived,
+   * `aria-description`; its workspace row (`ProjectRowItem`, `:1965-1971`) only `aria-expanded`. The full title and the
+   * folder are on the pointer's hover card (`copyText`, `:2364` and `:2055`). So a session row's `title` is the display
+   * title its label shows (and may clip), the name its card shows; every other row has none. Never the session's
+   * definition folder (`<folder>/_sessions_/session-…`), nor its working folder: the first is an internal path, and either can
+   * carry the home directory. The page keeps the definition in `data-definition`, which nothing shows or reads aloud.
+   */
+  function rowTooltip(node) {
+    return node !== null && typeof node === 'object' && node.kind === 'session' ? rowLabel(node) : undefined
+  }
+
+  /**
+   * The conversation header's title, or `null` for none. DSH hides it while the session is blank (`ConversationHeader`
+   * passes `hideChrome: blank`, `dsh-client-ui-conversation` `lib/client.js:17897-17908`, and the title renders only
+   * `!hideChrome`, `:17994`; its README.md:87) and then prints the session's display title: the stored title, else its
+   * folder's name, else the id (`displayTitleOf`, `dsh-api-session-controller` `lib/client.js:3696-3707`), read from the
+   * live session list (`:17990`) so it follows a title written later. #24: the header printed the raw session id, and kept
+   * it after the first prompt had titled the session.
+   */
+  function headerTitle(meta) {
+    if (placeholder(meta)) return null
+    const title = storedTitle(meta)
+    if (title !== undefined) return title
+    const folder = typeof meta.cwd === 'string' ? basename(meta.cwd) : ''
+    return folder !== '' ? folder : String(meta.id)
+  }
+
+  /**
+   * The window title, DSH's `DocumentTitle` (`dsh-client-ui-layout` `lib/client.js:57-68`): `<title> — <product>` while the
+   * open session has a stored title, the product's name alone otherwise — nothing open, or a session not titled yet.
+   */
+  function documentTitle(meta, product = 'Heddle') {
+    const title = storedTitle(meta)
+    return title === undefined ? product : `${title} — ${product}`
+  }
+
+  /**
+   * What a refused workspace Rename or Delete says (#49). A `404` is the server answering that the workspace is not
+   * registered any more: another tab or client removed it, and this page has no push to have heard. DSH keeps every page's
+   * list live, so a removed workspace is never a row to act on, and its own refusal names a workspace by id, not by folder
+   * (`Workspace "<id>" not found`, `dsh-api-workspace-controller` `lib/index.js:359`). So the page says it in words, and the
+   * caller redraws the tree; the server's `no workspace <absolute path>` is never shown, because the path carries the
+   * home directory. Any other refusal is the server's own sentence (a name conflict is DSH's), else `fallback`.
+   */
+  function workspaceRefusal(status, body, fallback) {
+    if (status === 404) return { gone: true, text: 'This workspace was already removed.' }
+    const said = body !== null && typeof body === 'object' && typeof body.error === 'string' && body.error.length > 0 ? body.error : undefined
+    return { gone: false, text: said ?? fallback }
+  }
+
+  /** Whether a workspace is one a person registered: an adopted root (`origin: 'auto'`) is not a group. */
+  function registered(entry) {
+    return entry !== undefined && entry !== null && entry.origin !== 'auto'
+  }
+
+  /** The nearest registered workspace above one, following `parent` through `byId`; a cycle in bad data ends the walk. */
+  function registeredAboveIn(entry, byId) {
+    const seen = new Set([entry.id])
+    let next = entry.parent === null || entry.parent === undefined ? undefined : byId.get(entry.parent)
+    while (next !== undefined && !seen.has(next.id)) {
+      if (registered(next)) return next
+      seen.add(next.id)
+      next = next.parent === null || next.parent === undefined ? undefined : byId.get(next.parent)
+    }
+    return undefined
+  }
+
+  /**
+   * The open session, kept across a reload the way DSH keeps it: one `localStorage` entry holding `{ sessionId }`,
+   * written each time the main view opens a session and emptied to `{}` when it is cleared (`dsh-client-ui-workspace`
+   * `lib/client.js:1369`, `:1644-1650`, `:1662-1665`; DSH's client store mirrors every write of a persisted store to
+   * `localStorage` and reads it back at start, `dsh-web-frontend` `dist/assets/index-CN7NIWNw.js:120`, `yI`). The key is
+   * per origin, so every tab of one server shares it, as DSH's does.
+   */
+  const SELECTION_KEY = 'heddle.sessions.current'
+
+  /** The entry this page writes for the open session `id`, or `{}` when nothing is open. */
+  function selectionRecord(id) {
+    return JSON.stringify(typeof id === 'string' && id.length > 0 ? { sessionId: id } : {})
+  }
+
+  /** The session id a stored entry names, or null for an entry that is missing, empty, or not one this page wrote. */
+  function savedSelection(raw) {
+    if (typeof raw !== 'string') return null
+    try {
+      const value = JSON.parse(raw)
+      return value !== null && typeof value === 'object' && typeof value.sessionId === 'string' && value.sessionId.length > 0 ? value.sessionId : null
+    } catch (error) {
+      return null
+    }
+  }
+
+  /**
+   * The workspace a fresh session starts in when nothing names one: DSH's `recentWorkspace` (`lib/client.js:1694-1710`),
+   * the workspace whose sessions were written last, else, with no session, the one created last; a tie keeps registry
+   * order. Only a registered workspace is a place a session starts, and an adopted root's sessions count for the registered
+   * workspace above it, where `deriveGroups` draws them. Undefined when no workspace is registered.
+   */
+  function recentWorkspace(workspaces, sessions) {
+    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
+    const metas = new Map((Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object').map((meta) => [meta.id, meta]))
+    const byId = new Map(list.map((entry) => [entry.id, entry]))
+    const latest = new Map()
+    for (const entry of list) {
+      const home = registered(entry) ? entry : registeredAboveIn(entry, byId)
+      if (home === undefined) continue
+      for (const id of Array.isArray(entry.sessionIds) ? entry.sessionIds : []) {
+        const meta = metas.get(id)
+        const at = meta === undefined ? Number.NaN : Date.parse(stamp(meta))
+        if (Number.isFinite(at)) latest.set(home.id, Math.max(latest.get(home.id) ?? Number.NEGATIVE_INFINITY, at))
+      }
+    }
+    let selected
+    let selectedTime = Number.NEGATIVE_INFINITY
+    for (const entry of list) {
+      if (!registered(entry)) continue
+      let time = latest.get(entry.id) ?? Number.NEGATIVE_INFINITY
+      if (time === Number.NEGATIVE_INFINITY) time = Date.parse(String(entry.createdAt ?? ''))
+      if (!Number.isFinite(time)) time = Number.NEGATIVE_INFINITY
+      if (selected === undefined || time > selectedTime) {
+        selected = entry
+        selectedTime = time
+      }
+    }
+    return selected
+  }
+
+  /**
+   * What a page load opens: DSH's `restoreSelection` (`lib/client.js:1605-1628`) under heddle's rules. `saved` is the id
+   * `savedSelection` read (or null), `workspaces` and `sessions` the answers of `/api/workspaces` and `/api/sessions`
+   * (newest first). The answer is `{ kind, id?, path?, forget? }`, and it never names a session nobody saved:
+   *
+   * - `saved` — the saved session is listed and not archived, so it is reopened (`:1611-1616`). A saved New session
+   *   placeholder is reopened too, by its own id and with its record read again, never replaced by a fresh one (DSH's
+   *   `restoreBlank` reloads the blank's projections and reconnects the same id, `:1451-1458`, `:1619`). A subagent's
+   *   child the person opened (search, `In one list`) is theirs to come back to, as DSH restores a saved subagent view
+   *   (`:1607-1609`).
+   * - `start` with `path` — nothing this page may reopen is saved, so a fresh session starts in the most recently active
+   *   registered workspace (`:1620`, then `connectWorkspace`, `:1626`, which creates one, `:1406`). That is a first visit
+   *   or a cleared entry, a saved session that is gone, and an archived saved one, which DSH reopens only for its
+   *   `clearArchivedCurrent` to empty the main view and the entry at once (`:1578`, `:1638-1650`). `forget` empties a
+   *   stale entry. #17: this page used to open the newest session in the store when nothing was saved, and on a shared
+   *   server that is often another person's, so their transcript was shown and the next message went into it.
+   * - `none` — no registered workspace to start in: nothing opens, and with `forget` the stale entry is emptied all the
+   *   same. The first-use default workspace is the page's `initializeDefaultWorkspace`, after the tree is drawn.
+   */
+  function restoreChoice(saved, workspaces, sessions) {
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
+    const named = typeof saved === 'string' && saved.length > 0
+    const meta = named ? metas.find((entry) => entry.id === saved) : undefined
+    if (meta !== undefined && meta.archived !== true) return { kind: 'saved', id: saved }
+    const target = recentWorkspace(workspaces, metas)
+    const fresh = target !== undefined && typeof target.path === 'string' ? { kind: 'start', path: target.path } : { kind: 'none' }
+    return named ? { ...fresh, forget: true } : fresh
+  }
+
+  /**
+   * Which workspace a new session should start in, among the workspace rows the tree draws (`tops`, each
+   * `{ path, label, group }`, in drawing order).
+   *
+   * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
+   * context exists (`state` is `{ chosen, current, selected, active }`): the workspace row the person opened or added
+   * since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace (DSH's
+   * `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace, then
+   * the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where am
+   * I", and the first one that applies wins. Null when the tree draws no workspace.
+   */
+  function newSessionWorkspace(tops, state = {}) {
+    const list = Array.isArray(tops) ? tops.filter((node) => node !== null && typeof node === 'object' && typeof node.path === 'string') : []
+    const { chosen = null, current = null, selected = null, active = null } = state ?? {}
+    /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
+    const owner = (path) =>
+      list.filter((node) => path === node.path || path.startsWith(node.path + '/')).sort((left, right) => right.path.length - left.path.length)[0] ?? null
+    /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
+    if (chosen !== null && typeof chosen === 'object' && chosen.during === current) {
+      const byChoice = list.find((node) => node.path === chosen.path)
+      if (byChoice !== undefined) return byChoice
+    }
+    /** Then the open session's own workspace: it is the group the reader is looking at. */
+    if (current !== null) {
+      const byCurrent = list.find((node) => node.group !== undefined && containsSession(node.group, current, false))
+      if (byCurrent !== undefined) return byCurrent
+    }
+    if (typeof selected === 'string' && !selected.startsWith('session:')) {
+      const bySelection = owner(selected)
+      if (bySelection !== null) return bySelection
+    }
+    if (typeof active === 'string' && active !== '') {
+      const byFolder = owner(active)
+      if (byFolder !== null) return byFolder
+    }
+    return list[0] ?? null
+  }
+
+  /**
+   * Where a message sent with **no session open** starts its conversation, and the name the page gives that place:
+   * `{ path, label }`, or null when there is nowhere to start one.
+   *
+   * DSH never lets a prompt go out without a workspace: its composer is bound to a Session made in a workspace, its
+   * hero chip names that workspace (`workspaceDisplayTitle` of the session's or the picked workspace's title,
+   * `dsh-client-ui-conversation` `lib/client.js:17783-17784`), and with none the composer is inert, reading "Choose a
+   * workspace to start" (`:17819-17828`, `placeholder.workspace` at `:16409`). heddle starts the session with the first
+   * prompt instead (first use opens none, D-056), so the page has to know that workspace before the session exists:
+   * it is `newSessionWorkspace`'s answer with no session open — the workspace chosen, the selected row's, the one the
+   * prompt box was aimed at, else the first workspace the tree draws — and only with no workspace drawn at all, a folder
+   * the prompt box was aimed at outside every workspace. #134: after a reload this was nothing, the hero read "Choose
+   * workspace", and the first message went out with no folder, so the server ran it in its own start folder, outside
+   * every workspace and out of the tree. `label` is the tree's (a workspace's display title, *Default workspace* for the
+   * first-use one); a bare folder is named by its last segment.
+   */
+  function newConversationTarget(tops, state = {}) {
+    const { chosen = null, selected = null, active = null } = state ?? {}
+    const workspace = newSessionWorkspace(tops, { chosen, current: null, selected, active })
+    if (workspace !== null) return { path: workspace.path, label: typeof workspace.label === 'string' && workspace.label !== '' ? workspace.label : basename(workspace.path) }
+    if (typeof active === 'string' && active !== '') return { path: active, label: basename(active) }
+    return null
+  }
+
+  /** The name the page gives a folder: the display title of the workspace the tree draws at exactly that path, else its last segment. */
+  function folderLabel(tops, path) {
+    if (typeof path !== 'string' || path === '') return ''
+    const exact = (Array.isArray(tops) ? tops : []).find((node) => node !== null && typeof node === 'object' && node.path === path)
+    return typeof exact?.label === 'string' && exact.label !== '' ? exact.label : basename(path)
+  }
+
+  /**
+   * What an empty session list says (#107). DSH's `EmptySessions` (`dsh-client-ui-workspace` `lib/client.js:3005-3021`) is
+   * drawn when the tree has no group (`:3344`) or the flat list no row (`:3384`): a glyph over the text, "No sessions yet"
+   * (`empty.none`), and under `Archived only` "No archived sessions yet" (`empty.noneArchived`) with a "View other
+   * sessions" text action (`empty.viewOthers`, the words at `:4899-4901`) that sets the filter back to its default
+   * (`leaveArchivedOnly`, `:3539-3541`), which is `Hide archived` here. The README says the same (`Managing sessions`,
+   * README.md:58).
+   *
+   * `archived` is the filter (`hide`, `show`, `only`), `grouping` the view (`tree`, `workspace`, `list`), `count` how many
+   * groups or rows were drawn. The answer is null when there is something to draw, else `{ kind, text, glyph?, action? }`:
+   * a `placeholder` drawn in the list, or heddle's own `note` under it. The note stays for a tree with no group outside
+   * `Archived only`, which is a tree with no registered workspace and no session: there, registering a folder is the next
+   * step. Under `Archived only` that note was wrong, because the filter drops every workspace with no archived session,
+   * so "no groups" no longer means "no roots": it told a person to register a folder they had registered.
+   */
+  const EMPTY_TEXT = {
+    none: 'No sessions yet',
+    noneArchived: 'No archived sessions yet',
+    viewOthers: 'View other sessions',
+    noRoots: 'no workspace root yet — register one with the + above',
+  }
+  function emptyList(archived, grouping, count) {
+    if (count > 0) return null
+    if (archived === 'only') return { kind: 'placeholder', glyph: 'archive', text: EMPTY_TEXT.noneArchived, action: EMPTY_TEXT.viewOthers }
+    if (grouping === 'list') return { kind: 'placeholder', glyph: 'list', text: EMPTY_TEXT.none }
+    return { kind: 'note', text: EMPTY_TEXT.noRoots }
+  }
+
+  /**
    * An account's rows with DSH's blank rule: among blank sessions only the open one is a row (`sessionVisible`), and it
    * leads, ahead of pins (`sectionMembers`, `pinCurrentBlank`, `lib/client.js:954-990`, :3584), in a group and in the flat
    * list alike. `current` undefined names no open session: nothing is left out and nothing moves.
@@ -12861,18 +14173,7 @@ const WorkspaceTree = (() => {
     const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object') : []
     const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object') : []
     const byId = new Map(list.map((entry) => [entry.id, entry]))
-    const registered = (entry) => entry !== undefined && entry.origin !== 'auto'
-    /** The nearest registered workspace above one, following `parent`; a cycle in bad data ends the walk. */
-    const registeredAbove = (entry) => {
-      const seen = new Set([entry.id])
-      let next = entry.parent === null || entry.parent === undefined ? undefined : byId.get(entry.parent)
-      while (next !== undefined && !seen.has(next.id)) {
-        if (registered(next)) return next
-        seen.add(next.id)
-        next = next.parent === null || next.parent === undefined ? undefined : byId.get(next.parent)
-      }
-      return undefined
-    }
+    const registeredAbove = (entry) => registeredAboveIn(entry, byId)
     const groups = new Map()
     for (const entry of list) {
       if (!registered(entry)) continue
@@ -12947,22 +14248,60 @@ const WorkspaceTree = (() => {
 
   /**
    * How many of a group's **conversations** are drawn: the watermark (5 until `Show more`), raised to cover the last
-   * running or open conversation among the first 50, never more than there are. A New session placeholder is not one of
-   * them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
+   * conversation among the first 50 that needs to be seen, never more than there are. A New session placeholder is not
+   * one of them: DSH's watermark counts non-blank rows only (`SESSION_WATERMARK_BASE`, `requiredWatermark`,
    * `dsh-client-ui-workspace` `lib/client.js:2803-2833`), so the open blank never takes one of the five places (#54).
+   *
+   * What raises it is DSH's `requiredWatermark` (`:2830`), clause for clause: a conversation that is **running**
+   * (`options.running`, or the list's own `running`), has a **running child** (`options.runningChildren`, the parents
+   * `parentsRunning` names), **awaits the person** (`options.pending`, id → kind, counting the three kinds
+   * `visiblePendingKind` keeps, `:1048-1055`), carries an **unread completion** (`options.unread`, DSH's `completed`,
+   * `:1068`), or is **open** (`options.current`). The waiting and unread clauses are #62.
    */
   function shownCount(sessions, watermark, options = {}) {
     const mark = Number.isFinite(watermark) ? Math.max(0, watermark) : INITIAL
     const running = options.running instanceof Set ? options.running : new Set()
+    const runningChildren = options.runningChildren instanceof Set ? options.runningChildren : new Set()
+    const pending = options.pending instanceof Map ? options.pending : new Map()
+    const unread = options.unread instanceof Set ? options.unread : new Set()
     const current = options.current ?? null
+    const awaits = (id) => Object.hasOwn(PENDING, String(pending.get(id)))
     let total = 0
     let required = 0
     for (const meta of sessions) {
       if (placeholder(meta)) continue
       total += 1
-      if (total <= REACH && (running.has(meta.id) || meta.running === true || (current !== null && meta.id === current))) required = total
+      if (total > REACH) continue
+      const id = meta.id
+      if (running.has(id) || meta.running === true || runningChildren.has(id) || awaits(id) || unread.has(id) || (current !== null && id === current)) required = total
     }
     return Math.min(total, Math.max(mark, required))
+  }
+
+  /**
+   * The watermark a group keeps after it is drawn: the stored one raised to what its rows now require, and never lowered —
+   * DSH's `raiseWatermarks` over its baselines (`lib/client.js:2834-2842`, `:3088`, `:3095-3096`). The watermark is a
+   * row count that does not fall on its own, so a row stays in view after its run, its question or its reminder ends
+   * (README: "the rows stay visible after a run or notification ends"); only `Show less` and folding the workspace lower
+   * it, which the page does by forgetting the stored mark. `stored` undefined is a group with none yet.
+   */
+  function raisedWatermark(stored, sessions, options = {}) {
+    const mark = Number.isFinite(stored) ? Math.max(0, stored) : INITIAL
+    return Math.max(mark, shownCount(sessions, INITIAL, options))
+  }
+
+  /**
+   * The sessions with a running **subagent** child, from `/api/sessions` (each child names its `parentSession`): DSH's
+   * `runningChildCount` over the parent's subagent catalog (`lib/client.js:1056-1058`). A fork also names its source as
+   * `parentSession`, but it is a conversation of its own, not a child, so only `origin: 'subagent'` counts.
+   */
+  function parentsRunning(sessions, running = new Set()) {
+    const parents = new Set()
+    for (const meta of Array.isArray(sessions) ? sessions : []) {
+      if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent' || typeof meta.parentSession !== 'string') continue
+      if (running.has(meta.id) || meta.running === true) parents.add(meta.parentSession)
+    }
+    return parents
   }
 
   /**
@@ -13001,10 +14340,116 @@ const WorkspaceTree = (() => {
     return mode === 'more' ? `Show ${hidden} more sessions` : 'Show less'
   }
 
+  /** DSH's `toast.archivedNotOpenable` (`dsh-client-ui-workspace` lib/client.js:4934), word for word. */
+  const ARCHIVED_NOT_OPENABLE = 'Archived sessions cannot be opened. Unarchive it to view.'
+
+  /**
+   * Whether clicking a row opens what it names. An **archived session** does not: DSH's browser guards opening
+   * (`guardedOpen`, lib/client.js:3532-3538), says why, and opens nothing; Rename, Fork and Unarchive stay in its menu.
+   * Measured before (live-testing draft developer-six-7): the click opened the session with a working composer.
+   */
+  function opensOnClick(node) {
+    return !(node?.kind === 'session' && node.archived === true)
+  }
+
+  /**
+   * Whether a key pressed in a tree row opens the row (#98): Enter or Space whose target is the row itself. A key on a
+   * control inside the row (the `…`, Archive, Pin, New session in, an item of the row's menu) belongs to that control,
+   * which the browser activates as the button it is. DSH's row controls are plain `<button>`s with no key handler above
+   * them: its rows carry an `onClick` only (`dsh-client-ui-workspace` lib/client.js:1965-1970, :2273-2282), and each
+   * control stops its own click there (`:2015-2017`, `:2033-2035`, `:2323-2327`). The row here also takes the keys,
+   * because it is focusable, and it took them from every control inside it: Archive opened the session.
+   */
+  function rowKeyOpens(event, row) {
+    return event !== null && typeof event === 'object' && event.target === row && (event.key === 'Enter' || event.key === ' ')
+  }
+
+  /**
+   * A session row's primary status, DSH's `sessionStatuses` (dsh-client-ui-workspace `client.js:2068-2117`): a pending
+   * interaction outranks running, which outranks an unread completion; otherwise idle. A pending one's `trailingLabel`
+   * takes the time's place on the row. `{ pending: 'approval' | 'plan-review' | 'question' | undefined, running, completed }`.
+   */
+  const PENDING = {
+    approval: { state: 'warning', label: 'Waiting for approval', trailingLabel: 'Approval' },
+    'plan-review': { state: 'warning', label: 'Plan awaiting review', trailingLabel: 'Plan review' },
+    question: { state: 'warning', label: 'Waiting for answer', trailingLabel: 'Answer' },
+  }
+  function rowStatus(facts = {}) {
+    if (Object.hasOwn(PENDING, String(facts.pending))) return { ...PENDING[facts.pending] }
+    if (facts.running === true) return { state: 'ongoing', label: 'Running' }
+    if (facts.completed === true) return { state: 'done', label: 'Completed' }
+    return { state: 'idle', label: 'Idle' }
+  }
+
+  /**
+   * Whether a session's completion is unread after a running edge, DSH's `observeRunning` and `reconcileStatus`
+   * (dsh-client-ui-session `client.js:948-965`): a turn that stops while the session is not on screen marks it, and
+   * running again or being on screen clears it. `{ wasRunning, running, viewing }`.
+   */
+  function completionUnread(unread, change = {}) {
+    if (change.running === true || change.viewing === true) return false
+    return change.wasRunning === true ? true : unread === true
+  }
+
   return {
-    UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, withOpenBlank, deriveGroups,
-    flatten, shownCount, watermarkRows, nextWatermark, overflow, overflowLabel,
-    FLAT, leads, reconcileOrder, flatRows, accountOrders, draggable, dragOrder, readOrder, chooseOrderBy, withSessionOrder, withPinFronted,
+    UNGROUPED,
+    INITIAL,
+    STEP,
+    REACH,
+    SELECTION_KEY,
+    basename,
+    sessionOrder,
+    visible,
+    containsSession,
+    placeholder,
+    hiddenBlank,
+    rowOffersActions,
+    NO_COMPLETED_TURN,
+    FORK_FAILED,
+    forkBlocked,
+    forkRefusal,
+    storedTitle,
+    sessionLabel,
+    rowLabel,
+    rowTooltip,
+    headerTitle,
+    documentTitle,
+    workspaceRefusal,
+    deriveGroups,
+    flatten,
+    shownCount,
+    raisedWatermark,
+    parentsRunning,
+    watermarkRows,
+    nextWatermark,
+    overflow,
+    overflowLabel,
+    rowStatus,
+    completionUnread,
+    ARCHIVED_NOT_OPENABLE,
+    opensOnClick,
+    rowKeyOpens,
+    selectionRecord,
+    savedSelection,
+    recentWorkspace,
+    restoreChoice,
+    newSessionWorkspace,
+    newConversationTarget,
+    folderLabel,
+    EMPTY_TEXT,
+    emptyList,
+    withOpenBlank,
+    FLAT,
+    leads,
+    reconcileOrder,
+    flatRows,
+    accountOrders,
+    draggable,
+    dragOrder,
+    readOrder,
+    chooseOrderBy,
+    withSessionOrder,
+    withPinFronted,
   }
 })()
 /* workspace-tree:end */
@@ -13014,12 +14459,91 @@ function placeholderDrawn(id) {
   return WorkspaceTree.flatten(treeGroups).some((group) => group.sessions.some((meta) => meta.id === id && WorkspaceTree.placeholder(meta)))
 }
 
+/* session-archive:begin */
+/**
+ * Archive and unarchive, in DSH's words and by DSH's rules (`dsh-client-ui-workspace`: the en dictionary,
+ * `activityLine`, `activeSessionRefusal`, the archive toasts and `SearchResultItem`).
+ *
+ * Pure, like the tree's block, so `test/session-archive.test.ts` loads it out of the page and judges the wording and
+ * the decisions in Node: what a `409 active` refusal means (the stop-and-archive dialog, listing the work it names),
+ * how each family of work is worded, and which actions an archive notice carries.
+ */
+const SessionArchive = (() => {
+  const TEXT = {
+    unarchiveSession: 'Unarchive session',
+    unarchive: 'Unarchive',
+    archivedNotOpenable: 'Archived sessions cannot be opened. Unarchive it to view.',
+    archived: 'Session archived. You can ',
+    stoppedAndArchived: 'Session stopped and archived. You can ',
+    undo: 'undo',
+    or: ' or ',
+    filter: 'filter archived sessions',
+    confirmTitle: 'Stop and archive this session?',
+    confirmActivity: 'Work that will be stopped',
+    confirmAction: 'Stop and archive',
+    confirmPending: 'Stopping and archiving…',
+  }
+
+  /** `archive.confirm.desc`: what stops, where the session comes back from, and that the work does not resume. */
+  function confirmDescription(title) {
+    return (
+      `“${title}” still has work in progress. Archiving stops it first; you can restore the session later from the ` +
+      '“All conversations (show archived)” filter in the sidebar, and the stopped work will not resume on its own.'
+    )
+  }
+
+  /** One family's line: its count and its items' labels (ids when an item has none); an unknown family is generic. */
+  function activityLine(entry) {
+    const items = Array.isArray(entry?.items) ? entry.items : []
+    const n = items.length
+    const names = items.map((item) => item.label ?? item.id).join(', ')
+    const one = n === 1
+    switch (entry?.kind) {
+      case 'turn':
+        return 'The turn in progress'
+      case 'subagent':
+        return `${n} running ${one ? 'subagent' : 'subagents'}: ${names}`
+      case 'job':
+        return `${n} background ${one ? 'job' : 'jobs'}: ${names}`
+      case 'schedule':
+        return `${n} scheduled ${one ? 'reminder' : 'reminders'}: ${names}`
+      default:
+        return `${n} other ${one ? 'item' : 'items'} of work (${String(entry?.kind)})`
+    }
+  }
+
+  /**
+   * The work a refused archive names, or `undefined` for any other answer. The route answers `409` with
+   * `code: 'active'` and DSH's `activity`; a server that predates the list still names a running turn.
+   */
+  function refusedActivity(status, body) {
+    if (status !== 409 || body === null || typeof body !== 'object' || body.code !== 'active') return undefined
+    return Array.isArray(body.activity) && body.activity.length > 0 ? body.activity : [{ kind: 'turn' }]
+  }
+
+  /**
+   * An archive notice's text and actions: `undo` always, and `filter archived sessions` only while archived rows are
+   * hidden, since otherwise the row is already in view. A not-openable notice carries none.
+   */
+  function notice(kind, archiveMode) {
+    if (kind === 'archivedNotOpenable') return { text: TEXT.archivedNotOpenable, tone: 'warning', holdMs: 4000, actions: [] }
+    const actions = [{ action: 'undo', label: TEXT.undo }]
+    if (archiveMode === 'hide') actions.push({ action: 'filter', prefix: TEXT.or, label: TEXT.filter })
+    return { text: kind === 'stoppedAndArchived' ? TEXT.stoppedAndArchived : TEXT.archived, tone: 'success', holdMs: 6000, actions }
+  }
+
+  return { TEXT, confirmDescription, activityLine, refusedActivity, notice }
+})()
+/* session-archive:end */
+
 /**
  * The page's state for the workspace tree: the groups the last render drew, each group's watermark, and the definition
  * folder of every session a folder listing has shown (so `Rename` can write both halves, as SESSION_TREE.md asks).
  */
 let treeGroups = []
 const watermarks = new Map()
+/** The subagent sessions `/api/sessions` last listed (not rows themselves): their runs raise their parents' rows. */
+let childSessions = []
 const definitionOf = new Map()
 /** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
 let listedSessions = new Set()
@@ -13140,10 +14664,11 @@ function wireSessionDrag(items, key, rows, order) {
 /* order-modes:end */
 
 /**
- * Remember where a session's definition sits, and let its row say so: a session nobody named is labelled with its
- * definition folder's name and carries that folder as its tooltip, which is what this page showed before the tree
- * grouped sessions by workspace. The row is updated in place, because the listing that reveals a definition arrives
- * after the session rows are drawn.
+ * Remember where a session's definition sits, and let its row carry that folder in `data-definition`. The row is updated
+ * in place, because the listing that reveals a definition arrives after the session rows are drawn. Only that data
+ * attribute: the label stays DSH's `New Session` or `Untitled` (`WorkspaceTree.sessionLabel`), never the folder's
+ * `session-<yyyymmdd>-<hhmm>` name, which is an internal identifier (#24), and the tooltip stays the row's title, because
+ * the folder is an internal path with the home directory in it, and a focusable row's tooltip is read aloud (#109).
  */
 function learnDefinition(id, folder) {
   if (definitionOf.get(id) === folder) return
@@ -13151,11 +14676,7 @@ function learnDefinition(id, folder) {
   const entry = rowIndex.get('session:' + id)
   if (entry === undefined) return
   const row = entry.li.querySelector(':scope > .row')
-  if (row !== null) row.title = folder
-  if (entry.node.session?.title) return
-  const label = row?.querySelector(':scope > .label')
-  if (label !== null && label !== undefined) label.textContent = WorkspaceTree.basename(folder)
-  entry.node.label = WorkspaceTree.basename(folder)
+  if (row !== null) row.dataset.definition = folder
 }
 
 /** What a folder listing draws: no nested root (it is a group), and no definition of a session the tree already lists. */
@@ -13168,24 +14689,12 @@ function folderRows(children) {
   )
 }
 
-/**
- * A session's row label: its stored title; else the name of its definition folder when the tree knows one (the name
- * this page always showed for a session nobody named, `session-<date>-<time>`); else DSH's words, `New session` while
- * it has no turn and `Untitled` after.
- */
-function sessionLabel(meta) {
-  if (typeof meta.title === 'string' && meta.title.trim().length > 0) return meta.title
-  const definition = definitionOf.get(meta.id)
-  if (definition !== undefined) return WorkspaceTree.basename(definition)
-  return (meta.turns ?? 0) === 0 ? 'New session' : 'Untitled'
-}
-
-/** One session as a tree node, in the shape `nodeRow` and the session actions already read. */
+/** One session as a tree node, in the shape `nodeRow` and the session actions already read; its label is DSH's (#24). */
 function sessionNode(meta) {
   return {
     kind: 'session',
     path: 'session:' + meta.id,
-    label: sessionLabel(meta),
+    label: WorkspaceTree.sessionLabel(meta),
     cwd: meta.cwd,
     badge: null,
     children: [],
@@ -13199,6 +14708,8 @@ function sessionNode(meta) {
     ...(meta.pinned === true ? { pinned: true } : {}),
     ...(meta.pinnedAt !== undefined ? { pinnedAt: meta.pinnedAt } : {}),
     ...(meta.archived === true ? { archived: true } : {}),
+    /** A New session placeholder: its row draws no menu, no hover buttons and no double-click rename (#79). */
+    ...(WorkspaceTree.rowOffersActions(meta) ? {} : { blank: true }),
   }
 }
 
@@ -13224,11 +14735,78 @@ function groupRow(group) {
 }
 
 /**
+ * The keyboard's place while a redraw that took it away is still drawing (its rows arrive over several awaits), so a
+ * redraw that starts meanwhile, with focus on the body, gives back the same place rather than none.
+ */
+let heldTreeFocus = null
+
+/**
+ * Where the keyboard is in the tree, so a redraw can give it back (#92): `{ row, control }`, the key of the row that holds
+ * focus and which of its stops — `row` for the row itself, `more` for its group's Show more, `tool:<n>` for its n-th
+ * control (an item of its menu counts as the menu's `…`, because a redraw closes the menu). `null` when focus is outside
+ * the tree, or is not the keyboard's (`:focus-visible`): a pointer's focus left on a control would keep the row's controls
+ * drawn, which a pointer does not expect. DSH's tree is React, which keeps the focused element through a refresh
+ * (`dsh-client-ui-workspace` lib/client.js:2526-2543 renders the same keyed rows); this page replaces its rows, and a
+ * refresh (a turn ending, leaving the New session placeholder) dropped the keyboard's place to the top of the page.
+ */
+function treeFocus() {
+  const active = document.activeElement
+  if (active === null || active === document.body) return heldTreeFocus
+  if (!(active instanceof HTMLElement) || !treeList.contains(active) || !active.matches(':focus-visible')) return null
+  const keyOf = (li) => (li === null ? undefined : li.dataset.rowKey ?? (li.dataset.sessionId !== undefined ? 'session:' + li.dataset.sessionId : undefined))
+  const more = active.closest('li[data-slot="more"]')
+  if (more !== null) {
+    const row = keyOf(more.parentElement?.closest('li[role="treeitem"]') ?? null)
+    return row === undefined ? null : { row, control: 'more' }
+  }
+  const li = active.closest('li[role="treeitem"]')
+  const row = keyOf(li)
+  if (row === undefined) return null
+  const own = li.querySelector(':scope > .row')
+  if (active === own) return { row, control: 'row' }
+  const index = treeTools(own).indexOf(active.closest('.menu-wrap')?.querySelector(':scope > button') ?? active)
+  return { row, control: index === -1 ? 'row' : 'tool:' + index }
+}
+
+/** A row's own controls in Tab order — its `…` and its quick buttons, never the items of its menu. */
+function treeTools(row) {
+  return row === null ? [] : [...row.querySelectorAll('.row-tools button')].filter((button) => button.closest('.menu') === null)
+}
+
+/**
+ * Give focus back where `treeFocus` saw it, when the redraw dropped it (focus on the page's body) and the row is still
+ * drawn. `done` ends a whole redraw, after which a place not given back is gone.
+ */
+function restoreTreeFocus(focus, done = false) {
+  if (focus === null) return
+  if (done && heldTreeFocus === focus) heldTreeFocus = null
+  const active = document.activeElement
+  if (active !== null && active !== document.body) {
+    if (heldTreeFocus === focus) heldTreeFocus = null
+    return
+  }
+  const li =
+    treeList.querySelector(`li[data-row-key="${CSS.escape(focus.row)}"]`) ??
+    (focus.row.startsWith('session:') ? treeList.querySelector(`li[data-session-id="${CSS.escape(focus.row.slice('session:'.length))}"]`) : null)
+  const row = li?.querySelector(':scope > .row') ?? null
+  if (row === null) return
+  if (heldTreeFocus === focus) heldTreeFocus = null
+  if (focus.control === 'more') {
+    ;(li.querySelector(':scope > ul > li[data-slot="more"] > button') ?? row).focus({ preventScroll: true })
+    return
+  }
+  /** The row first: its focus draws its controls (`:focus-within`), so the control can take focus next. */
+  row.focus({ preventScroll: true })
+  if (focus.control.startsWith('tool:')) treeTools(row)[Number(focus.control.slice('tool:'.length))]?.focus({ preventScroll: true })
+}
+
+/**
  * Draw (or redraw) a group's session rows and its overflow row, in place, after its child workspaces.
  *
  * In place rather than by redrawing the group, so `Show more` does not close the folders a person opened beneath it.
  */
 function paintSessionRows(list, group, depth) {
+  const focus = treeFocus()
   for (const old of list.querySelectorAll(':scope > li[data-slot="sessions"], :scope > li[data-slot="more"]')) {
     if (old.dataset.rowKey !== undefined) rowIndex.delete(old.dataset.rowKey)
     old.remove()
@@ -13237,11 +14815,14 @@ function paintSessionRows(list, group, depth) {
   const anchor = groupRows.length > 0 ? groupRows[groupRows.length - 1].nextSibling : list.firstChild
   /**
    * DSH's arithmetic (`lib/client.js:3156-3158`): the open New session placeholder is drawn on top of the watermark's
-   * conversations rather than in one of their places, and the control names how many it hides (#54). The drawn rows
-   * take session drags in the account's order (C17).
+   * conversations rather than in one of their places, and the control names how many it hides (#54). The raise is kept
+   * (`:3095-3096`), so a row a question or a finished turn brought into view stays there once it is answered and read.
+   * The drawn rows take session drags in the account's order (C17).
    */
-  const raise = { running: runningSessions, current }
-  const shown = WorkspaceTree.shownCount(group.sessions, watermarks.get(group.key) ?? WorkspaceTree.INITIAL, raise)
+  const raise = watermarkFacts()
+  const kept = WorkspaceTree.raisedWatermark(watermarks.get(group.key), group.sessions, raise)
+  if (kept !== (watermarks.get(group.key) ?? WorkspaceTree.INITIAL)) watermarks.set(group.key, kept)
+  const shown = WorkspaceTree.shownCount(group.sessions, kept, raise)
   const baseline = WorkspaceTree.shownCount(group.sessions, WorkspaceTree.INITIAL, raise)
   const drawn = WorkspaceTree.watermarkRows(group.sessions, shown)
   const total = drawn.conversations
@@ -13254,10 +14835,16 @@ function paintSessionRows(list, group, depth) {
     li.dataset.slot = 'more'
     li.setAttribute('role', 'none')
     li.style.setProperty('--tree-depth', String(depth))
-    const row = document.createElement('div')
+    /**
+     * DSH's control is a `<button>` whose `aria-expanded` says whether the group shows every session
+     * (`dsh-client-ui-workspace` lib/client.js:3309-3326, `sessionsExpanded` at :3159), which is the `less` mode here. It
+     * was a `div` with `role="button"`, no expanded state and a key handler of its own (#92); a button takes Enter and
+     * Space itself.
+     */
+    const row = document.createElement('button')
+    row.type = 'button'
     row.className = 'row'
-    row.tabIndex = 0
-    row.setAttribute('role', 'button')
+    row.setAttribute('aria-expanded', String(mode === 'less'))
     /** An empty icon cell, so the words line up with the session titles above them, as DSH's overflow row does. */
     const spacer = document.createElement('span')
     spacer.className = 'icon spacer'
@@ -13266,22 +14853,18 @@ function paintSessionRows(list, group, depth) {
     label.className = 'label'
     label.textContent = WorkspaceTree.overflowLabel(mode, drawn.hidden)
     row.append(spacer, label)
+    /** DSH's button is the same element after the toggle, so it keeps focus; the redraw gives it back here (`treeFocus`). */
     row.onclick = () => {
       if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))
       else watermarks.delete(group.key)
       paintSessionRows(list, group, depth)
       markSelection()
     }
-    row.onkeydown = (event) => {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault()
-        row.onclick()
-      }
-    }
     li.append(row)
     rows.push(li)
   }
   for (const li of rows) list.insertBefore(li, anchor)
+  restoreTreeFocus(focus)
   paintRunningMarks()
 }
 
@@ -13413,6 +14996,41 @@ function wireWorkspaceDrag(li, group) {
   })
 }
 
+/**
+ * What raises a watermark right now, in `WorkspaceTree.shownCount`'s terms: the running sessions, the parents of a running
+ * subagent, the sessions awaiting a person, the unread completions, and the open session (DSH's `requiredWatermark`).
+ */
+function watermarkFacts() {
+  return {
+    running: runningSessions,
+    runningChildren: WorkspaceTree.parentsRunning(childSessions, runningSessions),
+    pending: pendingInteractions,
+    unread: unreadSessions,
+    current,
+  }
+}
+
+/**
+ * Redraw the session rows of every open group whose rows now need a higher watermark than it keeps — a question, a run
+ * or an unread completion below the fold. DSH re-derives its baselines on every status change (`lib/client.js:3088-3096`),
+ * so such a row comes into view at once; the page's stream handlers only repaint the marks of rows already drawn, so
+ * they call this from `paintRunningMarks`. A group already high enough is left alone, which is also what ends the
+ * recursion through `paintSessionRows`.
+ */
+function raiseOpenGroups() {
+  const facts = watermarkFacts()
+  for (const { node, li } of [...rowIndex.values()]) {
+    const group = node.group
+    if (group === undefined || !li.isConnected || li.dataset.open !== 'true') continue
+    const list = li.querySelector(':scope > ul[role="group"]')
+    if (list === null) continue
+    const stored = watermarks.get(group.key) ?? WorkspaceTree.INITIAL
+    if (WorkspaceTree.raisedWatermark(stored, group.sessions, facts) <= stored) continue
+    paintSessionRows(list, group, Number(li.style.getPropertyValue('--tree-depth') || '0') + 1)
+    markSelection()
+  }
+}
+
 function nodeRow(node, depth = 0) {
   /** The row's right-hand slot, declared before anything appends to it: a later `const` was a TDZ error that took
    * every session row out of the tree while its branch still rendered. */
@@ -13426,8 +15044,12 @@ function nodeRow(node, depth = 0) {
    * A row is **focusable**, and that is what makes the display swap keyboard-reachable: the controls are not rendered until the
    * row is focused, so the row itself has to be the thing a keyboard can land on. Without this, `:focus-within` could only fire
    * from a control that is never rendered — a keyboard reader had no way to reach a row's actions at all.
+   *
+   * **One** Tab stop per row, the `.row` below, which takes Enter and Space. The list item was a second stop in front of it
+   * that ignored Enter, so a session row cost five Tab presses (#92). DSH's rows are no Tab stop at all (no `tabIndex`, no key
+   * handler: `dsh-client-ui-workspace` lib/client.js:1965-1970, :2273-2282) and its tree has no arrow keys (:2526-2537), so
+   * there is no roving focus to copy; the stop is heddle's, because it is what reaches the row's controls.
    */
-  li.tabIndex = 0
   li.dataset.kind = node.kind
   /** The key the movement animation matches a previous position to: a session by its id, anything else by its path. */
   li.dataset.rowKey = node.kind === 'session' && node.session !== undefined && node.session !== null ? 'session:' + node.session.id : 'node:' + node.path
@@ -13456,15 +15078,10 @@ function nodeRow(node, depth = 0) {
   icon.append(kindIcon(node.kind, false))
   row.append(icon)
   /**
-   * A running session carries the reference's **spinner** before its name — not a word: `StateDot`'s ongoing state is a
-   * rotating ring with a breathing arc, and the row repaints it from `runningSessions` (fed by `model/request` and
-   * `turn/completed` on the stream) so the mark says "still working" without a re-fetch.
+   * A session's status mark goes before its name — not a word: `StateDot`'s ongoing spinner while it runs, a warning dot
+   * while it waits on a person, a done dot for a completion not yet seen. `paintRowStatus` draws it once the row is
+   * built (below) and again from `paintRunningMarks` whenever the stream changes a state, without a re-fetch.
    */
-  if (node.kind === 'session' && node.session !== undefined && node.session !== null && runningSessions.has(node.session.id)) {
-    const mark = runningMark()
-    row.append(mark)
-    for (const animation of mark.getAnimations({ subtree: true })) animation.startTime = 0
-  }
   if (node.badge) {
     const badge = document.createElement('span')
     badge.className = 'badge'
@@ -13478,19 +15095,26 @@ function nodeRow(node, depth = 0) {
    * A session row shows the name a person gave it; everything else shows the folder's name.
    *
    * This is what makes `Rename…` mean something: the title was already carried by the node and written by the
-   * route, and the row ignored it — measured, renaming succeeded and the label did not move. The folder stays
-   * reachable as the row's tooltip, because it is still the identity.
+   * route, and the row ignored it — measured, renaming succeeded and the label did not move.
    */
-  label.textContent = node.kind === 'session' && node.session?.title ? node.session.title : node.label
-  /** The folder a session works in is its tooltip: the tree groups by workspace, and the folder is still its identity. */
-  if (node.kind === 'session') row.title = (node.session !== null && node.session !== undefined ? definitionOf.get(node.session.id) : undefined) ?? node.cwd ?? node.path
+  label.textContent = WorkspaceTree.rowLabel(node)
+  /**
+   * The row's tooltip is its display title, or nothing (`WorkspaceTree.rowTooltip`, #109). It used to be the session's
+   * definition folder, else its working folder: an internal path with the home directory in it, which a keyboard or
+   * screen-reader user still heard after the hover card took the tooltip from pointer users. The definition folder is
+   * still the session's identity, so the row keeps it where nothing shows or reads it: `data-definition`.
+   */
+  const tooltip = WorkspaceTree.rowTooltip(node)
+  if (tooltip !== undefined && tooltip !== '') row.title = tooltip
+  if (node.kind === 'session' && node.session !== null && node.session !== undefined && definitionOf.has(node.session.id)) row.dataset.definition = definitionOf.get(node.session.id)
   row.append(label)
   /**
    * DSH's session row opens the Rename session dialog on a **double-click on its title** (`onDoubleClick` →
    * `onRenameRequest`), the same request its menu's `Rename` and the chord raise. Here it is wired on the rows whose menu
    * offers `Rename`, and the event stops at the title, as DSH's does; the two clicks before it open the session as usual.
+   * A New session placeholder has neither, as DSH's blank row (`onDoubleClick: row.blank ? void 0 : …`, #79).
    */
-  if (node.kind === 'session' && node.session) {
+  if (node.kind === 'session' && node.session && node.blank !== true) {
     label.addEventListener('dblclick', (event) => {
       event.stopPropagation()
       renameSession(node)
@@ -13506,11 +15130,11 @@ function nodeRow(node, depth = 0) {
    */
   if (node.session) {
     /**
-     * The row says **how long ago**, and the turn count moves to the tooltip.
+     * The row says **how long ago**.
      *
      * DSH's list reads `context-mgmt 4d` and `Running Heddle browser tool 24min`: the age is what tells a reader
-     * which conversations are live, while a count of turns says how long one was. Both are here, in the order a
-     * person asks for them — the age on the row, the count on hover.
+     * which conversations are live. A count of turns is not on the row or its tooltip, as it is not on DSH's row or its
+     * hover card (`SessionHoverContent`, `dsh-client-ui-workspace` `lib/client.js:2141-2165`); the tooltip is the title.
      */
     const age = document.createElement('span')
     age.className = 'age'
@@ -13523,7 +15147,6 @@ function nodeRow(node, depth = 0) {
     age.textContent = relativeAge(stamp)
     age.dataset.stamp = stamp
     rowRight.append(age)
-    if (node.session.turns > 0) row.title = row.title.length > 0 ? row.title : `${node.session.turns} turn${node.session.turns === 1 ? '' : 's'}`
   }
 
   /**
@@ -13541,6 +15164,8 @@ function nodeRow(node, depth = 0) {
    */
   /** The archived state on the item itself, so a check (and a future style) can tell an archived row without reading text. */
   if (node.archived === true) li.dataset.archived = 'true'
+  /** An archived session row explains to a screen reader that it cannot be opened until restored (DSH, lib/client.js:2279). */
+  if (!WorkspaceTree.opensOnClick(node)) li.setAttribute('aria-description', WorkspaceTree.ARCHIVED_NOT_OPENABLE)
   const rowTools = document.createElement('span')
   rowTools.className = 'row-tools'
   /**
@@ -13569,7 +15194,8 @@ function nodeRow(node, depth = 0) {
     }
     return button
   }
-  if (node.kind === 'session' && node.session) {
+  /** None on a New session placeholder: DSH draws a blank row's `rowActions` not at all (`lib/client.js:2323`, #79). */
+  if (node.kind === 'session' && node.session && node.blank !== true) {
     const quick = document.createElement('span')
     quick.className = 'session-actions'
     quick.append(quickButton(node.archived ? 'Unarchive session' : 'Archive session', 'archive', () => archiveSession(node)))
@@ -13617,14 +15243,16 @@ function nodeRow(node, depth = 0) {
   if (node.pinned === true && node.archived !== true) {
     pinSlot.append(kindIcon('pin-fill'))
     pinSlot.setAttribute('role', 'img')
-    pinSlot.setAttribute('aria-label', 'pinned')
-    pinSlot.title = 'pinned'
+    /** DSH's PinnedIndicator is named by its `row.pinned` string, "Pinned" (dsh-client-ui-workspace client.js:2126-2134, :4933; #109). */
+    pinSlot.setAttribute('aria-label', 'Pinned')
+    pinSlot.title = 'Pinned'
     li.dataset.pinned = 'true'
   }
   rowRight.append(pinSlot)
   /** Nothing to do, nothing drawn: a row with no actions keeps its age at the edge and no empty slot. */
   if (rowTools.children.length > 0) rowRight.append(rowTools)
   if (rowRight.children.length > 0) row.append(rowRight)
+  if (node.kind === 'session' && node.session !== undefined && node.session !== null) paintRowStatus(row, sessionRowStatus(node))
   row.onclick = async () => {
     /**
      * Three kinds of row, three different acts — the owner's rules of 2026-10-11.
@@ -13639,6 +15267,10 @@ function nodeRow(node, depth = 0) {
       return
     }
     if (node.kind === 'session') {
+      if (!WorkspaceTree.opensOnClick(node)) {
+        notifyArchivedNotOpenable()
+        return
+      }
       await selectSession(node)
       return
     }
@@ -13652,11 +15284,11 @@ function nodeRow(node, depth = 0) {
     }
     await toggle(node, li)
   }
+  /** Enter and Space open the row only when the row itself has focus; a control inside it keeps its own keys (#98). */
   row.onkeydown = (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      row.onclick()
-    }
+    if (!WorkspaceTree.rowKeyOpens(event, row)) return
+    event.preventDefault()
+    row.onclick()
   }
   /**
    * A clipped title reveals itself on the pointer arriving, and returns on the pointer leaving — the same two moments DSH's
@@ -14077,7 +15709,7 @@ const rowHoverCard = (() => {
     const title = typeof session.title === 'string' ? session.title : ''
     const model = HoverCards.sessionCard(
       {
-        label: drawn !== null ? label : sessionLabel(session),
+        label: drawn !== null ? label : WorkspaceTree.sessionLabel(session),
         title,
         blank: (session.turns ?? 0) === 0 && title.trim() === '',
         stamp: session.updated ?? session.created,
@@ -14562,9 +16194,16 @@ async function loadSearchIndex() {
     fetch('/api/tree').then((response) => (response.ok ? response.json() : { children: [] })).catch(() => ({ children: [] })),
   ])
   searchIndex = {
-    sessions: Array.isArray(sessions) ? sessions : [],
+    /**
+     * Only the sessions the sidebar lists: the search and the one-column list both read this, and DSH hides a subagent's
+     * child from both, as from the tree (`SessionRules.sidebarSessions`). Phase A measured the two listing a delegated
+     * child the tree hides (R-developer-eight-1, -26).
+     */
+    sessions: SessionRules.sidebarSessions(sessions),
     roots: (treeBody.children ?? []).map((node) => ({ path: node.path, title: node.label })),
   }
+  /** Every listed session, a subagent's child included: the header follows the open session's title whatever it is. */
+  noteSessions(sessions)
   return searchIndex
 }
 
@@ -14605,13 +16244,24 @@ async function applySearch() {
   results.hidden = false
   results.replaceChildren(
     ...hits.map((meta) => {
-      const button = document.createElement('button')
-      button.type = 'button'
+      /**
+       * An **archived** hit is DSH's archived `SearchResultItem`: it cannot be opened — choosing it says why, keeping the
+       * query and the view where they are — and it carries an `Unarchive session` button that restores it in place (the
+       * hit then redraws as an ordinary one). A `div` treeitem, since a button cannot hold a button.
+       */
+      const archived = meta.archived === true
+      const button = document.createElement(archived ? 'div' : 'button')
+      if (archived) {
+        button.tabIndex = 0
+        button.dataset.archived = 'true'
+        button.setAttribute('aria-description', SessionArchive.TEXT.archivedNotOpenable)
+      } else button.type = 'button'
       button.className = 'hit'
       button.setAttribute('role', 'treeitem')
       const title = document.createElement('span')
       title.className = 'hit-title'
-      title.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
+      /** DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`), never the id (#24). */
+      title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
       const place = document.createElement('span')
       place.className = 'hit-workspace'
       /**
@@ -14621,6 +16271,27 @@ async function applySearch() {
        */
       place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       button.append(title, place)
+      if (archived) {
+        const restore = document.createElement('button')
+        restore.type = 'button'
+        restore.className = 'hit-unarchive'
+        restore.setAttribute('aria-label', SessionArchive.TEXT.unarchiveSession)
+        restore.title = SessionArchive.TEXT.unarchive
+        restore.append(kindIcon('archive-restore', false))
+        restore.onclick = async (clickEvent) => {
+          clickEvent.stopPropagation()
+          const result = await setSessionFlags({ kind: 'session', session: meta, archived: true, path: definitionOf.get(meta.id) }, { archived: false })
+          if (result.ok) await applySearch()
+        }
+        button.append(restore)
+        button.onclick = () => showArchiveNotice('archivedNotOpenable')
+        button.onkeydown = (keyEvent) => {
+          if (keyEvent.target !== button || (keyEvent.key !== 'Enter' && keyEvent.key !== ' ')) return
+          keyEvent.preventDefault()
+          showArchiveNotice('archivedNotOpenable')
+        }
+        return button
+      }
       button.onclick = () => showSession(meta.id)
       return button
     }),
@@ -14648,6 +16319,8 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
  * could not complete would be worse than a list that does not offer it.
  */
 async function renderFlatList() {
+  const focus = treeFocus()
+  heldTreeFocus = focus
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
@@ -14675,7 +16348,8 @@ async function renderFlatList() {
       icon.append(kindIcon('session', false))
       const label = document.createElement('span')
       label.className = 'label'
-      label.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
+      /** DSH's flat rows carry the tree's label (`displayTitle`), not the raw id (#24). */
+      label.textContent = WorkspaceTree.sessionLabel(meta)
       const place = document.createElement('span')
       place.className = 'age'
       place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
@@ -14689,20 +16363,33 @@ async function renderFlatList() {
        * the selection through `chooseSelected`; the flat list is a view of the same selection and must say so too.
        */
       row.onclick = async () => {
-        await showSession(meta.id)
+        /** A session that could not be loaded is not the open one, so no row is marked for it (#56). */
+        if (!(await showSession(meta.id))) return
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }
+      }
+      /** The row is a Tab stop, so it opens on Enter and Space as the tree's rows do (#92). */
+      row.onkeydown = (event) => {
+        if (!WorkspaceTree.rowKeyOpens(event, row)) return
+        event.preventDefault()
+        row.onclick()
       }
       li.append(row)
       return li
     }),
   )
   wireSessionDrag([...treeList.children], WorkspaceTree.FLAT, visible, flat.order)
-  setNote(visible.length === 0 ? 'no sessions to list' : '')
+  /** DSH's empty list: "No sessions yet", or under `Archived only` its own emptiness and the way back (#107). */
+  setNote('')
+  paintEmptyList(WorkspaceTree.emptyList(archiveMode, 'list', visible.length))
+  paintConversationTarget()
+  restoreTreeFocus(focus, true)
 }
 
 async function renderTree() {
+  /** The redraw replaces every row; the keyboard's place in the tree is given back once it is drawn (#92). */
+  const focus = treeFocus()
   if (groupingMode === 'list') {
     await renderFlatList()
     return
@@ -14717,17 +16404,21 @@ async function renderTree() {
   try {
     const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
     if (workspaceResponse.status === 503) {
+      workspaceRoutes = 'absent'
       treeList.replaceChildren()
       rowIndex.clear()
       setNote('this profile does not load the workspace plugin')
+      paintConversationTarget()
       return
     }
     if (!workspaceResponse.ok) {
+      workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
       await renderFlatList()
       setNote('this server predates the workspace tree, so sessions are listed in one column')
       return
     }
+    workspaceRoutes = 'served'
     workspaces = (await workspaceResponse.json()).workspaces ?? []
     sessions = sessionResponse.ok ? await sessionResponse.json() : []
   } catch (error) {
@@ -14735,7 +16426,9 @@ async function renderTree() {
     return
   }
   rowIndex.clear()
+  noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
+  childSessions = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta?.origin === 'subagent')
   treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode, order: orderState, current })
   shownOrders = WorkspaceTree.accountOrders(workspaces, Array.isArray(sessions) ? sessions : [], orderState)
   /** The registered workspaces, every level — what the primary action chooses among when no row decides. */
@@ -14758,9 +16451,24 @@ async function renderTree() {
     expanded.add(treeTops[0].path)
     rememberExpanded()
   }
-  if (treeTops.length === 0 && treeGroups.length === 0) setNote('no workspace root yet — register one with the + above')
-  else setNote(activeFolder === null ? '' : 'a new conversation in ' + activeFolder.split('/').filter(Boolean).pop())
+  heldTreeFocus = focus
   treeList.replaceChildren(...treeGroups.map((group) => groupRow(group)))
+  /**
+   * An empty tree says why (#107): under `Archived only` DSH's "No archived sessions yet" with its way back, else heddle's
+   * no-roots note. It used to print the no-roots note whenever no group was drawn, which `Archived only` also causes with
+   * a workspace registered.
+   */
+  const empty = WorkspaceTree.emptyList(archiveMode, groupingMode, treeGroups.length)
+  if (empty !== null) paintEmptyList(empty)
+  else {
+    /**
+     * The note names the place as the tree does (#134's P3: it printed the folder's last segment, `default-workspace`,
+     * under a row reading *Default workspace*). With no session open it is where the first message will start one, so a
+     * reload, which forgets the folder the prompt box was aimed at, still names that workspace (#134).
+     */
+    const place = current === null ? (newConversationTarget()?.label ?? null) : activeFolder === null ? null : WorkspaceTree.folderLabel(treeTops, activeFolder)
+    setNote(place === null ? '' : 'a new conversation in ' + place)
+  }
 
   /**
    * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
@@ -14773,8 +16481,12 @@ async function renderTree() {
     await toggle(entry.node, entry.li)
   }
   if (selectedPath === null) syncSelectionToSession()
-  markSelection()
+  /** The rows just drawn are what the new conversation's place is read from (#134). */
+  paintConversationTarget()
+  /** The schedule marks go on the drawn rows first; giving the keyboard its place back is the redraw's last act (#92). */
   paintScheduleMarks()
+  markSelection()
+  restoreTreeFocus(focus, true)
 }
 
 /**
@@ -15682,6 +17394,10 @@ async function showNewWorkspace(added, { openSession = false } = {}) {
  * default workspace, which it creates or reuses under heddle's home, and shows it as *Add workspace* would. Nothing is
  * sent; the composer is aimed at it, and the first prompt starts the session there (heddle starts none unasked, D-056).
  * An install that is not empty gets nothing and no error. A failure says so once and leaves the + to choose a folder.
+ *
+ * The aim is not kept in this page's memory alone: a reload before the first prompt finds the workspace in the tree and
+ * nothing else, and `newConversationTarget` names it from there (#134, where the reload left the composer aimed at
+ * nothing and the prompt ran in the server's start folder).
  */
 async function initializeDefaultWorkspace() {
   if (current !== null || activeFolder !== null || treeTops.length > 0 || treeGroups.length > 0 || listedSessions.size > 0) return
@@ -15847,8 +17563,19 @@ async function confirmRename() {
     })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
+      const refusal = WorkspaceTree.workspaceRefusal(response.status, body, 'could not rename that workspace')
+      dialogError('workspace-rename-error', refusal.text)
+      if (refusal.gone) {
+        /**
+         * #49: another tab or client removed the workspace. The dialog stays to say so, with nothing left to confirm
+         * (Cancel closes it), and the tree is redrawn without the stale row — what New session on that row already did.
+         */
+        if (activeFolder === renameTarget.path) activeFolder = null
+        renameTarget = null
+        await renderTree()
+        return
+      }
       renameTarget.busy = false
-      dialogError('workspace-rename-error', body.error ?? 'could not rename that workspace')
       button.disabled = false
       return
     }
@@ -15912,10 +17639,18 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
     const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.path), { method: 'DELETE' })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
+      document.getElementById('workspace-delete-status').hidden = true
+      const refusal = WorkspaceTree.workspaceRefusal(response.status, body, 'could not delete that workspace')
+      dialogError('workspace-delete-error', refusal.text)
+      if (refusal.gone) {
+        /** #49: already removed elsewhere. Said in words, nothing left to confirm, and the tree redrawn without the row. */
+        if (activeFolder === deleteTarget.path) activeFolder = null
+        deleteTarget = null
+        await renderTree()
+        return
+      }
       deleteTarget.busy = false
       button.disabled = false
-      document.getElementById('workspace-delete-status').hidden = true
-      dialogError('workspace-delete-error', body.error ?? 'could not delete that workspace')
       return
     }
     if (activeFolder === deleteTarget.path) activeFolder = null
@@ -16007,6 +17742,7 @@ async function answerApproval(outcome) {
     const body = await response.json().catch(() => ({}))
     if (response.ok && body.answered === true) {
       hideApproval()
+      void refreshApprovals(false)
       return
     }
     note.textContent = body.error ?? 'that answer did not land: the question is no longer waiting'
@@ -16024,11 +17760,33 @@ document.getElementById('approval-allow').addEventListener('click', () => void a
 document.getElementById('approval-reject').addEventListener('click', () => void answerApproval('rejected'))
 events.addEventListener('approval', (message) => {
   try {
-    showApproval(JSON.parse(message.data))
+    const request = JSON.parse(message.data)
+    /** Every session's question marks its row, the panel's own or not — DSH's `Approval` in place of the time. */
+    if (typeof request?.session === 'string' && !pendingInteractions.has(request.session)) {
+      pendingInteractions.set(request.session, 'approval')
+      paintRunningMarks()
+    }
+    showApproval(request)
   } catch {
     // a frame that is not a question is not this card's business
   }
 })
+/** The rows' pending marks, rebuilt from the waiting list: an answer from anywhere, a stop or a timeout clears one. */
+function notePendingApprovals(requests) {
+  const waiting = new Set(requests.filter((entry) => typeof entry?.session === 'string').map((entry) => entry.session))
+  let changed = false
+  for (const [id, kind] of pendingInteractions) {
+    if (kind !== 'approval' || waiting.has(id)) continue
+    pendingInteractions.delete(id)
+    changed = true
+  }
+  for (const id of waiting) {
+    if (pendingInteractions.has(id)) continue
+    pendingInteractions.set(id, 'approval')
+    changed = true
+  }
+  if (changed) paintRunningMarks()
+}
 /**
  * A question answered anywhere closes here too (phase B item 5).
  *
@@ -16044,19 +17802,22 @@ events.addEventListener('approval-settled', (message) => {
     // a frame that is not JSON settles nothing
   }
 })
-async function refreshApprovals() {
+async function refreshApprovals(card = true) {
   try {
     const askedAt = performance.now()
     const response = await fetch('/api/approvals')
     if (!response.ok) return
     const body = await response.json()
     const requests = Array.isArray(body.requests) ? body.requests : []
+    notePendingApprovals(requests)
     /**
      * The pending list is the authority on what is still waiting: a card whose question is no longer in it was
      * settled elsewhere — answered on another page, timed out, or withdrawn by a Stop — and goes. Only a list read
-     * after the card was shown may close it, so a push that raced this read is not undone.
+     * after the card was shown may close it, so a push that raced this read is not undone. A read for the rows'
+     * marks alone (`card` false) closes a stale card too; it only does not show a new one.
      */
     if (ApprovalSettle.staleAfterPoll(approvalPending?.id, approvalShownAt, askedAt, requests)) hideApproval()
+    if (!card) return
     const request = requests.find((entry) => entry.session === undefined || entry.session === current)
     if (request !== undefined) showApproval(request)
   } catch {
@@ -18475,7 +20236,7 @@ function paintScheduleLinked() {
   const button = document.getElementById('schedule-detail-linked')
   if (detail === null || !(button instanceof HTMLButtonElement)) return
   const { meta, reason } = scheduleLinkedSession(detail.sessionId)
-  const name = meta !== undefined ? sessionLabel(meta) : String(detail.sessionId ?? '')
+  const name = meta !== undefined ? WorkspaceTree.sessionLabel(meta) : String(detail.sessionId ?? '')
   scheduleSetText(button.querySelector('.sched-linked-name'), name)
   button.disabled = reason !== ''
   button.title = reason !== '' ? reason : name
@@ -18894,19 +20655,30 @@ void refreshScheduleCatalog()
 /** Questions wait for a person, so the card is discovered from the pending list as well as pushed by the stream. */
 setInterval(() => {
   if (document.hidden) return
-  if (current === null) return
-  void refreshApprovals()
+  /** The rows need the list even with no session open; the card only for an open one. */
+  void refreshApprovals(current !== null)
 }, 2000)
 
 await loadEndpoints()
 await loadStatus()
 growComposer()
-await refreshSessions()
+/** A reload reopens the session that was open (C28), before the tree is drawn so the tree marks it. */
+await restoreSelection()
 void refreshApprovals()
 document.getElementById('session-search').addEventListener('input', applySearch)
-renderTree()
-  .then(() => initializeDefaultWorkspace())
-  .then(() => applySearch())
+const firstTree = renderTree().then(() => initializeDefaultWorkspace())
+/**
+ * From here the page knows where a first message would start its session (#134): the hero names it, the composer is
+ * inert when there is nowhere, and a message sent before this point, which waited, goes there.
+ */
+void firstTree
+  .catch(() => {})
+  .then(() => {
+    firstTreeSettled = true
+    settleFirstTree()
+    paintConversationTarget()
+  })
+firstTree.then(() => applySearch())
 renderQueue()
 renderComposerState()
 /** The panel's first word: a conversation, or an invitation to start one. */
