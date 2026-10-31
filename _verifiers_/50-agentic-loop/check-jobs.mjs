@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -72,6 +72,8 @@ async function startServer(label) {
     script,
     cookie,
     sessions,
+    /** The server process, for a claim that stops it the way a restart does. */
+    process: child,
     output: () => output,
     close: async () => {
       // A detached job outlives a killed server, so every live job is stopped first, through the page's own route.
@@ -483,6 +485,34 @@ test('A51 spill: output that outgrew the ring is named by its spill file in job_
     assert.ok(full.startsWith('line 00000\nline 00001\n') && full.endsWith('line 39999\n'))
     assert.match(read, /line 39999\n/, 'the read still shows the tail itself')
     assert.match(read, /\[status: completed, exit code: 0\]$/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('#129: a background job ended by a server shutdown is settled in its session log', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * A restart (SIGTERM) ends every live job's process group, and the job's end is recorded like any other settle:
+   * `job/settled` with status `killed`, so the session's history does not keep a job that never ended. DSH's teardown
+   * awaits its jobs' settles (LOCAL:831-839). Measured before (developer-four, #129): TS wrote the settle, the binary
+   * wrote none, because its teardown only spawned the wait and the process exited first.
+   */
+  const server = await startServer('shutdown')
+  try {
+    const folder = join(server.work, 'shutdown')
+    const session = await openSession(server, folder)
+    const mark = events(server, session).length
+    await turn(server, session, folder, [backgroundBash('sleep 63 && touch marker'), { text: 'started' }])
+    const id = startedId(toolTexts(server, session, mark)[0])
+    const exited = new Promise((resolvePromise) => server.process.once('exit', resolvePromise))
+    server.process.kill('SIGTERM')
+    const stopped = await Promise.race([exited.then(() => true), new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 15_000))])
+    assert.ok(stopped, 'the server exits after SIGTERM')
+    const settled = settledEvent(server, session, id)
+    assert.ok(settled, `the job's end is in the session log\nsaw: ${JSON.stringify(events(server, session).slice(mark).map((event) => event.type))}`)
+    assert.equal(settled.status, 'killed')
+    assert.equal(existsSync(join(folder, 'marker')), false, 'the command never got to finish')
   } finally {
     await server.close()
   }
