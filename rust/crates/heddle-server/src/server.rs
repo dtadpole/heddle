@@ -1159,6 +1159,20 @@ async fn title_session(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     let title = title.to_owned();
+    // A title with nothing visible left once cleaned is refused, as DSH's rename refuses it
+    // (`dsh-session-title` lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838); the
+    // store cleans what it accepts (`heddle_session::title_text`). An unknown session is still a `404`
+    // first, as DSH resolves the session before it judges the title.
+    if heddle_session::title_text::clean_session_title(&title).is_empty() {
+        if !state.harness().sessions.exists(id.as_str()) {
+            return respond::no_session(id.as_str());
+        }
+        return respond::error_with_code(
+            StatusCode::BAD_REQUEST,
+            heddle_session::title_text::TITLE_INVALID_MESSAGE,
+            heddle_session::title_text::TITLE_INVALID_CODE,
+        );
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     if let Some(folder) = folder.as_ref()
         && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
@@ -1667,18 +1681,17 @@ async fn purify(State(state): State<AppState>) -> Response {
     // The browser loads this as a script, so it is served as JavaScript rather than through the
     // inline/download file answer: an `attachment` content-disposition here would leave the preview
     // page without a sanitiser.
-    let Some(path) = preview::purify_path(&state.options().asset_roots) else {
-        return respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n");
-    };
-    match std::fs::read(&path) {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/javascript; charset=utf-8")
-            .header("cache-control", "no-store")
-            .body(Body::from(bytes))
-            .expect("a response builder with static headers"),
-        Err(_) => respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n"),
-    }
+    // An installed package wins, so a checkout serves the version the TypeScript build serves; without one the binary
+    // serves its own copy (live issue #39), so a Rust deployment does not depend on a Node install.
+    let bytes = preview::purify_path(&state.options().asset_roots)
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(|| preview::EMBEDDED_PURIFY.as_bytes().to_vec());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/javascript; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Body::from(bytes))
+        .expect("a response builder with static headers")
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -3599,16 +3612,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sanitiser_is_javascript_or_a_plain_404() {
-        // Not installed: the TypeScript sentence, in plain text rather than a JSON error.
+    async fn the_sanitiser_is_javascript_whether_installed_or_not() {
+        // Not installed: the binary's own copy (live issue #39: this answered 404, and every HTML preview showed its
+        // source on a deployment without node_modules).
         let (router, _) = app("purify-missing");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
         let (status, headers, bytes) =
             call(&router, Method::GET, "/vendor/purify.js", Some(&cookie)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(headers["content-type"], "text/plain");
-        assert_eq!(body_text(&bytes), "the sanitiser is not installed\n");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert!(
+            body_text(&bytes).starts_with("/*! @license DOMPurify "),
+            "the sanitiser itself, not a refusal"
+        );
 
         // Installed under an asset root: served as a script a browser will run, not as a download.
         let root = std::env::temp_dir().join(format!(

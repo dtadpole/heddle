@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { escapeHtml, renderMarkdown } from '../src/server/markdown.ts'
+import { boundNesting, escapeHtml, MAX_INDENT, MAX_NESTING, renderInline, renderMarkdown } from '../src/server/markdown.ts'
 import { decodeCharacterReferences } from '../src/server/sanitize.ts'
 
 /**
@@ -321,4 +321,76 @@ test('an answer shows only local images, so it cannot make the page fetch from a
   assert.equal(followed(renderMarkdown('![p](plot.png)')).length, 0, 'a relative image with no folder to resolve against is not fetched')
   /** A document's preview keeps its author's remote image as written: a badge in a README. */
   assert.match(renderMarkdown('![b](https://img.shields.io/x.svg)', { base: '/w', remoteImages: true }), /src="https:\/\/img\.shields\.io\/x\.svg"/)
+})
+
+test('a line opens at most MAX_NESTING containers, and the rest reads as text', () => {
+  /** Live issues developer-two-15 (P0, Rust aborted) and -16 (TS failed the session view) at thousands of levels. */
+  assert.equal(MAX_NESTING, 100)
+  assert.equal(boundNesting(`${'>'.repeat(102)} x`), `${'>'.repeat(100)}\\>> x`, 'the 101st quote marker is escaped')
+  assert.equal(boundNesting(`${'- '.repeat(101)}x`), `${'- '.repeat(100)}\\- x`, 'and the 101st bullet')
+  assert.equal(boundNesting(`${'1. '.repeat(101)}x`), `${'1. '.repeat(100)}1\\. x`, 'and the 101st number keeps its digits')
+  assert.equal(boundNesting('> quote\n> > nested\n- a\n  - b'), '> quote\n> > nested\n- a\n  - b', 'ordinary nesting is untouched')
+  assert.equal(
+    boundNesting(`\`\`\`\n${'>'.repeat(102)}\n\`\`\``),
+    `\`\`\`\n${'>'.repeat(100)}\\>>\n\`\`\``,
+    'a line inside a code fence is bounded too, so no fence test can switch the bound off',
+  )
+})
+
+test('a line that only looks like a fence does not switch the bound off', () => {
+  /** developer-three's review: four spaces make an indented code block, and a backtick fence's info string has no backtick. */
+  for (const opener of ['    ```', '``` a`b', '```', '~~~']) {
+    const bounded = boundNesting(`${opener}\n\n${'>'.repeat(200)} x`)
+    assert.ok(!bounded.includes('>'.repeat(MAX_NESTING + 1)), JSON.stringify(opener))
+  }
+})
+
+test('deep inline nesting, mixed containers and a deeply indented list all render', () => {
+  /** developer-three's test material: none of these is bounded line by line, so the guard behind the bound must hold. */
+  const cases = {
+    stars: `${'*'.repeat(20000)}x${'*'.repeat(20000)}`,
+    brackets: `${'['.repeat(20000)}x${']'.repeat(20000)}`,
+    underscores: `${'_'.repeat(20000)}x${'_'.repeat(20000)}`,
+    mixed: `${'> - 1. '.repeat(20000)}x`,
+    indented: Array.from({ length: 3000 }, (_, level) => `${'  '.repeat(level)}- ${level}`).join('\n'),
+  }
+  for (const [name, source] of Object.entries(cases)) {
+    const html = renderMarkdown(source)
+    assert.ok(html.length > 0, name)
+  }
+  const indented = renderMarkdown(cases.indented)
+  assert.ok((indented.match(/<ul>/g) ?? []).length <= MAX_NESTING + 1, 'an indented list nests at a bounded depth')
+})
+
+test('a line keeps at most MAX_INDENT columns of indentation', () => {
+  assert.equal(MAX_INDENT, 200)
+  assert.equal(boundNesting(`${' '.repeat(300)}- x`), `${' '.repeat(200)}- x`)
+  assert.equal(boundNesting(`${'\t'.repeat(60)}- x`), `${' '.repeat(200)}- x`, 'a tab reaches the next multiple of four')
+  assert.equal(boundNesting(`${' '.repeat(200)}- x`), `${' '.repeat(200)}- x`, 'up to the bound a line is untouched')
+})
+
+test('fifty thousand nested quotes or list items render, at a bounded depth', () => {
+  const quotes = renderMarkdown(`${'>'.repeat(50000)} x`)
+  assert.equal((quotes.match(/<blockquote>/g) ?? []).length, 100, 'one hundred quotes, the rest as text')
+  const bullets = renderMarkdown(`${'- '.repeat(20000)}x`)
+  assert.equal((bullets.match(/<ul>/g) ?? []).length, 100)
+  assert.ok(renderInline('>'.repeat(50000)).length > 0, 'an inline span renders too')
+})
+
+test('a text the parser cannot render is shown as its own escaped words, not as an error', () => {
+  /** Deep inline nesting is not bounded line by line; marked then runs out of stack, which this build can catch. */
+  const html = renderMarkdown(`${'*a '.repeat(5000)}<b>x</b>${' a*'.repeat(5000)}`)
+  assert.ok(html.startsWith('<pre class="unrendered"><code>'), 'the words are kept in a plain block')
+  assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && !html.includes('<b>'), 'escaped, so nothing in them runs')
+})
+
+
+test('parser work budget preserves hostile inline input as escaped text without recursion', () => {
+  const huge = '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)
+  const compact = '*a '.repeat(2000) + '<script>x</script>' + ' a*'.repeat(2000)
+  for (const text of [huge, compact, 'x'.repeat(65537)]) {
+    assert.equal(renderMarkdown(text), `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`)
+    assert.equal(renderInline(text), escapeHtml(text))
+  }
+  assert.match(renderMarkdown('ordinary **bold** and *emphasis*'), /<strong>bold<\/strong>/)
 })
