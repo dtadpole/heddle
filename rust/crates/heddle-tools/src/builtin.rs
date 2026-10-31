@@ -128,8 +128,11 @@ pub fn escalation_fields(sandbox: &dyn SandboxGate) -> serde_json::Map<String, s
     ])
 }
 
-/// Cut a command's combined output at [`BASH_OUTPUT_LIMIT`] characters, marking the cut with
-/// `"\n… truncated"`.
+/// The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB).
+pub const BASH_SPILL_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// What the model is shown of a command's combined output at [`BASH_OUTPUT_LIMIT`] characters: see
+/// [`truncate_output_at`].
 ///
 /// The TypeScript build counts UTF-16 code units; this counts `char`s, so a cut never splits a character.
 /// The two agree on every ASCII output, which is what the verifiers produce.
@@ -137,14 +140,54 @@ pub fn truncate_output(combined: &str) -> String {
     truncate_output_at(combined, BASH_OUTPUT_LIMIT)
 }
 
-/// [`truncate_output`] at `limit` characters, the row's `bashOutputLimit`.
+/// All of `combined` within `limit` characters (the row's `bashOutputLimit`), otherwise its **end** and the path of a
+/// file holding the whole of it: `[output truncated; full output: <path>]`, or `(unavailable)` when no file could be
+/// written.
+///
+/// Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long
+/// command's closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream
+/// and names its spill file (`dsh-tool-bash` streamText). Stated differences: the combined stdout and stderr are cut,
+/// by characters, where DSH cuts each stream at 64,000 bytes.
 pub fn truncate_output_at(combined: &str, limit: usize) -> String {
-    if combined.chars().count() <= limit {
+    let total = combined.chars().count();
+    if total <= limit {
         return combined.to_owned();
     }
-    let mut cut: String = combined.chars().take(limit).collect();
-    cut.push_str("\n… truncated");
-    cut
+    let start = combined
+        .char_indices()
+        .nth(total - limit)
+        .map_or(combined.len(), |(index, _)| index);
+    let path = spill_output(combined).unwrap_or_else(|| "(unavailable)".to_owned());
+    format!(
+        "{}\n[output truncated; full output: {path}]",
+        &combined[start..]
+    )
+}
+
+/// Write a command's whole output to a private temporary file, at most [`BASH_SPILL_MAX_BYTES`]; its path, or
+/// `None` when it could not be written.
+fn spill_output(full: &str) -> Option<String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let name = format!(
+        "heddle-bash-output-{}-{nanos:x}-{}.txt",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let path = std::env::temp_dir().join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(&path).ok()?;
+    let bytes = full.as_bytes();
+    file.write_all(&bytes[..bytes.len().min(BASH_SPILL_MAX_BYTES)])
+        .ok()?;
+    Some(path.display().to_string())
 }
 
 /// The argument a tool requires as a string; empty when absent, which is what makes the refusal sentence.
@@ -1049,25 +1092,35 @@ mod tests {
         );
     }
 
+    /// The kept tail and the spill path of a cut output: issue #83's head probe, filler and tail probe.
+    fn cut_parts(cut: &str) -> (&str, std::path::PathBuf) {
+        let (kept, marker) = cut
+            .rsplit_once("\n[output truncated; full output: ")
+            .expect("the cut is marked with the spill path");
+        let path = marker.strip_suffix(']').expect("the marker closes");
+        (kept, std::path::PathBuf::from(path))
+    }
+
     #[test]
-    fn a_long_output_is_cut_at_the_limit_and_marked() {
+    fn a_long_output_keeps_its_end_and_names_a_file_with_all_of_it() {
+        // Issue #83: the head was kept and the tail, often the summary, was lost with nothing to recover it.
         let inside = "a".repeat(BASH_OUTPUT_LIMIT);
         assert_eq!(truncate_output(&inside), inside, "no cut at the limit");
-        let outside = "a".repeat(BASH_OUTPUT_LIMIT + 10);
+        let outside = format!("HEAD-PROBE{}TAIL-PROBE", "x".repeat(BASH_OUTPUT_LIMIT));
         let cut = truncate_output(&outside);
-        assert_eq!(
-            cut.chars().count(),
-            BASH_OUTPUT_LIMIT + "\n… truncated".chars().count()
-        );
-        assert!(cut.ends_with("\n… truncated"));
+        let (kept, path) = cut_parts(&cut);
+        assert_eq!(kept.chars().count(), BASH_OUTPUT_LIMIT);
+        assert!(kept.ends_with("TAIL-PROBE") && !kept.contains("HEAD-PROBE"));
+        assert_eq!(std::fs::read_to_string(&path).expect("the spill file"), outside);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn a_configured_output_limit_cuts_there() {
-        assert_eq!(
-            truncate_output_at(&"a".repeat(500), 50),
-            format!("{}\n… truncated", "a".repeat(50))
-        );
+        let cut = truncate_output_at(&format!("{}é-end", "a".repeat(500)), 50);
+        let (kept, path) = cut_parts(&cut);
+        assert_eq!(kept, format!("{}é-end", "a".repeat(45)), "the last 50 characters, whole");
+        let _ = std::fs::remove_file(path);
         assert_eq!(
             truncate_output_at(&"b".repeat(500), 500),
             "b".repeat(500),

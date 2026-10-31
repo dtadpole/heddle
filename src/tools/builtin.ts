@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
@@ -44,6 +46,40 @@ function escalationFields(sandbox: SandboxService): Record<string, { type: 'stri
       description:
         'Required with sandbox_permissions: one sentence for the user explaining why this exact operation needs the wider access. Use the language of the user’s current request.',
     },
+  }
+}
+
+/** The most a full-output file holds: DSH's `maxSpillBytes` (64 MiB). */
+export const BASH_SPILL_MAX_BYTES = 64 * 1024 * 1024
+
+/**
+ * What the model is shown of a command's output: all of it within `limit` characters, otherwise its **end** and the
+ * path of a file holding the whole of it.
+ *
+ * Live-testing issue #83: the build kept the first `limit` characters and an `… truncated` mark, so a long command's
+ * closing summary or diagnostic was lost and nothing could recover it. DSH keeps the tail of each stream and names the
+ * spill file, `[output truncated; full output: <path>]` (`dsh-tool-bash` streamText; `(unavailable)` when no file could
+ * be written). Stated differences: heddle cuts the combined stdout and stderr, by characters (`bashOutputLimit`),
+ * where DSH cuts each stream at 64,000 bytes.
+ */
+export function tailOutput(combined: string, limit: number): string {
+  if (combined.length <= limit) return combined
+  let tail = combined.slice(combined.length - limit)
+  // Never start on the second half of a surrogate pair.
+  const first = tail.charCodeAt(0)
+  if (first >= 0xdc00 && first <= 0xdfff) tail = tail.slice(1)
+  return `${tail}\n[output truncated; full output: ${spillOutput(combined) ?? '(unavailable)'}]`
+}
+
+/** Write a command's whole output to a private temporary file, at most `BASH_SPILL_MAX_BYTES`; its path, or none. */
+function spillOutput(full: string): string | undefined {
+  try {
+    const path = join(tmpdir(), `heddle-bash-output-${process.pid}-${randomBytes(6).toString('hex')}.txt`)
+    const bytes = Buffer.from(full, 'utf8')
+    writeFileSync(path, bytes.length > BASH_SPILL_MAX_BYTES ? bytes.subarray(0, BASH_SPILL_MAX_BYTES) : bytes, { mode: 0o600 })
+    return path
+  } catch {
+    return undefined
   }
 }
 
@@ -253,7 +289,7 @@ export function builtinTools(
         child.on('close', (code) => {
           clearTimeout(timer)
           const combined = stdout + stderr
-          const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
+          const trimmed = tailOutput(combined, outputLimit)
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
           const sandboxFacts = confined === null ? { mode } : { mode, enforcement: confined.enforcement }
           /** A stopped call says so, as the Rust build and the loop's own stopped calls do, not `exited null`. */
