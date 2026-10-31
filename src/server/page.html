@@ -11055,7 +11055,7 @@ async function fillSettings() {
       const response = await fetch(path)
       if (response.ok) return { body: await response.json() }
       if (response.status === 404) return { missing: true }
-      return { failure: `the server answered ${response.status}` }
+      return { failure: `the server answered ${response.status}`, status: response.status }
     } catch (error) {
       return { failure: (error && error.message) || String(error) }
     }
@@ -11066,7 +11066,8 @@ async function fillSettings() {
     read('/api/workspaces'),
     read('/api/settings'),
   ])
-  renderSettingsConfig(settingsRead.body ?? null, settingsRead.failure)
+  // A server started without a settings service answers 503: that is "no settings surface", like a 404, not a failed read.
+  renderSettingsConfig(settingsRead.body ?? null, settingsRead.status === 503 ? undefined : settingsRead.failure)
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
@@ -11281,6 +11282,12 @@ function settingsEntryForm(entry) {
     for (const { key, control, initial } of inputs) {
       const shown = control.type === 'checkbox' ? control.checked : control.value
       if (shown === initial) continue
+      /** An emptied number is not 0: say so, and leave unsetting to Reset (developer-ten's note 3). */
+      if (control.type === 'number' && control.value.trim() === '') {
+        status.dataset.kind = 'error'
+        status.textContent = `${key} needs a number; Reset restores the value beneath this profile`
+        return
+      }
       changed[key] = control.type === 'number' ? Number(control.value) : shown
     }
     if (Object.keys(changed).length === 0) {
