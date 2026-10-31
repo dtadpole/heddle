@@ -582,6 +582,121 @@ mod tests {
     }
 
     #[test]
+    fn local_image_paths_decode_once_before_joining_and_keep_fragments() {
+        for (authored, expected) in [
+            ("shot%20one.png#part%20one", "/w/docs/shot one.png"),
+            ("shot%2520one.png", "/w/docs/shot%20one.png"),
+            ("%E6%96%87%E5%AD%97%26image.png", "/w/docs/文字&image.png"),
+            ("hash%23name.png#view", "/w/docs/hash#name.png"),
+            ("..%2Fimages%2Fshot%20one.png", "/w/images/shot one.png"),
+            ("/w/shot%20one.png", "/w/shot one.png"),
+            ("%2Fw%2Fshot%20one.png", "/w/shot one.png"),
+        ] {
+            let fragment = authored.split_once('#').map_or("", |(_, fragment)| fragment);
+            let expected_url = raw_url(&Subresource {
+                path: expected.to_string(),
+                fragment: fragment.to_string(),
+            });
+            for source in [
+                format!("![image](<{authored}>)"),
+                format!("<img src=\"{authored}\">"),
+            ] {
+                let html = render_at("/w/docs/notes.md", &source);
+                assert!(
+                    html.contains(&format!("src=\"{}\"", escape_html(&expected_url))),
+                    "{html}"
+                );
+            }
+        }
+        for source in [
+            "![image](/w/shot%20one.png#view)",
+            "<img src=\"/w/shot%20one.png#view\">",
+        ] {
+            assert!(render(source).contains("src=\"/api/raw?path=%2Fw%2Fshot%20one.png#view\""));
+        }
+        assert!(render("![image](/w/shot%2520one.png)")
+            .contains("src=\"/api/raw?path=%2Fw%2Fshot%2520one.png\""));
+    }
+
+    #[test]
+    fn malformed_local_image_paths_are_refused_without_partial_decoding() {
+        for name in [
+            "100%.png", "bad%2.png", "bad%GG.png", "bad%20%GG.png", "bad%FF.png", "bad%ED%A0%80.png",
+        ] {
+            for destination in [name.to_string(), format!("/w/{name}")] {
+                for source in [
+                    format!("![image]({destination})"),
+                    format!("<img src=\"{destination}\">"),
+                ] {
+                    let answer = render(&source);
+                    let preview = render_at("/w/notes.md", &source);
+                    // The raw HTML sanitizer drops a refused src, not the surrounding img element.
+                    assert!(followed(&answer).is_empty(), "answer {source}: {answer}");
+                    assert!(followed(&preview).is_empty(), "preview {source}: {preview}");
+                }
+            }
+        }
+        assert!(render_at("/w/notes.md", "![image](literal%252520.png)")
+            .contains("src=\"/api/raw?path=%2Fw%2Fliteral%252520.png\""));
+    }
+
+    #[test]
+    fn authored_path_decoder_is_strict_utf8_and_preserves_literal_percent_identity() {
+        assert_eq!(
+            decode_local_path("shot%20one.png"),
+            Some("shot one.png".to_string())
+        );
+        assert_eq!(
+            decode_local_path("shot%2520one.png"),
+            Some("shot%20one.png".to_string())
+        );
+        assert_eq!(
+            decode_local_path("%E6%96%87%E5%AD%97%26image.png"),
+            Some("文字&image.png".to_string())
+        );
+        for malformed in [
+            "%", "%2", "%GG", "%20%GG", "%FF", "%ED%A0%80", "%C0%AF", "%F4%90%80%80",
+        ] {
+            assert_eq!(decode_local_path(malformed), None, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn encoded_schemes_are_not_local_image_paths_or_remote_fetches() {
+        for destination in [
+            "http%3A%2F%2Fexample.png", "javascript%3Aalert(1)", "file%3A%2F%2F%2Fw%2Fx.png",
+        ] {
+            assert!(!render_at("/w/notes.md", &format!("![image]({destination})")).contains("<img"));
+            assert!(!render(&format!("![image]({destination})")).contains("<img"));
+        }
+    }
+
+    #[test]
+    fn filesystem_bases_and_emitted_raw_transport_paths_are_not_authored_decoded() {
+        assert!(render_at("/w/literal%20folder/notes.md", "![image](shot%20one.png)")
+            .contains("src=\"/api/raw?path=%2Fw%2Fliteral%2520folder%2Fshot%20one.png\""));
+        let source = "![image](/api/raw?path=%2Fw%2Fshot%2520one.png#part%20one)";
+        assert!(render_at("/w/notes.md", source)
+            .contains("src=\"/api/raw?path=%2Fw%2Fshot%2520one.png#part%20one\""));
+    }
+
+    #[test]
+    fn shared_link_paths_decode_once_and_keep_encoded_anchors() {
+        for source in [
+            "[note](note%20one.md#part%20one)",
+            "<a href=\"note%20one.md#part%20one\">note</a>",
+        ] {
+            let html = render_at("/w/notes.md", source);
+            assert!(
+                html.contains("href=\"/api/raw?path=%2Fw%2Fnote%20one.md#part%20one\""),
+                "{html}"
+            );
+        }
+        assert!(render_at("/w/notes.md", "[note](note%2520one.md)")
+            .contains("data-heddle-path=\"/w/note%20one.md\""));
+    }
+
+    #[test]
     fn a_raw_html_image_is_resolved_by_the_allow_lists_policy() {
         // Raw HTML goes around the renderer, so the sanitiser's policy is the one that resolves it.
         let html = render_at(
@@ -989,9 +1104,9 @@ fn render_markdown_here(source: &str, options: MarkdownOptions<'_>) -> String {
     let base = options.base;
     let remote_images = options.remote_images;
     let policy = move |value: &str, site: UrlSite<'_>| {
-        // A hand-written `<img>` in an answer follows the same rule as a markdown image there: local files only.
-        if site.tag == "img" && !remote_images {
-            return safe_url(value).and_then(|safe| image_source(safe, base, false));
+        // Hand-written images use the same local-path decoding and remote policy as Markdown images.
+        if site.tag == "img" {
+            return safe_url(value).and_then(|safe| image_source(safe, base, remote_images));
         }
         url_for(value, base)
     };
@@ -1545,10 +1660,11 @@ fn resolve_subresource(href: &str, base: Option<&Path>) -> Option<Subresource> {
         Some((target, fragment)) => (target, fragment),
         None => (trimmed, ""),
     };
+    let target = decode_local_path(target)?;
     let path = if target.starts_with('/') {
-        target.to_string()
+        target
     } else {
-        resolve_against(base, target)
+        resolve_against(base, &target)
     };
     Some(Subresource {
         path,
@@ -1601,7 +1717,34 @@ pub(crate) fn percent_encode(value: &str) -> String {
     out
 }
 
-/// `decodeURIComponent`, total: a stray `%` or an invalid sequence is left as written rather than refused.
+/// Decode an authored local path exactly once before joining and raw_url's transport encoding (#131).
+/// Match DSH sidebar-documentpreview markdownImageUrl: malformed escapes, invalid UTF-8 and decoded schemes are
+/// refused, never partially decoded or recursively interpreted. Fragments stay separate.
+fn decode_local_path(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let decoded = String::from_utf8(out).ok()?;
+    if scheme_of(&decoded).is_some() {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// Decode a transport path already emitted by raw_url; existing tolerant handling is not authored-path policy.
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -1639,13 +1782,20 @@ fn image_source(target: &str, base: Option<&Path>, remote_images: bool) -> Optio
     if let Some(resolved) = resolve_subresource(target, base) {
         return Some(raw_url(&resolved));
     }
+    // Validate authored local paths even when no base exists; remote addresses remain exactly as written.
+    let remote = scheme_of(target).is_some() || target.starts_with("//");
+    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
+    let decoded = if remote {
+        None
+    } else {
+        Some(decode_local_path(path)?)
+    };
     if remote_images {
         return Some(target.to_string());
     }
-    let (path, fragment) = target.split_once('#').unwrap_or((target, ""));
     if path.starts_with('/') && !path.starts_with("//") {
         return Some(raw_url(&Subresource {
-            path: path.to_string(),
+            path: decoded?,
             fragment: fragment.to_string(),
         }));
     }

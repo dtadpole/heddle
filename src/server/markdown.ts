@@ -101,7 +101,23 @@ function resolveSubresource(href: string, base: string | undefined): ResolvedSub
   if (trimmed.startsWith('#')) return null
   if (base === undefined) return null
   const [target, fragment] = splitFragment(trimmed)
-  return { path: isAbsolute(target) ? target : resolve(base, target), fragment }
+  const path = decodeLocalPath(target)
+  if (path === null) return null
+  return { path: isAbsolute(path) ? path : resolve(base, path), fragment }
+}
+
+/**
+ * Decode an authored local path exactly once before joining and rawUrl's transport encoding (#131).
+ * DSH sidebar-documentpreview markdownImageUrl likewise decodes before joining. Malformed escapes or UTF-8
+ * and decoded schemes are refused, never partially decoded or recursively interpreted; fragments stay separate.
+ */
+function decodeLocalPath(path: string): string | null {
+  try {
+    const decoded = decodeURIComponent(path)
+    return /^[a-z][a-z0-9+.-]*:/i.test(decoded) ? null : decoded
+  } catch {
+    return null
+  }
 }
 
 /** The route that serves a file's bytes, which is what an `<img>` and a followed link both need. */
@@ -160,9 +176,13 @@ function imageSource(target: string): string | null {
   if (target.startsWith('/api/raw?')) return target
   const resolved = resolveSubresource(target, imageBase)
   if (resolved !== null) return rawUrl(resolved)
-  if (remoteImagesAllowed) return target
+  /** Validate local paths even without a base; remote addresses remain exactly as written. */
+  const remote = /^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('//')
   const [path, fragment] = splitFragment(target)
-  if (path.startsWith('/') && !path.startsWith('//')) return rawUrl({ path, fragment })
+  const decoded = remote ? null : decodeLocalPath(path)
+  if (!remote && decoded === null) return null
+  if (remoteImagesAllowed) return target
+  if (path.startsWith('/') && !path.startsWith('//') && decoded !== null) return rawUrl({ path: decoded, fragment })
   return null
 }
 
@@ -444,8 +464,8 @@ export function renderMarkdown(source: string, options: { readonly base?: string
     url: (value, at) => {
       const safe = safeUrl(value)
       if (safe === null) return null
-      /** A hand-written `<img>` in an answer follows the same rule as a markdown image there: local files only. */
-      if (at.tag === 'img' && !remoteImagesAllowed) return imageSource(safe)
+      /** Hand-written images share Markdown's local-path decoding and remote policy. */
+      if (at.tag === 'img') return imageSource(safe)
       /** A reference with a scheme, or one already absolute, is not a file beside the document. */
       const relative = !/^[a-z][a-z0-9+.-]*:/i.test(safe) && !safe.startsWith('/') && !safe.startsWith('#')
       if (!relative) return safe
