@@ -499,6 +499,8 @@ test('Pin and Archive on a session row say they failed when their request gets n
    * resolves every call to ok or error and never rejects for a carrier problem (dsh-api-gateway README.md:60), and its
    * pin says "Pin failed. Try again later." (dsh-client-ui-workspace lib/client.js:5085-5094). The server is stopped
    * rather than stubbed, as in #59, so the failure is the one a person meets when the network or the server goes away.
+   * Since #149 both say it in DSH's toast and words ("Pin failed. Try again later.", and Archive's in the same words), not
+   * in the tree's note, which the next redraw writes over.
    */
   const place = fixtureDir('workspaces-flags-unanswered')
   const home = isolatedHome('workspaces-flags-unanswered')
@@ -508,8 +510,9 @@ test('Pin and Archive on a session row say they failed when their request gets n
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config, HOME: place } },
   )
   const browser = await openBrowser({ width: 1400, height: 900 })
-  const said = (prefix) => `(() => { const note = document.getElementById('tree-note'); return !note.hidden && note.textContent.startsWith(${JSON.stringify(prefix)}) })()`
-  const clearNote = `(() => { const note = document.getElementById('tree-note'); note.textContent = ''; note.hidden = true })()`
+  const toasted = (text) => `document.getElementById('session-toast')?.textContent === ${JSON.stringify(text)}`
+  const clearToast = `document.getElementById('session-toast')?.remove()`
+  const toastText = `JSON.stringify(document.getElementById('session-toast')?.textContent ?? null)`
   try {
     const work = join(place, 'work')
     mkdirSync(work, { recursive: true })
@@ -531,19 +534,19 @@ test('Pin and Archive on a session row say they failed when their request gets n
     server.kill()
     await new Promise((done) => setTimeout(done, 300))
 
-    await browser.evaluate(clearNote)
+    await browser.evaluate(clearToast)
     await browser.evaluate(`${control('Pin session')}.click()`)
     assert.ok(
-      await browser.waitFor(said('could not change that session: '), 10_000),
-      `Pin says in the tree's note that it failed\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('tree-note').textContent)`)}`,
+      await browser.waitFor(toasted('Pin failed. Try again later.'), 10_000),
+      `Pin says in DSH's toast that it failed, in DSH's words\nsaw: ${await browser.evaluate(toastText)}`,
     )
     assert.equal(await browser.evaluate(`${control('Pin session')} != null && ${control('Unpin session')} == null`), true, 'and the row is still unpinned')
 
-    await browser.evaluate(clearNote)
+    await browser.evaluate(clearToast)
     await browser.evaluate(`${control('Archive session')}.click()`)
     assert.ok(
-      await browser.waitFor(said('could not change that session: '), 10_000),
-      `Archive says it failed too\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('tree-note').textContent)`)}`,
+      await browser.waitFor(toasted('Archive failed. Try again later.'), 10_000),
+      `Archive says it failed too, in the same words\nsaw: ${await browser.evaluate(toastText)}`,
     )
     assert.equal(await browser.evaluate(`${row} !== null && ${control('Archive session')} != null`), true, 'and the row is still there, not archived')
     assert.equal(await browser.evaluate(`document.getElementById('archive-notice').hidden`), true, 'with no "Session archived" notice for an archive that never happened')
@@ -551,6 +554,99 @@ test('Pin and Archive on a session row say they failed when their request gets n
     const unhandled = JSON.parse(await browser.evaluate('JSON.stringify(window.__unhandled)'))
     assert.deepEqual(unhandled, [], 'no failure is left to the console as an unhandled rejection')
   } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(place)
+  }
+})
+
+test("Pin, Archive and Rename on a session the store cannot save say they failed in DSH's words, and the row stays as it was (#149)", async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** A read-only folder does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * GitHub issue #149: with the session store read-only, a row's Pin said nothing on either build, and the Rename dialog
+   * showed the Rust server's "no session session-<full id>". DSH says a failed pin in its toast, "Pin failed. Try again
+   * later." (dsh-client-ui-workspace lib/client.js:4955, from its pin's catch, :5085-5094); it says nothing for a failed
+   * archive (it logs it, :5104-5108) and puts the host's message, raw id and all, in its rename dialog (:4452-4455), so the
+   * page says those in the pin's words. The store is made read-only the way the issue does it, with the page already open
+   * (`chmod -R a-w` on the session root), and given back in `finally`.
+   */
+  const { chmodSync, readdirSync, statSync } = await import('node:fs')
+  const writable = (path, on) => {
+    const stat = statSync(path)
+    if (stat.isDirectory()) for (const name of readdirSync(path)) writable(join(path, name), on)
+    chmodSync(path, stat.isDirectory() ? (on ? 0o755 : 0o555) : on ? 0o644 : 0o444)
+  }
+  const place = fixtureDir('workspaces-store-read-only')
+  const home = isolatedHome('workspaces-store-read-only')
+  const store = join(home, 'sessions')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', store], {
+    env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config, HOME: place },
+  })
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const toasted = (text) => `document.getElementById('session-toast')?.textContent === ${JSON.stringify(text)}`
+  const clearToast = `document.getElementById('session-toast')?.remove()`
+  const toastText = `JSON.stringify(document.getElementById('session-toast')?.textContent ?? null)`
+  let locked = false
+  try {
+    const work = join(place, 'work')
+    mkdirSync(work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    const registered = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(registered.status, 200, `registered a workspace (${JSON.stringify(registered.body)})`)
+    const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'a session to pin, archive and rename', folder: work }) })
+    assert.equal(turn.status, 200, `a turn made a session to act on (${turn.status})`)
+    const listed = (await api(server.url, cookie, '/api/sessions')).body
+    const before = (Array.isArray(listed) ? listed : []).find((meta) => meta.cwd === realpathSync(work))
+    assert.ok(before !== undefined, `the session is listed\nsaw: ${JSON.stringify(listed)}`)
+    const session = before.id
+    await browser.gotoSession(server.url, session)
+    const row = `document.querySelector('#tree li[data-session-id=${JSON.stringify(session)}]')`
+    const control = (label) => `${row}?.querySelector('button[aria-label=${JSON.stringify(label)}]')`
+    assert.ok(await browser.waitFor(`${control('Pin session')} != null && ${control('Archive session')} != null`, 20_000), 'the row offers Pin and Archive')
+    const title = await browser.evaluate(`${row}.querySelector('.label').textContent`)
+
+    /** From here on the store cannot be written. */
+    writable(store, false)
+    locked = true
+
+    await browser.evaluate(clearToast)
+    await browser.evaluate(`${control('Pin session')}.click()`)
+    assert.ok(await browser.waitFor(toasted('Pin failed. Try again later.'), 10_000), `Pin says it failed, in DSH's toast and words\nsaw: ${await browser.evaluate(toastText)}`)
+    assert.equal(await browser.evaluate(`${control('Pin session')} != null && ${control('Unpin session')} == null`), true, 'and the row is still unpinned')
+    assert.equal(await browser.evaluate(`document.getElementById('tree-note').textContent.includes(${JSON.stringify(session)})`), false, 'and no note shows the raw id')
+
+    await browser.evaluate(clearToast)
+    await browser.evaluate(`${control('Archive session')}.click()`)
+    assert.ok(await browser.waitFor(toasted('Archive failed. Try again later.'), 10_000), `Archive says it failed, in the same words\nsaw: ${await browser.evaluate(toastText)}`)
+    assert.equal(await browser.evaluate(`${row} !== null && ${control('Archive session')} != null`), true, 'and the row is still there, not archived')
+    assert.equal(await browser.evaluate(`document.getElementById('archive-notice').hidden`), true, 'with no "Session archived" notice for an archive that never happened')
+
+    await browser.evaluate(`${row}.querySelector('[aria-haspopup]').click()`)
+    await browser.waitFor(`Array.from(document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')).some((item) => item.textContent.trim() === 'Rename')`, 5_000)
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')).find((item) => item.textContent.trim() === 'Rename').click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('session-rename').open`, 5_000), 'Rename opens its dialog')
+    await browser.evaluate(`(() => { const input = document.getElementById('session-rename-input'); input.value = 'A new name'; input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    await browser.evaluate(`document.getElementById('session-rename-confirm').click()`)
+    const line = `document.getElementById('session-rename-error')`
+    assert.ok(
+      await browser.waitFor(`!${line}.hidden && ${line}.textContent === 'Rename failed. Try again later.'`, 10_000),
+      `the dialog says the rename failed, without the raw id\nsaw: ${await browser.evaluate(`JSON.stringify(${line}.textContent)`)}`,
+    )
+    assert.equal(await browser.evaluate(`document.getElementById('session-rename').open`), true, 'and stays open, to try again or cancel')
+    assert.equal(await browser.evaluate(`${row}.querySelector('.label').textContent`), title, 'and the row keeps its title')
+    await browser.evaluate(`document.querySelector('#session-rename [data-ws-close]').click()`)
+
+    writable(store, true)
+    locked = false
+    const after = (await api(server.url, cookie, '/api/sessions')).body.find((meta) => meta.id === session)
+    assert.deepEqual({ title: after?.title, pinned: after?.pinned === true, archived: after?.archived === true }, { title: before.title, pinned: false, archived: false }, 'and nothing was saved')
+  } finally {
+    if (locked) writable(store, true)
     browser.close()
     server.kill()
     removeDir(home)

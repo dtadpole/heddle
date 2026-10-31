@@ -12,6 +12,10 @@ import { test } from 'node:test'
  * problem (dsh-api-gateway README.md:60, "Client service"), and its pin says "Pin failed. Try again later."
  * (dsh-client-ui-workspace lib/client.js:5085-5094, :4955). The function is loaded out of the page and run against a
  * `fetch` that rejects as a browser's does offline.
+ *
+ * Since #149 the failure is said in DSH's own words and place, its toast ("Pin failed. Try again later.", and the same
+ * words for unpin, archive and unarchive, `SessionActionFailure`), not in the tree's note, which the next redraw writes
+ * over; `test/session-action-failure.test.ts` judges an answered write failure the same way.
  */
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
@@ -19,16 +23,22 @@ const start = page.indexOf('async function setSessionFlags(')
 const end = page.indexOf('\n}\n', start)
 assert.ok(start !== -1 && end > start, 'page.html carries setSessionFlags')
 const source = page.slice(start, end + 2)
+/** The page's failure words, or nothing on a page without them. */
+const failureBegin = page.indexOf('/* session-action-failure:begin */')
+const failureEnd = page.indexOf('/* session-action-failure:end */')
+const SessionActionFailure = failureBegin > 0 && failureEnd > failureBegin ? new Function(`${page.slice(failureBegin, failureEnd)}\nreturn SessionActionFailure`)() : undefined
 
 interface Flags {
   (node: unknown, patch: Record<string, unknown>, extra?: Record<string, unknown>, options?: Record<string, unknown>): Promise<{ ok: boolean; status: number; body: unknown }>
 }
 
 function load(fetchImpl: (url: string, init: unknown) => Promise<unknown>) {
-  const seen = { notes: [] as string[], redraws: 0, confirms: 0 }
+  const seen = { notes: [] as string[], toasts: [] as string[], redraws: 0, confirms: 0 }
   const flags = new Function(
     'fetch',
     'setNote',
+    'showSessionToast',
+    'SessionActionFailure',
     'definitionFolder',
     'captureRowBoxes',
     'renderTree',
@@ -39,6 +49,8 @@ function load(fetchImpl: (url: string, init: unknown) => Promise<unknown>) {
   )(
     fetchImpl,
     (text: string) => seen.notes.push(text),
+    (notice: { text: string }) => seen.toasts.push(notice.text),
+    SessionActionFailure,
     () => undefined,
     () => null,
     async () => {
@@ -62,13 +74,15 @@ const offline = async () => {
 }
 
 test('a pin or an archive whose request gets no answer resolves as a failure and says so, never rejecting', async () => {
-  for (const patch of [{ pinned: true }, { pinned: false }, { archived: true }, { archived: false }]) {
+  const words = ['Pin failed. Try again later.', 'Unpin failed. Try again later.', 'Archive failed. Try again later.', 'Unarchive failed. Try again later.']
+  for (const [index, patch] of [{ pinned: true }, { pinned: false }, { archived: true }, { archived: false }].entries()) {
     const { flags, seen } = load(offline)
     let applied = false
     const result = await flags(node, patch, {}, { applied: () => (applied = true) })
     assert.equal(result.ok, false, `${JSON.stringify(patch)}: a failure, not a rejection`)
     assert.equal(result.status, 0, 'with no status, since nothing answered')
-    assert.deepEqual(seen.notes, ['could not change that session: Failed to fetch'], `${JSON.stringify(patch)}: the tree's note says it failed, with the browser's reason`)
+    assert.deepEqual(seen.toasts, [words[index]], `${JSON.stringify(patch)}: the toast says it failed, in DSH's words (#149)`)
+    assert.deepEqual(seen.notes, [], `${JSON.stringify(patch)}: not in the tree's note, which the next redraw writes over`)
     assert.equal(seen.redraws, 0, 'the row is left as it was: no redraw from a change the server never confirmed')
     assert.equal(applied, false, 'and nothing that follows a taken change runs')
   }
@@ -78,7 +92,7 @@ test('a caller that says the failure itself gets the failure without a note', as
   const { flags, seen } = load(offline)
   const result = await flags(node, { archived: true }, { stop: true }, { quiet: () => true })
   assert.equal(result.ok, false)
-  assert.deepEqual(seen.notes, [], 'the stop-and-archive dialog says it in its own line')
+  assert.deepEqual({ notes: seen.notes, toasts: seen.toasts }, { notes: [], toasts: [] }, 'the stop-and-archive dialog says it in its own line')
 })
 
 test('an answered refusal still says the server\'s sentence, and a taken change still redraws', async () => {
@@ -87,6 +101,7 @@ test('an answered refusal still says the server\'s sentence, and a taken change 
   assert.equal(answer.ok, false)
   assert.equal(answer.status, 409)
   assert.deepEqual(refused.seen.notes, ['cannot pin an archived session'])
+  assert.deepEqual(refused.seen.toasts, [], 'a refusal is the server\'s sentence, not a failure')
 
   const taken = load(async () => ({ ok: true, status: 200, json: async () => ({ pinned: true }) }))
   const done = await taken.flags(node, { pinned: true })
