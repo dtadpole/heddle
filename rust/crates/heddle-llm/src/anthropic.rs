@@ -191,6 +191,8 @@ pub fn anthropic_call(
         );
     }
 
+    with_prompt_cache(&mut body, endpoint.prompt_cache != Some(false));
+
     Ok(PreparedCall {
         url: format!(
             "{}/projects/{project}/locations/{region}/publishers/anthropic/models/{model}:streamRawPredict",
@@ -207,6 +209,62 @@ pub fn anthropic_call(
         ),
         stream: true,
     })
+}
+
+/// Mark an Anthropic request's prompt for caching (#70; `withPromptCache` in the TypeScript build), as DSH's
+/// route does by default (pi-ai `anthropic-messages`).
+///
+/// The system prompt becomes one text block with an ephemeral breakpoint, the last tool definition gets one, and
+/// so does the last block of the last message when that message is the user's (a text, image, document or tool
+/// result block that is not empty text). That is three of Anthropic's four breakpoints. Measured before on both
+/// builds: a two-turn Claude session billed its whole prompt twice, with no cache read or write. `enabled` is
+/// false for an endpoint with `promptCache: false`.
+pub fn with_prompt_cache(body: &mut serde_json::Map<String, Value>, enabled: bool) {
+    if !enabled {
+        return;
+    }
+    let ephemeral = serde_json::json!({ "type": "ephemeral" });
+    if let Some(system) = body
+        .get("system")
+        .and_then(Value::as_str)
+        .filter(|system| !system.is_empty())
+        .map(str::to_owned)
+    {
+        let block =
+            serde_json::json!([{ "type": "text", "text": system, "cache_control": ephemeral }]);
+        body.insert("system".into(), block);
+    }
+    if let Some(Value::Object(tool)) = body
+        .get_mut("tools")
+        .and_then(Value::as_array_mut)
+        .and_then(|tools| tools.last_mut())
+    {
+        tool.insert("cache_control".into(), ephemeral.clone());
+    }
+    let last = body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|messages| messages.last_mut())
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|content| content.last_mut())
+        .and_then(Value::as_object_mut);
+    if let Some(block) = last {
+        let kind = block
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // An empty text block may not carry a breakpoint.
+        let empty = kind == "text"
+            && block
+                .get("text")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty);
+        if matches!(kind, "text" | "image" | "document" | "tool_result") && !empty {
+            block.insert("cache_control".into(), ephemeral);
+        }
+    }
 }
 
 /// The system prompt as Anthropic takes it (`anthropicSystem`): every system message's text, as one top-level
@@ -415,13 +473,10 @@ impl StreamFold for AnthropicFold {
                     .get("message")
                     .and_then(|message| message.get("usage"))
                 {
-                    // The start frame reports only the input side; the cache buckets are not read here, and the
-                    // output count arrives with the stop reason.
-                    self.usage = Some(crate::usage::TokenUsage {
-                        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
-                        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
-                        ..crate::usage::TokenUsage::default()
-                    });
+                    // The start frame reports the input side, the cache read and write included (#70: with the
+                    // prompt marked for caching, most of it is a cache read); the output count arrives with the
+                    // stop reason.
+                    self.usage = crate::usage::anthropic_usage(usage);
                 }
             }
             "content_block_start" => {
@@ -507,13 +562,16 @@ impl StreamFold for AnthropicFold {
                     self.finish_reason =
                         crate::types::canonical_finish_reason(Some(stop), self.calls.len());
                 }
-                if let Some(output) = parsed
-                    .get("usage")
-                    .and_then(|usage| usage.get("output_tokens"))
-                    .and_then(Value::as_u64)
+                // The delta's usage restates what it knows; a bucket it names replaces the start frame's.
+                if let Some(reported) = parsed.get("usage").and_then(crate::usage::anthropic_usage)
                 {
                     let mut usage = self.usage.unwrap_or_default();
-                    usage.output_tokens = Some(output);
+                    usage.input_tokens = reported.input_tokens.or(usage.input_tokens);
+                    usage.output_tokens = reported.output_tokens.or(usage.output_tokens);
+                    usage.cache_read_tokens =
+                        reported.cache_read_tokens.or(usage.cache_read_tokens);
+                    usage.cache_write_tokens =
+                        reported.cache_write_tokens.or(usage.cache_write_tokens);
                     self.usage = Some(usage);
                 }
             }
@@ -570,6 +628,43 @@ mod tests {
             event: Some(event.to_string()),
             data: value.to_string(),
         }
+    }
+
+    #[test]
+    fn the_fold_records_the_cache_read_and_write_the_start_frame_reports() {
+        // #70: these buckets were dropped, so a cached prompt never showed in the usage.
+        let mut fold = AnthropicFold::new("claude");
+        let mut chunks = Vec::new();
+        for event in [
+            sse(
+                "message_start",
+                serde_json::json!({ "type": "message_start", "message": { "usage": {
+                    "input_tokens": 20, "cache_read_input_tokens": 4000, "cache_creation_input_tokens": 300
+                } } }),
+            ),
+            sse(
+                "message_delta",
+                serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 2 } }),
+            ),
+            sse(
+                "message_stop",
+                serde_json::json!({ "type": "message_stop" }),
+            ),
+        ] {
+            chunks.extend(fold.event(&event).expect("folds").chunks);
+        }
+        assert_eq!(
+            chunks.last(),
+            Some(&Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: Some(crate::usage::TokenUsage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(2),
+                    cache_read_tokens: Some(4000),
+                    cache_write_tokens: Some(300),
+                }),
+            })
+        );
     }
 
     #[test]
@@ -842,6 +937,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 
@@ -863,6 +959,84 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_is_marked_for_caching_where_dsh_marks_it_and_the_switch_turns_it_off() {
+        let ephemeral = serde_json::json!({ "type": "ephemeral" });
+        let body = || {
+            serde_json::json!({
+                "system": "be brief",
+                "tools": [{ "name": "a" }, { "name": "b" }],
+                "messages": [
+                    { "role": "user", "content": [{ "type": "text", "text": "first" }] },
+                    { "role": "assistant", "content": [{ "type": "text", "text": "ok" }] },
+                    { "role": "user", "content": [
+                        { "type": "tool_result", "tool_use_id": "t", "content": "out" },
+                        { "type": "text", "text": "next" }
+                    ] }
+                ]
+            })
+            .as_object()
+            .cloned()
+            .expect("an object")
+        };
+        let mut cached = body();
+        with_prompt_cache(&mut cached, true);
+        assert_eq!(cached["system"][0]["cache_control"], ephemeral);
+        assert_eq!(
+            cached["tools"][1]["cache_control"], ephemeral,
+            "the last tool"
+        );
+        assert!(
+            cached["tools"][0].get("cache_control").is_none(),
+            "and only the last"
+        );
+        assert_eq!(
+            cached["messages"][2]["content"][1]["cache_control"], ephemeral,
+            "the last block of the last message"
+        );
+        assert!(
+            cached["messages"][2]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        assert!(
+            cached["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none(),
+            "earlier messages are not marked"
+        );
+
+        let mut off = body();
+        with_prompt_cache(&mut off, false);
+        assert_eq!(
+            serde_json::Value::Object(off),
+            serde_json::Value::Object(body()),
+            "promptCache: false sends it as it was"
+        );
+
+        // An assistant last message, and an empty text block, take no breakpoint.
+        let mut prefill = serde_json::json!({ "messages": [{ "role": "assistant", "content": [{ "type": "text", "text": "a" }] }] })
+            .as_object()
+            .cloned()
+            .expect("an object");
+        with_prompt_cache(&mut prefill, true);
+        assert!(
+            prefill["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+        let mut empty = serde_json::json!({ "messages": [{ "role": "user", "content": [{ "type": "text", "text": "" }] }] })
+            .as_object()
+            .cloned()
+            .expect("an object");
+        with_prompt_cache(&mut empty, true);
+        assert!(
+            empty["messages"][0]["content"][0]
+                .get("cache_control")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn the_call_is_addressed_to_the_publisher_route() {
         let call = anthropic_call(&base_endpoint(), &request()).expect("builds");
         assert_eq!(
@@ -879,7 +1053,11 @@ mod tests {
             serde_json::json!(64),
             "the endpoint's cap is the default"
         );
-        assert_eq!(call.body["system"], serde_json::json!("be brief"));
+        assert_eq!(
+            call.body["system"],
+            serde_json::json!([{ "type": "text", "text": "be brief", "cache_control": { "type": "ephemeral" } }]),
+            "the system prompt is one block, marked for caching (#70)"
+        );
         assert_eq!(
             call.headers,
             vec![("X-Enterprise-Inject".to_string(), "descriptor".to_string())],
@@ -907,8 +1085,10 @@ mod tests {
             serde_json::json!([{
                 "name": "bash",
                 "description": "run a command",
-                "input_schema": { "type": "object", "properties": {} }
-            }])
+                "input_schema": { "type": "object", "properties": {} },
+                "cache_control": { "type": "ephemeral" }
+            }]),
+            "the last tool carries the cache breakpoint (#70)"
         );
     }
 
