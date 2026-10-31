@@ -24,7 +24,7 @@ import { trackScratch, untrackScratch } from '../../_tools_/verify-runner/scratc
  * timed out at 5 s, and the sixth tab stayed "No session" with an empty tree, as did every request of the other five.
  *
  * **How:** a chat double holds every HOLD prompt's answer open, streaming, until the check releases it. Test one sends
- * five HOLD messages from the page's own composer, each in a new session, racing a request from that page against 3 s
+ * five HOLD messages from the page's own composer, each in a new session, racing a request from that page against 2 s
  * after each. Test two opens eight tabs of one server in one browser, renames the session they show, sends a turn from
  * a tab that does not hold the stream, and closes the one that does while it runs.
  */
@@ -211,9 +211,9 @@ test('five turns running from one tab leave its other requests answering, a sixt
     }
     for (let turn = 1; turn <= 5; turn += 1) {
       await sendInNewSession(turn)
-      statuses.push(await browser.evaluate(raced(3000), 10_000))
+      statuses.push(await browser.evaluate(raced(2000), 10_000))
     }
-    assert.deepEqual(statuses, [200, 200, 200, 200, 200], 'with each more turn running, a request from the page is still answered within 3 s')
+    assert.deepEqual(statuses, [200, 200, 200, 200, 200], 'with each more turn running, a request from the page is still answered within 2 s')
     await sendInNewSession(6)
     at.double.release()
     assert.ok(
@@ -306,7 +306,7 @@ test('eight tabs of one server all load and follow the stream, and a turn sent f
       readiness.push(await truthy(page, `document.body.dataset.ready === 'true' && ${LOG}.includes('answer to: SHORT first')`, 10_000))
     }
     assert.deepEqual(readiness, [true, true, true, true, true, true, true, true], 'every tab finished loading and shows the session')
-    const answered = await pages[1].evaluate(raced(3000), { timeoutMs: 10_000 })
+    const answered = await pages[1].evaluate(raced(2000), { timeoutMs: 10_000 })
     assert.equal(answered, 200, 'a loaded tab still answers with eight open')
     const feeds = await Promise.all(pages.map((page) => page.evaluate(`document.body.dataset.feed ?? 'none'`, { timeoutMs: 5_000 })))
     assert.equal(feeds.filter((feed) => feed === 'leader').length, 1, `one tab holds the stream for all of them: ${feeds.join(', ')}`)
