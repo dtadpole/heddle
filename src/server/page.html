@@ -1221,6 +1221,36 @@
     background: var(--surface);
   }
   #session-branch { font-size: 11px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /**
+   * The session's agent preset (inventory A96), DSH's read-only header label: a small tag in the caption tone, at most
+   * 180px, hidden in a narrow header as DSH's is below 540px.
+   */
+  #session-preset {
+    flex: none;
+    max-width: 180px;
+    height: 22px;
+    padding: 0 6px;
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text-3);
+    font-size: 12px;
+    line-height: 22px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  @media (max-width: 540px) { #session-preset { display: none; } }
+  /** The new-session preset chooser, between the invitation and the composer, as DSH's hero chip sits. */
+  #preset-seat { display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--text-3); }
+  #preset-seat select {
+    height: 30px;
+    padding: 0 .6rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+  }
   #ledger .when, #ledger .usage { opacity: .55; font-size: .76rem; }
   #ledger .usage.provider { color: #2fa36b; opacity: .9; }
   #ledger pre { white-space: pre-wrap; word-break: break-word; background: color-mix(in oklab, currentColor 6%, transparent); padding: .5rem .6rem; border-radius: .3rem; font-size: .8rem; margin: .3rem 0 0; }
@@ -2990,6 +3020,7 @@
   <header id="session-head">
     <h2 id="session-title">No session</h2>
     <span id="session-branch" class="meta"></span>
+    <span id="session-preset" data-i18n-title="presets.headerHint" title="The agent preset chosen when this task started" hidden></span>
     <!--
       DSH's header carries a `More actions` menu, and the one item in it this UI can honestly offer is
       `Download session log` — the other is product feedback for DSH itself.
@@ -3016,15 +3047,19 @@
   <!--
     The **empty state**, which DSH has and this panel did not: its home centres the mark, a heading and the composer
     rather than showing an empty column headed "No session". Measured from DSH's home on 2026-10-17 — a centred hero
-    above the composer with the workspace and mode chips between them. Heddle has no mode presets, so its version says
-    the two things a reader can actually do from here: pick a workspace, or press the chord the panel's primary action
-    is bound to.
+    above the composer with the workspace and mode chips between them. Heddle's version says the two things a reader can
+    do from here: pick a workspace, or press the chord the panel's primary action is bound to. Below them is the mode
+    chip, the agent preset chooser (inventory A96), which picks the preset the next new session is created under.
   -->
   <section id="empty-state" hidden>
     <img src="/favicon.svg" alt="" width="28" height="28">
     <h3>Start a conversation</h3>
     <p>Pick a workspace in the left panel and start a session there, or press
       <kbd>⌥⌘N</kbd> to begin one in the workspace you are looking at.</p>
+    <div id="preset-seat" hidden>
+      <label for="preset-select" data-i18n="presets.label">Agent preset</label>
+      <select id="preset-select" data-i18n-title="presets.seatHint" title="Choose the agent preset for your new task"></select>
+    </div>
   </section>
   <!--
     DSH's Automation tasks page (dsh-client-ui-schedule `TaskManagerPage`, main slot `schedules`): every retained
@@ -3458,6 +3493,10 @@ const MESSAGES = Object.freeze({
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
+    'presets.label': 'Agent preset',
+    'presets.seatHint': 'Choose the agent preset for your new task',
+    'presets.headerHint': 'The agent preset chosen when this task started',
+    'presets.standard': 'Standard mode',
   }),
   zh: Object.freeze({
     'settings.title': '设置',
@@ -3469,6 +3508,10 @@ const MESSAGES = Object.freeze({
     'settings.models': '模型',
     'settings.workspaces': '工作区',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
+    'presets.label': 'Agent 预设',
+    'presets.seatHint': '选择新任务使用的 Agent 预设',
+    'presets.headerHint': '本任务的 Agent 预设，在任务开始时确定',
+    'presets.standard': '标准模式',
   }),
 })
 
@@ -6197,6 +6240,73 @@ function renderTodo() {
   )
 }
 
+/**
+ * Agent presets on the page (inventory A96), DSH's dsh-client-ui-agent-preset: the new-session chooser and the
+ * session's read-only label.
+ *
+ * `GET /api/presets` is the roster and its default (a profile without the `presets` row answers its one implicit
+ * `standard` preset). The chooser sits on the new-session screen and stages a preset for the next session only: it
+ * goes with the turn or the Start that creates that session and is then consumed, so the session after it gets the
+ * default again, and the default itself is not changed here. A session keeps the preset it was created with, which the
+ * header shows. A preset's name is its own; the implicit `standard` preset is named in the page's language.
+ */
+let presetRoster = null
+/** The preset chosen for the next new session, or `null` for the roster's default. */
+let stagedPreset = null
+
+async function loadPresets() {
+  try {
+    const response = await fetch('/api/presets')
+    presetRoster = response.ok ? await response.json() : null
+  } catch {
+    presetRoster = null
+  }
+  paintPresetSeat()
+}
+
+function presetName(id) {
+  const preset = presetRoster?.presets?.find((candidate) => candidate.id === id)
+  if (id === 'standard' && (preset === undefined || preset.name === undefined || preset.name === 'Standard')) return t('presets.standard')
+  return preset?.name ?? id
+}
+
+/** The chooser offers every preset by name, the staged one or else the default selected; nothing to offer, no chooser. */
+function paintPresetSeat() {
+  const seat = document.getElementById('preset-seat')
+  const select = document.getElementById('preset-select')
+  if (seat === null || select === null) return
+  const presets = Array.isArray(presetRoster?.presets) ? presetRoster.presets : []
+  seat.hidden = presets.length === 0
+  select.replaceChildren(
+    ...presets.map((preset) => {
+      const option = document.createElement('option')
+      option.value = preset.id
+      option.textContent = presetName(preset.id)
+      return option
+    }),
+  )
+  select.value = stagedPreset ?? presetRoster?.default ?? ''
+}
+
+let shownPreset = null
+/** The open session's preset in its header, or nothing for a session that recorded none. */
+function paintSessionPreset(id) {
+  shownPreset = id
+  const label = document.getElementById('session-preset')
+  if (label === null) return
+  label.hidden = id === null
+  label.textContent = id === null ? '' : presetName(id)
+}
+
+document.getElementById('preset-select')?.addEventListener('change', (changeEvent) => {
+  const chosen = changeEvent.target.value
+  stagedPreset = chosen === presetRoster?.default ? null : chosen
+})
+window.addEventListener('heddle:locale', () => {
+  paintPresetSeat()
+  paintSessionPreset(shownPreset)
+})
+
 async function showSession(id) {
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
@@ -6242,6 +6352,7 @@ async function showSession(id) {
       if (title !== null) title.textContent = 'No session'
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
+      paintSessionPreset(null)
       paintEmptyState()
       applySessionAccess(null)
       paintScheduleHeader()
@@ -6264,6 +6375,7 @@ async function showSession(id) {
     const branchCell = document.getElementById('session-branch')
     if (titleCell !== null) titleCell.textContent = typeof body.title === 'string' && body.title.length > 0 ? body.title : id
     if (branchCell !== null) branchCell.textContent = typeof body.cwd === 'string' ? body.cwd : ''
+    paintSessionPreset(typeof body.preset === 'string' ? body.preset : null)
     /**
      * Each turn renders inside its own guard.
      *
@@ -7626,7 +7738,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     session: target,
     folder: activeFolder,
     ...selectionForTurn(),
+    /** The preset chosen on the new-session screen goes with the turn that creates the session (inventory A96). */
+    ...(target === null && stagedPreset !== null ? { preset: stagedPreset } : {}),
   })
+  if (target === null && response.ok) stagedPreset = null
   if (!response.ok) {
     /**
      * The server's own sentence, not only its status.
@@ -8881,6 +8996,8 @@ async function fetchSessionAccess(id) {
     if (!response.ok) return
     const body = await response.json()
     if (current === id) applySessionAccess(body.permission?.mode ?? null)
+    /** The same record names the preset the session was created under, which its header shows (inventory A96). */
+    if (current === id) paintSessionPreset(typeof body.preset === 'string' ? body.preset : null)
   } catch {
     // A mode that cannot be read leaves the chip on what it had; the turn itself still works.
   }
@@ -10857,13 +10974,14 @@ async function startSessionAt(node) {
   const response = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ branch: node.path }),
+    body: JSON.stringify({ branch: node.path, ...(stagedPreset !== null ? { preset: stagedPreset } : {}) }),
   })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) {
     setNote(body.error ?? 'could not start a session there')
     return
   }
+  stagedPreset = null
   setNote('')
   activeFolder = node.path
   expanded.add(node.path)
@@ -15739,6 +15857,7 @@ setInterval(() => {
 
 await loadEndpoints()
 await loadStatus()
+await loadPresets()
 growComposer()
 await refreshSessions()
 void refreshApprovals()
