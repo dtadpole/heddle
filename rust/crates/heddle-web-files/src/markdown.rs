@@ -783,6 +783,77 @@ mod tests {
             "an unclosed block is left to the parser"
         );
     }
+
+    #[test]
+    fn a_line_opens_at_most_max_nesting_containers_and_the_rest_reads_as_text() {
+        // Live issues developer-two-15 (P0, this server aborted) and -16 (TypeScript failed the session view).
+        assert_eq!(MAX_NESTING, 100);
+        assert_eq!(
+            bound_nesting(&format!("{} x", ">".repeat(102))),
+            format!("{}\\>> x", ">".repeat(100)),
+            "the 101st quote marker is escaped"
+        );
+        assert_eq!(
+            bound_nesting(&format!("{}x", "- ".repeat(101))),
+            format!("{}\\- x", "- ".repeat(100)),
+            "and the 101st bullet"
+        );
+        assert_eq!(
+            bound_nesting(&format!("{}x", "1. ".repeat(101))),
+            format!("{}1\\. x", "1. ".repeat(100)),
+            "and the 101st number keeps its digits"
+        );
+        let ordinary = "> quote\n> > nested\n- a\n  - b";
+        assert_eq!(
+            bound_nesting(ordinary),
+            ordinary,
+            "ordinary nesting is untouched"
+        );
+        let fenced = format!("```\n{}\n```", ">".repeat(300));
+        assert_eq!(
+            bound_nesting(&fenced),
+            fenced,
+            "a line inside a code fence is left alone"
+        );
+    }
+
+    #[test]
+    fn fifty_thousand_nested_quotes_or_list_items_render_at_a_bounded_depth() {
+        // Before the fix this test aborted the whole test binary: the stack overflowed inside comrak.
+        let quotes = render_markdown(
+            &format!("{} x", ">".repeat(50_000)),
+            MarkdownOptions::default(),
+        );
+        assert_eq!(
+            quotes.matches("<blockquote>").count(),
+            100,
+            "one hundred quotes, the rest as text"
+        );
+        let bullets = render_markdown(
+            &format!("{}x", "- ".repeat(20_000)),
+            MarkdownOptions::default(),
+        );
+        // comrak caps list nesting at 99 of its own (the TypeScript build draws 100); either way it is bounded.
+        let lists = bullets.matches("<ul>").count();
+        assert!((99..=MAX_NESTING).contains(&lists), "{lists} nested lists");
+        assert!(
+            !render_inline(&">".repeat(50_000)).is_empty(),
+            "an inline span renders too"
+        );
+    }
+
+    #[test]
+    fn deep_inline_nesting_renders_on_the_render_stack_without_stopping_the_server() {
+        // Not bounded line by line, so it is the render stack that keeps this from aborting the process.
+        let source = format!("{}<b>x</b>{}", "*a ".repeat(5_000), " a*".repeat(5_000));
+        let html = render_markdown(&source, MarkdownOptions::default());
+        assert!(!html.is_empty());
+        assert!(
+            !html.contains("<b>"),
+            "raw HTML is still judged: {}",
+            &html[..html.len().min(200)]
+        );
+    }
 }
 
 /// Per-document rendering options.
@@ -806,9 +877,14 @@ pub struct MarkdownOptions<'a> {
 /// passes through [`crate::sanitize::sanitize_html`] with a URL policy that applies [`safe_url`] and resolves
 /// relative references against `options.base` — for raw HTML tags as well as for markdown links and images.
 pub fn render_markdown(source: &str, options: MarkdownOptions<'_>) -> String {
+    on_render_stack(|| render_markdown_here(source, options))
+        .unwrap_or_else(|| unrendered(&source.replace("\r\n", "\n").replace('\r', "\n")))
+}
+
+fn render_markdown_here(source: &str, options: MarkdownOptions<'_>) -> String {
     let text = source.replace("\r\n", "\n").replace('\r', "\n");
     let (front, body) = split_frontmatter(&text);
-    let prepared = escape_leading_underscores(body);
+    let prepared = escape_leading_underscores(&bound_nesting(body));
     let comrak_options = comrak_options();
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, &prepared, &comrak_options);
@@ -844,7 +920,11 @@ pub fn render_markdown(source: &str, options: MarkdownOptions<'_>) -> String {
 
 /// Render inline spans only — a title, a table cell, a label — through the same parser and the same allow-list.
 pub fn render_inline(text: &str) -> String {
-    let prepared = escape_leading_underscores(text);
+    on_render_stack(|| render_inline_here(text)).unwrap_or_else(|| escape_html(text))
+}
+
+fn render_inline_here(text: &str) -> String {
+    let prepared = escape_leading_underscores(&bound_nesting(text));
     let rendered = comrak::markdown_to_html(&prepared, &comrak_options());
     let body = unwrap_paragraph(&rendered);
     // An inline span is never a document's preview: its images follow an answer's rule.
@@ -1116,6 +1196,131 @@ fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
         Some(tail) => (Some(content), tail),
         None => (Some(content), after),
     }
+}
+
+/// The deepest container nesting one line may open: markdown-it's default `maxNesting`.
+///
+/// Live issues developer-two-15 (P0) and -16 (2026-10-29): a line of 5,000 `>` overflowed this renderer's stack and
+/// aborted the server, again on every open of the session whose answer held it, and the TypeScript build failed the
+/// session view from about 2,000 levels. A container nested this deep carries nothing a reader can follow, so the
+/// levels past it are rendered as their text.
+pub const MAX_NESTING: usize = 100;
+
+/// The stack a render runs on: the last guard behind [`bound_nesting`], for a structure it does not bound (deep inline
+/// nesting). A stack overflow cannot be caught, and a server worker's stack is a few megabytes; this is address space
+/// reserved, not memory used, until a text actually nests that deep.
+const RENDER_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+/// Each line opens at most [`MAX_NESTING`] containers (block quotes and list items); a marker past that is escaped, so
+/// it reads as its own character. Lines inside a code fence are left alone. The TypeScript `boundNesting` writes the
+/// same.
+pub fn bound_nesting(markdown: &str) -> String {
+    let mut out = String::with_capacity(markdown.len() + 4);
+    let mut fence: Option<&str> = None;
+    for (index, line) in markdown.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        if let Some(marker) = fence_marker(line) {
+            match fence {
+                None => fence = Some(marker),
+                Some(open) if open == marker => fence = None,
+                Some(_) => {}
+            }
+            out.push_str(line);
+            continue;
+        }
+        if fence.is_some() {
+            out.push_str(line);
+            continue;
+        }
+        bound_line(line, &mut out);
+    }
+    out
+}
+
+fn bound_line(line: &str, out: &mut String) {
+    let bytes = line.as_bytes();
+    let mut at = 0usize;
+    let mut depth = 0usize;
+    loop {
+        while at < bytes.len() && (bytes[at] == b' ' || bytes[at] == b'\t') {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b'>') {
+            depth += 1;
+            if depth > MAX_NESTING {
+                out.push_str(&line[..at]);
+                out.push('\\');
+                out.push_str(&line[at..]);
+                return;
+            }
+            at += 1;
+            continue;
+        }
+        let Some(length) = list_marker_len(bytes, at) else {
+            out.push_str(line);
+            return;
+        };
+        depth += 1;
+        if depth > MAX_NESTING {
+            // A bullet is escaped itself; a number keeps its digits and escapes its `.` or `)`.
+            let escape_at = if bytes[at].is_ascii_digit() {
+                at + length - 1
+            } else {
+                at
+            };
+            out.push_str(&line[..escape_at]);
+            out.push('\\');
+            out.push_str(&line[escape_at..]);
+            return;
+        }
+        at += length;
+    }
+}
+
+/// The length of a list item's marker at `at` (a bullet, or up to nine digits and their `.` or `)`), when a space, a
+/// tab or the end of the line follows it.
+fn list_marker_len(bytes: &[u8], at: usize) -> Option<usize> {
+    let first = *bytes.get(at)?;
+    let length = if matches!(first, b'-' | b'+' | b'*') {
+        1
+    } else {
+        let digits = bytes[at..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        if digits == 0 || digits > 9 || !matches!(bytes.get(at + digits), Some(b'.' | b')')) {
+            return None;
+        }
+        digits + 1
+    };
+    match bytes.get(at + length) {
+        None | Some(b' ' | b'\t') => Some(length),
+        Some(_) => None,
+    }
+}
+
+/// Run a render on its own thread with [`RENDER_STACK_BYTES`] of stack; `None` when the thread could not start or
+/// the render panicked, and the caller then shows the text as its own words.
+fn on_render_stack<T: Send>(work: impl FnOnce() -> T + Send) -> Option<T> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("heddle-markdown".to_string())
+            .stack_size(RENDER_STACK_BYTES)
+            .spawn_scoped(scope, work)
+            .ok()?
+            .join()
+            .ok()
+    })
+}
+
+/// What a text that could not be rendered is shown as: its own words, escaped, so nothing is lost and nothing runs.
+fn unrendered(text: &str) -> String {
+    format!(
+        "<pre class=\"unrendered\"><code>{}</code></pre>",
+        escape_html(text)
+    )
 }
 
 /// A leading `_` is escaped, so a name is a name: `_tools_` is not emphasis.

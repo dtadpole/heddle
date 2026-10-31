@@ -165,6 +165,75 @@ function imageSource(target: string): string | null {
 }
 
 /**
+ * The deepest container nesting one line may open: markdown-it's default `maxNesting`.
+ *
+ * Live issues developer-two-15 (P0) and -16 (2026-10-29): a line of 5,000 `>` overflowed the Rust renderer's stack and
+ * aborted the server, again on every open of the session whose answer held it; this build answered from about 2,000
+ * levels with `marked`'s own "Maximum call stack size exceeded", so the session view and the file preview failed. A
+ * container nested this deep carries nothing a reader can follow, so the levels past it are rendered as their text.
+ */
+export const MAX_NESTING = 100
+
+/**
+ * Each line opens at most `MAX_NESTING` containers (block quotes and list items); a marker past that is escaped, so
+ * it reads as its own character. Lines inside a code fence are left alone. The Rust `bound_nesting` writes the same.
+ */
+export function boundNesting(markdown: string): string {
+  const lines = markdown.split('\n')
+  let fence: string | null = null
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    const marker = /^\s*(```|~~~)/.exec(line)
+    if (marker !== null) {
+      const character = marker[1] ?? '```'
+      if (fence === null) fence = character
+      else if (fence === character) fence = null
+      continue
+    }
+    if (fence === null) lines[index] = boundLine(line)
+  }
+  return lines.join('\n')
+}
+
+/** A list item's marker at a given index: a bullet, or a number of up to nine digits and its `.` or `)`. */
+const LIST_MARKER = /(?:[-+*]|\d{1,9}[.)])(?=[ \t]|$)/y
+
+function boundLine(line: string): string {
+  let at = 0
+  let depth = 0
+  for (;;) {
+    while (line[at] === ' ' || line[at] === '\t') at += 1
+    if (line[at] === '>') {
+      depth += 1
+      if (depth > MAX_NESTING) return `${line.slice(0, at)}\\${line.slice(at)}`
+      at += 1
+      continue
+    }
+    LIST_MARKER.lastIndex = at
+    const list = LIST_MARKER.exec(line)
+    if (list === null) return line
+    depth += 1
+    if (depth > MAX_NESTING) {
+      /** A bullet is escaped itself; a number keeps its digits and escapes its `.` or `)`. */
+      const escapeAt = /\d/.test(line[at] ?? '') ? at + list[0].length - 1 : at
+      return `${line.slice(0, escapeAt)}\\${line.slice(escapeAt)}`
+    }
+    at += list[0].length
+  }
+}
+
+/**
+ * What a text that could not be rendered is shown as: its own words, escaped, so nothing is lost and nothing runs.
+ *
+ * The last guard behind `boundNesting`: a structure it does not bound (deep inline nesting) can still exhaust the
+ * parser's stack, and in JavaScript that is a `RangeError` this build can catch, where it used to fail the whole
+ * session view (live issue developer-two-16).
+ */
+function unrendered(text: string): string {
+  return `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`
+}
+
+/**
  * A leading `_` is escaped, so a name is a name.
  *
  * Measured, and it is a defect this repository hits everywhere: `# _tools_` rendered as `<em>tools</em>`, so the
@@ -280,12 +349,16 @@ export function renderInline(text: string): string {
   /** An inline span is never a document's preview: its images follow an answer's rule, whatever parsed last. */
   imageBase = undefined
   remoteImagesAllowed = false
-  return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(String(text ?? ''))) as string, {
-    url: (value, at) => {
-      const safe = safeUrl(value)
-      return safe !== null && at.tag === 'img' ? imageSource(safe) : safe
-    },
-  })
+  try {
+    return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(boundNesting(String(text ?? '')))) as string, {
+      url: (value, at) => {
+        const safe = safeUrl(value)
+        return safe !== null && at.tag === 'img' ? imageSource(safe) : safe
+      },
+    })
+  } catch {
+    return escapeHtml(String(text ?? ''))
+  }
 }
 
 /**
@@ -305,7 +378,13 @@ export function renderMarkdown(source: string, options: { readonly base?: string
     front === null
       ? ''
       : `<section class="frontmatter"><h2>frontmatter</h2><pre><code>${escapeHtml((front[1] ?? '').trim())}</code></pre></section>\n`
-  return sanitizeHtml(frontHtml + (marked.parse(escapeLeadingUnderscores(body)) as string), {
+  let parsed: string
+  try {
+    parsed = marked.parse(escapeLeadingUnderscores(boundNesting(body))) as string
+  } catch {
+    return unrendered(text)
+  }
+  return sanitizeHtml(frontHtml + parsed, {
     /**
      * One rule for a subresource, **wherever the tag came from**.
      *
