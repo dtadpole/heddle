@@ -22,13 +22,10 @@ import { evidencePath, fixtureDir, heddleCommand, isolatedHome, removeDir, repoR
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, stepsFor = (work) => [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'the folder holds two files' }, { text: 'second answer' }]) {
   const home = isolatedHome(`trajectory-${label}`)
   const work = fixtureDir(`trajectory-${label}-work`)
-  const { config } = scriptedConfig({
-    home,
-    steps: [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'the folder holds two files' }, { text: 'second answer' }],
-  })
+  const { config } = scriptedConfig({ home, steps: stepsFor(work) })
   mkdirSync(work, { recursive: true })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
@@ -1001,6 +998,91 @@ test("a user record counts its images and files, and its inspector lists them wi
     assert.match(listed[1][2], /^\d+ B/, 'and the file row its size')
     await browser.evaluate('document.querySelector("#tr-details .tr-attach-thumb").click()')
     assert.ok(await browser.waitFor('document.querySelector("dialog.image-lightbox")?.open === true', 5_000), 'the thumbnail opens the lightbox')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a long ledger opens at its tail with a Load earlier first row, which keeps the reader in place, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21), DSH's Virtual rows: a long ledger opens with 50 records ending at the tail, snapped to
+   * a section head, and a first-row control draws one earlier page; the overview still reaches every turn. Before this,
+   * every row of every turn was drawn at once.
+   */
+  const calls = (work, count, answer) => [...Array.from({ length: count }, () => ({ toolCall: { name: 'list_dir', arguments: { path: work } } })), { text: answer }]
+  const server = await startServer('ledger-window', (work) => [...calls(work, 30, 'first done'), ...calls(work, 30, 'second done'), ...calls(work, 30, 'third done')])
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    for (const prompt of ['one', 'two', 'three']) {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `turn ${prompt} ran (${turn.status})`)
+      await turn.text()
+    }
+    const rows = (await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)).body.rows ?? []
+    assert.ok(rows.length > 90, `three turns of 30 calls make a long ledger (${rows.length} rows)`)
+    /** The page's rule, restated: the last 50 rows, snapped back to their section head when that adds at most 50. */
+    const headAt = (index) => { for (let at = index; at >= 0; at -= 1) if (rows[at].turnStart) return at; return 0 }
+    const tail = rows.length - 50
+    const expected = tail - headAt(tail) <= 50 ? headAt(tail) : tail
+    assert.ok(expected > 0, 'the window starts after the first row')
+
+    const open = async () => {
+      /** Opened as the page restores it, after boot, so boot's fresh session cannot take its place. */
+      await browser.gotoSession(server.url, session)
+      assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+      await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+      await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+      assert.ok(await browser.waitFor(`document.querySelectorAll('#tr-table tbody tr[data-index]').length > 0 && document.querySelector('#tr-table tbody tr[data-index="${rows.length - 1}"]') !== null`, 20_000), 'the ledger opens with its last row drawn')
+    }
+    await open()
+    const state = () => browser.evaluate(`JSON.stringify((() => {
+      const body = document.querySelector('#tr-table tbody')
+      const drawn = [...body.querySelectorAll('tr[data-index]')].map((tr) => Number(tr.dataset.index))
+      const control = body.firstElementChild?.classList.contains('tr-more') ? body.firstElementChild.textContent : null
+      return { first: drawn[0], last: drawn[drawn.length - 1], count: drawn.length, control }
+    })())`).then(JSON.parse)
+    const opening = await state()
+    assert.equal(opening.first, expected, `the window opens at the tail's section head (${JSON.stringify(opening)})`)
+    assert.equal(opening.last, rows.length - 1, 'and runs to the last row')
+    assert.equal(opening.control, `Load earlier · ${expected} more records`, 'the first row is the load control')
+
+    /** One click draws the previous 50 rows, snapped back to their section head the same way. */
+    const earlier = (start) => {
+      const target = Math.max(0, start - 50)
+      return target - headAt(target) <= 50 ? headAt(target) : target
+    }
+    const before = await browser.evaluate(`document.querySelector('#tr-table tbody tr[data-index="${expected}"]').getBoundingClientRect().top`)
+    await browser.evaluate(`document.querySelector('#tr-table tbody .tr-more button').click()`)
+    const next = earlier(expected)
+    assert.ok(await browser.waitFor(`document.querySelector('#tr-table tbody tr[data-index]')?.dataset.index === '${next}'`, 5_000), `one click draws the earlier page, from row ${next}`)
+    const after = await browser.evaluate(`document.querySelector('#tr-table tbody tr[data-index="${expected}"]').getBoundingClientRect().top`)
+    assert.ok(Math.abs(after - before) <= 2, `the row that was first stays where it was on screen (${before} to ${after})`)
+    for (let start = next, clicks = 0; start > 0 && clicks < 10; start = earlier(start), clicks += 1) {
+      await browser.evaluate(`document.querySelector('#tr-table tbody .tr-more button').click()`)
+      assert.ok(await browser.waitFor(`document.querySelector('#tr-table tbody tr[data-index]')?.dataset.index === '${earlier(start)}'`, 5_000), `the next click draws from row ${earlier(start)}`)
+    }
+    const whole = await state()
+    assert.equal(whole.control, null, `with nothing earlier, the control is gone (${JSON.stringify(whole)})`)
+    assert.equal(whole.count, rows.length, 'and every row is drawn')
+
+    /** A fresh page opens at the tail again; picking the first turn in the overview draws it. */
+    await open()
+    assert.ok((await state()).control !== null, 'the reload opens at the tail with the control')
+    assert.ok(await browser.waitFor('document.querySelector(\'#timeline .tr-tick[data-turn="1"]\') !== null', 10_000), 'the overview shows the first turn')
+    await browser.evaluate(`document.querySelector('#timeline .tr-tick[data-turn="1"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`)
+    assert.ok(await browser.waitFor(`document.querySelector('#tr-table tbody tr[data-index="0"]') !== null`, 5_000), 'picking a turn before the window draws its rows')
   } finally {
     browser.close()
     await server.close()
