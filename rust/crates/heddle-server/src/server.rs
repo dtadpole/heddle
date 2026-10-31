@@ -58,7 +58,7 @@ use tokio::sync::mpsc;
 use crate::fence;
 use crate::page;
 use crate::preview;
-use crate::respond::{self, JsonBody, SessionId, SessionPath, canonical_path};
+use crate::respond::{self, JsonBody, JsonObject, SessionId, SessionPath, canonical_path};
 use crate::runs::{RunRegistry, iso_time};
 use crate::selection::{SessionSelection, session_request_selection, turn_selection};
 use crate::services::{
@@ -1343,7 +1343,9 @@ fn fork_cut(body: &JsonBody) -> Result<Option<u64>, ()> {
 async fn fork_session(
     State(state): State<AppState>,
     SessionPath(id): SessionPath,
-    body: JsonBody,
+    // A body that is not a JSON object is refused before anything is cut, as `readJson` refuses it for the
+    // TypeScript route (`400 the body must be a JSON object`); `JsonBody` would read it as `{}` and fork.
+    JsonObject(body): JsonObject,
 ) -> Response {
     // An optional `atSeq` is DSH's inclusive cut: the chat's Branch action sends the seq that ended its turn.
     let Ok(at_seq) = fork_cut(&body) else {
@@ -1367,6 +1369,7 @@ async fn fork_session(
             format!("session {id} has no completed turn to fork from"),
             code,
         ),
+        ForkOutcome::Refused(error) => service_refusal(error, StatusCode::BAD_REQUEST),
         ForkOutcome::Forked(created) => respond::json(
             StatusCode::OK,
             &json!({
@@ -1390,18 +1393,26 @@ async fn flags_session(
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
     // The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace`
-    // `archiveSession`, `details.activity`): the turn in progress and the running subagent descendants, which
-    // the page's stop-and-archive dialog lists. A turn is running when this server started it or the agent
-    // runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
-    // A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs`
-    // lib/index.js:19-31, which puts its `{ kind: "job", items }` ahead of the rest): they block the archive
-    // the same way, are listed in the refusal (also as `jobs`), and with `stop: true` are stopped once the
-    // archive is written.
-    let activity = state.harness().activity.clone();
+    // `archiveSession`, `details.activity`): the turn in progress, the session's live background jobs, its
+    // running subagent descendants and its active reminders, in DSH's listener order
+    // (`heddle_session::session_activity`), which the page's stop-and-archive dialog lists. The jobs and the
+    // reminders are what the rows behind the activity port report; the jobs are also listed as `jobs`, the jobs
+    // row's own field, which the page's older confirm reads. A turn is running when this server started it or the
+    // agent runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
+    //
+    // With `stop: true` every family is stopped only once the archive is written — DSH's order: it writes the
+    // archive set, then asks every `workspace/session-stop` listener and awaits them
+    // (`dsh-workspace/lib/index.js:527-541`, `:621-628`). The turn and its running subagents are cancelled, then
+    // the port's work. A write that is refused, finds no session or fails stops nothing, as a throwing `setState`
+    // in DSH never reaches `stopSessionActivity`; nor can a cancelled child's settlement notice start a parent turn
+    // before the archived flag is on disk.
+    let port = state.harness().activity.clone();
     let stop = archived == Some(true) && body.bool("stop") == Some(true);
+    let runs = state.runs();
+    let runner = state.harness().turns.clone();
+    // The sessions a successful write stops: the session and the subagents its activity named.
+    let mut stop_sessions: Vec<String> = Vec::new();
     if archived == Some(true) {
-        let runs = state.runs();
-        let runner = state.harness().turns.clone();
         let is_running = |session: &str| runs.is_running(session) || runner.is_live(session);
         let metas: Vec<heddle_session::LineageMeta> = state
             .harness()
@@ -1415,47 +1426,27 @@ async fn flags_session(
                     .and_then(heddle_session::LineageMeta::from_map)
             })
             .collect();
-        let work = heddle_session::session_activity(id.as_str(), &metas, is_running);
-        let jobs: Vec<Value> = activity
-            .as_ref()
-            .map(|activity| activity.active(id.as_str()))
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|item| item.kind == crate::services::ActivityKind::Job)
+        let rows = row_activity(port.as_deref(), id.as_str());
+        let jobs: Vec<Value> = rows
+            .jobs
+            .iter()
             .map(|item| json!({ "id": item.id, "label": item.label }))
             .collect();
-        if !work.is_empty() || !jobs.is_empty() {
+        let activity = heddle_session::session_activity(id.as_str(), &metas, is_running, rows);
+        if !activity.is_empty() {
             if !stop {
-                let error = if !work.is_empty() {
-                    format!("session {id} is running; pass stop: true to stop it and archive")
-                } else {
-                    format!(
-                        "session {id} has running background jobs; pass stop: true to stop them and archive"
-                    )
-                };
-                let mut listed: Vec<Value> = Vec::new();
-                if !jobs.is_empty() {
-                    listed.push(json!({ "kind": "job", "items": jobs.clone() }));
-                }
-                listed.extend(
-                    work.iter()
-                        .filter_map(|entry| serde_json::to_value(entry).ok()),
-                );
                 let mut refusal = json!({
-                    "error": error,
+                    "error": heddle_session::refusal_sentence(id.as_str(), &activity),
                     "code": "active",
                     "running": runs.running(id.as_str()),
-                    "activity": listed,
+                    "activity": activity,
                 });
                 if !jobs.is_empty() {
                     refusal["jobs"] = Value::Array(jobs);
                 }
                 return respond::json(StatusCode::CONFLICT, &refusal);
             }
-            for session in heddle_session::activity_sessions(id.as_str(), &work) {
-                runs.abort(&session);
-                runner.interrupt(&session);
-            }
+            stop_sessions = heddle_session::activity_sessions(id.as_str(), &activity);
         }
     }
     match state
@@ -1465,8 +1456,12 @@ async fn flags_session(
     {
         Ok(None) => respond::no_session(id.as_str()),
         Ok(Some(meta)) => {
-            if let (true, Some(activity)) = (stop, activity.as_ref()) {
-                activity.stop(id.as_str());
+            for session in &stop_sessions {
+                runs.abort(session);
+                runner.interrupt(session);
+            }
+            if let (true, Some(port)) = (stop, port.as_ref()) {
+                port.stop(id.as_str()).await;
             }
             // Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end
             // with their owner (#85).
@@ -1480,6 +1475,29 @@ async fn flags_session(
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
         }
     }
+}
+
+/// The activity port's items as the families `heddle_session::session_activity` places in DSH's order: each
+/// `job` and `schedule` item, labelled. Turns and subagents are the server's own count, so the port's items of
+/// those kinds are not read here.
+fn row_activity(
+    port: Option<&dyn crate::services::SessionActivity>,
+    session: &str,
+) -> heddle_session::RowActivity {
+    use crate::services::ActivityKind;
+    let mut rows = heddle_session::RowActivity::default();
+    for item in port.map(|port| port.active(session)).unwrap_or_default() {
+        let entry = heddle_session::ActivityItem {
+            id: item.id,
+            label: Some(item.label),
+        };
+        match item.kind {
+            ActivityKind::Job => rows.jobs.push(entry),
+            ActivityKind::Schedule => rows.schedules.push(entry),
+            ActivityKind::Turn | ActivityKind::Subagent => {}
+        }
+    }
+    rows
 }
 
 async fn title_session(
@@ -3040,6 +3058,16 @@ mod tests {
         modes: std::sync::Mutex<Vec<String>>,
         /// Every `record` call, as `(session, type, fields)`.
         recorded: std::sync::Mutex<Vec<(String, String, Value)>>,
+        /// What a flags write answers.
+        flags: FlagsAnswer,
+    }
+
+    /// A flags write's outcome: the record, no such session, or the store's refusal of a pin on an archived session.
+    #[derive(Clone, Copy, Debug)]
+    enum FlagsAnswer {
+        Written,
+        Missing,
+        Refused,
     }
 
     impl Sessions {
@@ -3056,6 +3084,7 @@ mod tests {
                 events: HashMap::new(),
                 modes: std::sync::Mutex::new(Vec::new()),
                 recorded: std::sync::Mutex::new(Vec::new()),
+                flags: FlagsAnswer::Written,
             }
         }
     }
@@ -3101,10 +3130,17 @@ mod tests {
         }
         fn set_flags(
             &self,
-            _id: &str,
+            id: &str,
             _patch: FlagPatch,
         ) -> Result<Option<SessionMeta>, ServiceError> {
-            Ok(self.metas.first().cloned())
+            match self.flags {
+                FlagsAnswer::Written => Ok(self.metas.first().cloned()),
+                FlagsAnswer::Missing => Ok(None),
+                FlagsAnswer::Refused => Err(ServiceError::with_code(
+                    format!("session {id} is archived and cannot be pinned"),
+                    "archived",
+                )),
+            }
         }
         fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
             self.metas.first().cloned()
@@ -4126,6 +4162,7 @@ mod tests {
             events: HashMap::new(),
             modes: std::sync::Mutex::new(vec!["danger-full-access".into(), "read-only".into()]),
             recorded: std::sync::Mutex::new(Vec::new()),
+            flags: FlagsAnswer::Written,
         };
         let harness = Harness::new(
             Arc::new(sessions),
@@ -4463,8 +4500,9 @@ mod tests {
                 }]
             }
         }
-        fn stop(&self, session: &str) {
+        fn stop(&self, session: &str) -> BoxFuture<'static, ()> {
             self.stopped.lock().unwrap().push(session.to_owned());
+            Box::pin(async {})
         }
     }
 
@@ -4851,6 +4889,7 @@ mod tests {
             events: HashMap::new(),
             modes: std::sync::Mutex::new(Vec::new()),
             recorded: std::sync::Mutex::new(Vec::new()),
+            flags: FlagsAnswer::Written,
         };
         let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut harness = Harness::new(
@@ -5239,6 +5278,141 @@ mod tests {
         drop(guard);
     }
 
+    /// The activity port as a double: the work it reports for one session until that session is stopped.
+    struct RowWork {
+        items: Vec<crate::services::ActivityItem>,
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for RowWork {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                self.items.clone()
+            }
+        }
+        fn stop(&self, session: &str) -> BoxFuture<'static, ()> {
+            self.stopped.lock().unwrap().push(session.to_owned());
+            Box::pin(async {})
+        }
+    }
+
+    /// DSH's schedule plugin is an activity provider (`dsh-schedule/lib/index.js:2043-2064`): an active reminder
+    /// refuses a plain archive even of an idle session, the families come in DSH's listener order (turn, job,
+    /// subagent, schedule), and `stop: true` asks the port to stop once the archive is written.
+    #[tokio::test]
+    async fn the_ports_reminders_and_jobs_are_listed_in_dsh_order_and_stopped_by_stop_true() {
+        use crate::services::{ActivityItem, ActivityKind};
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let port = Arc::new(RowWork {
+            items: vec![
+                ActivityItem {
+                    kind: ActivityKind::Schedule,
+                    id: "schedule-1".into(),
+                    label: "Stand-up".into(),
+                },
+                ActivityItem {
+                    kind: ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                },
+            ],
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_rows = harness();
+        with_rows.activity = Some(port.clone());
+        let (router, state) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = format!("/api/sessions/{id}/flags");
+
+        let guard = state.runs().begin(id);
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["activity"],
+            json!([
+                { "kind": "turn" },
+                { "kind": "job", "items": [{ "id": "bash-0123456789abcdef", "label": "sleep 30" }] },
+                { "kind": "schedule", "items": [{ "id": "schedule-1", "label": "Stand-up" }] }
+            ]),
+            "{body}"
+        );
+        drop(guard);
+
+        let reminders_only = Arc::new(RowWork {
+            items: port.items[..1].to_vec(),
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut idle = harness();
+        idle.activity = Some(reminders_only.clone());
+        let (router, _) = ServerBuilder::new(
+            idle,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-reminder")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an idle session with a reminder"
+        );
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "active");
+        assert_eq!(
+            body["error"],
+            format!(
+                "session {id} has active scheduled reminders; pass stop: true to stop them and archive"
+            )
+        );
+        assert_eq!(
+            body["activity"],
+            json!([{ "kind": "schedule", "items": [{ "id": "schedule-1", "label": "Stand-up" }] }]),
+            "{body}"
+        );
+        assert!(
+            reminders_only.stopped.lock().unwrap().is_empty(),
+            "a refusal stops nothing"
+        );
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(*reminders_only.stopped.lock().unwrap(), [id]);
+        let (status, _) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "with the reminder stopped, nothing blocks"
+        );
+
+        let (status, _) = post_json(&router, &uri, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            reminders_only.stopped.lock().unwrap().len(),
+            1,
+            "pinning never stops anything"
+        );
+    }
+
     /// A runner whose agent runtime holds turns the server did not start, and records what it was asked to stop.
     struct LiveTurns {
         live: Vec<String>,
@@ -5316,6 +5490,132 @@ mod tests {
             *runner.interrupted.lock().unwrap(),
             vec![parent.to_owned(), child.to_owned()]
         );
+    }
+
+    /// The fork reads a body (its `atSeq`), and the TypeScript route's `readJson` refuses JSON that is not an
+    /// object: `400 the body must be a JSON object`. This route read `null`, `[]`, `5` and `"x"` as `{}` and
+    /// forked; DSH's gateway refuses such args too (dsh-api-gateway lib/index.js:1746).
+    #[tokio::test]
+    async fn a_fork_body_that_is_not_a_json_object_is_refused_before_anything_is_cut() {
+        let (router, _) = app("fork-body");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = "/api/sessions/session-00000000-0000-0000-0000-000000000001/fork";
+        for body in ["null", "[]", "5", r#""x""#] {
+            let (status, bytes) = post_json(&router, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                body_text(&bytes),
+                "the body must be a JSON object\n",
+                "{body}"
+            );
+        }
+        // An object, or no body at all, reaches the fork; the double has no such session to cut.
+        for body in ["{}", ""] {
+            let (status, _) = post_json(&router, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+        }
+        // A body that is not JSON keeps its own sentence.
+        let (status, bytes) = post_json(&router, uri, &cookie, "{").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(&bytes), "the body must be JSON\n");
+    }
+
+    /// DSH's `archiveSession` with `stopActivity` writes the archive set and only then asks the
+    /// `workspace/session-stop` listeners (`dsh-workspace/lib/index.js:527-541`): a write that throws stops
+    /// nothing. Here a refused write (`409`, a pin on an archived session) and a missing session (`404`) leave
+    /// the turn, the running subagent and the port's work as they were.
+    #[tokio::test]
+    async fn a_stop_and_archive_whose_write_is_refused_or_finds_no_session_stops_nothing() {
+        use crate::services::{ActivityItem, ActivityKind};
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        for (answer, expected) in [
+            (FlagsAnswer::Refused, StatusCode::CONFLICT),
+            (FlagsAnswer::Missing, StatusCode::NOT_FOUND),
+            (FlagsAnswer::Written, StatusCode::OK),
+        ] {
+            let mut sessions = Sessions::with_one();
+            sessions.flags = answer;
+            let mut rest = Map::new();
+            rest.insert("parentSession".into(), Value::String(parent.into()));
+            rest.insert("origin".into(), Value::String("subagent".into()));
+            sessions.metas.push(SessionMeta {
+                id: child.into(),
+                title: Some("look things up".into()),
+                rest,
+                ..SessionMeta::default()
+            });
+            let runner = Arc::new(LiveTurns {
+                live: vec![child.to_owned()],
+                interrupted: std::sync::Mutex::new(Vec::new()),
+            });
+            let port = Arc::new(RowWork {
+                items: vec![ActivityItem {
+                    kind: ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }],
+                stopped: std::sync::Mutex::new(Vec::new()),
+            });
+            let mut harness = Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner.clone(),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            );
+            harness.activity = Some(port.clone());
+            let (router, state) = ServerBuilder::new(
+                harness,
+                ServerOptions {
+                    token: Some("test-token".into()),
+                    secret_path: Some(temp_secret(&format!("archive-write-{answer:?}"))),
+                    ..ServerOptions::default()
+                },
+            )
+            .into_router(3082)
+            .expect("the test router");
+            let guard = state.runs().begin(parent);
+            let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+            let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+            let uri = format!("/api/sessions/{parent}/flags");
+            let (status, bytes) = post_json(
+                &router,
+                &uri,
+                &cookie,
+                r#"{"archived":true,"pinned":true,"stop":true}"#,
+            )
+            .await;
+            assert_eq!(status, expected, "{answer:?}: {}", body_text(&bytes));
+            match answer {
+                FlagsAnswer::Written => {
+                    assert!(guard.is_cancelled(), "a written archive stops the turn");
+                    assert_eq!(
+                        *runner.interrupted.lock().unwrap(),
+                        vec![parent.to_owned(), child.to_owned()]
+                    );
+                    assert_eq!(*port.stopped.lock().unwrap(), [parent]);
+                }
+                FlagsAnswer::Refused | FlagsAnswer::Missing => {
+                    if let FlagsAnswer::Refused = answer {
+                        let body: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(body["code"], "archived", "{body}");
+                    }
+                    assert!(!guard.is_cancelled(), "{answer:?}: the turn keeps running");
+                    assert!(
+                        runner.interrupted.lock().unwrap().is_empty(),
+                        "{answer:?}: no turn or subagent is interrupted"
+                    );
+                    assert!(
+                        port.stopped.lock().unwrap().is_empty(),
+                        "{answer:?}: the port's work is not stopped"
+                    );
+                }
+            }
+            drop(guard);
+        }
     }
 
     /// One raw HTTP/1.1 exchange, because the verifiers speak over a socket rather than through
