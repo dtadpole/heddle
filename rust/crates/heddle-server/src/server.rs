@@ -47,7 +47,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
-use axum::http::{Method, StatusCode, header::HOST};
+use axum::http::{HeaderMap, Method, StatusCode, header, header::HOST};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
@@ -86,6 +86,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/"),
     ("GET", "/api/events"),
     ("GET", "/api/status"),
+    ("GET", "/api/presets"),
     ("GET", "/api/sessions"),
     ("POST", "/api/sessions"),
     ("GET", "/api/sessions/search"),
@@ -381,6 +382,7 @@ impl ServerBuilder {
             .route("/", get(page_route))
             .route("/api/events", get(events_route))
             .route("/api/status", get(status))
+            .route("/api/presets", get(list_presets))
             .route("/api/sessions", get(list_sessions).post(create_session))
             .route("/api/sessions/search", get(search_sessions))
             .route("/api/sessions/{id}", get(session_view_route))
@@ -531,6 +533,9 @@ pub struct WebServer {
     heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl WebServer {
     /// `http://<host>:<port>/?token=<token>`.
     pub fn url(&self) -> &str {
@@ -582,6 +587,16 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        // A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each
+        // running command's process group is ended and its call is recorded as interrupted before the process
+        // goes (live-testing issue #6; DSH cancels its agents at teardown, dsh-bash-local graceMs 3000).
+        let runs = self.state.runs().clone();
+        if runs.abort_all() > 0 {
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+            while runs.any_running() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
@@ -755,7 +770,8 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
     if path == "/" && method == Method::GET {
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
-            return respond::html(StatusCode::OK, page::page());
+            let lang = page_language(&state, request.headers());
+            return respond::html(StatusCode::OK, page::with_language(page::page(), lang));
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
@@ -864,8 +880,25 @@ async fn healthz(State(state): State<AppState>) -> Response {
     healthz_body(state.port())
 }
 
-async fn page_route() -> Response {
-    respond::html(StatusCode::OK, page::page())
+async fn page_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    respond::html(
+        StatusCode::OK,
+        page::with_language(page::page(), page_language(&state, &headers)),
+    )
+}
+
+/// The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one
+/// the browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`.
+fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let locale = state
+        .harness()
+        .locale
+        .unwrap_or_default()
+        .for_request(accept);
+    heddle_config::document_language(locale)
 }
 
 async fn events_route(State(state): State<AppState>) -> Response {
@@ -938,6 +971,78 @@ async fn status(State(state): State<AppState>) -> Response {
     )
 }
 
+/// The roster requests are checked against, and whether it is the implicit one of a profile without the `presets` row
+/// (inventory A96), which declares only `standard`.
+fn preset_roster_of(state: &AppState) -> (heddle_config::PresetRoster, bool) {
+    match state.harness().presets.as_ref() {
+        Some(roster) => ((**roster).clone(), false),
+        None => (
+            heddle_config::preset_roster(None).unwrap_or_else(|_| heddle_config::PresetRoster {
+                default: heddle_config::standard_preset().id,
+                presets: vec![heddle_config::standard_preset()],
+            }),
+            true,
+        ),
+    }
+}
+
+/// `GET /api/presets` (inventory A96): DSH's `agentPresets/list`, the roster and its default, for the new-session
+/// picker and the Settings roster. Each preset says what it narrows: the tools its sessions are offered (absent means
+/// every tool) and its persona. A profile without the `presets` row answers its one implicit preset, marked so.
+async fn list_presets(State(state): State<AppState>) -> Response {
+    let (roster, implicit) = preset_roster_of(&state);
+    let mut body = Map::new();
+    body.insert("default".into(), Value::String(roster.default));
+    body.insert(
+        "presets".into(),
+        serde_json::to_value(&roster.presets).unwrap_or(Value::Array(Vec::new())),
+    );
+    if implicit {
+        body.insert("implicit".into(), Value::Bool(true));
+    }
+    respond::json(StatusCode::OK, &Value::Object(body))
+}
+
+/// The agent preset a request names (inventory A96), checked before anything is written: `Ok(None)` when it names
+/// none (absent, not a string, or blank), the declared id, or the sentence a `400` answers — DSH's
+/// dsh-agent-preset-registry `Unknown agent preset: <id>`, with what is declared.
+fn requested_preset(state: &AppState, body: &JsonBody) -> Result<Option<String>, String> {
+    let Some(wanted) = body.trimmed("preset") else {
+        return Ok(None);
+    };
+    let declared = preset_roster_of(state).0.ids();
+    if !declared.iter().any(|id| id == wanted) {
+        return Err(format!(
+            "Unknown agent preset: {wanted}; declared: {}",
+            declared.join(", ")
+        ));
+    }
+    Ok(Some(wanted.to_owned()))
+}
+
+/// The `409` for another preset named for a session that recorded one: a session keeps the preset it was created with.
+fn preset_fixed(recorded: &str) -> Response {
+    respond::error_with_code(
+        StatusCode::CONFLICT,
+        format!(
+            "the session runs the preset '{recorded}'; a session keeps the preset it was created with"
+        ),
+        "session/preset-fixed",
+    )
+}
+
+/// The preset a new session is created under: the one the request named, else the profile's default (none for a
+/// profile without the `presets` row).
+fn new_session_preset(state: &AppState, named: Option<&str>) -> Option<String> {
+    named.map(str::to_owned).or_else(|| {
+        state
+            .harness()
+            .presets
+            .as_ref()
+            .map(|roster| roster.default.clone())
+    })
+}
+
 fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
     match error.code {
         Some(code) => respond::error_with_code(status, error.message, code),
@@ -959,10 +1064,15 @@ async fn create_session(State(state): State<AppState>, body: JsonBody) -> Respon
             format!("{} is not under any workspace root", branch.display()),
         );
     }
+    let named = match requested_preset(&state, &body) {
+        Ok(named) => named,
+        Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal),
+    };
+    let preset = new_session_preset(&state, named.as_deref());
     match state
         .harness()
         .sessions
-        .create_at(&branch, body.non_empty("title"))
+        .create_at(&branch, body.non_empty("title"), preset.as_deref())
     {
         Ok(created) => respond::json(
             StatusCode::OK,
@@ -993,6 +1103,7 @@ async fn folder_session(State(state): State<AppState>, body: JsonBody) -> Respon
         fresh: body.bool("new") == Some(true),
         title: None,
         selection: SessionSelection::default(),
+        preset: None,
     };
     match state.harness().sessions.open_at(&folder, options) {
         Ok(id) => {
@@ -1066,6 +1177,14 @@ async fn session_view_route(
         meta.as_ref()
             .and_then(|meta| meta.reasoning_effort.clone())
             .map(Value::String)
+            .unwrap_or(Value::Null),
+    );
+    // The agent preset the session runs under (inventory A96); `null` until a turn records one.
+    body.insert(
+        "preset".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.preset())
+            .map(|preset| Value::String(preset.to_owned()))
             .unwrap_or(Value::Null),
     );
     body.insert(
@@ -1780,6 +1899,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         );
     }
 
+    // The agent preset the request names (inventory A96), checked before a session exists, as the endpoint is.
+    let named_preset = match requested_preset(&state, &body) {
+        Ok(named) => named,
+        Err(refusal) => return respond::text(StatusCode::BAD_REQUEST, format!("{refusal}\n")),
+    };
+    let born_preset = new_session_preset(&state, named_preset.as_deref());
     let born = SessionSelection {
         endpoint: requested_endpoint.map(str::to_owned),
         model: requested_model.map(str::to_owned),
@@ -1788,13 +1913,25 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
     let folder = body.non_empty("folder").map(canonical_path);
-    let title: String = prompt.chars().take(60).collect();
+    // A session this route opens is born untitled, as DSH's is (#68): its first message writes the fallback name and
+    // the session layer's title coordinator asks the model for the title (heddle_session::title). A title given here
+    // would read as a person's name, and no title would ever be generated.
     // A one-shot subagent's session takes no turn from here, refused before the session is opened so the child's log
     // gets nothing (web.ts asks `subagentTurnRefusal` at the same point).
-    if let Some(resume) = resume
-        && let Some(refusal) = subagent_turn_refusal(sessions.meta(resume).as_ref())
-    {
-        return respond::json_compact(StatusCode::CONFLICT, &refusal);
+    if let Some(resume) = resume {
+        let resumed = sessions.meta(resume);
+        if let Some(refusal) = subagent_turn_refusal(resumed.as_ref()) {
+            return respond::json_compact(StatusCode::CONFLICT, &refusal);
+        }
+        // A session keeps the preset it was created with (DSH): another one named for it is refused before it is
+        // opened.
+        if let (Some(named), Some(recorded)) = (
+            named_preset.as_deref(),
+            resumed.as_ref().and_then(|meta| meta.preset()),
+        ) && recorded != named
+        {
+            return preset_fixed(recorded);
+        }
     }
     let session = if let Some(resume) = resume {
         // A resumed session keeps the selection it recorded; only a session this request creates is
@@ -1804,6 +1941,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             cwd: None,
             title: None,
             selection: SessionSelection::default(),
+            preset: None,
         })
     } else if let Some(folder) = folder.as_ref() {
         // web.ts opens the folder's session whether or not a workspace owns the folder, then adopts it
@@ -1813,16 +1951,18 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             folder,
             OpenAt {
                 fresh: body.bool("new") == Some(true),
-                title: Some(title),
+                title: None,
                 selection: born.clone(),
+                preset: born_preset.clone(),
             },
         )
     } else {
         sessions.start(StartSession {
             resume: None,
             cwd: Some(state.harness().cwd.clone()),
-            title: Some(title),
+            title: None,
             selection: born.clone(),
+            preset: born_preset.clone(),
         })
     };
     let session = match session {
@@ -1833,6 +1973,17 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         && let Some(workspaces) = state.harness().workspaces.as_ref()
     {
         workspaces.ensure_owner(folder);
+    }
+    // The same rule for a folder's existing session, which is only known once it is opened: another preset named for
+    // it is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
+    // once the endpoint checks below have passed, so a refused turn records nothing.
+    let recorded_preset = sessions
+        .meta(&session)
+        .and_then(|meta| meta.preset().map(str::to_owned));
+    if let (Some(named), Some(recorded)) = (named_preset.as_deref(), recorded_preset.as_deref())
+        && recorded != named
+    {
+        return preset_fixed(recorded);
     }
 
     let meta = sessions.meta(&session);
@@ -1869,6 +2020,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             reasoning_effort: selection.reasoning_effort.clone(),
         };
         sessions.set_model(&session, &recorded_selection);
+    }
+    // The preset the request named, for a session that recorded none: now that nothing above refused the turn.
+    if let Some(named) = named_preset.as_deref()
+        && recorded_preset.is_none()
+    {
+        sessions.record_preset(&session, named);
     }
 
     let guard = state.runs().begin(&session);
@@ -2031,6 +2188,7 @@ mod tests {
             &self,
             _branch: &Path,
             _title: Option<&str>,
+            _preset: Option<&str>,
         ) -> Result<CreatedSession, ServiceError> {
             Ok(CreatedSession {
                 session: self.metas[0].id.clone(),
@@ -3380,6 +3538,99 @@ mod tests {
         assert!(body_text(&bytes).contains("event: done"));
     }
 
+    /// A runner that writes what the agent loop writes first into a real store: the prompt as the user message.
+    struct RecordingTurns(heddle_session::SessionService);
+
+    impl TurnRunner for RecordingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let service = self.0.clone();
+            Box::pin(async move {
+                let handle = service
+                    .open(&request.session)
+                    .expect("the session the route opened");
+                service
+                    .user(&handle, &request.prompt, None)
+                    .expect("the user message");
+                Ok(TurnOutcome::default())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_the_turn_route_opens_is_born_untitled_so_its_first_prompt_names_it() {
+        // #68: DSH writes no title when a session is created. dsh-session-title writes the fallback from the first
+        // eligible human message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session
+        // with no title yet (:387). The turn route opened its session titled with the prompt's first sixty characters,
+        // so the first message wrote no fallback and the title coordinator asked nothing (heddle_session::title).
+        use crate::adapters::StoreSessions;
+        const PROMPT: &str = "Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.";
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-turn-route-title-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(scratch.join("ws")).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let inner = heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        );
+        let harness = Harness::new(
+            Arc::new(StoreSessions::new(inner.clone())),
+            Arc::new(Models),
+            Arc::new(RecordingTurns(inner.clone())),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-route-title")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let fallback = heddle_session::title_from(PROMPT);
+        let cut: String = PROMPT.chars().take(60).collect();
+        for body in [
+            json!({"prompt": PROMPT, "folder": scratch.join("ws"), "new": true}),
+            json!({"prompt": PROMPT}),
+        ] {
+            let before: Vec<String> = inner
+                .list()
+                .iter()
+                .map(|meta| meta.id().to_owned())
+                .collect();
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+            let made: Vec<Option<String>> = inner
+                .list()
+                .iter()
+                .filter(|meta| !before.iter().any(|id| id == meta.id()))
+                .map(|meta| meta.title().map(str::to_owned))
+                .collect();
+            assert_eq!(made.len(), 1, "{body}: the turn opened one new session");
+            assert_eq!(
+                made[0].as_deref(),
+                Some(fallback.as_str()),
+                "{body}: the first message wrote the fallback, cut at a word, which a generated title may replace"
+            );
+            assert_ne!(made[0].as_deref(), Some(cut.as_str()), "{body}");
+        }
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     /// A runner that counts the turns it is asked to run.
     struct CountingTurns(Arc<std::sync::atomic::AtomicUsize>);
 
@@ -4300,6 +4551,267 @@ mod tests {
             }
             other => panic!("expected a route conflict, got {other:?}"),
         }
+    }
+
+    // ---- Agent presets (inventory A96): web.ts's GET /api/presets and the preset a request creates a session under,
+    // over the real session store. ----
+
+    /// The test's `presets` row: `standard` (every tool, the default) and `reader` (one tool and a persona).
+    fn preset_roster() -> Arc<heddle_config::PresetRoster> {
+        Arc::new(
+            heddle_config::preset_roster(Some(&json!({
+                "default": "standard",
+                "presets": [
+                    { "id": "standard", "name": "Standard" },
+                    { "id": "reader", "name": "Reader", "tools": ["read_file"], "persona": "You review." }
+                ]
+            })))
+            .unwrap(),
+        )
+    }
+
+    /// A router over a real store in a scratch folder, every folder owned, with `presets` as the profile's roster.
+    async fn preset_app(
+        label: &str,
+        presets: Option<Arc<heddle_config::PresetRoster>>,
+    ) -> (Router, crate::adapters::StoreSessions, PathBuf, String) {
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-presets-{label}-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let sessions = crate::adapters::StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let mut harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        harness.workspaces = Some(Arc::new(ViewWorkspaces));
+        harness.presets = presets;
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret(&format!("presets-{label}"))),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        (router, sessions, scratch, cookie)
+    }
+
+    fn preset_of(sessions: &crate::adapters::StoreSessions, id: &str) -> Option<String> {
+        use crate::services::SessionService as _;
+        sessions
+            .meta(id)
+            .and_then(|meta| meta.preset().map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn the_presets_route_answers_the_roster_and_marks_the_implicit_one() {
+        let (router, _, scratch, cookie) = preset_app("route-implicit", None).await;
+        let (status, headers, bytes) =
+            call(&router, Method::GET, "/api/presets", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "application/json");
+        let implicit: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            implicit,
+            json!({
+                "default": "standard",
+                "presets": [serde_json::to_value(heddle_config::standard_preset()).unwrap()],
+                "implicit": true
+            })
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+
+        let (router, _, scratch, cookie) =
+            preset_app("route-declared", Some(preset_roster())).await;
+        let (status, _, bytes) = call(&router, Method::GET, "/api/presets", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let declared: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(declared["default"], "standard");
+        assert_eq!(
+            declared.get("implicit"),
+            None,
+            "a declared roster is not marked"
+        );
+        assert_eq!(declared["presets"][1]["id"], "reader");
+        assert_eq!(declared["presets"][1]["tools"], json!(["read_file"]));
+        assert_eq!(
+            declared["presets"][0].get("tools"),
+            None,
+            "absent means every tool"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn a_turn_creates_its_session_under_the_named_preset_or_the_default_and_refuses_an_undeclared_one()
+     {
+        use crate::services::SessionService as _;
+        let (router, sessions, scratch, cookie) = preset_app("turn", Some(preset_roster())).await;
+
+        // An undeclared preset is refused before anything is written, in DSH's words, as plain text.
+        let (status, bytes) = post_json(
+            &router,
+            "/api/turn",
+            &cookie,
+            r#"{"prompt":"hello","preset":"nope"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "Unknown agent preset: nope; declared: standard, reader\n"
+        );
+        assert!(
+            sessions.list().is_empty(),
+            "the refused request wrote nothing"
+        );
+
+        // A new session runs under the preset the request names, and the session view says so.
+        let (status, bytes) = post_json(
+            &router,
+            "/api/turn",
+            &cookie,
+            r#"{"prompt":"read it","preset":" reader "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let reader = sessions.list()[0].id.clone();
+        assert_eq!(preset_of(&sessions, &reader).as_deref(), Some("reader"));
+        let (_, _, bytes) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{reader}"),
+            Some(&cookie),
+        )
+        .await;
+        let view: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["preset"], "reader");
+
+        // The session keeps it: another preset named for it is refused, the same one is fine.
+        let other = json!({"prompt": "again", "session": reader, "preset": "standard"});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &other.to_string()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"the session runs the preset 'reader'; a session keeps the preset it was created with\",\"code\":\"session/preset-fixed\"}\n"
+        );
+        let same = json!({"prompt": "again", "session": reader, "preset": "reader"});
+        let (status, _) = post_json(&router, "/api/turn", &cookie, &same.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // A request that names none creates its session under the default.
+        let before: Vec<String> = sessions.list().into_iter().map(|meta| meta.id).collect();
+        let (status, _) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"plain"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let plain = sessions
+            .list()
+            .into_iter()
+            .map(|meta| meta.id)
+            .find(|id| !before.contains(id))
+            .expect("a new session");
+        assert_eq!(preset_of(&sessions, &plain).as_deref(), Some("standard"));
+
+        // A session that recorded none takes the one a request names.
+        let older = sessions
+            .start(StartSession {
+                cwd: Some(scratch.clone()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        assert_eq!(preset_of(&sessions, &older), None);
+        let (_, _, bytes) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{older}"),
+            Some(&cookie),
+        )
+        .await;
+        let view: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["preset"], Value::Null);
+        let named = json!({"prompt": "now", "session": older, "preset": "reader"});
+        let (status, _) = post_json(&router, "/api/turn", &cookie, &named.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(preset_of(&sessions, &older).as_deref(), Some("reader"));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn without_the_presets_row_a_turn_names_only_the_implicit_preset_and_creates_none() {
+        use crate::services::SessionService as _;
+        let (router, sessions, scratch, cookie) = preset_app("turn-implicit", None).await;
+        let (status, bytes) = post_json(
+            &router,
+            "/api/turn",
+            &cookie,
+            r#"{"prompt":"hello","preset":"reader"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "Unknown agent preset: reader; declared: standard\n"
+        );
+        let (status, _) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"plain"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let plain = sessions.list()[0].id.clone();
+        assert_eq!(preset_of(&sessions, &plain), None, "no roster, no preset");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn a_new_session_route_creates_under_the_named_preset_and_refuses_an_undeclared_one() {
+        use crate::services::SessionService as _;
+        let (router, sessions, scratch, cookie) =
+            preset_app("sessions", Some(preset_roster())).await;
+        let branch = scratch.join("branch");
+        std::fs::create_dir_all(&branch).unwrap();
+
+        let refused = json!({"branch": branch, "preset": "nope"});
+        let (status, bytes) =
+            post_json(&router, "/api/sessions", &cookie, &refused.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"Unknown agent preset: nope; declared: standard, reader\"}\n"
+        );
+        assert!(
+            sessions.list().is_empty(),
+            "the refused request wrote nothing"
+        );
+
+        let named = json!({"branch": branch, "preset": "reader", "title": "reading"});
+        let (status, bytes) =
+            post_json(&router, "/api/sessions", &cookie, &named.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let id = created["session"].as_str().unwrap().to_owned();
+        assert_eq!(preset_of(&sessions, &id).as_deref(), Some("reader"));
+
+        let plain = json!({"branch": branch});
+        let (status, bytes) =
+            post_json(&router, "/api/sessions", &cookie, &plain.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let id = created["session"].as_str().unwrap().to_owned();
+        assert_eq!(preset_of(&sessions, &id).as_deref(), Some("standard"));
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     // `to_bytes` is used by `call`'s siblings in other modules; the import is kept explicit here.
