@@ -5612,6 +5612,12 @@ events.addEventListener('session', (message) => {
     }
     paintRunningMarks()
     /**
+     * The composer follows its session's running state: a turn that starts on the panel's session, however it was
+     * started (the queue, the CLI, a goal round), turns Send into Stop. This handler marked the session running but
+     * never redrew the composer, so a drained queued turn ran under an idle Send (live issue developer-ten-6).
+     */
+    if (!wasRunning && payload.session === composerKey) renderComposerState()
+    /**
      * A turn this page did **not** start — a goal round continuing itself, the CLI, or another window — is a
      * running turn all the same, and `model/request` is its start signal. Only the page's own send used to refresh
      * the running row, so a goal-driven session showed no "Weaving" at all (the owner's "missing again").
@@ -5915,8 +5921,60 @@ function setSidebarCollapsed(collapsed) {
   sidebarToggle.title = `${label} (⌥⌘B)`
 }
 
+/**
+ * Below 1024 pixels the sidebar **collapses to its rail by itself**, as DSH's does (`dsh-client-ui-layout`:
+ * `SIDEBAR_AUTO_COLLAPSE = 1024`, "below 1024px it collapses automatically"). Without it a phone-width window kept the
+ * panel open at most of the width, wrapped the transcript a few letters per line and pushed the composer and its send
+ * button off the screen (live-testing draft developer-ten-9).
+ *
+ * The state is DSH's two facts, not one. Wide, the toggle is a preference (`sidebarWideCollapsed`); narrow, the rail is
+ * the default and the toggle opens the panel over the squeezed conversation until it is toggled back
+ * (`sidebarNarrowExpanded`). Crossing the breakpoint either way forgets the narrow opening, so a window widened and
+ * narrowed again starts from the rail, and the wide preference is untouched by anything done while narrow.
+ */
+const SIDEBAR_AUTO_COLLAPSE_PX = 1024
+let sidebarWideCollapsed = false
+let sidebarNarrowExpanded = false
+
+/** Whether the window is below the breakpoint where the rail is the default. */
+function sidebarNarrow() {
+  return window.innerWidth < SIDEBAR_AUTO_COLLAPSE_PX
+}
+
+/** The collapsed state the two facts give at a viewport width, as DSH computes `sidebarCollapsed`. */
+function sidebarCollapsedFor(viewportWidth, wideCollapsed, narrowExpanded) {
+  return viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX ? !narrowExpanded : wideCollapsed
+}
+
+function paintSidebarCollapse() {
+  setSidebarCollapsed(sidebarCollapsedFor(window.innerWidth, sidebarWideCollapsed, sidebarNarrowExpanded))
+}
+
+/** The toggle (the control and its chord): the narrow opening while narrow, the wide preference while wide. */
+function toggleSidebarCollapse() {
+  if (sidebarNarrow()) sidebarNarrowExpanded = !sidebarNarrowExpanded
+  else sidebarWideCollapsed = !sidebarWideCollapsed
+  paintSidebarCollapse()
+}
+
+/** Put the panel back, for a gesture that needs the tree or the search field on screen. */
+function openSidebar() {
+  if (sidebarNarrow()) sidebarNarrowExpanded = true
+  else sidebarWideCollapsed = false
+  paintSidebarCollapse()
+}
+
+let sidebarWasNarrow = sidebarNarrow()
+window.addEventListener('resize', () => {
+  const narrow = sidebarNarrow()
+  if (narrow === sidebarWasNarrow) return
+  sidebarWasNarrow = narrow
+  sidebarNarrowExpanded = false
+  paintSidebarCollapse()
+})
+
 sidebarToggle.addEventListener('click', () => {
-  setSidebarCollapsed(!sidebarCollapsed())
+  toggleSidebarCollapse()
   sidebarToggle.focus()
 })
 
@@ -5927,14 +5985,17 @@ sidebarToggle.addEventListener('click', () => {
  * gesture rather than a separate step.
  */
 document.getElementById('sidebar-search').addEventListener('click', () => {
-  setSidebarCollapsed(false)
+  openSidebar()
   const field = document.getElementById('session-search')
   field.focus()
   field.select()
 })
 
-/** Every visit starts wide: a collapse is a look at the content, and DSH does not carry it across a reload either. */
-setSidebarCollapsed(false)
+/**
+ * Every visit starts wide on a wide window and on the rail on a narrow one: a collapse is a look at the content, and
+ * DSH does not carry it across a reload either.
+ */
+paintSidebarCollapse()
 
 /**
  * The composer: the draft, the queue it feeds, and the model seat — DSH's input bar, reduced to heddle's parts.
@@ -6296,8 +6357,20 @@ function turnInFlight() {
  */
 let directTurnPending = 0
 
+/**
+ * Queues whose pump has a turn out: from the moment the pump sends a queued message until that turn's stream settles.
+ *
+ * `sendNow` holds `directTurnPending` for the whole of its turn, and the pump had no equivalent: its row counts as
+ * running only while it is `sending`, and `retire` removes the row the moment the turn is accepted. From then until the
+ * stream's `model/request` arrived nothing said running, and the composer was drawn idle under a running turn: Send
+ * instead of Stop, and a message typed then went out at once as a **second** turn on the same session (live issue
+ * developer-ten-6, measured on 8082 on 2026-10-29). Held per queue, not as a count, so a queue being pumped for another
+ * session cannot show Stop on this one; `adoptSession` moves the same array to the session a fresh panel's turn created.
+ */
+const queueTurnOut = new WeakSet()
+
 function anyRunning() {
-  return directTurnPending > 0 || turnInFlight() || sessionRunning()
+  return directTurnPending > 0 || queueTurnOut.has(queueOf()) || turnInFlight() || sessionRunning()
 }
 
 /**
@@ -6386,12 +6459,28 @@ async function sendNow(text, attachments = []) {
   }
   directTurnPending += 1
   renderComposerState()
+  /**
+   * Whether the server took the message: `runTurn` says so when the turn's response opens, before its stream is read.
+   *
+   * Live issue #48 (2026-10-30): when the connection dropped at the end of a turn, the answer had streamed in full, but
+   * reading the stream's end threw, and this catch said "the message could not be sent" and put the answered prompt back
+   * in the composer, so Enter sent it again as a duplicate turn and the next message was appended to it. DSH restores a
+   * draft only for a failed **submission**; once the host has the message its echo is retired and nothing comes back.
+   * The queue's pump already drew this line (`accepted` in `pumpQueue`).
+   */
+  let accepted = false
   try {
-    await runTurn(text, composerKey, attachments)
+    await runTurn(text, composerKey, attachments, () => {
+      accepted = true
+    })
   } catch (error) {
-    if (field.value.trim() === '') field.value = text
-    growComposer()
-    add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    if (accepted) {
+      add('denied', `the connection dropped while the answer was arriving (${(error && error.message) || error}); the message itself was delivered`)
+    } else {
+      if (field.value.trim() === '') field.value = text
+      growComposer()
+      add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    }
   } finally {
     directTurnPending = Math.max(0, directTurnPending - 1)
     if (directTurnPending === 0) {
@@ -6704,6 +6793,9 @@ async function pumpQueue(key = composerKey) {
         if (at !== -1) queue.splice(at, 1)
         renderQueue()
       }
+      /** The turn is running from here until its stream settles, whatever the stream announces and when. */
+      queueTurnOut.add(queue)
+      renderComposerState()
       try {
         await runTurn(item.text, forKey, item.attachments ?? [], retire)
         const at = queue.findIndex((entry) => entry.id === item.id)
@@ -6729,6 +6821,9 @@ async function pumpQueue(key = composerKey) {
           if (at !== -1) queue.splice(at, 1)
         }
         add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+      } finally {
+        queueTurnOut.delete(queue)
+        renderComposerState()
       }
       renderQueue()
     }
@@ -10137,44 +10232,66 @@ function settingsEndpoint(endpoint) {
   return item
 }
 
-/** Fill the dialog from the three routes it needs, each tolerating a profile that does not load it. */
+/** A list note in the dialog's muted style: an empty section, or a section that could not be read. */
+function settingsNote(text) {
+  const note = document.createElement('li')
+  note.className = 'meta'
+  note.textContent = text
+  return note
+}
+
+/**
+ * Fill the dialog from the three routes it needs, each tolerating a profile that does not load it.
+ *
+ * A route the profile does not load (404) is an empty section, because that is what the profile has. A read that
+ * **failed** is not (issue #60): with the server unreachable, every route used to read as empty, and the dialog stated
+ * "no endpoint is configured" and "no workspace root is registered yet" about a configuration that was intact. A failed
+ * section now says it could not be read and why, in the words the tree already uses ("could not read the workspaces:
+ * Failed to fetch"), as DSH's surfaces report a failed read rather than an empty answer.
+ */
 async function fillSettings() {
   const server = document.getElementById('settings-server')
   const models = document.getElementById('settings-models')
   const workspaces = document.getElementById('settings-workspaces')
+  /** `{ body }` on success, `{ missing: true }` for a route the profile does not load, `{ failure }` otherwise. */
   const read = async (path) => {
     try {
       const response = await fetch(path)
-      return response.ok ? await response.json() : null
+      if (response.ok) return { body: await response.json() }
+      if (response.status === 404) return { missing: true }
+      return { failure: `the server answered ${response.status}` }
     } catch (error) {
-      return null
+      return { failure: (error && error.message) || String(error) }
     }
   }
-  const [status, endpoints, tree] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
+  const [statusRead, endpointsRead, treeRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
 
-  const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
-  server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
-  server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
-
-  const list = endpoints === null || !Array.isArray(endpoints.endpoints) ? [] : endpoints.endpoints
-  if (list.length === 0) {
-    const note = document.createElement('li')
-    note.className = 'meta'
-    note.textContent = 'no endpoint is configured in this profile'
-    models.append(note)
+  if (statusRead.failure !== undefined) {
+    server.append(...settingsTerm('Status', `could not read the server status: ${statusRead.failure}`))
+  } else {
+    const status = statusRead.body ?? null
+    const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
+    server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
+    server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
   }
+
+  if (endpointsRead.failure !== undefined) {
+    models.append(settingsNote(`could not read the endpoint list: ${endpointsRead.failure}`))
+  }
+  const endpoints = endpointsRead.body ?? null
+  const list = endpoints === null || !Array.isArray(endpoints.endpoints) ? [] : endpoints.endpoints
+  if (list.length === 0 && endpointsRead.failure === undefined) models.append(settingsNote('no endpoint is configured in this profile'))
   for (const endpoint of list) models.append(settingsEndpoint(endpoint))
 
-  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
-  if (roots.length === 0) {
-    const note = document.createElement('li')
-    note.className = 'meta'
-    note.textContent = 'no workspace root is registered yet'
-    workspaces.append(note)
+  if (treeRead.failure !== undefined) {
+    workspaces.append(settingsNote(`could not read the workspaces: ${treeRead.failure}`))
   }
+  const tree = treeRead.body ?? null
+  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
+  if (roots.length === 0 && treeRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
   for (const root of roots) {
     const item = document.createElement('li')
     item.className = 'settings-workspace'
@@ -10258,7 +10375,7 @@ document.addEventListener('keydown', (event) => {
   if (action === null) return
   event.preventDefault()
   if (action === 'sidebar') {
-    setSidebarCollapsed(!sidebarCollapsed())
+    toggleSidebarCollapse()
     sidebarToggle.focus()
     return
   }
@@ -10272,7 +10389,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (action === 'search') {
     /** The field is put away while the sidebar is a rail, so reaching it means putting the panel back first. */
-    if (sidebarCollapsed()) setSidebarCollapsed(false)
+    if (sidebarCollapsed()) openSidebar()
     const field = document.getElementById('session-search')
     field.focus()
     field.select()
@@ -10459,6 +10576,28 @@ const WorkspaceTree = (() => {
     return leftId === rightId ? 0 : leftId < rightId ? -1 : 1
   }
 
+  /**
+   * DSH's `In one list` rows: every session the archive filter shows, in **the tree's order** — the newest pin first,
+   * then the last write, then id. DSH keeps one pin list, most recent pin first, and fronts a new pin in the group and in
+   * the flat list alike (`dsh-workspace` `pinSession`; `dsh-client-ui-workspace` `pinSessionOrder` / `pinOrderAccounts`),
+   * and its flat list orders the rest by `Last updated` as a group does. The list used to sort by creation, so two pins
+   * read in one order here and in the other in the tree (R-developer-eight-17).
+   *
+   * Only the order is the tree's: the list keeps every session it listed before, the archive filter aside.
+   */
+  function flatList(sessions, options = {}) {
+    const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
+    return metas
+      .filter((meta) => {
+        const isArchived = meta.archived === true
+        if (archived === 'only') return isArchived
+        if (archived === 'show') return true
+        return !isArchived
+      })
+      .sort(sessionOrder)
+  }
+
   /** Whether a session is a row under the archive filter: `hide` (the default), `show`, or `only`. */
   function visible(meta, archived) {
     if (meta === null || typeof meta !== 'object' || typeof meta.id !== 'string') return false
@@ -10598,7 +10737,7 @@ const WorkspaceTree = (() => {
     return shown > INITIAL ? 'less' : null
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, flatList, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
 })()
 /* workspace-tree:end */
 
@@ -11334,7 +11473,8 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
 
 /**
  * DSH's `In one list`: every session in one flat column, newest first, pinned first — the same order the tree uses
- * inside a branch, without the folders.
+ * inside a branch, without the folders. `WorkspaceTree.flatList` picks and orders the rows, so the two views cannot
+ * drift apart again; each row's age is the stamp it sorts by, last written, as a tree row's is.
  *
  * It is a **reading** list rather than a second tree: a row opens its session, and the hover controls that need a
  * session's definition folder stay on the tree's rows, where that folder is known. A flat row that offered a rename it
@@ -11344,13 +11484,7 @@ async function renderFlatList() {
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
-  const visible = index.sessions.filter((meta) => {
-    const archived = meta.archived === true
-    if (archiveMode === 'only') return archived
-    if (archiveMode === 'hide') return !archived
-    return true
-  })
-  visible.sort((left, right) => Number(right.pinned === true) - Number(left.pinned === true) || String(right.created).localeCompare(String(left.created)))
+  const visible = WorkspaceTree.flatList(index.sessions, { archived: archiveMode })
   treeList.replaceChildren(
     ...visible.map((meta) => {
       const li = document.createElement('li')
@@ -11370,7 +11504,7 @@ async function renderFlatList() {
       label.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
       const place = document.createElement('span')
       place.className = 'age'
-      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       row.append(icon, label, place)
       /**
        * A row in the flat list is also **the selected row**.
@@ -11669,7 +11803,16 @@ async function browseTo(path) {
   }
 }
 
-/** Register a folder, then show it: the tree redrawn, the new workspace open and selected, the composer aimed at it. */
+/**
+ * Register a folder, then open a session in it: the tree redrawn, the new workspace open, its new session selected and
+ * shown, and the composer bound to that session.
+ *
+ * DSH (dsh-client-ui-workspace): "Choose Add workspace and select a directory to register it and open a Session." Live
+ * issue #22 (developer-six-3, 2026-10-29): this used to set `activeFolder` and select the workspace row while the
+ * composer stayed bound to the session that was open, so the note read "a new conversation in <folder>" and the next
+ * message went into the previous session (the turn route resumes a named session and ignores the folder). Opening the
+ * session through `startSessionAt`, the workspace row's own New session, makes the page do what it says.
+ */
 async function adoptWorkspace(path) {
   const response = await fetch('/api/workspaces', {
     method: 'POST',
@@ -11683,7 +11826,7 @@ async function adoptWorkspace(path) {
   expanded.add(added)
   rememberExpanded()
   await renderTree()
-  chooseSelected(added)
+  await startSessionAt({ path: added })
   const row = Array.from(treeList.querySelectorAll('.row')).find((entry) => entry.dataset.path === added)
   row?.scrollIntoView({ block: 'nearest' })
   return null

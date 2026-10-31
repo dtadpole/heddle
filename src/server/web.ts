@@ -8,6 +8,7 @@ import { basename, dirname, extname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
+import type { TurnRegistry } from '../agent/turns.ts'
 import { handleCommandRequest } from '../commands/http.ts'
 import type { CommandService } from '../commands/service.ts'
 import { handlePlanRequest } from '../plan/http.ts'
@@ -33,6 +34,7 @@ import { readFileText, tree } from '../session/tree.ts'
 import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
+import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
 import {
   COOKIE_MAX_AGE,
@@ -573,16 +575,23 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
+      /**
+       * The bytes are read **before** the answer starts, so a file that cannot be read still gets its 404. The head
+       * used to go out first: a file without read permission threw EACCES after writeHead(200), the catch's 404 then
+       * threw ERR_HTTP_HEADERS_SENT, and the response was never ended, so the request hung for good (live issue
+       * developer-two-13). The length is what was read, so it cannot disagree with the body if the file changed.
+       */
+      const bytes = readFileSync(wanted)
       const contentType = inlineContentType(wanted)
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
-        'content-length': String(stats.size),
+        'content-length': String(bytes.length),
         /** `inline` only for a type a document embeds; anything else is offered as a download. */
-        'content-disposition': contentType === null ? `attachment; filename="${basename(wanted).replace(/"/g, '')}"` : 'inline',
+        'content-disposition': contentType === null ? attachmentDisposition(basename(wanted)) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
-      response.end(readFileSync(wanted))
+      response.end(bytes)
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
@@ -627,15 +636,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
         return
       }
+      /** Read before the head, as the raw route does, so an unreadable upload still gets its 404. */
+      const bytes = readFileSync(wanted)
       const contentType = inlineContentType(wanted)
       response.writeHead(200, {
         'content-type': contentType ?? 'application/octet-stream',
-        'content-length': String(stats.size),
-        'content-disposition': contentType === null ? `attachment; filename="${leaf.replace(/"/g, '')}"` : 'inline',
+        'content-length': String(bytes.length),
+        'content-disposition': contentType === null ? attachmentDisposition(leaf) : 'inline',
         'cache-control': 'no-store',
         ...FILE_ANSWER_HEADERS,
       })
-      response.end(readFileSync(wanted))
+      response.end(bytes)
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
@@ -1507,8 +1518,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * Retitle a conversation — the `Rename…` item in a session's or an instance's menu.
    *
    * The session's own log is append-only and stays that way: this rewrites the meta record, which is
-   * what a listing and a tree row read. The title is a label rather than a fact about the run, and the
-   * empty string clears it.
+   * what a listing and a tree row read. The title is a label rather than a fact about the run; the store
+   * cleans it as DSH does, and a title with nothing visible left is refused (`400 session/title-invalid`).
    *
    * `folder` is the session's **definition** folder when the caller knows it, and it is why one rename
    * reaches both halves: the store holds the label this UI reads, while the definition is the record a
@@ -1524,6 +1535,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     if (body === null) return
     if (typeof body.title !== 'string') {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a title is required' })}\n`)
+      return
+    }
+    /**
+     * A title with nothing visible left once cleaned is **refused**, as DSH's rename refuses it (`dsh-session-title`
+     * `rename`, lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838, `session/title-invalid`). The store
+     * cleans what it accepts (`src/session/title-text.ts`). Measured before: three spaces cleared the title with a 200.
+     * An unknown session is still a `404` first, as DSH resolves the session before it judges the title.
+     */
+    if (normalizeSessionTitle(body.title).length === 0) {
+      if (!ctx.session.list().some((meta) => meta.id === id)) {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+        return
+      }
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: TITLE_INVALID.message, code: TITLE_INVALID.code })}\n`)
       return
     }
     const folder = typeof body.folder === 'string' && body.folder.length > 0 ? canonicalPath(body.folder) : undefined
@@ -2028,7 +2053,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const stopped = abortSession(state.controllers, id)
+    /**
+     * Every turn of the session, not only the ones this route started (#93). A goal round, a reminder's turn and a
+     * background job's notice turn are started by their rows through `runTurn`, which registers each with the
+     * live-turn registry; the route's own table never held them, so Stop answered `stopped: 0` and a goal round ran
+     * on. A turn this route started is in both tables and is counted once.
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    const live = turns?.isRunning(id) === true
+    const fromRoute = abortSession(state.controllers, id)
+    if (live) turns?.abort(id, 'stopped by the user')
+    const stopped = Math.max(fromRoute, live ? 1 : 0)
     respond(response, 200, 'application/json', `${JSON.stringify({ stopped, session: id })}\n`)
     return
   }
@@ -2589,19 +2624,43 @@ function respondSse(response: ServerResponse): void {
  * such a document with no script and no origin, `default-src 'none'` lets it load nothing, and `nosniff` keeps a
  * download from being read as a page. A policy on an image or a stylesheet does not affect the page that embeds it.
  */
+/**
+ * The `attachment` disposition for a file's own name, with nothing but visible ASCII in the header. A name of visible
+ * ASCII without `"` or a backslash is sent as it is. Any other name keeps an ASCII `filename="…"` fallback, each other
+ * character (per code point) replaced by `_`, and carries the real name in `filename*=UTF-8''…` (RFC 6266, RFC 5987):
+ * `encodeURIComponent` with `'()*` also encoded, the same bytes the Rust server's `attachment_disposition` writes.
+ * Before this the raw name went into the header: Node refused a name above U+00FF part-way through `writeHead`
+ * (`ERR_INVALID_CHAR`, and the catch then wrote a 404 over the started 200 with the file's length), and a Latin-1
+ * name went out as a raw byte (live issues developer-two-2 and developer-two-3).
+ */
+export function attachmentDisposition(name: string): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\]/gu, '_')
+  if (fallback === name) return `attachment; filename="${name}"`
+  const encoded = encodeURIComponent(name).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
+}
+
 export const FILE_ANSWER_HEADERS: Readonly<Record<string, string>> = {
   'content-security-policy': "sandbox; default-src 'none'",
   'x-content-type-options': 'nosniff',
 }
 
-function inlineContentType(path: string): string | null {
+/**
+ * The type a document may embed inline, by lower-cased extension, or `null` for a download.
+ *
+ * A stylesheet is on the list because an HTML preview's `<link rel="stylesheet">` is rewritten to this route, and a
+ * browser **refuses a stylesheet whose type is not `text/css`** in a standards-mode document: measured 2026-10-29
+ * (DSH parity R-developer-twelve-14), a preview's relative CSS never applied because it arrived as a download type.
+ * CSS runs no script, so serving it inline adds nothing a viewed file could execute.
+ */
+export function inlineContentType(path: string): string | null {
   const extension = extname(path).toLowerCase()
   const known: Readonly<Record<string, string>> = {
     '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif',
     '.webp': 'image/webp', '.avif': 'image/avif', '.bmp': 'image/bmp', '.ico': 'image/x-icon',
     '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg',
     '.ogg': 'audio/ogg', '.wav': 'audio/wav', '.woff': 'font/woff', '.woff2': 'font/woff2',
-    '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf',
+    '.ttf': 'font/ttf', '.otf': 'font/otf', '.pdf': 'application/pdf', '.css': 'text/css; charset=utf-8',
   }
   return known[extension] ?? null
 }
@@ -2699,16 +2758,22 @@ export function transcriptTurns(
   let openAssistant = -1
   let openReasoning = -1
   /**
-   * The files written since the last user message, which the exchange's answer carries as its panel data. A write
-   * that arrives after the answer has been drawn belongs to no answer, so it is kept for the next one rather than
-   * retroactively attached.
+   * The files written since the last user message are the exchange's answer's panel data. A `write_file` call is
+   * noted when it is made and **counted only once its result says it succeeded**.
+   *
+   * A call's arguments say what the model asked for, not what happened: a write the sandbox refused, or one that
+   * failed for any other reason, changed nothing on disk. Measured 2026-10-29 (DSH parity R-developer-twelve-11):
+   * with every write refused, the panel still named three files with their added lines. So a write is held
+   * against its call until the paired result arrives, and only an `ok` result makes it an edited file.
    */
-  let written: { path: string; added: number }[] = []
-  /** Writes kept per exchange, keyed by the index of the user turn that opened it. */
-  const sections = new Map<number, { path: string; added: number }[]>()
+  interface NotedWrite { readonly path: string; readonly added: number; ok: boolean }
+  /** Writes kept per exchange in call order, keyed by the index of the user turn that opened it. */
+  const sections = new Map<number, NotedWrite[]>()
+  /** The write each open call would make, by the index of its turn. */
+  const writeOfCall = new Map<number, NotedWrite>()
   let sectionStart = -1
-  const noteWrite = (name: string, argumentsText: string): void => {
-    if (name !== 'write_file') return
+  const noteWrite = (name: string, argumentsText: string, callIndex: number): void => {
+    if (name !== 'write_file' || sectionStart < 0) return
     let args: { path?: unknown; content?: unknown }
     try {
       args = JSON.parse(argumentsText) as { path?: unknown; content?: unknown }
@@ -2718,14 +2783,22 @@ export function transcriptTurns(
     if (typeof args.path !== 'string' || typeof args.content !== 'string') return
     /** Lines a file will have, not segments: a trailing newline closes the last line rather than starting one. */
     const lines = args.content === '' ? 0 : args.content.split('\n').length - (args.content.endsWith('\n') ? 1 : 0)
-    if (sectionStart >= 0) {
-      const bucket = sections.get(sectionStart) ?? []
-      sections.set(sectionStart, bucket)
-      written = bucket
+    const write: NotedWrite = { path: args.path, added: lines, ok: false }
+    const bucket = sections.get(sectionStart) ?? []
+    sections.set(sectionStart, bucket)
+    bucket.push(write)
+    writeOfCall.set(callIndex, write)
+  }
+  /** The edited files of one exchange: its successful writes, first position per path, the latest lines. */
+  const editedFiles = (writes: readonly NotedWrite[]): { path: string; added: number }[] => {
+    const files: { path: string; added: number }[] = []
+    for (const write of writes) {
+      if (!write.ok) continue
+      const existing = files.find((file) => file.path === write.path)
+      if (existing === undefined) files.push({ path: write.path, added: write.added })
+      else existing.added = write.added
     }
-    const existing = written.find((file) => file.path === args.path)
-    if (existing === undefined) written.push({ path: args.path, added: lines })
-    else existing.added = lines
+    return files
   }
   const closeRuns = (): void => {
     openAssistant = -1
@@ -2759,7 +2832,11 @@ export function transcriptTurns(
   const close = (index: number, result: string): void => {
     const turn = turns[index]
     if (turn === undefined) return
-    turns[index] = { ...turn, result, state: /^error/i.test(result) ? 'error' : 'ok' }
+    const state = /^error/i.test(result) ? 'error' : 'ok'
+    turns[index] = { ...turn, result, state }
+    /** Only a write whose call succeeded is an edited file. */
+    const write = writeOfCall.get(index)
+    if (write !== undefined && state === 'ok') write.ok = true
   }
 
   /** Where each slash command's row sits, by its run id (src/commands/, developer-three). */
@@ -2804,7 +2881,6 @@ export function transcriptTurns(
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
-        written = []
         sectionStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
         turns.push({
@@ -2871,7 +2947,7 @@ export function transcriptTurns(
      * built, which is why it travels as a field.
      */
     else if (chunk.type === 'tool-call' && chunk.name !== undefined) {
-      noteWrite(chunk.name, chunk.arguments ?? '')
+      noteWrite(chunk.name, chunk.arguments ?? '', turns.length)
       turns.push({
         kind: 'tool',
         name: chunk.name,
@@ -2891,7 +2967,8 @@ export function transcriptTurns(
    * exchange's last answer once the whole log is folded — not to the first delta of a streamed answer, which is
    * created before the writes that followed it are known.
    */
-  for (const [start, files] of sections) {
+  for (const [start, writes] of sections) {
+    const files = editedFiles(writes)
     if (files.length === 0) continue
     let lastAnswer = -1
     for (let index = start + 1; index < turns.length; index += 1) {

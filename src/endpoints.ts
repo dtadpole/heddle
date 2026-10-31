@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 
 import type { EndpointConfig, ModelOption, ReasoningLevels } from './llm/types.ts'
+import { localConfigCandidates } from './local-config.ts'
 import { offeredModels, reasoningLevelsFor } from './llm/types.ts'
 
 /**
@@ -44,6 +45,32 @@ export function defaultEndpoints(): readonly EndpointConfig[] {
       capabilities: ['offline', 'tools'],
     },
   ]
+}
+
+/**
+ * Whether `endpoint` is the shipped offline fixture as `defaultEndpoints` ships it: same name, kind and script path. A
+ * machine that restated it with its own script is not.
+ */
+export function isShippedFixture(endpoint: Pick<EndpointConfig, 'name' | 'kind' | 'baseUrl'>): boolean {
+  return defaultEndpoints().some(
+    (shipped) => shipped.name === endpoint.name && shipped.kind === endpoint.kind && shipped.baseUrl === endpoint.baseUrl,
+  )
+}
+
+/**
+ * What a turn on the shipped fixture says when its script is not there (issue #74).
+ *
+ * That is what a home that configured nothing runs on, so the old "the script for 'scripted' could not be read at
+ * scripted.json" was the first thing a new user saw, and it named a test file. This names the machine file a run reads
+ * (the first of `localConfigCandidates`) and the shape to write there, as DSH's missing-key message names the
+ * credential and where to store it (`dsh-llm-deepseek-api-key`).
+ */
+export function unscriptedFixtureMessage(candidates: readonly string[] = localConfigCandidates()): string {
+  return (
+    "the offline test endpoint 'scripted' has no script at scripted.json. To talk to a model, pick another endpoint " +
+    `for this session, or declare one in ${candidates[0]}, for example {"endpoints": [{"name": "mine", "kind": ` +
+    `"openai-chat", "baseUrl": "<url>", "model": "<model>", "apiKeyFile": "<key file>"}], "default": "mine"}`
+  )
 }
 
 /** Where the owner's configuration lives, in precedence order. */
