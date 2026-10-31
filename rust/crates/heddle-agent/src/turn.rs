@@ -503,6 +503,12 @@ async fn run_turn_body(
             Ok(prepared) => prepared,
             Err(failure) => return Err(TurnError::Hook(pre_step_failure_message(&failure))),
         };
+        // The session's preset is applied again to what the hook answered (developer-five's review of A96): a
+        // listener may add a registered tool, and one outside the preset would otherwise reach the model's tool list
+        // even though a call to it is refused. A profile without presets is unchanged.
+        if let Some(preset) = preset {
+            prepared.tools = preset.narrow(prepared.tools, |spec| spec.name.as_str());
+        }
 
         // `(id, name, arguments)` for each complete tool call the round asked for.
         let mut calls: Vec<(String, String, String)> = Vec::new();
@@ -3299,6 +3305,49 @@ pub(crate) mod tests {
             session.preset().as_deref(),
             Some("retired"),
             "and replaces nothing"
+        );
+    }
+
+    /// A pre-step listener that adds a tool to what the round offers.
+    struct AddsTool(ToolSpec);
+
+    impl TurnHooks for AddsTool {
+        fn pre_step(&self, mut step: PreStep) -> Result<PreStep, HookFailure> {
+            step.tools.push(self.0.clone());
+            Ok(step)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_a_pre_step_listener_adds_outside_the_preset_is_still_not_offered() {
+        // developer-five's review of A96: the preset is applied after the hook, not only before it.
+        let session = RecordingSession::new();
+        session.created_under("reader");
+        let ran = Arc::new(Mutex::new(Vec::new()));
+        let model = ScriptedModel::new(vec![answers("read only")]);
+        let (mut runtime, _context) = preset_runtime(
+            Arc::clone(&model),
+            &session,
+            preset_tools(&ran),
+            Some(preset_roster("standard")),
+        );
+        let write_spec = runtime
+            .tools
+            .describe()
+            .into_iter()
+            .find(|spec| spec.name == "write_tool")
+            .expect("the registry has write_tool");
+        runtime.hooks = Arc::new(AddsTool(write_spec));
+        run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "look around"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            offered(&session),
+            [["read_tool"]],
+            "the preset is applied after the hook"
         );
     }
 
