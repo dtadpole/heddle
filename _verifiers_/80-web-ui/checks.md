@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T08:45:00Z
+modified: 2026-10-31T17:15:00Z
 level: L3
-version: 1.4.0
+version: 1.5.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -69,9 +69,11 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, the `Workspace` grouping
-  drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id and no title in the
-  header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written;
+  starting in the workspace row the person opened rather than the open session's, and in the open session's own
+  workspace when that session is archived and its row is not drawn, not in the last remembered folder (#119), the
+  `Workspace` grouping drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id
+  and no title in the header, then the row, the header and the window title (`<title> — Heddle`) following its title
+  as it is written;
   and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
   workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
   new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh
@@ -88,8 +90,11 @@ grounded_in:
   workspace to start*, Send disabled, Enter refused with *Choose a workspace first.* and opening Add workspace, and no
   session started; and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
   placeholder *No archived sessions yet* with its *View other sessions* action (not the no-roots note), the action
-  setting *Hide archived* back and drawing the rows again (#107). The page opens no session on its own, so a check that reads a seeded session opens it by name
-  (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
+  setting *Hide archived* back and drawing the rows again (#107); and a folder the server may not read (`chmod 000`)
+  opening to DSH's one line *Read failed: cannot list "locked": permission denied* with no rows, never *nothing
+  inside*, a readable sibling still listing its file, and a workspace whose own folder it may not read keeping its
+  session and its *Files* heading over the same line (#106). The page opens no session on its own, so a check that
+  reads a seeded session opens it by name (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
@@ -129,6 +134,13 @@ grounded_in:
   the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
   shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
   composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
+- [`check-reconnect.mjs`](check-reconnect.mjs) — a change that reached the server just before the connection dropped
+  shows once it is back, as DSH's re-acquired baselines show it (#91): a session rename and a nested workspace's
+  *Delete workspace* whose answers arrive only after the browser went offline (DevTools' Offline, through the
+  protocol) are drawn once it is back online — the new title, the workspace gone and its session under its parent —
+  and a rename answered just before the server went away is drawn once the page's stream reconnects to it on the same
+  port. Each time the tree's "could not read the workspaces" note goes, the Deleting… line is not left set, and no
+  unhandled rejection reaches the console.
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every

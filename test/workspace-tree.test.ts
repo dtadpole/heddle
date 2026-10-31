@@ -64,6 +64,7 @@ interface Tree {
   savedSelection: (raw: unknown) => string | null
   recentWorkspace: (workspaces: unknown[], sessions: unknown[]) => { id: string; path: string } | undefined
   restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'none'; id?: string; path?: string; forget?: boolean }
+  sessionWorkspace: (workspaces: unknown[], sessions: unknown[], id: string | null) => { id: string; path: string } | undefined
   newSessionWorkspace: (tops: unknown, state?: Record<string, unknown>) => { path: string; label: string } | null
   newConversationTarget: (tops: unknown, state?: Record<string, unknown>) => { path: string; label: string } | null
   folderLabel: (tops: unknown, path: unknown) => string
@@ -393,6 +394,103 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+/** The workspace rows the page keeps from one drawing under an archive filter (`treeTops`), as `renderTree` makes them. */
+function drawnRows(workspaces: unknown[], sessions: unknown[], options: Record<string, unknown>) {
+  return tree
+    .flatten(tree.deriveGroups(workspaces, sessions, { grouping: 'tree', ...options }))
+    .filter((group) => group.workspace !== null)
+    .map((group) => ({ kind: 'workspace', path: group.path, label: group.label, group }))
+}
+
+test('New session starts in the open session\'s workspace even when its row is archived and not drawn, never in the last remembered folder (#119)', () => {
+  /**
+   * #119: under Hide archived an open archived session is in no drawn group, so the page's lookup among drawn groups
+   * missed and New session started in `activeFolder`, the folder of a session that was no longer open — on a shared
+   * server another person's project. DSH finds the open session's workspace in its whole workspace list
+   * (dsh-client-ui-workspace lib/client.js:1503-1508), where an archived session keeps its account slot (dsh-workspace
+   * lib/index.js:232-233, :502-503; README "Archive filtering alone changes neither saved positions nor account membership").
+   * The order is still #134's one `newSessionWorkspace`; only its open-session step reads the whole index.
+   */
+  const workspaces = [
+    workspace('w-a', '/work/a', { sessionIds: ['s-a-new'] }),
+    workspace('w-b', '/work/b', { sessionIds: ['s-b-archived'], title: 'Beta' }),
+  ]
+  const sessions = [
+    session('s-a-new', 9, { cwd: '/work/a' }),
+    session('s-b-archived', 1, { cwd: '/work/b', archived: true }),
+  ]
+  const rows = drawnRows(workspaces, sessions, { archived: 'hide', current: 's-b-archived' })
+  assert.equal(rows.some((row) => tree.containsSession(row.group, 's-b-archived', false)), false, 'the precondition: under Hide archived no drawn group holds the open archived session')
+  assert.deepEqual(rows.map((row) => row.path), ['/work/a', '/work/b'], 'A is drawn first')
+  const state = { current: 's-b-archived', chosen: null, selected: 'session:s-a-new', active: '/work/a' }
+  assert.equal(tree.newSessionWorkspace(rows, state)?.path, '/work/a', 'without the index the drawn groups miss it, which was #119')
+
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-b-archived')?.id, 'w-b', 'the whole index still knows the archived session\'s workspace')
+  const indexed = { ...state, workspaces, sessions }
+  const picked = tree.newSessionWorkspace(rows, indexed)
+  assert.equal(picked?.path, '/work/b', 'New session starts in B, where the open session lives, not in the remembered folder A nor the first drawn workspace A')
+  assert.equal(picked, rows[1], 'as the row the tree drew for B')
+  assert.equal(tree.newSessionWorkspace(drawnRows(workspaces, sessions, { archived: 'show', current: 's-b-archived' }), indexed)?.path, '/work/b', 'show: the same answer')
+  const only = drawnRows(workspaces, [session('s-b-archived', 1, { cwd: '/work/b', archived: true })], { archived: 'only', current: 's-b-archived' })
+  assert.deepEqual(tree.newSessionWorkspace(only.filter((row) => row.path !== '/work/b'), indexed), { kind: 'workspace', path: '/work/b', label: 'Beta' }, 'a workspace the filter left undrawn is still the answer, by its path and display title')
+  assert.equal(tree.newSessionWorkspace(rows, { ...indexed, current: 's-a-new' })?.path, '/work/a', 'an open session in A starts in A')
+  assert.equal(
+    tree.newSessionWorkspace(rows, { ...indexed, chosen: { path: '/work/a', during: 's-b-archived' } })?.path,
+    '/work/a',
+    'a workspace row the person opened beside the open session still wins over the open session\'s (#25)',
+  )
+  assert.equal(tree.newSessionWorkspace(rows, { ...indexed, chosen: { path: '/work/a', during: 's-a-new' } })?.path, '/work/b', 'but not a choice made beside another session')
+  assert.equal(tree.newConversationTarget(rows, { chosen: null, selected: 'session:s-a-new', active: '/work/a' })?.path, '/work/a', 'with no session open the composer\'s place is #134\'s, unchanged')
+})
+
+test('the open session\'s workspace is the registered one that accounts for it: nested, adopted, or by its cwd when no workspace names it yet (#119)', () => {
+  const workspaces = [
+    workspace('w-app', '/repo/packages/app', { parent: 'w-repo', sessionIds: ['s-app'] }),
+    workspace('w-repo', '/repo', { sessionIds: ['s-repo'] }),
+    workspace('w-scratch', '/repo/scratch', { origin: 'auto', parent: 'w-repo', sessionIds: ['s-scratch'] }),
+    workspace('w-loose', '/tmp/loose', { origin: 'auto', sessionIds: ['s-loose'] }),
+  ]
+  const sessions = [
+    session('s-app', 4, { cwd: '/repo/packages/app', archived: true }),
+    session('s-repo', 3, { cwd: '/repo' }),
+    session('s-scratch', 2, { cwd: '/repo/scratch' }),
+    session('s-loose', 1, { cwd: '/tmp/loose' }),
+    session('s-new', 5, { cwd: '/repo/packages/app/src' }),
+    session('s-repository', 6, { cwd: '/repository' }),
+  ]
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-app')?.id, 'w-app', 'the nested workspace, not the one above it')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-scratch')?.id, 'w-repo', 'an adopted root counts for the registered workspace above it, where the tree draws it')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-new')?.id, 'w-app', 'a session no workspace names yet: the deepest registered workspace containing its cwd')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-repository'), undefined, 'a sibling folder whose name only starts the same is not inside')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-loose'), undefined, 'an Ungrouped session has no workspace')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-unknown'), undefined)
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, null), undefined)
+  const rows = drawnRows(workspaces, sessions, { archived: 'hide', current: 's-app' })
+  assert.deepEqual(rows.map((row) => row.path).sort(), ['/repo', '/repo/packages/app'])
+  assert.equal(tree.newSessionWorkspace(rows, { workspaces, sessions, current: 's-app', active: '/repo' })?.path, '/repo/packages/app')
+  assert.equal(
+    tree.newSessionWorkspace(rows, { workspaces, sessions, current: 's-loose', active: '/repo/packages/app/x' })?.path,
+    '/repo/packages/app',
+    'an open session no registered workspace holds: the remembered folder\'s workspace, as before',
+  )
+})
+
+test('the page asks newSessionWorkspace with the whole index, kept before the archive filter draws (#119)', () => {
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const decide = body('function newSessionWorkspace() {')
+  assert.match(decide, /WorkspaceTree\.newSessionWorkspace\(treeTops, \{/, 'the page hands its state to #134\'s one order')
+  assert.match(decide, /workspaces: knownWorkspaces,/, 'with every workspace')
+  assert.match(decide, /sessions: \[\.\.\.sessionMetas\.values\(\)\],/, 'and every listed session, archived included')
+  assert.doesNotMatch(body('function newConversationTarget() {'), /knownWorkspaces/, 'the composer\'s place with no session open needs no index')
+  assert.match(body('async function renderTree() {'), /if \(Array\.isArray\(workspaces\)\) knownWorkspaces = workspaces\n\s*rowIndex\.clear\(\)/, 'the tree keeps the whole answer before it filters')
+  assert.match(body('async function restoreSelection() {'), /knownWorkspaces = workspaceBody\.workspaces/, 'and so does a load')
+  assert.match(body('async function startNewSession() {'), /const workspace = newSessionWorkspace\(\)/, 'the header and the Automation tasks page\'s New both ask it')
 })
 
 test('the first-use workspace reads as Default workspace while it keeps its automatic title', () => {

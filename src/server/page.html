@@ -7282,9 +7282,20 @@ async function refreshSessions() {
   searchIndex = null
   /** The newest running mark this read can know about; a mark after it outranks the read's silence. */
   const readTick = runningTick
-  const response = await fetch('/api/sessions')
-  if (!response.ok) return
-  const sessions = await response.json()
+  /**
+   * A list that cannot be read changes nothing: the rows keep what they last showed, the tree's own read says it failed,
+   * and the stream's reconnect or the browser's return online reads again (`StreamBaseline`). This used to reject, and
+   * every action that refreshes after its request — a rename, a pin, an archive, a fork — left an unhandled rejection
+   * when the network dropped right after the server had applied it (#91).
+   */
+  let sessions
+  try {
+    const response = await fetch('/api/sessions')
+    if (!response.ok) return
+    sessions = await response.json()
+  } catch (error) {
+    return
+  }
   listedMetas.clear()
   for (const meta of Array.isArray(sessions) ? sessions : []) {
     if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string') listedMetas.set(meta.id, meta)
@@ -7412,6 +7423,8 @@ async function restoreSelection() {
     }
   }
   const [workspaceBody, sessions] = await Promise.all([read('/api/workspaces'), read('/api/sessions')])
+  /** Kept for New session's lookup too (#119), which a load in the flat list, where no tree is read, needs as well. */
+  if (Array.isArray(workspaceBody?.workspaces)) knownWorkspaces = workspaceBody.workspaces
   /**
    * If a session was opened while the lists were read, that session stays shown. It may be a row a person picked, a turn
    * that created a session, or a check that opens one by name. The boot does not reopen the saved session over it, or
@@ -7624,6 +7637,100 @@ function scheduleTreeRefresh() {
     void renderTree()
   }, 400)
 }
+
+/* stream-baseline:begin */
+/**
+ * When the tree reads its baselines again — DSH's connection generation, as far as this page's stream can follow it (#91).
+ *
+ * DSH re-acquires the Workspace and Session baselines on every new connection. Its `ConnectionController` publishes
+ * `connected` and calls `onConnected` only once the stream's `ready` item has arrived (dsh-client-connection
+ * lib/client.browser.js:1094-1100, README "Connection generation"); the Session controller re-reads its list there
+ * (dsh-api-session-controller lib/client.js:4289-4296, `handleConnected` :3570-3584), and the Workspace state stream
+ * reopens on a `baseline` frame that replaces the projection and clears its error (dsh-api-workspace-controller
+ * lib/client.js:473-490, `replaceBaseline` :183-194). A browser `offline` aborts the stream and suspends the retries; the
+ * next `online` starts again at the 500 ms tier (lib/client.browser.js:989-999, `watchBrowserNetwork` :1359-1376, README
+ * "Browser offline aborts active work…").
+ *
+ * This page follows `GET /api/events` through its own connection (`events` above), whose every connection opens with
+ * the server's `ready` frame (`src/server/stream.ts`). A reconnect presents its cursor, so the server replays the frames
+ * written while the page was away, or answers `reset` when it cannot and the page reads everything again. Neither
+ * brings back a read the page had already started and lost to the cut: a rename's or a workspace delete's own frame that
+ * arrived before the cut, or the redraw after the page's own request, failed there, and nothing asked again, so the old
+ * title and the "could not read the workspaces" note stayed (#91, rechecked on the following stream). So:
+ * - the **first** `ready` is the page's own load, whose boot reads the tree itself: nothing more;
+ * - every **later** `ready` is a reconnect: read again at once, as `onConnected` does on every connection, resumed or
+ *   not (a `reset` that follows reads the open transcript and the approvals too);
+ * - `offline` reads nothing (the read would fail) and is remembered;
+ * - `online` after an `offline` reads again after DSH's first tier, because the page's connection does not watch the
+ *   browser's network state: it may have kept its stream through the cut, and then no `ready` comes.
+ *
+ * Pure, so `test/stream-baseline.test.ts` judges it out of the page. `next` answers the next state and the delay before
+ * a read, `null` for none.
+ */
+const StreamBaseline = (() => {
+  const ONLINE_DELAY_MS = 500
+
+  function initial() {
+    return { generations: 0, offline: false }
+  }
+
+  function next(state, signal) {
+    if (signal === 'ready') {
+      const generations = state.generations + 1
+      return { state: { ...state, generations }, reread: generations > 1 ? 0 : null }
+    }
+    if (signal === 'offline') return { state: { ...state, offline: true }, reread: null }
+    if (signal === 'online') return { state: { ...state, offline: false }, reread: state.offline ? ONLINE_DELAY_MS : null }
+    return { state, reread: null }
+  }
+
+  return { ONLINE_DELAY_MS, initial, next }
+})()
+/* stream-baseline:end */
+
+/**
+ * Read the tree's baselines again: `/api/workspaces` and `/api/sessions` through `renderTree`, whose successful draw
+ * replaces a stale "could not read the workspaces" note, then the session list's running state through
+ * `refreshSessions`. The search index is a cache of the session list, so it is dropped first; the one-column list draws
+ * from it. A read asked for while one is in flight runs once more after it, so the last answer drawn is never the older.
+ */
+let baselineFollow = StreamBaseline.initial()
+let baselineTimer = 0
+let baselineRead = null
+let baselineAgain = false
+function reacquireBaselines() {
+  if (baselineRead !== null) {
+    baselineAgain = true
+    return baselineRead
+  }
+  baselineRead = (async () => {
+    try {
+      do {
+        baselineAgain = false
+        clearTimeout(treeRefreshTimer)
+        searchIndex = null
+        await renderTree()
+        await refreshSessions()
+      } while (baselineAgain)
+    } catch (error) {
+      setNote('could not read the workspaces: ' + (error && error.message))
+    } finally {
+      baselineRead = null
+    }
+  })()
+  return baselineRead
+}
+function followConnection(signal) {
+  const step = StreamBaseline.next(baselineFollow, signal)
+  baselineFollow = step.state
+  if (step.reread === null) return
+  clearTimeout(baselineTimer)
+  baselineTimer = setTimeout(() => void reacquireBaselines(), step.reread)
+}
+events.addEventListener('ready', () => followConnection('ready'))
+window.addEventListener('offline', () => followConnection('offline'))
+window.addEventListener('online', () => followConnection('online'))
+
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
@@ -11539,6 +11646,14 @@ function chooseWorkspace(path) {
  */
 let treeTops = []
 
+/**
+ * `/api/workspaces`' last whole answer: every workspace with its `sessionIds`, archived sessions included, whatever the
+ * archive filter drew. New session finds the open session's workspace here (`WorkspaceTree.newSessionWorkspace`), because
+ * the drawn groups leave out an archived session under Hide archived, and the lookup then fell back to another
+ * project's folder (#119).
+ */
+let knownWorkspaces = []
+
 function readExpanded() {
   try {
     return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) ?? '[]'))
@@ -12562,11 +12677,18 @@ function menuItemsFor(node) {
         run: async () => {
           const title = window.prompt('Rename this conversation', node.session.title ?? '')
           if (title === null) return
-          const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ title }),
-          })
+          let response
+          try {
+            response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ title }),
+            })
+          } catch (error) {
+            /** Said in the note rather than left to the console; the next baseline read shows what the server holds (#91). */
+            setNote('could not rename that conversation: ' + (error && error.message))
+            return
+          }
           const body = await response.json().catch(() => ({}))
           if (!response.ok) {
             setNote(body.error ?? 'could not rename that conversation')
@@ -12674,6 +12796,11 @@ async function confirmSessionRename() {
       return
     }
   } catch (error) {
+    /**
+     * A request that fails in flight is said in the dialog, which stays open, as DSH's `RenameForm` does
+     * (`dsh-client-ui-workspace` `lib/client.js:4449-4455`). The server may have applied it before the cut; the next
+     * baseline read shows what it holds (`StreamBaseline`, #91).
+     */
     refuse('could not rename that session: ' + (error && error.message))
     return
   }
@@ -12683,6 +12810,7 @@ async function confirmSessionRename() {
     sessionRenameDialog.close()
   }
   setNote('')
+  /** Neither read rejects: a failed one leaves the tree's note, and a reconnect or the return online reads again (#91). */
   await renderTree()
   await refreshSessions()
 }
@@ -12777,13 +12905,25 @@ async function archiveSession(node) {
  * a row's menu only decides which of the two it is changing. Answers `{ ok, status, body }`; a refusal the caller
  * handles itself (`options.quiet`) is not written to the tree's note, and `options.applied` runs once the server took the
  * change, before the redraw (a pin under Manual fronts the session in its saved orders, C17).
+ *
+ * A request that fails in flight answers `{ ok: false, status: 0, body: {}, error }` and says so in the note, as DSH's
+ * pin says "Pin failed. Try again later." (`dsh-client-ui-workspace` `lib/client.js:5085-5094`) rather than leaving the
+ * rejection to the console: the row and menu buttons that call this do not catch (#91). Whether the server applied it
+ * anyway is the next read's to show, which the stream's reconnect or the browser's return online makes
+ * (`StreamBaseline`); `options.applied` does not run for it.
  */
 async function setSessionFlags(node, patch, extra = {}, options = {}) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  })
+  let response
+  try {
+    response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
+    })
+  } catch (error) {
+    if (typeof options.quiet !== 'function' || !options.quiet(0, {})) setNote('could not change that session: ' + (error && error.message))
+    return { ok: false, status: 0, body: {}, error }
+  }
   const body = await response.json().catch(() => ({}))
   /**
    * The route refuses an archive while the session still has work the page did not know about — a background job
@@ -12875,7 +13015,8 @@ document.getElementById('session-archive-confirm').addEventListener('click', asy
     const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
     settle(false)
     if (!result.ok) {
-      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      const failed = result.error !== undefined ? 'could not stop and archive that session: ' + (result.error && result.error.message) : null
+      dialogError('session-archive-error', failed ?? result.body?.error ?? 'could not stop and archive that session')
       return
     }
     stopArchiveTarget = null
@@ -12997,10 +13138,20 @@ async function startSessionAt(node) {
 /**
  * Which workspace a new session should start in: `WorkspaceTree.newSessionWorkspace` over the rows the tree last drew and
  * the reader's context — the workspace chosen beside the open session (`chosenWorkspace`), the open session's, the
- * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws.
+ * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws. The open session's
+ * workspace is read from the whole index (`knownWorkspaces`, `sessionMetas`), not from the drawn groups, so an archived
+ * session open under Hide archived still starts New session in its own workspace rather than in the last remembered
+ * folder (#119).
  */
 function newSessionWorkspace() {
-  return WorkspaceTree.newSessionWorkspace(treeTops, { chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder })
+  return WorkspaceTree.newSessionWorkspace(treeTops, {
+    chosen: chosenWorkspace,
+    current,
+    selected: selectedPath,
+    active: activeFolder,
+    workspaces: knownWorkspaces,
+    sessions: [...sessionMetas.values()],
+  })
 }
 
 /**
@@ -14458,19 +14609,48 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * The registered workspace a session lives in, read from the **whole** index, whatever the archive filter draws:
+   * `workspaces` is `/api/workspaces`'s array and `sessions` `/api/sessions`, archived sessions included in both. DSH finds
+   * the open session's workspace in its full workspace list, by the account that names it (`dsh-client-ui-workspace`
+   * `lib/client.js:1503-1506`), and archiving never touches that account: an archived session keeps its `sessionIds` slot
+   * (`dsh-workspace` `lib/index.js:232-233`, `:502-503`; the README's "Archive filtering alone changes neither saved
+   * positions nor account membership"). Heddle's account is the session's canonical `cwd` mapped to its nearest root, which
+   * both servers derive into `sessionIds`; an adopted root counts for the registered workspace above it, where
+   * `deriveGroups` draws it. A session no workspace names yet (a list read before it was made) falls back to its own
+   * `cwd`: the deepest registered workspace containing it. Undefined for an unknown id or a session no registered
+   * workspace holds (an Ungrouped one).
+   */
+  function sessionWorkspace(workspaces, sessions, id) {
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.path === 'string') : []
+    const byId = new Map(list.map((entry) => [entry.id, entry]))
+    const named = list.find((entry) => (Array.isArray(entry.sessionIds) ? entry.sessionIds : []).includes(id))
+    const home = named === undefined ? undefined : registered(named) ? named : registeredAboveIn(named, byId)
+    if (home !== undefined) return home
+    const meta = (Array.isArray(sessions) ? sessions : []).find((entry) => entry !== null && typeof entry === 'object' && entry.id === id)
+    const cwd = typeof meta?.cwd === 'string' ? meta.cwd : ''
+    if (cwd.length === 0) return undefined
+    return list
+      .filter((entry) => registered(entry) && (cwd === entry.path || cwd.startsWith(entry.path.endsWith('/') ? entry.path : entry.path + '/')))
+      .sort((left, right) => right.path.length - left.path.length)[0]
+  }
+
+  /**
    * Which workspace a new session should start in, among the workspace rows the tree draws (`tops`, each
    * `{ path, label, group }`, in drawing order).
    *
    * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
-   * context exists (`state` is `{ chosen, current, selected, active }`): the workspace row the person opened or added
-   * since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace (DSH's
-   * `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace, then
-   * the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where am
-   * I", and the first one that applies wins. Null when the tree draws no workspace.
+   * context exists (`state` is `{ chosen, current, selected, active, workspaces, sessions }`): the workspace row the person
+   * opened or added since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace
+   * (DSH's `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace,
+   * then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where
+   * am I", and the first one that applies wins. Null when the tree draws no workspace and no session is open in one.
+   * `workspaces` and `sessions` are the whole index (`/api/workspaces`, `/api/sessions`), whatever the archive filter
+   * drew; the open session's workspace is read there.
    */
   function newSessionWorkspace(tops, state = {}) {
     const list = Array.isArray(tops) ? tops.filter((node) => node !== null && typeof node === 'object' && typeof node.path === 'string') : []
-    const { chosen = null, current = null, selected = null, active = null } = state ?? {}
+    const { chosen = null, current = null, selected = null, active = null, workspaces = [], sessions = [] } = state ?? {}
     /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
     const owner = (path) =>
       list.filter((node) => path === node.path || path.startsWith(node.path + '/')).sort((left, right) => right.path.length - left.path.length)[0] ?? null
@@ -14479,8 +14659,19 @@ const WorkspaceTree = (() => {
       const byChoice = list.find((node) => node.path === chosen.path)
       if (byChoice !== undefined) return byChoice
     }
-    /** Then the open session's own workspace: it is the group the reader is looking at. */
+    /**
+     * Then the open session's own workspace, from the whole index (`sessionWorkspace`), drawn or not: its drawn row, else
+     * the workspace by its path and display title (a filter such as Archived only may leave it undrawn). #119: this was
+     * looked up among the drawn groups only, so with an archived session open under Hide archived it missed and the new
+     * session started in `active`, the last remembered folder, which was another project's. When the open session's
+     * workspace is known, nothing below is asked. A caller without the index still finds it among the drawn groups.
+     */
     if (current !== null) {
+      const home = sessionWorkspace(workspaces, sessions, current)
+      if (home !== undefined) {
+        const label = typeof home.title === 'string' && home.title.length > 0 ? workspaceDisplayTitle(home.title) : basename(home.path)
+        return list.find((node) => node.path === home.path) ?? { kind: 'workspace', path: home.path, label }
+      }
       const byCurrent = list.find((node) => node.group !== undefined && containsSession(node.group, current, false))
       if (byCurrent !== undefined) return byCurrent
     }
@@ -14839,6 +15030,7 @@ const WorkspaceTree = (() => {
     savedSelection,
     recentWorkspace,
     restoreChoice,
+    sessionWorkspace,
     newSessionWorkspace,
     newConversationTarget,
     folderLabel,
@@ -16464,6 +16656,37 @@ function glideRows(previous) {
   }
 }
 
+/**
+ * The failure a level's listing answered with, when it is one the tree draws as a line of its own — `null` otherwise.
+ *
+ * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:564-581): a failed
+ * level is one line, by code, and never "Empty directory". The tree route answers a folder the server may not read with
+ * `workspace-file/unreadable` (#106); it was `200` with no children, drawn as "nothing inside", which was false.
+ */
+async function failedLevel(response) {
+  try {
+    const body = await response.json()
+    return body !== null && body.code === 'workspace-file/unreadable' && typeof body.error === 'string' ? { code: body.code, message: body.error } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The line a failed level shows, in DSH's words: a code DSH's tree names has its own sentence, and any other says
+ * "Read failed: <message>" with the transport's own message (`failureLine` and `error.unavailable`,
+ * dsh-client-ui-sidebar-files lib/client.js:483-489 and :773). DSH has no `workspace-file/unreadable`, so it is the
+ * second: `Read failed: cannot list "locked": permission denied`.
+ */
+function failedLevelLine(failure) {
+  const line = document.createElement('div')
+  line.className = 'empty'
+  line.dataset.filesRow = 'failed'
+  line.dataset.filesCode = failure.code
+  line.textContent = 'Read failed: ' + failure.message
+  return line
+}
+
 /** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
 async function loadChildren(node, li) {
   const group = document.createElement('ul')
@@ -16480,18 +16703,22 @@ async function loadChildren(node, li) {
     for (const child of node.group.children) group.append(groupRow(child))
     paintSessionRows(group, node.group, depth + 1)
     let files = []
+    let failed = null
     if (node.kind === 'workspace') {
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-        if (!response.ok) throw new Error('the tree answered ' + response.status)
-        files = folderRows((await response.json()).children ?? [])
+        if (!response.ok) {
+          failed = await failedLevel(response)
+          if (failed === null) throw new Error('the tree answered ' + response.status)
+        } else files = folderRows((await response.json()).children ?? [])
       } catch (error) {
         setNote('could not read ' + node.label + ': ' + (error && error.message))
       }
     }
     /** The group may have been closed (or the tree redrawn) while its folders were being read. */
     if (!group.isConnected) return
-    if (files.length > 0) {
+    /** A workspace folder the server may not read keeps its `Files` heading, over the one line that says why (#106). */
+    if (files.length > 0 || failed !== null) {
       const heading = document.createElement('li')
       heading.className = 'tree-heading'
       heading.setAttribute('role', 'none')
@@ -16499,6 +16726,7 @@ async function loadChildren(node, li) {
       heading.textContent = 'Files'
       group.append(heading)
       for (const child of files) group.append(nodeRow(child, depth + 1))
+      if (failed !== null) group.append(failedLevelLine(failed))
     }
     if (group.children.length === 0) {
       const empty = document.createElement('div')
@@ -16510,6 +16738,7 @@ async function loadChildren(node, li) {
     return
   }
   let children = node.children
+  let failed = null
   if (children === null) {
     try {
       /**
@@ -16518,12 +16747,20 @@ async function loadChildren(node, li) {
        * every reopened branch replaced it with the unfiltered list — the row existed and could not be seen.
        */
       const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-      if (!response.ok) throw new Error('the tree answered ' + response.status)
-      children = (await response.json()).children ?? []
+      if (!response.ok) {
+        failed = await failedLevel(response)
+        if (failed === null) throw new Error('the tree answered ' + response.status)
+        children = []
+      } else children = (await response.json()).children ?? []
     } catch (error) {
       setNote('could not read ' + node.label + ': ' + (error && error.message))
       children = []
     }
+  }
+  /** A level the server may not read is that one line, never "nothing inside" (#106). */
+  if (failed !== null) {
+    group.append(failedLevelLine(failed))
+    return
   }
   if (children.length === 0) {
     /**
@@ -16854,6 +17091,8 @@ async function renderTree() {
     setNote('could not read the workspaces: ' + (error && error.message))
     return
   }
+  /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
+  if (Array.isArray(workspaces)) knownWorkspaces = workspaces
   rowIndex.clear()
   noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
@@ -18089,7 +18328,10 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
     }
     if (activeFolder === deleteTarget.path) activeFolder = null
     deleteTarget = null
+    /** The dialog closes with its Deleting… line put away, not left set behind it (#91). */
+    document.getElementById('workspace-delete-status').hidden = true
     workspaceDelete.close()
+    /** A redraw that cannot read the tree says so in its note, and a reconnect or the return online reads again (#91). */
     await renderTree()
   } catch (error) {
     if (deleteTarget !== null) deleteTarget.busy = false

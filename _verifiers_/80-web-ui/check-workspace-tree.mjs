@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, realpathSync, renameSync } from 'node:fs'
+import { chmodSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 
@@ -14,14 +14,17 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * inside another nests under it (`Workspace Tree`) with its row **before** the parent's own sessions; a session no
  * registered workspace owns trails under **Ungrouped**; an open workspace shows five sessions and a `Show {n} more
  * sessions` control (the open New session on top of the five, not in one of their places); the
- * selected session's workspace tints its folder; a workspace's `+` starts a session there; the `Workspace` grouping
+ * selected session's workspace tints its folder; a workspace's `+` starts a session there; New session starts in the
+ * open session's workspace even when that session is archived and its row is not drawn (#119); the `Workspace` grouping
  * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
  * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
  * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
  * with the composer disabled, not to a blank page that takes a message (#56); first use's Default workspace stays the
  * new conversation's place across a reload, named so by the hero and the note, and a message with no workspace to go
- * to is refused rather than run in the server's start folder (#134); and Archived only with nothing archived
- * says DSH's "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107).
+ * to is refused rather than run in the server's start folder (#134); Archived only with nothing archived says DSH's
+ * "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107); and a
+ * folder the server may not read, or a workspace whose folder it may not read, draws DSH's one failure line
+ * ("Read failed: …"), never "nothing inside" (#106).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -397,6 +400,118 @@ test('New session starts in the workspace row the person opened, not in the open
     assert.equal(await cwdOf(plain), a.path, 'with no workspace row opened since the session was opened, New session starts in the open session\'s workspace')
   } finally {
     browser.close()
+    server.kill()
+    for (const dir of [home, first, second]) removeDir(dir)
+  }
+})
+
+test('New session starts where the open session lives when that session is archived and its row is not drawn, not in the last remembered folder (#119)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's New session starts in the open session's workspace, found in its whole workspace list by the account that names
+   * the session (dsh-client-ui-workspace lib/client.js:1503-1508), and archiving keeps that account (dsh-workspace
+   * lib/index.js:232-233; README "Archive filtering alone changes neither saved positions nor account membership"). #119:
+   * the page looked the open session up among the drawn groups only, so with an archived session open under Hide archived
+   * it missed and the session started in the last remembered folder — on the shared server another person's project.
+   *
+   * The newer session in A is opened first (by its saved selection, then its row, which aims the prompt box at A), then
+   * the archived session in B by id. A page holds an archived session open once a person archives the session they have
+   * open (heddle keeps it on screen, where DSH's `clearArchivedCurrent` empties the view); an archived row does not open
+   * (`guardedOpen`), and a load does not reopen an archived saved session (restoreChoice, after DSH's restoreSelection).
+   * So B, archived first, is opened through the page's verifier seam `showSession(id)`, the call a search hit makes,
+   * which leaves the prompt box aimed at A as a session opened from search and then archived does. A is registered last,
+   * so it is drawn first, and both fallbacks the bug used — the remembered folder and the first drawn workspace — point
+   * at A.
+   */
+  const home = isolatedHome('tree-archived-target')
+  const first = fixtureDir('tree-archived-target-a')
+  const second = fixtureDir('tree-archived-target-b')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const register = async (path) => {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      return added.body.record
+    }
+    const b = await register(second)
+    const a = await register(first)
+    const putAway = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: b.path, title: 'put away in b' }) })
+    assert.equal(putAway.status, 200, `a session in B (${JSON.stringify(putAway.body)})`)
+    const inB = putAway.body.session
+    const archived = await api(server.url, cookie, `/api/sessions/${inB}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(archived.status, 200, `the session in B is archived (${JSON.stringify(archived.body)})`)
+    await new Promise((done) => setTimeout(done, 20))
+    const newer = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: a.path, title: 'newer work in a' }) })
+    assert.equal(newer.status, 200, `a newer session in A (${JSON.stringify(newer.body)})`)
+    const inA = newer.body.session
+    const listed = (await api(server.url, cookie, '/api/workspaces')).body.workspaces
+    assert.deepEqual(listed.filter((entry) => entry.origin === 'added').map((entry) => entry.path), [a.path, b.path], 'A is first in the registry, so the tree draws it first')
+    assert.deepEqual(listed.find((entry) => entry.id === b.id)?.sessionIds, [inB], 'and B still accounts for its archived session')
+
+    const workspaceRow = (record) => `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
+    const openId = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const cwdOf = async (id) => {
+      const sessions = (await api(server.url, cookie, '/api/sessions')).body
+      return (Array.isArray(sessions) ? sessions : []).find((meta) => meta.id === id)?.cwd ?? null
+    }
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        open: ${openId},
+        title: document.getElementById('session-title')?.textContent ?? null,
+        note: document.getElementById('tree-note')?.textContent ?? null,
+        archived: localStorage.getItem('heddle.tree.archived.v1'),
+        rows: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => [li.dataset.sessionId, li.getAttribute('aria-selected')]),
+      })`)
+    const until = async (expression, what, timeoutMs = 10_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+
+    /** A first: its saved selection opens it, and a click on its row aims the prompt box at A, as a person's would. */
+    await browser.gotoSession(server.url, inA)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await until(`${workspaceRow(a)} !== undefined && ${workspaceRow(b)} !== undefined`, 'both workspaces are drawn', 15_000)
+    await until(`document.getElementById('session-title').textContent.includes('newer work in a')`, 'the saved session in A is open')
+    await browser.evaluate(`(() => { const row = ${workspaceRow(a)}; if (row.closest('li').dataset.open !== 'true') row.click() })()`)
+    await until(`document.querySelector('#tree li[data-session-id="${inA}"] > .row') !== null`, 'the session in A is drawn')
+    await browser.evaluate(`document.querySelector('#tree li[data-session-id="${inA}"] > .row').click()`)
+    await until(`${openId} === ${JSON.stringify(inA)}`, 'the session in A is the selected row')
+    await new Promise((done) => setTimeout(done, 1_000))
+
+    /** Then the archived session in B, by id; under Hide archived its row is not drawn. */
+    await browser.evaluate(`showSession(${JSON.stringify(inB)}).then(() => true)`)
+    await until(`document.getElementById('session-title').textContent.includes('put away in b')`, 'the archived session in B is open')
+    await new Promise((done) => setTimeout(done, 1_000))
+    const before = JSON.parse(await state())
+    assert.equal(before.archived ?? 'hide', 'hide', `the tree hides archived sessions\nsaw: ${JSON.stringify(before)}`)
+    assert.equal(before.rows.some(([id]) => id === inB), false, `so the open archived session has no row\nsaw: ${JSON.stringify(before)}`)
+
+    await browser.evaluate(`document.getElementById('new-session').click()`)
+    await until(
+      `(() => { const id = ${openId}; return id !== null && id !== ${JSON.stringify(inA)} && id !== ${JSON.stringify(inB)} })()`,
+      'New session opens a new session',
+      15_000,
+    )
+    const made = await browser.evaluate(openId)
+    const cwd = await cwdOf(made)
+    assert.equal(
+      cwd,
+      b.path,
+      `New session starts in B, where the open archived session lives, not in A (the remembered folder and the first drawn workspace)\nA: ${a.path}\nsaw: ${await state()}`,
+    )
+    await until(`${workspaceRow(b)}.closest('li').querySelector('li[data-session-id="${made}"]') !== null`, 'and the new session is drawn under B')
+  } finally {
+    await browser.close()
     server.kill()
     for (const dir of [home, first, second]) removeDir(dir)
   }
@@ -1415,5 +1530,128 @@ test('a session dragged above another switches the order to Manual, and the orde
   } finally {
     browser.close()
     fixture.close()
+  }
+})
+
+test('a folder the server may not read draws DSH\'s failure line, not "nothing inside", and so does a workspace whose folder it may not read (#106)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** `chmod 000` does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:564-581): a failed
+   * level is one line, by code, and a code its tree does not name says "Read failed: {message}" with the transport's own
+   * message (:483-489, words at :773). The tree route answers a folder the server may not read with
+   * `400 workspace-file/unreadable` and a sentence (#106); before, it answered `200` with no children and the page said
+   * "nothing inside", which was false — the folder holds a file. A workspace whose own folder cannot be read kept its
+   * sessions and silently lost its Files heading; it keeps the heading now, over the same kind of line. The modes are
+   * restored in `finally`, before the fixture is removed.
+   */
+  const home = isolatedHome('tree-unreadable')
+  const work = fixtureDir('tree-unreadable-work')
+  const locked = join(work, 'locked')
+  mkdirSync(locked, { recursive: true })
+  writeFileSync(join(locked, 'held.txt'), 'a file the server cannot list\n')
+  mkdirSync(join(work, 'open'), { recursive: true })
+  writeFileSync(join(work, 'open', 'kept.txt'), 'readable\n')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const title = added.body.record.title
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: work, title: 'plain notes' }) })
+    assert.equal(made.status, 200, `created a session (${JSON.stringify(made.body)})`)
+    const session = made.body.session
+    chmodSync(locked, 0o000)
+
+    const folderRow = (label) => `[...document.querySelectorAll('#tree li[data-kind="folder"] > .row')].find((row) => row.querySelector('.label')?.textContent === ${JSON.stringify(label)})`
+    const level = (label) =>
+      browser.evaluate(`JSON.stringify((() => {
+        const row = ${folderRow(label)}
+        if (row === undefined) return { missing: true }
+        const li = row.closest('li')
+        const group = li.querySelector(':scope > ul[role=group]')
+        return {
+          open: li.dataset.open,
+          lines: group === null ? [] : [...group.querySelectorAll(':scope > .empty')].map((line) => ({ text: line.textContent, row: line.dataset.filesRow ?? null, code: line.dataset.filesCode ?? null })),
+          rows: group === null ? 0 : group.querySelectorAll(':scope > li').length,
+        }
+      })())`)
+    const workspaceGroup = () =>
+      browser.evaluate(`JSON.stringify((() => {
+        const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(added.body.record.path)})
+        if (row === undefined) return { missing: true }
+        const group = row.closest('li').querySelector(':scope > ul[role=group]')
+        if (group === null) return { open: false }
+        return {
+          open: true,
+          headings: [...group.querySelectorAll(':scope > .tree-heading')].map((heading) => heading.textContent),
+          lines: [...group.querySelectorAll(':scope > .empty')].map((line) => ({ text: line.textContent, row: line.dataset.filesRow ?? null, code: line.dataset.filesCode ?? null })),
+          session: group.querySelector('li[data-kind="session"][data-session-id="${session}"]') !== null,
+        }
+      })())`)
+    const until = async (expression, what, seen, timeoutMs = 10_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await seen()}`)
+      }
+    }
+
+    /** The page opens the session by name; its workspace group is open, with the folder's files under Files. */
+    await browser.gotoSession(server.url, session)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading', workspaceGroup)
+    await until(`${folderRow('locked')} !== undefined && ${folderRow('open')} !== undefined`, 'the workspace lists both folders under Files', workspaceGroup)
+
+    /** A readable folder still opens to its file. */
+    await browser.evaluate(`${folderRow('open')}.click()`)
+    await until(`${folderRow('open')}.closest('li').querySelector('ul[role=group] li[data-kind="file"]') !== null`, 'the readable folder lists its file', () => level('open'))
+
+    /** The unreadable one opens to DSH's failure line and nothing else. */
+    await browser.evaluate(`${folderRow('locked')}.click()`)
+    await until(`${folderRow('locked')}.closest('li').querySelector('ul[role=group] > .empty') !== null`, 'the unreadable folder draws a line under it', () => level('locked'))
+    const opened = JSON.parse(await level('locked'))
+    assert.equal(opened.open, 'true', `the folder is open\nsaw: ${JSON.stringify(opened)}`)
+    assert.deepEqual(
+      opened.lines,
+      [{ text: 'Read failed: cannot list "locked": permission denied', row: 'failed', code: 'workspace-file/unreadable' }],
+      `one failure line in DSH's words, with its code, not "nothing inside"\nsaw: ${JSON.stringify(opened)}`,
+    )
+    assert.equal(opened.rows, 0, 'and no rows')
+
+    /** The workspace's own folder made unreadable: its session stays, and its Files heading holds the line. */
+    chmodSync(work, 0o000)
+    await browser.gotoSession(server.url, session)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading again', workspaceGroup)
+    await until(
+      `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].some((row) => row.dataset.path === ${JSON.stringify(added.body.record.path)} && row.closest('li').querySelector(':scope > ul[role=group] > .empty') !== null)`,
+      'the workspace group draws a line where its files were',
+      workspaceGroup,
+    )
+    const group = JSON.parse(await workspaceGroup())
+    assert.equal(group.session, true, `the workspace still shows its session\nsaw: ${JSON.stringify(group)}`)
+    assert.deepEqual(group.headings, ['Files'], 'it keeps its Files heading')
+    assert.deepEqual(
+      group.lines,
+      [{ text: `Read failed: cannot list "${title}": permission denied`, row: 'failed', code: 'workspace-file/unreadable' }],
+      `over one failure line naming the workspace, not "nothing inside"\nsaw: ${JSON.stringify(group)}`,
+    )
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [work, locked]) {
+      try {
+        chmodSync(dir, 0o755)
+      } catch {
+        // already gone, or never made
+      }
+    }
+    for (const dir of [home, work]) removeDir(dir)
   }
 })
