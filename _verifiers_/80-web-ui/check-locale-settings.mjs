@@ -99,7 +99,7 @@ test('the Settings rows follow the interface language, redrawn while the dialog 
       'both endpoints of the machine file are listed',
     )
     const english = await browser.evaluate(ROWS)
-    assert.deepEqual(english.terms, ['Sandbox', 'Working directory'])
+    assert.deepEqual(english.terms, ['Sandbox', 'Working directory', 'Browser tab'])
     assert.ok(english.endpoints.some((text) => text.includes('128000 tokens') && text.includes('credential set')), english.endpoints.join(' | '))
     assert.ok(english.endpoints.some((text) => text.includes('no credential')), english.endpoints.join(' | '))
 
@@ -110,7 +110,7 @@ test('the Settings rows follow the interface language, redrawn while the dialog 
       return true
     })()`)
     assert.ok(
-      await browser.waitFor(`[...document.querySelectorAll('#settings-server dt')].map((term) => term.textContent).join() === '沙箱,工作目录'`, 5_000),
+      await browser.waitFor(`[...document.querySelectorAll('#settings-server dt')].map((term) => term.textContent).join() === '沙箱,工作目录,浏览器标签页'`, 5_000),
       'the server facts are redrawn in Chinese while the dialog stays open',
     )
     const chinese = await browser.evaluate(ROWS)
@@ -125,7 +125,7 @@ test('the Settings rows follow the interface language, redrawn while the dialog 
       return true
     })()`)
     assert.ok(
-      await browser.waitFor(`[...document.querySelectorAll('#settings-server dt')].map((term) => term.textContent).join() === 'Sandbox,Working directory'`, 5_000),
+      await browser.waitFor(`[...document.querySelectorAll('#settings-server dt')].map((term) => term.textContent).join() === 'Sandbox,Working directory,Browser tab'`, 5_000),
       'and back in English',
     )
     assert.deepEqual(await browser.evaluate(ROWS), english, 'word for word')
