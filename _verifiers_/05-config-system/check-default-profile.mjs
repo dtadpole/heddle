@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -90,6 +90,30 @@ test('a custom HEDDLE_HOME without --session-root keeps its sessions under that 
     const stores = existsSync(join(home, 'sessions')) ? readdirSync(join(home, 'sessions')) : []
     assert.ok(stores.length > 0, `the session was written under $HEDDLE_HOME/sessions (found: ${stores.join(', ') || 'nothing'})`)
     assert.equal(existsSync(join(home, '.heddle', 'sessions')), false, 'and not under ~/.heddle/sessions')
+  } finally {
+    removeDir(home)
+  }
+})
+
+test('--from-default-profile without --profile is still refused, and touches no profile', () => {
+  // developer-two's review: the default-profile fallback must not turn the replacing flag's refusal into a reset.
+  const { home, work } = fresh('reset-guard')
+  try {
+    const onFresh = run(home, work, ['config', '--json', '--from-default-profile', 'default'])
+    assert.equal(onFresh.code, 1, `${onFresh.stdout}\n${onFresh.stderr}`)
+    assert.match(onFresh.stderr, /--from-default-profile needs --profile <name>/)
+    assert.equal(existsSync(join(home, 'profiles', 'default')), false, 'a fresh home gets no profile')
+
+    const kept = join(home, 'profiles', 'default')
+    mkdirSync(kept, { recursive: true })
+    writeFileSync(join(kept, 'cordis.yml'), '[]\n# a person\'s own default\n')
+    const onExisting = run(home, work, ['--turn', 'hello', '--from-default-profile', 'default'])
+    assert.equal(onExisting.code, 1, `${onExisting.stdout}\n${onExisting.stderr}`)
+    assert.equal(readFileSync(join(kept, 'cordis.yml'), 'utf8'), '[]\n# a person\'s own default\n', 'an existing default is unchanged')
+
+    const named = run(home, work, ['config', '--json', '--profile', 'default', '--from-default-profile', 'default'])
+    assert.equal(named.code, 0, `${named.stdout}\n${named.stderr}`)
+    assert.ok(JSON.parse(named.stdout).some((row) => row.id === 'session'), 'an explicit --profile reset still works')
   } finally {
     removeDir(home)
   }

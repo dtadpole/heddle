@@ -947,6 +947,11 @@ async function runCommand(command: string, target: string | undefined, json: boo
  */
 function useDefaultProfile(args: Args): boolean {
   if (args.profile !== undefined || args.config !== undefined || args.patch.length > 0) return true
+  /**
+   * `--from-default-profile` replaces a profile, so it must name one: the check below refuses it without `--profile`.
+   * Choosing `default` here first would turn that refusal into a reset of the default profile (developer-two's review).
+   */
+  if (args.fromDefaultProfile !== undefined) return true
   if (args.command === undefined && args.turn === undefined) return true
   if (args.command === 'profiles') return true
   if (existsSync(resolve(process.cwd(), 'cordis.yml'))) return true

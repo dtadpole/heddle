@@ -127,6 +127,11 @@ fn use_default_profile(
     if args.profile.is_some() || args.config.is_some() || !args.patch.is_empty() {
         return Ok(());
     }
+    // `--from-default-profile` replaces a profile, so it must name one: the check after this refuses it without
+    // `--profile`. Choosing `default` here first would turn that refusal into a reset of the default profile.
+    if args.from_default_profile.is_some() {
+        return Ok(());
+    }
     if args.command.is_none() && args.turn.is_none() {
         return Ok(());
     }
