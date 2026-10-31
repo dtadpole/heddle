@@ -172,7 +172,11 @@ test('the header jobs control shows a background job, streams its output while e
     const triggerLabel = `document.getElementById('jobs-trigger')?.getAttribute('aria-label') ?? null`
     const item = `document.querySelector('#jobs-menu li.jobs-item[data-job-id=${JSON.stringify(id)}]')`
 
-    await browser.goto(server.url)
+    /**
+     * Opened on the quiet session by name: a first visit starts a fresh New session (#17), and among blank sessions only
+     * the open one is a row (C2), so the quiet blank would otherwise not be drawn.
+     */
+    await browser.gotoSession(server.url, quiet)
 
     // 1. A session with no jobs shows no control at all.
     await openSessionRow(quiet)
@@ -383,7 +387,8 @@ test('archiving from the row with a background job running opens DSH\'s stop-and
     const metaOf = async () => (await server.api('/api/sessions')).body.find((entry) => entry.id === session)
     assert.equal((await jobOf())?.status, 'running', 'the background job runs')
 
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, session)
     const row = `document.querySelector('li[data-session-id=${JSON.stringify(session)}]')`
     const archive = `${row}?.querySelector('button[aria-label="Archive session"]')`
     await browser.waitFor(`${archive} != null`, 20_000)

@@ -262,7 +262,8 @@ test("a /goal typed in the composer shows DSH's Command input bubble and result 
       await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
       await browser.waitFor(`${FIELD} !== null`, 10_000)
     }
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await showSession()
 
     // A12: the create. The person's line is a bubble, the result is DSH's goal card, and the goal service holds it.
@@ -306,7 +307,8 @@ test("a /goal typed in the composer shows DSH's Command input bubble and result 
     }
 
     // A13: a reload rebuilds every bubble and card from the session's log, in place.
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await showSession()
     await browser.waitFor(`${BUBBLES}.length === 4 && ${SETTLED}.length === 4`, 15_000)
     assertFourRuns(await transcript(browser), 'after a reload')
