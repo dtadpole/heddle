@@ -1806,7 +1806,12 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
    * append points only, so the view sometimes sat above the bottom while the answer was still growing (the owner's
    * "sometimes it does not follow").
    */
-  const longText = Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n')
+  /**
+   * Forty paragraphs, not forty lines: the settled answer is rendered as markdown without soft breaks, so lines joined
+   * by a single newline collapse into one paragraph once the turn ends. The transcript then shrinks, and a reader
+   * scrolled to the top could sit 0-78 px from the floor (developer-twelve's diagnosis, #94).
+   */
+  const longText = Array.from({ length: 40 }, (_, index) => `line ${index + 1} of an answer long enough to scroll`).join('\n\n')
   const steps = () => [
     ...Array.from({ length: 8 }, (_, index) => ({ reasoning: `thinking ${index + 1}`, toolCall: { name: 'bash', arguments: { command: 'sleep 0.2' } } })),
     { toolCall: { name: 'write_file', arguments: { path: join(fixtureDir('unused'), 'never.txt'), content: 'x\n' } } },
@@ -1816,6 +1821,25 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
   const browser = await openBrowser({ width: 1100, height: 700 })
   const distance = () => browser.evaluate('Math.round((() => { const log = document.getElementById("log"); return log.scrollHeight - log.scrollTop - log.clientHeight })())')
   const rows = () => browser.evaluate('document.querySelectorAll("#log .turn").length')
+  /**
+   * Whether the transcript reaches its floor within a few animation frames (#94). The page re-pins one frame after a
+   * change (`followChatTail` runs in `requestAnimationFrame`), so a distance read at once lands between an append and
+   * its frame whenever the machine is busy: 5 of 20 recorded gate runs failed at 7/11 samples, and passed on re-run.
+   * Asking in the page, frame by frame, keeps the claim (a page that does not follow never reaches the floor, so it
+   * still fails) without racing the frame.
+   */
+  const reachesFloor = () =>
+    browser.evaluate(`new Promise((resolve) => {
+      const log = document.getElementById('log')
+      let frames = 0
+      const look = () => {
+        if (Math.round(log.scrollHeight - log.scrollTop - log.clientHeight) <= 1) return resolve(true)
+        frames += 1
+        if (frames >= 5) return resolve(false)
+        requestAnimationFrame(look)
+      }
+      look()
+    })`)
   try {
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 25_000)
@@ -1829,18 +1853,21 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
       const running = await browser.evaluate('document.getElementById("send").hidden')
       if ((await rows()) > 6) {
         observed += 1
-        if ((await distance()) <= 1) followed += 1
+        if (await reachesFloor()) followed += 1
       }
       if (!running && observed > 0) break
       await new Promise((resolve) => setTimeout(resolve, 150))
     }
     assert.ok(observed > 2, `the turn was observed growing (${observed} samples)`)
-    /** A sample can land between a growth and its animation frame, so the claim is "follows", not "every 100ms". */
+    /** Each sample gives the page its frames to re-pin, so the claim is "follows", not "every 150ms". */
     assert.ok(followed >= Math.ceil(observed * 0.8), `the transcript followed the floor as it grew (${followed}/${observed} samples at the bottom)`)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("line 40 of an answer")', 20_000), 'the long answer arrived')
     /** The settled document and the final layout land after the last append — still at the floor. */
     await new Promise((resolve) => setTimeout(resolve, 1200))
     assert.ok((await distance()) <= 1, `the settled answer is still at the floor (${await distance()}px away)`)
+    /** The precondition for the scroll-back steps below: the settled transcript is tall enough to leave the floor. */
+    const overflow = Number(await browser.evaluate('(() => { const log = document.getElementById("log"); return Math.round(log.scrollHeight - log.clientHeight) })()'))
+    assert.ok(overflow > 300, `the settled transcript overflows its view enough to scroll back (${overflow}px)`)
 
     /**
      * A reader who scrolls back is not yanked, and a second turn keeps growing above them. The wheel is what
@@ -1849,6 +1876,15 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
      */
     await sendMessage(browser, 'one more')
     assert.ok(await browser.waitFor('document.getElementById("send").hidden === true', 10_000), 'the second turn is running')
+    /**
+     * Scrolling back means something only while the transcript overflows its view by more than the claim's 100 px.
+     * Gate runs saw the reader 0 and 78 px from the floor right after scrolling to the top, a transcript momentarily
+     * barely taller than its view (#94). The second turn is still adding rows, so the check waits for the overflow.
+     */
+    assert.ok(
+      await browser.waitFor('(() => { const log = document.getElementById("log"); return log.scrollHeight - log.clientHeight > 300 })()', 10_000).catch(() => false),
+      'the transcript overflows its view enough to scroll back',
+    )
     const markAway = await rows()
     await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = 0 })()')
     await new Promise((resolve) => setTimeout(resolve, 250))
@@ -1860,13 +1896,26 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
     )
     assert.ok((await distance()) >= awayFrom - 2, `and it does not pull the reader back (${await distance()} vs ${awayFrom})`)
 
-    /** Scrolling back to the floor re-engages following, as the reference's near-bottom test does. */
-    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+    /**
+     * Scrolling back to the floor re-engages following, as the reference's near-bottom test does. Both judge the
+     * reader's arrival against the floor when the scroll is sampled (DSH's `ScrollFollow.sample` reads the metrics at
+     * that moment), so while the stream grows, an arrival can land a frame short of a floor that has just moved, and
+     * the reader scrolls again (#94: two re-runs timed out waiting for the re-engaged follow). The check does what the
+     * reader does, up to three times, until the page's own intent says it follows; a page that never re-engages fails.
+     */
+    let engaged = false
+    for (let attempt = 0; attempt < 3 && !engaged; attempt += 1) {
+      await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+      engaged = await browser.waitFor('document.getElementById("log").dataset.following === "true"', 3000).catch(() => false)
+    }
+    assert.ok(engaged, 'scrolling back to the floor re-engages following')
     assert.ok(
       await browser.waitFor('Math.round((() => { const log = document.getElementById("log"); return log.scrollHeight - log.scrollTop - log.clientHeight })()) <= 1', 10_000),
       'the floor is reachable again',
     )
     const markFollow = await rows()
+    /** The second turn may have ended during the return; a third gives the re-engaged follow growth to follow. */
+    if (!(await browser.evaluate('document.getElementById("send").hidden'))) await sendMessage(browser, 'and once more')
     assert.ok(
       await browser.waitFor(`document.querySelectorAll("#log .turn").length > ${markFollow}`, 15_000),
       'and more content arrives',

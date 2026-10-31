@@ -21,6 +21,7 @@ import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
+import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
@@ -531,7 +532,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page())
+      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -1299,9 +1300,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the path must be absolute' })}\n`)
       return
     }
+    /**
+     * A leading `~` is the home folder, and what is checked **and stored** is the canonical path of the expanded
+     * spelling — the Rust route's `canonical_path(expand_home(raw))` (heddle-server `add_workspace`). This route used
+     * to check the expanded path and store the raw string, which `canonicalPath` then resolved against the server's
+     * working folder: `~/x` became a record at `<cwd>/~/x`, a folder that does not exist (GitHub issue #1). heddle keeps
+     * the `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path that is not fully qualified
+     * (dsh-workspace `realpathNormalize`, lib/index.js:20-24, :48-50). The sentences keep the path as it was written.
+     */
+    const folder = canonicalPath(expandHome(path))
     let stat
     try {
-      stat = statSync(expandHome(path))
+      stat = statSync(folder)
     } catch {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${path} does not exist` })}\n`)
       return
@@ -1315,7 +1325,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a name must be lowercase letters, digits and dashes' })}\n`)
       return
     }
-    const { record, created } = workspaces.add(path, name)
+    const { record, created } = workspaces.add(folder, name)
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
   }
@@ -3238,8 +3248,19 @@ export function markedPage(html: string): string {
  * which on screen look identical. (It happened: the live daemon served a stale deployment checkout while the source
  * and the checks were already correct, and a row's geometry read as "not implemented".)
  */
-function page(): string {
-  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8'))
+function page(lang = 'en'): string {
+  return markedPage(readFileSync(join(import.meta.dirname, 'page.html'), 'utf8')).replace('<html lang="en">', `<html lang="${lang}">`)
+}
+
+/**
+ * The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one the
+ * browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`, as DSH
+ * writes it. The page's marker stays the file's own, so a language never reads as a different build.
+ */
+export function pageLanguage(ctx: Context, acceptLanguage: string | string[] | undefined): string {
+  const header = Array.isArray(acceptLanguage) ? acceptLanguage.join(',') : acceptLanguage
+  const locale = ctx.get('locale') as { forRequest(header: string | undefined): Locale } | undefined
+  return documentLanguage(locale?.forRequest(header) ?? negotiateLocale(undefined, acceptedLanguages(header)))
 }
 
 /** The addresses a person could reach this server on, for a LAN-aware message. */

@@ -9035,6 +9035,19 @@ function effectiveEffort(option, modelId) {
   return { levels, id, name }
 }
 
+/**
+ * Whether the seat's model is one its endpoint's catalogue no longer lists (issue #47).
+ *
+ * A session keeps the model it recorded after the configuration drops it, and its turns still name it, which is
+ * DSH's rule too ("a saved selection can still submit requests after its catalog entry disappears"). What DSH does
+ * not do is show the stale id as if it were a choice: "when the saved selection is absent from the catalog, the
+ * composer shows 'Select model' in regular weight and hides the reasoning effort caption". Restoring the entry
+ * restores its name and caption, because both are read from the catalogue each time the seat is drawn.
+ */
+function modelMissingFrom(option, modelId) {
+  return option !== undefined && modelId !== null && modelsOf(option).length > 0 && modelEntryOf(option, modelId) === undefined
+}
+
 /** The endpoint the seat is set to: the page's choice, then the run's nomination, then the first it offers. */
 function currentEndpointName() {
   const names = endpointOptions.map((option) => option.name)
@@ -9072,6 +9085,14 @@ function renderModelSeat() {
     return
   }
   const modelId = selectedModelId(option)
+  if (modelMissingFrom(option, modelId)) {
+    modelLabel.textContent = 'Select model'
+    modelEffort.hidden = true
+    modelEffort.textContent = ''
+    modelTrigger.setAttribute('aria-label', 'Select model')
+    modelTrigger.title = 'Select model'
+    return
+  }
   const label = modelId === null ? wanted : modelTitle(option, modelId)
   modelLabel.textContent = label
   const effort = effectiveEffort(option, modelId)
@@ -9256,16 +9277,76 @@ function buildRootPane() {
   const name = currentEndpointName()
   const option = configuredEndpoint(name)
   const modelId = option === undefined ? null : selectedModelId(option)
+  /** A model the catalogue no longer lists keeps DSH's placeholder here too, and has no Effort row (issue #47). */
+  const missingModel = modelMissingFrom(option, modelId)
   const label = option === undefined
     ? `${name ?? 'no model'} (not configured)`
-    : modelId === null ? option.name : modelTitle(option, modelId)
+    : missingModel ? 'Select model' : modelId === null ? option.name : modelTitle(option, modelId)
   modelMenu.append(menuCell('Model', label, 'model'))
-  const effort = option === undefined ? { name: undefined } : effectiveEffort(option, modelId)
+  const effort = option === undefined || missingModel ? { name: undefined } : effectiveEffort(option, modelId)
   /**
    * The Effort row exists only when the selected model publishes reasoning metadata. A model that declares no
    * levels has no row, because a control there would offer values the adapter would refuse to send.
    */
   if (effort.name !== undefined) modelMenu.append(menuCell('Effort', effort.name, 'effort'))
+}
+
+/**
+ * DSH's model search: `rankByName` from its UI primitives, which dsh-client-ui-model-selection applies within each
+ * provider (issue #51). A query matches a name case-insensitively when its characters appear **in order**, not
+ * necessarily together, so `dsflash` finds DeepSeek-V4.1-Flash. Within a group, prefix matches come first, then the
+ * alignment score, then catalogue order. The score is DSH's: one point per matched character, eight more at a word
+ * start (the name's start or after `-` or `_`), four more for a character right after the previous one, and a cost
+ * for each character skipped. Ported line for line, because the order a person sees is the claim.
+ */
+function nameMatchBonus(name, index) {
+  return index === 0 || name.charAt(index - 1) === '-' || name.charAt(index - 1) === '_' ? 8 : 0
+}
+
+/** The best alignment of `query` as a subsequence of `name` (both lower case), or `undefined` when it is not one. */
+function nameAlignment(name, query) {
+  if (query.length > name.length) return undefined
+  const none = Number.NEGATIVE_INFINITY
+  let previous = Array(name.length).fill(none)
+  for (let at = 0; at < name.length; at++) {
+    if (name.charAt(at) === query.charAt(0)) previous[at] = 1 + nameMatchBonus(name, at) - at
+  }
+  for (let q = 1; q < query.length; q++) {
+    const row = Array(name.length).fill(none)
+    let diagonal = none
+    let behind = none
+    let gapped = none
+    for (const [at, value] of previous.entries()) {
+      if (behind !== none) gapped = Math.max(gapped, behind + at - 2)
+      if (name.charAt(at) === query.charAt(q)) {
+        const gain = 1 + nameMatchBonus(name, at)
+        let best = none
+        if (diagonal !== none) best = diagonal + gain + 4
+        if (gapped !== none) best = Math.max(best, gapped + gain + 1 - at)
+        row[at] = best
+      }
+      behind = diagonal
+      diagonal = value
+    }
+    previous = row
+  }
+  let best = none
+  for (const value of previous) best = Math.max(best, value)
+  return best === none ? undefined : best
+}
+
+/** The entries whose name matches `query`, in DSH's order; every entry, unchanged, for an empty query. */
+function rankByName(entries, query, nameOf) {
+  const wanted = query.toLowerCase()
+  if (wanted === '') return entries
+  const ranked = []
+  entries.forEach((entry, index) => {
+    const name = nameOf(entry).toLowerCase()
+    const score = nameAlignment(name, wanted)
+    if (score !== undefined) ranked.push({ entry, index, prefix: name.startsWith(wanted), score })
+  })
+  ranked.sort((a, b) => Number(b.prefix) - Number(a.prefix) || b.score - a.score || a.index - b.index)
+  return ranked.map((item) => item.entry)
 }
 
 /** The models offered by every configured endpoint, endpoint first, filtered by the current query. */
@@ -9288,15 +9369,32 @@ function buildModelPane() {
   groups.className = 'model-groups scrollable'
   groups.setAttribute('role', 'menu')
   groups.setAttribute('aria-label', 'Model')
-  const query = showSearch ? modelQuery.trim().toLowerCase() : ''
-  const matches = (entry) => {
-    if (query.length === 0) return true
-    return `${entry.model.name ?? ''} ${entry.model.id} ${entry.option.name}`.toLowerCase().includes(query)
+  /** Leading and trailing spaces are ignored, and each endpoint's models are ranked on their own (DSH's rule). */
+  const query = showSearch ? modelQuery.trim() : ''
+  const byEndpoint = new Map()
+  for (const entry of all) {
+    const list = byEndpoint.get(entry.option.name) ?? []
+    list.push(entry)
+    byEndpoint.set(entry.option.name, list)
   }
-  const visible = all.filter(matches)
+  for (const [endpointName, entries] of [...byEndpoint]) {
+    const ranked = rankByName(entries, query, (entry) => entry.model.name ?? entry.model.id)
+    if (ranked.length === 0) byEndpoint.delete(endpointName)
+    else byEndpoint.set(endpointName, ranked)
+  }
+  const visible = [...byEndpoint.values()].flat()
   const currentName = currentEndpointName()
   const currentOption = configuredEndpoint(currentName)
   const currentModelId = currentOption === undefined ? null : selectedModelId(currentOption)
+  /**
+   * Opening highlights the current model, or the first row when it is not listed, so Enter keeps the choice at once
+   * (DSH: "Opening highlights the current model or the first available row"). `null` is the state a fresh pane, or a
+   * cleared query, starts in; typing sets the first result instead.
+   */
+  if (showSearch && modelHighlighted === null && visible.length > 0) {
+    const current = visible.findIndex((entry) => entry.option.name === currentName && entry.model.id === currentModelId)
+    modelHighlighted = current === -1 ? 0 : current
+  }
   const missing = chosenEndpoint !== null && currentOption === undefined
   if (missing) {
     const heading = document.createElement('div')
@@ -9304,12 +9402,6 @@ function buildModelPane() {
     heading.textContent = `${chosenEndpoint} — not configured`
     groups.append(heading)
     groups.append(modelOption({ name: chosenEndpoint }, { id: chosenModel ?? '(recorded model)' }, true, true))
-  }
-  const byEndpoint = new Map()
-  for (const entry of visible) {
-    const list = byEndpoint.get(entry.option.name) ?? []
-    list.push(entry)
-    byEndpoint.set(entry.option.name, list)
   }
   /**
    * The highlight is indexed by **visible** position, not by catalogue position: a query shrinks the list, and an
@@ -11006,7 +11098,7 @@ async function fillSettings() {
       return { failure: (error && error.message) || String(error) }
     }
   }
-  const [statusRead, endpointsRead, treeRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/tree')])
+  const [statusRead, endpointsRead, workspacesRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/workspaces')])
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
@@ -11028,23 +11120,56 @@ async function fillSettings() {
   if (list.length === 0 && endpointsRead.failure === undefined) models.append(settingsNote('no endpoint is configured in this profile'))
   for (const endpoint of list) models.append(settingsEndpoint(endpoint))
 
-  if (treeRead.failure !== undefined) {
-    workspaces.append(settingsNote(`could not read the workspaces: ${treeRead.failure}`))
+  if (workspacesRead.failure !== undefined) {
+    workspaces.append(settingsNote(`could not read the workspaces: ${workspacesRead.failure}`))
   }
-  const tree = treeRead.body ?? null
-  const roots = tree === null || !Array.isArray(tree.children) ? [] : tree.children
-  if (roots.length === 0 && treeRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
-  for (const root of roots) {
+  const views = workspacesRead.body ?? null
+  const records = views === null || !Array.isArray(views.workspaces) ? [] : views.workspaces
+  if (records.length === 0 && workspacesRead.failure === undefined) workspaces.append(settingsNote('no workspace root is registered yet'))
+  for (const { record, depth } of settingsWorkspaceOrder(records)) {
     const item = document.createElement('li')
     item.className = 'settings-workspace'
+    item.dataset.depth = String(depth)
+    item.style.marginLeft = `${depth * 1.25}rem`
     const title = document.createElement('span')
-    title.textContent = typeof root.label === 'string' ? root.label : root.path
+    title.textContent = typeof record.title === 'string' && record.title.length > 0 ? record.title : record.path
     const path = document.createElement('span')
     path.className = 'path'
-    path.textContent = root.path
+    path.textContent = record.path
     item.append(title, path)
     workspaces.append(item)
   }
+}
+
+/**
+ * Every registered workspace, each followed by the ones nested in it, indented by depth (issue #108).
+ *
+ * The section read `GET /api/tree`, whose `children` are only the top-level roots, so a workspace registered inside
+ * another one (`W/ws-01` under `W`) was missing from Settings without a word. `GET /api/workspaces` lists every
+ * record with its nearest enclosing workspace as `parent`; roots keep the record order and each one's nested
+ * workspaces follow it, as the left column's Workspace Tree groups them. A record whose parent is not in the list
+ * is a root, and a record is placed once even if the parents loop, so nothing registered is ever left out.
+ */
+function settingsWorkspaceOrder(records) {
+  const ids = new Set(records.map((record) => record.id))
+  const children = new Map()
+  for (const record of records) {
+    const parent = typeof record.parent === 'string' && ids.has(record.parent) ? record.parent : null
+    const list = children.get(parent) ?? []
+    list.push(record)
+    children.set(parent, list)
+  }
+  const ordered = []
+  const placed = new Set()
+  const visit = (record, depth) => {
+    if (placed.has(record.id)) return
+    placed.add(record.id)
+    ordered.push({ record, depth })
+    for (const child of children.get(record.id) ?? []) visit(child, depth + 1)
+  }
+  for (const root of children.get(null) ?? []) visit(root, 0)
+  for (const record of records) visit(record, 0)
+  return ordered
 }
 
 async function showSettings() {
