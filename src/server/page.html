@@ -4183,14 +4183,27 @@ function branchAction(row) {
     if (source === null || !Number.isSafeInteger(atSeq)) return
     button.disabled = true
     try {
-      const response = await fetch('/api/sessions/' + encodeURIComponent(source) + '/fork', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ atSeq }),
-      })
-      const body = await response.json().catch(() => ({}))
-      if (!response.ok || typeof body.session !== 'string') {
-        setNote(body.error ?? 'could not branch from that turn')
+      /**
+       * A refusal is said in DSH's words, never the server's, which name the session by its raw id (#79): the row fork's
+       * `WorkspaceTree.forkRefusal` (DSH's notice, `dsh-client-ui-workspace` lib/client.js:4647). A request that never got
+       * an answer is DSH's fork failure too, not an unhandled rejection; DSH's own Branch catches its fork as well
+       * (`dsh-client-ui-chat` lib/client.js:13266-13283).
+       */
+      let response
+      let body
+      try {
+        response = await fetch('/api/sessions/' + encodeURIComponent(source) + '/fork', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ atSeq }),
+        })
+        body = await response.json().catch(() => ({}))
+      } catch (error) {
+        setNote(WorkspaceTree.FORK_FAILED)
+        return
+      }
+      if (!response.ok || typeof body?.session !== 'string') {
+        setNote(WorkspaceTree.forkRefusal(body))
         return
       }
       setNote('')
