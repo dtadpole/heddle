@@ -7260,11 +7260,13 @@ async function showSession(id) {
     if (superseded()) return false
     return await failHistory(0, '', { error: error && error.message })
   }
-  if (superseded()) return false
+  // History was drawn already. A same-session replacement still leaves this requested session shown,
+  // but the older generation must not perform any further panel updates.
+  if (superseded()) return current === id
   await refreshGoal()
-  if (superseded()) return false
+  if (superseded()) return current === id
   await refreshTodo()
-  if (superseded()) return false
+  if (superseded()) return current === id
   /**
    * The reminders: the transcript's turn tails get their cards, then both sources are re-read — the cards first, so the
    * catalog read is newer than their mount and a task deleted since the turn reads "Deleted".
