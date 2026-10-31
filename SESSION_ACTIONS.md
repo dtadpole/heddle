@@ -269,6 +269,14 @@ store recording exactly one pin. Unit 334 and part 7 green after the change.
   This is read from the code, not observed in a running DSH. Heddle's `sessionActivity` /
   `heddle_session::session_activity` emit exactly that order; the page's dialog draws the families in the order
   received, as DSH's `activityLine` list does (`dsh-client-ui-workspace/lib/client.js:4232-4275`).
-- **The job slot.** The order has a place for `job` between the turn and the subagents; the jobs row's own archive
-  admission (developer-nine's) fills it. A job's or a reminder's id is never taken for a session to abort: the stop
-  walks only the `subagent` family.
+- **The jobs, in their slot.** The jobs row's own archive admission (developer-nine's, from main) fills the `job`
+  slot between the turn and the subagents: `sessionJobActivity` / `heddle_jobs::http::session_job_activity` (DSH's
+  `runningJobs`, the running or stopping jobs the session owns), read through `rowActivity` in TypeScript and the
+  binary's `JobActivity` behind the same port in Rust; `stop: true` kills each with `session archived` after the write
+  (`stopSessionJobs`, DSH's `dsh-jobs/lib/index.js:32-36`), together with the reminders' removal. The jobs row's own
+  `jobs` field stays beside `activity`. A running `bash` call is itself a job from its start (`promoteOnTimeout`, in
+  heddle's `runForeground` and in DSH, `dsh-tool-bash/lib/index.js:386-410`), so a turn sleeping in a foreground
+  command is refused as `[turn, job(<command>)]`. The first merge of main listed the job family **first**, reading
+  "`dsh-jobs` prepends its entry" as an order; but every listener prepends its own entry before `rest`, the turn's
+  too (`dsh-agent/lib/index.js:26-31`), so only registration order decides, and the job follows the turn. A job's or a
+  reminder's id is never taken for a session to abort: the stop walks only the `subagent` family.
