@@ -769,7 +769,10 @@ pub fn parse_arguments(raw: &str) -> ToolArgs {
 pub fn tool_message_text(result: &ToolResult) -> String {
     match &result.error {
         Some(error) if !result.output.is_empty() => {
-            format!("error ({}): {}\n{}", error.code, error.message, result.output)
+            format!(
+                "error ({}): {}\n{}",
+                error.code, error.message, result.output
+            )
         }
         Some(error) => format!("error ({}): {}", error.code, error.message),
         None if result.output.is_empty() => "(the tool produced no output)".to_owned(),
@@ -805,7 +808,6 @@ pub(crate) mod tests {
     use crate::ports::ModelRequestRecord;
     use crate::upstream::{Chunk, Message, SurfaceView};
 
-
     #[test]
     fn a_failed_result_keeps_its_output_below_the_error_line() {
         // Live-testing issue #82: the output of a failed bash call was dropped from the model-facing text.
@@ -821,7 +823,10 @@ pub(crate) mod tests {
             "error (INTERRUPTED): the command was stopped before it finished"
         );
         assert_eq!(tool_message_text(&ToolResult::ok("ok\n")), "ok\n");
-        assert_eq!(tool_message_text(&ToolResult::ok("")), "(the tool produced no output)");
+        assert_eq!(
+            tool_message_text(&ToolResult::ok("")),
+            "(the tool produced no output)"
+        );
     }
 
     #[test]
