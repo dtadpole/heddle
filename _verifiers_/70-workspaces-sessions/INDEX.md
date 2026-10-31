@@ -38,6 +38,9 @@ doubles. Nothing here needs a display, so it runs unattended.
 
 Since 29 Oct one more check judges the Web API's add, rename and delete of a workspace at DSH parity, on whichever
 build runs the part (TypeScript or `HEDDLE_BIN`): `the Web API adds, renames and deletes a workspace the way DSH does`.
+Another judges first use, DSH's `workspace/initializeDefault`: `first use creates or reuses default-workspace under the
+heddle home, once, the way DSH initializes its default` (an empty install only, reused on a repeated call, never given
+back once deleted, nothing made in the user's Documents).
 
 ## Where it stands, 2026-10-11
 

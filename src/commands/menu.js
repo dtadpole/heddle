@@ -1,0 +1,775 @@
+// The composer's slash-command menu, loaded by the page with `import('/commands/menu.js')` and installed over the
+// composer's text field. Owner: developer-three (D-057); the page hands over at three points (src/commands/INDEX.md).
+//
+// Modelled on DSH's dsh-client-ui-input-trigger and dsh-client-ui-commands, re-read from its source on 2026-10-29:
+// `/` at the caret opens a menu of the host's commands, grouped "Add" and "Commands" until something is typed; the
+// arrows move (wrapping), Enter or Tab picks, Escape or Shift+Tab closes and leaves that token alone. A command that
+// takes input becomes `/name ` with its hint shown; one that takes none runs at once. A run is never a prompt: the line
+// goes to `POST /api/sessions/{id}/commands`, and only a line the host does not recognise goes on to the model.
+//
+// One deliberate difference: DSH's web client sends `/compact foo` to the model as a prompt (the host would refuse
+// the argument, so the client never asks it). Here a registered command's name always reaches the host, which answers
+// with its own usage sentence — a command's name is never something the model is asked about.
+
+/** The line rule, the host's own (`src/commands/registry.ts`). */
+const COMMAND_LINE = /^\/([a-z][a-z0-9_-]*)(?=$|[\t\n\r ])/
+
+/**
+ * The commands whose runs show the person's line as a `Command input` bubble before the run's row. DSH's
+ * dsh-client-ui-goal registers its projection for `/goal` alone (`goalCommandInputDefinition` matches a `command/run`
+ * named `goal`), so a `/goal` stays visible as something the person said, live and after a reload.
+ */
+const INPUT_BUBBLE_COMMANDS = new Set(['goal'])
+
+/** The line a run's bubble shows: `/name` and the recorded raw remainder, trailing whitespace removed (DSH's `goalCommandText`). */
+export function commandInputText(name, args) {
+  return `/${name}${(args ?? '').trimEnd()}`
+}
+
+/** DSH's empty-query sections and their order. Unlisted names follow in their section, by name. */
+const SECTION_ORDER = { add: ['file', 'goal', 'plan', 'feedback'], commands: ['compact', 'permission', 'model', 'export'] }
+const SECTION_TITLES = { add: 'Add', commands: 'Commands' }
+
+/** What a claimed command shows while its input is still empty: DSH's composer hints. */
+const INPUT_HINTS = {
+  goal: 'describe the objective for a long-running task',
+  plan: 'describe your task to generate plan',
+  feedback: 'what would you like to tell us about this session?',
+  permission: 'read-only, workspace-write or danger-full-access',
+}
+
+/**
+ * The slash token the caret is in, or `null`.
+ *
+ * DSH's rule: scan left from the caret to whitespace; the token must start with `/` and hold no other `/` (a path
+ * such as `/usr/bin` is not a command), and the `/` must open the draft or follow whitespace or punctuation — never a
+ * word character or a `:` glued to a word, so `a/b` and `http://x` never open the menu.
+ */
+export function detectTrigger(text, caret) {
+  let start = caret
+  while (start > 0 && !/\s/.test(text[start - 1])) start -= 1
+  const token = text.slice(start, caret)
+  if (!token.startsWith('/') || token.indexOf('/', 1) !== -1) return null
+  const query = token.slice(1)
+  if (!/^[a-z0-9_-]*$/i.test(query)) return null
+  const before = text.slice(0, start)
+  return { start, end: caret, query, position: before.trim().length === 0 ? 'leading' : 'inline' }
+}
+
+/** Whether `query` is an ordered, case-insensitive subsequence of `value`. */
+function subsequence(query, value) {
+  let at = 0
+  for (const character of value.toLowerCase()) {
+    if (character === query[at]) at += 1
+    if (at === query.length) return true
+  }
+  return query.length === 0
+}
+
+/**
+ * The rows for a token: inline hides every command that takes input (DSH), an empty query is grouped, a typed one is
+ * ranked — prefixes of the name or label first, then any subsequence match.
+ */
+export function candidates(catalog, trigger) {
+  const visible = catalog.filter((entry) => trigger.position === 'leading' || entry.input === undefined)
+  const query = trigger.query.toLowerCase()
+  if (query.length === 0) {
+    const rows = []
+    for (const section of ['add', 'commands']) {
+      const order = SECTION_ORDER[section]
+      const members = visible
+        .filter((entry) => entry.section === section)
+        .sort((left, right) => rank(order, left.name) - rank(order, right.name) || left.name.localeCompare(right.name))
+      for (const entry of members) rows.push({ ...entry, group: SECTION_TITLES[section] })
+    }
+    return rows
+  }
+  const prefix = visible.filter((entry) => entry.name.startsWith(query) || entry.label.toLowerCase().startsWith(query))
+  const rest = visible.filter((entry) => !prefix.includes(entry) && (subsequence(query, entry.name) || subsequence(query, entry.label)))
+  return [...prefix, ...rest].map((entry) => ({ ...entry, group: 'Commands' }))
+}
+
+function rank(order, name) {
+  const index = order.indexOf(name)
+  return index === -1 ? order.length : index
+}
+
+/**
+ * Whether a submitted line belongs to the command layer rather than the model.
+ *
+ * A registered host command always does (its own handler refuses an argument it does not take). A page entry
+ * (`/model`, `/file`) does only bare, as DSH's does. Anything else — an unknown `/word`, a path, prose — does not.
+ */
+export function claims(catalog, text) {
+  const match = COMMAND_LINE.exec(text)
+  if (match === null) return false
+  const entry = catalog.find((candidate) => candidate.name === match[1])
+  if (entry === undefined) return false
+  if (entry.client === true) return text.trim() === `/${entry.name}`
+  return true
+}
+
+/** The page entries DSH's composer adds beside the host's commands, offered only when the page can perform them. */
+function clientEntries(api) {
+  const entries = []
+  if (typeof api.openFilePicker === 'function') {
+    entries.push({ name: 'file', label: 'File', description: 'Attach a file to the message', section: 'add', client: true, run: api.openFilePicker })
+  }
+  if (typeof api.openModelMenu === 'function') {
+    entries.push({ name: 'model', label: 'Model', description: 'Select the model for this conversation', section: 'commands', client: true, run: api.openModelMenu })
+  }
+  return entries
+}
+
+const STYLE = `
+.hc-backdrop { position: fixed; inset: 0; z-index: 70; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, .45); }
+.hc-feedback { width: min(488px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 20px; padding: 20px;
+  background: var(--surface, #232324); color: var(--text, #f9fafb); border: 1px solid var(--border, #353535);
+  border-radius: var(--radius-lg, 16px); box-shadow: var(--shadow-menu, 0 8px 24px -4px #0006); font: 14px/1.45 var(--font, system-ui); }
+.hc-feedback-head { display: flex; align-items: center; justify-content: space-between; }
+.hc-feedback-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.hc-feedback-close { background: none; border: 0; color: inherit; cursor: pointer; font-size: 16px; padding: 4px 6px; border-radius: 6px; }
+.hc-feedback-categories { display: flex; flex-wrap: wrap; gap: 8px; }
+.hc-feedback-categories button { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border, #353535);
+  background: none; color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
+.hc-feedback-categories button[aria-pressed='true'] { border-color: var(--accent, #2694fe); background: rgba(38, 148, 254, .16); }
+.hc-feedback-detail { min-height: 120px; resize: vertical; padding: 10px; border-radius: 10px; border: 1px solid var(--border, #353535);
+  background: rgba(255, 255, 255, .03); color: inherit; font: inherit; }
+.hc-feedback-foot { display: flex; justify-content: flex-end; }
+.hc-feedback-submit { padding: 6px 16px; border-radius: 8px; border: 0; background: var(--accent, #2694fe); color: #fff; font: inherit; cursor: pointer; }
+.hc-feedback-submit:disabled { opacity: .6; cursor: default; }
+.hc-toast { position: fixed; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 80; padding: 8px 14px; border-radius: 10px;
+  background: var(--surface, #232324); color: var(--text, #f9fafb); border: 1px solid var(--border, #353535); font: 13px/1.4 var(--font, system-ui); }
+.hc-menu, .hc-hint { position: fixed; z-index: 60; background: var(--surface, #232324); color: var(--text, #f9fafb);
+  border: 1px solid var(--border, #353535); border-radius: var(--radius-md, 12px); box-shadow: var(--shadow-menu, 0 2px 8px -2px #0003);
+  font: 13px/1.4 var(--font, system-ui); }
+.hc-menu { padding: 4px; max-height: 320px; overflow-y: auto; min-width: 280px; }
+.hc-menu[hidden], .hc-hint[hidden] { display: none; }
+.hc-group { padding: 6px 10px 2px; color: var(--chat-caption, #81858c); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.hc-row { display: flex; gap: 8px; align-items: baseline; padding: 6px 10px; border-radius: var(--radius, 8px); cursor: pointer; }
+.hc-row[aria-selected="true"] { background: var(--hover, #2c2c2c); }
+.hc-row .hc-name { font-weight: 600; }
+.hc-row .hc-token, .hc-row .hc-args { font-family: var(--mono, ui-monospace); color: var(--chat-muted, #adb2b8); font-size: 12px; }
+.hc-row .hc-desc { color: var(--chat-muted, #adb2b8); margin-left: auto; padding-left: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hc-hint { padding: 6px 10px; color: var(--chat-muted, #adb2b8); pointer-events: none; }
+.hc-command { margin: 8px 0; padding: 8px 12px; border: 1px solid var(--border, #353535); border-radius: var(--radius, 8px);
+  background: var(--surface, #232324); font: 13px/1.5 var(--font, system-ui); }
+.hc-command .hc-head { display: flex; gap: 8px; align-items: baseline; }
+.hc-command .hc-title { font-family: var(--mono, ui-monospace); font-weight: 600; }
+.hc-command .hc-args { font-family: var(--mono, ui-monospace); color: var(--chat-muted, #adb2b8); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hc-command .hc-state { margin-left: auto; color: var(--chat-caption, #81858c); font-size: 12px; }
+.hc-command .hc-text { margin-top: 4px; white-space: pre-wrap; color: var(--chat-secondary, #cfd3d6); }
+.hc-command[data-state="error"] { border-color: #b4483f; }
+.hc-command[data-state="error"] .hc-state { color: #e5786e; }
+.hc-input { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 100%; margin: 8px 0 0; }
+.hc-input .hc-input-stack { min-width: 0; max-width: min(calc(var(--chat-content-width, 748px) * .702), 82%); display: flex; flex-direction: column; align-items: flex-end; }
+.hc-input .hc-input-bubble { max-width: 100%; width: fit-content; padding: 10px 16px; border-radius: 20px; background: var(--chat-bubble, #2c2c2e);
+  color: var(--chat-text, #f9fafb); font-size: 14px; line-height: 22px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.hc-input .hc-chip { display: inline-block; padding: 0 6px; border-radius: 6px; background: var(--hover, #3a3a3c); font-family: var(--mono, ui-monospace);
+  font-size: 13px; line-height: 20px; vertical-align: baseline; cursor: default; }
+`
+
+/**
+ * Install the menu over the composer and answer the page's three hand-over points.
+ *
+ * `api` is what the page lends: `field` (the textarea), `anchor` (what the menu sits above), `sessionId()` (the
+ * session the composer is attached to, or null), `ensureSession()` (start one when there is none),
+ * `sendAsPrompt(text, attachments)` (the page's ordinary send, for a line the host does not recognise and for the words a
+ * `prompt` action hands on, each with the files the line carried), `addRow(node)` (append to the transcript),
+ * `notice(text)` (say something went wrong), `pendingAttachments()` and `takeAttachments()` (the composer's files), and
+ * optionally `openFilePicker()`, `openModelMenu()`, `openAccessMenu()`, `setModeChip(chip | null)` and
+ * `setPlaceholder(text | null)` (the page's `window.heddlePage` affordances).
+ */
+export function install(api) {
+  const field = api.field
+  const anchor = api.anchor ?? field.closest('form') ?? field.parentElement
+  let catalog = []
+  let rows = []
+  let selected = 0
+  let trigger = null
+  let dismissed = null
+  const drawn = new Map()
+
+  if (document.getElementById('hc-style') === null) {
+    const style = document.createElement('style')
+    style.id = 'hc-style'
+    style.textContent = STYLE
+    document.head.append(style)
+  }
+  const menu = document.createElement('div')
+  menu.className = 'hc-menu'
+  menu.id = 'slash-menu'
+  menu.setAttribute('role', 'listbox')
+  menu.setAttribute('aria-label', 'Commands')
+  menu.hidden = true
+  const hint = document.createElement('div')
+  hint.className = 'hc-hint'
+  hint.id = 'slash-hint'
+  hint.hidden = true
+  document.body.append(menu, hint)
+  field.setAttribute('aria-controls', 'slash-menu')
+
+  const ready = refresh()
+
+  async function refresh() {
+    try {
+      const response = await fetch('/api/commands', { credentials: 'same-origin' })
+      if (!response.ok) throw new Error(`the command list answered ${response.status}`)
+      const body = await response.json()
+      const host = Array.isArray(body.commands) ? body.commands : []
+      catalog = [...host.map((entry) => ({ ...entry, client: false })), ...clientEntries(api)]
+    } catch (error) {
+      catalog = clientEntries(api)
+      api.notice?.(`the command list could not be read: ${(error && error.message) || error}`)
+    }
+    update()
+    return catalog
+  }
+
+  function place(element) {
+    const box = anchor.getBoundingClientRect()
+    element.style.left = `${Math.round(box.left)}px`
+    element.style.bottom = `${Math.round(window.innerHeight - box.top + 6)}px`
+    element.style.maxWidth = `${Math.round(Math.max(280, box.width))}px`
+  }
+
+  function close() {
+    menu.hidden = true
+    field.setAttribute('aria-expanded', 'false')
+    trigger = null
+    rows = []
+  }
+
+  function render() {
+    menu.replaceChildren()
+    let group = null
+    rows.forEach((row, index) => {
+      if (row.group !== group) {
+        group = row.group
+        const heading = document.createElement('div')
+        heading.className = 'hc-group'
+        heading.textContent = group
+        menu.append(heading)
+      }
+      const option = document.createElement('div')
+      option.className = 'hc-row'
+      option.setAttribute('role', 'option')
+      option.dataset.command = row.name
+      option.setAttribute('aria-selected', index === selected ? 'true' : 'false')
+      const name = document.createElement('span')
+      name.className = 'hc-name'
+      name.textContent = row.label
+      const token = document.createElement('span')
+      token.className = 'hc-token'
+      token.textContent = `/${row.name}`
+      option.append(name, token)
+      if (row.input !== undefined) {
+        const args = document.createElement('span')
+        args.className = 'hc-args'
+        args.textContent = row.input.hint
+        option.append(args)
+      }
+      const description = document.createElement('span')
+      description.className = 'hc-desc'
+      description.textContent = row.description
+      option.append(description)
+      option.addEventListener('mousedown', (event) => {
+        event.preventDefault()
+        selected = index
+        pick()
+      })
+      option.addEventListener('mousemove', () => {
+        if (selected !== index) {
+          selected = index
+          render()
+        }
+      })
+      menu.append(option)
+    })
+    menu.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' })
+  }
+
+  function update() {
+    updateHint()
+    const found = detectTrigger(field.value, field.selectionStart ?? field.value.length)
+    if (found === null || (dismissed !== null && dismissed === found.start)) {
+      if (found === null) dismissed = null
+      close()
+      return
+    }
+    const next = candidates(catalog, found)
+    if (next.length === 0) {
+      close()
+      return
+    }
+    const sameToken = trigger !== null && trigger.start === found.start
+    trigger = found
+    rows = next
+    if (!sameToken || selected >= rows.length) selected = 0
+    place(menu)
+    menu.hidden = false
+    field.setAttribute('aria-expanded', 'true')
+    render()
+  }
+
+  function updateHint() {
+    const match = /^\/([a-z][a-z0-9_-]*)\s*$/.exec(field.value)
+    const entry = match === null ? undefined : catalog.find((candidate) => candidate.name === match[1] && candidate.input !== undefined)
+    if (entry === undefined || !/\s$/.test(field.value)) {
+      hint.hidden = true
+      return
+    }
+    hint.textContent = INPUT_HINTS[entry.name] ?? entry.input.hint
+    place(hint)
+    hint.hidden = false
+  }
+
+  function replaceToken(replacement) {
+    const value = field.value
+    field.value = `${value.slice(0, trigger.start)}${replacement}${value.slice(trigger.end)}`
+    const caret = trigger.start + replacement.length
+    field.setSelectionRange(caret, caret)
+    field.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  function pick() {
+    const row = rows[selected]
+    if (row === undefined || trigger === null) return
+    if (row.client === true) {
+      replaceToken('')
+      close()
+      row.run()
+      return
+    }
+    // DSH's /feedback decoration: picked from the menu, it opens the feedback dialog.
+    if (row.name === 'feedback') {
+      replaceToken('')
+      close()
+      openFeedback()
+      return
+    }
+    // DSH opens the access chip's presets for /permission picked from the menu; typed with a preset it runs.
+    if (row.name === 'permission' && typeof api.openAccessMenu === 'function') {
+      replaceToken('')
+      close()
+      api.openAccessMenu()
+      return
+    }
+    if (row.input !== undefined) {
+      replaceToken(`/${row.name} `)
+      close()
+      updateHint()
+      field.focus()
+      return
+    }
+    replaceToken('')
+    close()
+    void submit(`/${row.name}`)
+  }
+
+  document.addEventListener(
+    'keydown',
+    (event) => {
+      if (event.target !== field || menu.hidden || rows.length === 0) return
+      if (event.isComposing) return
+      const keys = ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape']
+      if (!keys.includes(event.key)) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.key === 'ArrowDown') selected = (selected + 1) % rows.length
+      else if (event.key === 'ArrowUp') selected = (selected - 1 + rows.length) % rows.length
+      else if (event.key === 'Escape' || (event.key === 'Tab' && event.shiftKey)) {
+        dismissed = trigger?.start ?? null
+        close()
+        return
+      } else {
+        pick()
+        return
+      }
+      render()
+    },
+    true,
+  )
+  field.addEventListener('input', update)
+  field.addEventListener('click', update)
+  field.addEventListener('keyup', (event) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'Home' || event.key === 'End') update()
+  })
+  field.addEventListener('blur', () => setTimeout(close, 120))
+  window.addEventListener('resize', () => {
+    if (!menu.hidden) place(menu)
+    if (!hint.hidden) place(hint)
+  })
+
+  /** Run a submitted line on the host; a line the host does not recognise goes on to the model. */
+  async function submit(text) {
+    await ready
+    hint.hidden = true
+    const entry = catalog.find((candidate) => candidate.client === true && text.trim() === `/${candidate.name}`)
+    if (entry !== undefined) {
+      entry.run()
+      return
+    }
+    // A bare `/feedback` opens the dialog, as DSH's decoration does; `/feedback <text>` records the text on the host.
+    if (text.trim() === '/feedback' && catalog.some((candidate) => candidate.name === 'feedback')) {
+      openFeedback()
+      return
+    }
+    // Files in the composer travel only with a command that takes them (DSH's /goal and /plan); any other command
+    // refuses them before anything runs, and the draft and the files stay where they are.
+    const named = COMMAND_LINE.exec(text)?.[1]
+    const command = catalog.find((candidate) => candidate.name === named)
+    const pending = typeof api.pendingAttachments === 'function' ? api.pendingAttachments() : 0
+    if (pending > 0 && command?.input?.attachments !== true) {
+      if (field.value.trim() === '') field.value = text
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      api.notice?.(`/${named} does not accept attachments; remove them first`)
+      return
+    }
+    // A line with no words after the name leaves the files in the composer: heddle's turn route needs words, so
+    // `/plan` alone could not send them on (DSH sends them as a wordless message), and they stay for the next message.
+    const words = text.trim().slice(1 + (named?.length ?? 0)).trim()
+    const attachments = pending > 0 && words.length > 0 && typeof api.takeAttachments === 'function' ? api.takeAttachments() : []
+    try {
+      let id = api.sessionId()
+      if (id === null && typeof api.ensureSession === 'function') id = await api.ensureSession()
+      if (id === null || id === undefined) throw new Error('open or start a session first')
+      const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/commands`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ line: text, ...(attachments.length > 0 ? { attachments } : {}) }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(body.error ?? `the command answered ${response.status}`)
+      if (body.matched !== true) {
+        api.sendAsPrompt(text, attachments)
+        return
+      }
+      // A command that shows its line as a bubble records that line (DSH's raw remainder), so the bubble drawn now is
+      // the one a reload draws from the log.
+      const rawInput = INPUT_BUBBLE_COMMANDS.has(body.name) ? text.slice(COMMAND_LINE.exec(text)?.[0].length ?? text.length) : undefined
+      draw({ type: 'command/run', commandId: body.commandId, name: body.name, ...(rawInput !== undefined ? { args: rawInput } : {}) })
+      draw({ type: 'command/done', commandId: body.commandId, kind: body.kind, ...(body.text !== undefined ? { text: body.text } : {}) })
+      // `/plan <words>`: the mode is on, and the words go to the model as the ordinary message DSH steers in, with the
+      // files the line carried.
+      if (body.kind === 'success' && body.action?.kind === 'prompt' && typeof body.action.text === 'string') {
+        api.sendAsPrompt(body.action.text, attachments)
+      }
+      if (body.kind === 'success' && body.action?.kind === 'download' && typeof body.action.href === 'string') {
+        const link = document.createElement('a')
+        link.href = body.action.href
+        link.download = ''
+        link.hidden = true
+        document.body.append(link)
+        link.click()
+        link.remove()
+      }
+    } catch (error) {
+      if (field.value.trim() === '') field.value = text
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      api.notice?.(`the command could not run: ${(error && error.message) || error}`)
+    }
+  }
+
+  /**
+   * Plan mode's composer face (DSH): a blue "Plan" chip that turns it off, and the placeholder "describe your task to
+   * generate plan". Drawn only through the page's own affordances, when it lends them; the state comes from
+   * `GET /api/sessions/{id}/plan` when a session is shown and from `plan/mode` events after that.
+   */
+  let planOn = false
+  let planSession = null
+
+  async function sessionShown(id) {
+    planSession = typeof id === 'string' && id.length > 0 ? id : null
+    planOn = false
+    if (planSession !== null) {
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(planSession)}/plan`, { credentials: 'same-origin' })
+        if (response.ok && planSession === id) planOn = (await response.json()).active === true
+      } catch {
+        // No plan service, or the server is away: the composer shows the default mode.
+      }
+    }
+    renderPlan()
+  }
+
+  /** What the composer last drew, so a show or a replayed event that changes nothing touches nothing on the page. */
+  let planDrawn = false
+
+  function renderPlan() {
+    if (planDrawn === planOn) return
+    planDrawn = planOn
+    if (typeof api.setModeChip === 'function') {
+      api.setModeChip(
+        planOn
+          ? {
+              id: 'plan',
+              label: 'Plan',
+              title: 'Plan mode on — click to turn off (/plan off)',
+              ariaLabel: 'Plan mode on, press to turn off',
+              onClick: () => void leavePlan(),
+            }
+          : null,
+      )
+    }
+    if (typeof api.setPlaceholder === 'function') api.setPlaceholder(planOn ? 'describe your task to generate plan' : null)
+  }
+
+  async function leavePlan() {
+    try {
+      const id = api.sessionId()
+      if (id === null) throw new Error('no session')
+      const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/commands`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ line: '/plan off' }),
+      })
+      const body = await response.json().catch(() => ({}))
+      if (!response.ok || body.matched !== true || body.kind !== 'success') throw new Error(body.text ?? body.error ?? 'refused')
+      draw({ type: 'command/run', commandId: body.commandId, name: body.name, args: 'off' })
+      draw({ type: 'command/done', commandId: body.commandId, kind: body.kind, ...(body.text !== undefined ? { text: body.text } : {}) })
+      planOn = false
+      renderPlan()
+    } catch {
+      api.notice?.('Failed to exit plan mode')
+    }
+  }
+
+  /**
+   * DSH's session feedback dialog (dsh-client-ui-message-feedback, read 2026-10-29): "Submit feedback", seven category
+   * chips (one at a time, a second click clears it), a details box whose placeholder says the log goes with it, and
+   * Submit. It records through `POST /api/sessions/{id}/feedback` — `feedback/record {text?, category?}` — and says
+   * "Thanks for your feedback", or "Could not save feedback" and stays open.
+   */
+  const FEEDBACK_CATEGORIES = [
+    ['task-result', 'Task result'],
+    ['instruction-following', 'Instruction understanding and following'],
+    ['product-interaction', 'Product features and interaction'],
+    ['service-stability', 'Stability and speed'],
+    ['resource-cost', 'Resource usage and cost'],
+    ['security-privacy-permission', 'Security, privacy, and permissions'],
+    ['other', 'Other'],
+  ]
+
+  function toast(text, holdMs = 3000) {
+    const node = document.createElement('div')
+    node.className = 'hc-toast'
+    node.setAttribute('role', 'status')
+    node.textContent = text
+    document.body.append(node)
+    setTimeout(() => node.remove(), holdMs)
+  }
+
+  function openFeedback() {
+    if (document.querySelector('.hc-feedback') !== null) return
+    const id = api.sessionId()
+    if (id === null) {
+      toast('Could not save feedback', 6000)
+      return
+    }
+    let category = null
+    const backdrop = document.createElement('div')
+    backdrop.className = 'hc-backdrop'
+    const dialog = document.createElement('div')
+    dialog.className = 'hc-feedback'
+    dialog.setAttribute('role', 'dialog')
+    dialog.setAttribute('aria-modal', 'true')
+    dialog.setAttribute('aria-labelledby', 'hc-feedback-title')
+    const head = document.createElement('div')
+    head.className = 'hc-feedback-head'
+    const title = document.createElement('h2')
+    title.id = 'hc-feedback-title'
+    title.textContent = 'Submit feedback'
+    const closeButton = document.createElement('button')
+    closeButton.type = 'button'
+    closeButton.className = 'hc-feedback-close'
+    closeButton.setAttribute('aria-label', 'Close')
+    closeButton.textContent = '✕'
+    head.append(title, closeButton)
+    const group = document.createElement('div')
+    group.className = 'hc-feedback-categories'
+    group.setAttribute('role', 'group')
+    group.setAttribute('aria-label', 'Feedback category')
+    for (const [value, label] of FEEDBACK_CATEGORIES) {
+      const chip = document.createElement('button')
+      chip.type = 'button'
+      chip.dataset.category = value
+      chip.setAttribute('aria-pressed', 'false')
+      chip.textContent = label
+      chip.addEventListener('click', () => {
+        category = category === value ? null : value
+        for (const other of group.children) other.setAttribute('aria-pressed', String(other.dataset.category === category))
+      })
+      group.append(chip)
+    }
+    const detail = document.createElement('textarea')
+    detail.className = 'hc-feedback-detail'
+    detail.setAttribute('aria-label', 'Feedback details')
+    detail.placeholder = 'Add details to help us improve. Your submission will include the current conversation log.'
+    const foot = document.createElement('div')
+    foot.className = 'hc-feedback-foot'
+    const submitButton = document.createElement('button')
+    submitButton.type = 'button'
+    submitButton.className = 'hc-feedback-submit'
+    submitButton.textContent = 'Submit'
+    foot.append(submitButton)
+    dialog.append(head, group, detail, foot)
+    backdrop.append(dialog)
+    document.body.append(backdrop)
+    detail.focus()
+
+    const dismiss = () => {
+      backdrop.remove()
+      field.focus()
+    }
+    closeButton.addEventListener('click', dismiss)
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) dismiss()
+    })
+    dialog.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        dismiss()
+      }
+    })
+    submitButton.addEventListener('click', async () => {
+      submitButton.disabled = true
+      submitButton.textContent = 'Submitting…'
+      detail.readOnly = true
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/feedback`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...(detail.value.trim() !== '' ? { text: detail.value } : {}), ...(category !== null ? { category } : {}) }),
+        })
+        if (!response.ok) throw new Error(`feedback answered ${response.status}`)
+        dismiss()
+        toast('Thanks for your feedback')
+      } catch {
+        submitButton.disabled = false
+        submitButton.textContent = 'Submit'
+        detail.readOnly = false
+        toast('Could not save feedback', 6000)
+      }
+    })
+  }
+
+  /** The row a run is shown in, created on its first event. */
+  function rowFor(commandId, name) {
+    let row = drawn.get(commandId)
+    if (row !== undefined && row.isConnected) return row
+    // A history render leaves a placeholder where the row belongs, so the transcript keeps its order.
+    const holder = [...document.querySelectorAll('.hc-command')].find((element) => element.dataset.commandId === commandId)
+    if (holder !== undefined && holder.querySelector('.hc-head') !== null) {
+      drawn.set(commandId, holder)
+      return holder
+    }
+    const placed = holder !== undefined
+    row = placed ? holder : document.createElement('div')
+    row.className = 'turn command hc-command'
+    row.dataset.kind = 'command'
+    row.dataset.commandId = commandId
+    row.dataset.state = 'running'
+    const head = document.createElement('div')
+    head.className = 'hc-head'
+    const title = document.createElement('span')
+    title.className = 'hc-title'
+    title.textContent = `/${name ?? 'command'}`
+    const args = document.createElement('span')
+    args.className = 'hc-args'
+    const state = document.createElement('span')
+    state.className = 'hc-state'
+    state.textContent = 'Running…'
+    head.append(title, args, state)
+    const text = document.createElement('div')
+    text.className = 'hc-text'
+    row.append(head, text)
+    drawn.set(commandId, row)
+    if (!placed) api.addRow(row)
+    return row
+  }
+
+  /**
+   * The `Command input` bubble a run shows just before its row: DSH's `GoalCommandInputView` — a right-aligned
+   * user-style bubble (`role="group"`, `aria-label="Command input"`, `data-command-input`) whose leading `/name` is a
+   * command chip that does nothing when clicked, the rest plain text, with no time, copy or branch actions. It is
+   * built from the run's `command/run`, the same way live and from history, so a reload rebuilds it.
+   */
+  function bubbleFor(row, commandId, name, args) {
+    let bubble = [...document.querySelectorAll('[data-command-input]')].find((element) => element.dataset.commandId === commandId)
+    if (bubble === undefined) {
+      bubble = document.createElement('div')
+      bubble.className = 'hc-input'
+      bubble.dataset.commandInput = ''
+      bubble.dataset.commandId = commandId
+      bubble.setAttribute('role', 'group')
+      bubble.setAttribute('aria-label', 'Command input')
+      const stack = document.createElement('div')
+      stack.className = 'hc-input-stack'
+      const body = document.createElement('div')
+      body.className = 'hc-input-bubble'
+      stack.append(body)
+      bubble.append(stack)
+    }
+    if (bubble.nextElementSibling !== row) row.before(bubble)
+    const text = commandInputText(name, args)
+    const body = bubble.querySelector('.hc-input-bubble')
+    if (body.textContent !== text) {
+      const token = `/${name}`
+      const chip = document.createElement('span')
+      chip.className = 'hc-chip'
+      chip.dataset.command = name
+      chip.title = token
+      chip.textContent = token
+      body.replaceChildren(chip, document.createTextNode(text.slice(token.length)))
+    }
+    return bubble
+  }
+
+  /** Draw a live `command/run` or `command/done` event; repeats of one event change nothing. */
+  function draw(event) {
+    if (event.type === 'plan/mode') {
+      planOn = event.active === true
+      renderPlan()
+      return
+    }
+    if (typeof event.commandId !== 'string') return
+    if (event.type === 'command/run') {
+      const row = rowFor(event.commandId, event.name)
+      if (typeof event.args === 'string') row.querySelector('.hc-args').textContent = event.args.trim()
+      if (INPUT_BUBBLE_COMMANDS.has(event.name) && row.isConnected) bubbleFor(row, event.commandId, event.name, event.args)
+      return
+    }
+    if (event.type === 'command/done') {
+      const row = rowFor(event.commandId, event.name)
+      const failed = event.kind === 'error'
+      row.dataset.state = failed ? 'error' : 'done'
+      row.querySelector('.hc-state').textContent = failed ? 'Command failed' : 'Completed'
+      row.querySelector('.hc-text').textContent = typeof event.text === 'string' ? event.text : ''
+    }
+  }
+
+  /** Draw a finished run from a session's history (`{kind: 'command', commandId, name, args?, state, text?}`). */
+  function drawTurn(turn) {
+    draw({ type: 'command/run', commandId: turn.commandId, name: turn.name, ...(turn.args !== undefined ? { args: turn.args } : {}) })
+    if (turn.state === 'done' || turn.state === 'error') {
+      draw({ type: 'command/done', commandId: turn.commandId, kind: turn.state === 'error' ? 'error' : 'success', ...(turn.text !== undefined ? { text: turn.text } : {}) })
+    }
+  }
+
+  return {
+    claims: (text) => claims(catalog, text),
+    submit,
+    draw,
+    drawTurn,
+    refresh,
+    /** For a session switch: rows belong to the transcript that is being replaced. */
+    forget: () => drawn.clear(),
+    /** The page shows a session: plan mode's chip and placeholder follow it. */
+    sessionShown,
+  }
+}
