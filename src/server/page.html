@@ -8491,7 +8491,21 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         liveUsage = undefined
         updateStatusBar()
         void refreshSessionStats()
-        for (const denial of payload.denials ?? []) add('denied', `${denial.tool}: ${denial.message}`)
+        /**
+         * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
+         *
+         * The turn's `done` comes on its own connection and can be handled before the answer's last deltas arrive on
+         * the event stream. A note appended then split the answer in two: the late text started a new row after the
+         * refusals (live-testing draft developer-five-9, seen on TS). With the answer as the newest row, each note goes
+         * just before it, so late text still lands in the answer. A turn with no answer row yet appends as before;
+         * its answer then follows the notes whole.
+         */
+        const answerRow = lastTurnRow()
+        for (const denial of payload.denials ?? []) {
+          add('denied', `${denial.tool}: ${denial.message}`)
+          const note = lastTurnRow()
+          if (answerRow !== null && answerRow.dataset.kind === 'assistant' && note !== null && note !== answerRow && note.dataset.kind === 'denied') answerRow.before(note)
+        }
         /**
          * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
          * reason travels on the completed event, so a reload shows it again from the transcript.
