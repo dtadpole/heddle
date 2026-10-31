@@ -6712,6 +6712,8 @@ async function restoreSelection() {
     return
   }
   const workspaces = Array.isArray(workspaceBody?.workspaces) ? workspaceBody.workspaces : []
+  /** Kept for New session's lookup too (#119), which a load in the flat list, where no tree is read, needs as well. */
+  if (Array.isArray(workspaceBody?.workspaces)) knownWorkspaces = workspaces
   const choice = WorkspaceTree.restoreChoice(saved, workspaces, sessions)
   if (choice.forget === true) rememberCurrent()
   if (choice.kind === 'saved') {
@@ -10302,6 +10304,14 @@ function chooseWorkspace(path) {
  */
 let treeTops = []
 
+/**
+ * `/api/workspaces`' last whole answer: every workspace with its `sessionIds`, archived sessions included, whatever the
+ * archive filter drew. New session finds the open session's workspace here (`WorkspaceTree.newSessionTarget`), because
+ * the drawn groups leave out an archived session under Hide archived, and the lookup then fell back to another
+ * project's folder (#119).
+ */
+let knownWorkspaces = []
+
 function readExpanded() {
   try {
     return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) ?? '[]'))
@@ -11620,33 +11630,24 @@ async function startSessionAt(node) {
  * context exists: the workspace row the person opened or added since the open session was chosen (`chosenWorkspace`),
  * then the open session's workspace (DSH's `currentWorkspaceId`, `lib/client.js:1505-1508`), then the selected row's
  * workspace, then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers
- * to "where am I", and the first one that applies wins.
+ * to "where am I", and the first one that applies wins. The order is `WorkspaceTree.newSessionTarget`, pure; this hands
+ * it the page's state. The open session's workspace is read from the whole index (`knownWorkspaces`, `sessionMetas`),
+ * not from the drawn groups, so an archived session open under Hide archived still starts New session in its own
+ * workspace rather than in the last remembered folder (#119).
  */
 function newSessionWorkspace() {
-  /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
-  const owner = (path) =>
-    treeTops
-      .filter((node) => path === node.path || path.startsWith(node.path + '/'))
-      .sort((left, right) => right.path.length - left.path.length)[0] ?? null
-  /** The workspace the person acted on last wins over the open session's, as a named workspace does in DSH (#25). */
-  if (chosenWorkspace !== null && chosenWorkspace.during === current) {
-    const byChoice = treeTops.find((node) => node.path === chosenWorkspace.path)
-    if (byChoice !== undefined) return byChoice
-  }
-  /** Then the open session's own workspace: it is the group the reader is looking at. */
-  if (current !== null) {
-    const byCurrent = treeTops.find((node) => node.group !== undefined && WorkspaceTree.containsSession(node.group, current, false))
-    if (byCurrent !== undefined) return byCurrent
-  }
-  if (selectedPath !== null && !selectedPath.startsWith('session:')) {
-    const bySelection = owner(selectedPath)
-    if (bySelection !== null) return bySelection
-  }
-  if (activeFolder !== null) {
-    const byFolder = owner(activeFolder)
-    if (byFolder !== null) return byFolder
-  }
-  return treeTops[0] ?? null
+  const path = WorkspaceTree.newSessionTarget({
+    workspaces: knownWorkspaces,
+    sessions: [...sessionMetas.values()],
+    drawn: treeTops.map((node) => node.path),
+    current,
+    chosen: chosenWorkspace,
+    selected: selectedPath,
+    folder: activeFolder,
+  })
+  if (path === null) return null
+  /** The drawn row when there is one; a workspace the filter left out (Archived only) is started in by its path alone. */
+  return treeTops.find((node) => node.path === path) ?? { kind: 'workspace', path, label: WorkspaceTree.basename(path) }
 }
 
 /**
@@ -12862,6 +12863,72 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * The registered workspace a session lives in, read from the **whole** index, whatever the archive filter draws:
+   * `workspaces` is `/api/workspaces`'s array and `sessions` `/api/sessions`, archived sessions included in both. DSH finds
+   * the open session's workspace in its full workspace list, by the account that names it (`dsh-client-ui-workspace`
+   * `lib/client.js:1503-1506`), and archiving never touches that account: an archived session keeps its `sessionIds` slot
+   * (`dsh-workspace` `lib/index.js:232-233`, `:502-503`; the README's "Archive filtering alone changes neither saved
+   * positions nor account membership"). Heddle's account is the session's canonical `cwd` mapped to its nearest root, which
+   * both servers derive into `sessionIds`; an adopted root counts for the registered workspace above it, where
+   * `deriveGroups` draws it. A session no workspace names yet (a list read before it was made) falls back to its own
+   * `cwd`: the deepest registered workspace containing it. Undefined for an unknown id or a session no registered
+   * workspace holds (an Ungrouped one).
+   */
+  function sessionWorkspace(workspaces, sessions, id) {
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.path === 'string') : []
+    const byId = new Map(list.map((entry) => [entry.id, entry]))
+    const named = list.find((entry) => (Array.isArray(entry.sessionIds) ? entry.sessionIds : []).includes(id))
+    const home = named === undefined ? undefined : registered(named) ? named : registeredAboveIn(named, byId)
+    if (home !== undefined) return home
+    const meta = (Array.isArray(sessions) ? sessions : []).find((entry) => entry !== null && typeof entry === 'object' && entry.id === id)
+    const cwd = typeof meta?.cwd === 'string' ? meta.cwd : ''
+    if (cwd.length === 0) return undefined
+    return list
+      .filter((entry) => registered(entry) && (cwd === entry.path || cwd.startsWith(entry.path.endsWith('/') ? entry.path : entry.path + '/')))
+      .sort((left, right) => right.path.length - left.path.length)[0]
+  }
+
+  /**
+   * Where the panel's New session starts — the header's button, its chord, and the Automation tasks page's New, which all
+   * call `startNewSession` — as a workspace path, or null with nowhere to start. DSH's `startSession` takes a named
+   * workspace, else the open session's, else its most recent one (`lib/client.js:1499-1508`); heddle's order is:
+   *
+   * 1. `chosen` — the workspace row the person opened or added beside the open session (`{ path, during }`, #25), while
+   *    that session is still `current` and the row is still `drawn`.
+   * 2. The open session's own workspace, from the whole index (`sessionWorkspace`), drawn or not. #119: this used to be
+   *    looked up among the drawn groups only, so with an archived session open under Hide archived it missed and the
+   *    session started in `folder`, the last remembered folder, which was another project's. When the open session's
+   *    workspace is known, nothing below is asked.
+   * 3. With no session open, or one no registered workspace holds: the workspace owning the `selected` row (a session row
+   *    does not count), then the one owning `folder` (the folder the prompt box was last aimed at), then the first `drawn`.
+   *
+   * `drawn` is the tree's registered workspace paths in its order; `workspaces` and `sessions` are the whole index.
+   */
+  function newSessionTarget(context = {}) {
+    const drawn = (Array.isArray(context.drawn) ? context.drawn : []).filter((path) => typeof path === 'string' && path.length > 0)
+    const current = typeof context.current === 'string' && context.current.length > 0 ? context.current : null
+    /** The deepest drawn workspace at or above a path, if any. */
+    const owner = (path) =>
+      drawn.filter((root) => path === root || path.startsWith(root + '/')).sort((left, right) => right.length - left.length)[0] ?? null
+    const chosen = context.chosen
+    if (chosen !== null && typeof chosen === 'object' && (chosen.during ?? null) === current && drawn.includes(chosen.path)) return chosen.path
+    if (current !== null) {
+      const home = sessionWorkspace(context.workspaces, context.sessions, current)
+      if (home !== undefined) return home.path
+    }
+    if (typeof context.selected === 'string' && !context.selected.startsWith('session:')) {
+      const bySelection = owner(context.selected)
+      if (bySelection !== null) return bySelection
+    }
+    if (typeof context.folder === 'string' && context.folder.length > 0) {
+      const byFolder = owner(context.folder)
+      if (byFolder !== null) return byFolder
+    }
+    return drawn[0] ?? null
+  }
+
+  /**
    * What an empty session list says (#107). DSH's `EmptySessions` (`dsh-client-ui-workspace` `lib/client.js:3005-3021`) is
    * drawn when the tree has no group (`:3344`) or the flat list no row (`:3384`): a glyph over the text, "No sessions yet"
    * (`empty.none`), and under `Archived only` "No archived sessions yet" (`empty.noneArchived`) with a "View other
@@ -13161,6 +13228,8 @@ const WorkspaceTree = (() => {
     savedSelection,
     recentWorkspace,
     restoreChoice,
+    sessionWorkspace,
+    newSessionTarget,
     EMPTY_TEXT,
     emptyList,
   }
@@ -15009,6 +15078,8 @@ async function renderTree() {
     setNote('could not read the workspaces: ' + (error && error.message))
     return
   }
+  /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
+  if (Array.isArray(workspaces)) knownWorkspaces = workspaces
   rowIndex.clear()
   noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))

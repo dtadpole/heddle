@@ -158,12 +158,13 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /body\[data-sidebar='collapsed'\] #new-session \{[\s\S]*?width: 36px;[\s\S]*?height: 36px;/, 'and it becomes a 36-pixel icon in the rail')
   assert.match(page, /let treeTops = \[\]/, 'the tree keeps the workspace rows the action needs')
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
+  assert.match(page, /const path = WorkspaceTree\.newSessionTarget\(\{/, 'by the tree block\'s pure order, which test/workspace-tree.test.ts judges')
   assert.match(
     page,
-    /if \(chosenWorkspace !== null && chosenWorkspace\.during === current\) \{[\s\S]*?const byChoice = treeTops\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = treeTops\.find/,
-    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace',
+    /if \(chosen !== null && typeof chosen === 'object' && \(chosen\.during \?\? null\) === current && drawn\.includes\(chosen\.path\)\) return chosen\.path\s*if \(current !== null\) \{\s*const home = sessionWorkspace\(context\.workspaces, context\.sessions, current\)/,
+    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace from the whole index (#119)',
   )
-  assert.match(page, /if \(selectedPath !== null && !selectedPath\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selectedPath\)/, 'then from the selected row\'s workspace')
+  assert.match(page, /if \(typeof context\.selected === 'string' && !context\.selected\.startsWith\('session:'\)\) \{\s*const bySelection = owner\(context\.selected\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
   assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
