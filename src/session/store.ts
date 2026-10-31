@@ -19,6 +19,7 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
+import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame } from './transcript.ts'
 
 /**
@@ -280,12 +281,31 @@ export function isReplacementOp(
 }
 
 /**
+ * Whether an event ends a model step for the fold: the next request, or the turn's retry or end.
+ *
+ * A chunk run that never got its `done` (a stop, a failed stream) ends here, and a message held for the step
+ * boundary is placed.
+ */
+export function endsStep(type: string): boolean {
+  return type === 'model/request' || type.startsWith('turn/')
+}
+
+/**
  * Fold a log into its surface.
  *
  * The chunk rule is where this store's own choice meets the surface: heddle records **every**
  * streamed chunk as it arrives, so an interrupted answer is not lost, while DSH settles a stream
  * into one message. The fold resolves that by giving the surface one node per run — the seq of its
  * first chunk — and deriving the run's message from the chunks that follow.
+ *
+ * **A message that lands mid-step is placed at the step boundary** (#30). A steer, a subagent's settlement notice and
+ * a teammate's mail are written when they arrive, which can be while the model is still streaming. Placed where it
+ * landed, such a message closed the run: the rest of the step became a second assistant node after it, the next
+ * request ended with that assistant message, the provider read it as a prefix to continue (in thinking mode it
+ * refused it for want of its reasoning), and the model never saw its own reply before the message. DSH claims such
+ * input at the next step boundary. So a message that lands while a run is open is held. It is placed when the run
+ * closes, or, when the step called tools, once their results are placed, so a call and its result stay adjacent. A
+ * new request, the turn's end or a replacement places whatever is still held.
  */
 export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
   const nodes: number[] = []
@@ -293,10 +313,27 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
   let contentGeneration = 0
   let replaceGeneration = 0
   let openChunk: number | undefined
+  /** The tool calls of the open run. */
+  let runCalls = new Set<string>()
+  /** The calls of the run that closed last whose results are not all placed yet. */
+  let awaiting = new Set<string>()
+  /** Messages that landed mid-step, in arrival order. */
+  let held: number[] = []
+  const place = (seq: number): void => {
+    nodes.push(seq)
+    contentGeneration += 1
+  }
+  const release = (): void => {
+    for (const seq of held) place(seq)
+    held = []
+    awaiting = new Set()
+  }
 
   for (const event of events) {
     const op = event.surfaceOp as SurfaceOp | undefined
     if (isReplacementOp(op)) {
+      release()
+      runCalls = new Set()
       const startIdx = nodes.indexOf(op.startSeq)
       const endIdx = nodes.indexOf(op.endSeq)
       if (startIdx === -1 || endIdx < startIdx) {
@@ -312,29 +349,67 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
       openChunk = undefined
       continue
     }
-    if (isSurfaceEligible(event.type) && event.type !== 'assistant/chunk') {
-      // A `message` the person or the model produced, or a `context/note` the harness wrote: both
-      // take a position, and neither is a chunk run.
-      nodes.push(event.seq)
-      contentGeneration += 1
+    if (endsStep(event.type)) {
       openChunk = undefined
+      runCalls = new Set()
+      release()
+      continue
+    }
+    if (isSurfaceEligible(event.type) && event.type !== 'assistant/chunk') {
+      // A `message` the person or the model produced, or a `context/note` the harness wrote: both take a position,
+      // and neither is a chunk run. Mid-step, the position is the step boundary.
+      if (openChunk !== undefined) {
+        held.push(event.seq)
+        continue
+      }
+      if (awaiting.size > 0) {
+        const message = event.message as { readonly role?: string; readonly toolCallId?: string } | undefined
+        if (message?.role === 'tool' && typeof message.toolCallId === 'string' && awaiting.has(message.toolCallId)) {
+          place(event.seq)
+          awaiting.delete(message.toolCallId)
+          if (awaiting.size === 0) release()
+        } else {
+          held.push(event.seq)
+        }
+        continue
+      }
+      place(event.seq)
       continue
     }
     if (event.type === 'assistant/chunk') {
       if (openChunk === undefined) {
-        nodes.push(event.seq)
-        contentGeneration += 1
+        place(event.seq)
         openChunk = event.seq
+        runCalls = new Set()
       }
       const chunk = event.chunk as Chunk | undefined
-      if (chunk?.type === 'done') openChunk = undefined
+      if (chunk?.type === 'tool-call') runCalls.add(chunk.id)
+      if (chunk?.type === 'done') {
+        openChunk = undefined
+        if (runCalls.size > 0) awaiting = runCalls
+        else release()
+        runCalls = new Set()
+      }
     }
   }
+  // The log may end mid-step (a turn still streaming, or its tools still running): what is held is shown at the end,
+  // and the next fold, over a longer log, places it at the boundary.
+  release()
 
   return { nodes, contentGeneration, replaceGeneration, replacements }
 }
 
-/** The message one node derives to, or null when it produces none. */
+/**
+ * The message one node derives to, or null when it produces none.
+ *
+ * A chunk run derives **one part per block, not one per delta**: consecutive `text-delta`s join into one `text` part
+ * and consecutive `reasoning-delta`s into one `reasoning` part, while a `tool-call` (or a switch between text and
+ * reasoning) starts the next part. That is DSH's assembly — `BlockAssembler.push` appends every delta of a block to one
+ * partial (`partial.text += chunk.text`, dsh-llm `lib/types/assembler.js:46-52`) — and it matters on the wire: the chat
+ * adapter keeps separate text blocks apart with a newline, so a part per delta handed the model its own earlier answer
+ * broken at every point where the stream split it (live-testing draft developer-five-2). The log itself still holds
+ * one event per chunk; only the derivation coalesces. The Rust twin is `derive_message` in heddle-session `surface.rs`.
+ */
 export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: number): Message | null {
   const event = bySeq.get(seq)
   if (event === undefined) return null
@@ -345,13 +420,25 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
   }
   if (event.type !== 'assistant/chunk') return null
   const content: ContentPart[] = []
+  /** Append a delta to the part it continues — the last one, when it is the same kind — or start a new part. */
+  const delta = (type: 'text' | 'reasoning', text: string): void => {
+    const last = content.at(-1)
+    if (last !== undefined && last.type === type) content[content.length - 1] = { type, text: last.text + text }
+    else content.push({ type, text })
+  }
   for (let index = seq; ; index += 1) {
     const next = bySeq.get(index)
-    if (next === undefined || next.type !== 'assistant/chunk') break
+    if (next === undefined) break
+    if (next.type !== 'assistant/chunk') {
+      // A message held for the step boundary, an inbox splice or any other note written while the model streamed is
+      // not part of its step (#30): the step runs to its `done`, or to a new request or the turn's end.
+      if (endsStep(next.type)) break
+      continue
+    }
     const chunk = next.chunk as Chunk | undefined
     if (chunk === undefined) continue
-    if (chunk.type === 'text-delta') content.push({ type: 'text', text: chunk.text })
-    else if (chunk.type === 'reasoning-delta') content.push({ type: 'reasoning', text: chunk.text })
+    if (chunk.type === 'text-delta') delta('text', chunk.text)
+    else if (chunk.type === 'reasoning-delta') delta('reasoning', chunk.text)
     else if (chunk.type === 'tool-call') content.push({ type: 'tool-call', id: chunk.id, name: chunk.name, arguments: chunk.arguments })
     else if (chunk.type === 'done') break
   }
@@ -613,6 +700,13 @@ export class SessionStore {
    * surface once per round, which is exactly where re-folding a long log on every call would show.
    */
   private readonly surfaceCache = new Map<string, { readonly count: number; readonly state: SurfaceState }>()
+
+  /**
+   * The automatic titles of this store's sessions (`./title.ts`, DSH's first-prompt title). Idle until a model is
+   * attached, which the session plugin does; it lives on the store so every service over this store shares one record
+   * of which call may still land.
+   */
+  readonly titles: SessionTitles = new SessionTitles(this)
 
   constructor(
     root: string = defaultSessionRoot(),
@@ -971,6 +1065,8 @@ export class SessionStore {
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
+    /** A first prompt waits for a title, and the turn's `model/request` starts it (`./title.ts`); never throws. */
+    this.titles.observe(handle, record)
     return record
   }
 

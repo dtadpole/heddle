@@ -26,6 +26,7 @@ import { canonicalPath, isUnder } from '../paths.ts'
 import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
+import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
@@ -719,6 +720,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   }
 
   /**
+   * Content search: DSH's `session.search` (dsh-api-session-controller lib/index.js:2010-2123), the sessions whose
+   * user or assistant messages hold `q` as a phrase, ranked, at most 20, each with its snippet, and `hasMore`. The
+   * rules live in `src/session/search.ts`; a refused query answers 400 with DSH's sentence. Matched before the
+   * `/api/sessions/<id>` routes below, which would otherwise answer it as "not a session id".
+   */
+  if (url.pathname === '/api/sessions/search' && request.method === 'GET') {
+    try {
+      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '')
+      respond(response, 200, 'application/json', `${JSON.stringify(page, null, 2)}\n`)
+    } catch (error) {
+      const refused = error instanceof SessionSearchQueryError
+      const message = refused ? error.message : `session search failed: ${String(error)}`
+      respond(response, refused ? 400 : 500, 'application/json', `${JSON.stringify({ error: message })}\n`)
+    }
+    return
+  }
+
+  /**
    * What a session can be switched onto.
    *
    * The composer's model seat needs the list before it can offer anything, and the list is the model
@@ -1288,6 +1307,44 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         return
       }
       respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
+    }
+    return
+  }
+
+  /**
+   * Move a workspace in the stored order — DSH's `workspace/insertBefore` (dsh-api-workspace-controller lib/index.js:
+   * 262-269), what dropping a dragged workspace row asks for.
+   *
+   * `{workspaceId, beforeWorkspaceId?}` (an id or a path each): before the anchor, or last without one. The answer is
+   * DSH's `{workspaceIds}`, the complete order; a workspace or anchor not in it is `404` with DSH's
+   * `workspace/not-found` and sentence. The order lives with the host, in the record file, so it holds across a
+   * reload, a restart and the other build.
+   */
+  if (url.pathname === '/api/workspaces/insertBefore' && request.method === 'POST') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    if (typeof body.workspaceId !== 'string' || body.workspaceId.length === 0) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a workspaceId is required' })}\n`)
+      return
+    }
+    const before = body.beforeWorkspaceId
+    if (before !== undefined && before !== null && (typeof before !== 'string' || before.length === 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'beforeWorkspaceId must be a workspace id' })}\n`)
+      return
+    }
+    try {
+      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
+    } catch (error) {
+      const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
+      if (!missing) throw error
+      const id = String((error as { workspaceId?: unknown }).workspaceId)
+      respond(response, 404, 'application/json', `${JSON.stringify({ error: `Workspace "${id}" not found`, code: 'workspace/not-found' })}\n`)
     }
     return
   }
@@ -2206,7 +2263,12 @@ export function sessionRequestSelection(
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
   }
-  if (typeof body.prompt !== 'string' || body.prompt.length === 0) {
+  /**
+   * A prompt of only whitespace is no prompt (#32). Measured: `"   "` was accepted and ran a model turn while `""`
+   * was refused. DSH refuses content without non-whitespace text (`hasPromptContent`, "prompt content must include
+   * non-whitespace text or an attachment"); a prompt here always carries its text, so blank text is refused.
+   */
+  if (typeof body.prompt !== 'string' || body.prompt.trim().length === 0) {
     respond(response, 400, 'text/plain', 'a prompt is required\n')
     return
   }

@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.3.0
+version: 1.4.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -32,6 +32,12 @@ The log also carries the session's **inbox** ([`inbox.ts`](inbox.ts)): what a pe
 turn that the turn has not taken yet. It is DSH's agent inbox, recorded with DSH's `agent/inbox/spliced` event.
 A steer is queued in the next-step list, the loop writes it at its next step boundary (after any tool result
 still due), a stop keeps it, and the next turn writes it before its own prompt (R-developer-two-5).
+
+The log is also what **content search** reads ([`search.ts`](search.ts)): DSH's `session.search`, the sessions whose
+current user or assistant messages hold a phrase, ranked and quoted as DSH's SQLite FTS5 index answers. heddle has no
+SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-generate.ts`](unicode61-generate.ts) into
+[`unicode61.ts`](unicode61.ts) and its Rust twin, and the search is a scan that re-reads a log only when it changed
+(R-developer-eight-19).
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is

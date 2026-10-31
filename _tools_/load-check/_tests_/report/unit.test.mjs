@@ -42,7 +42,7 @@ const base = {
     { index: 2, state: 'free' },
   ],
   processes: [],
-  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, memWarnPct: 30, memStopPct: 25, swapWarnMb: 7424, swapStopMb: 7680, slots: 3 },
+  thresholds: { diskStopGb: 20, diskWarnGb: 26, loadWarnPerCore: 1.5, loadStopPerCore: 2, teamWarnPerCore: 1, teamStopPerCore: 1.3, memWarnPct: 30, memStopPct: 25, slots: 3 },
 }
 
 test('the machine sources are parsed from the commands a Mac answers with', () => {
@@ -146,18 +146,12 @@ test('the assessment warns and stops at the working model\'s lines', () => {
   const teamStop = assess({ ...base, processes: [{ pid: 7, cpu: 1400, command: '/x/rustc' }] })
   assert.equal(teamStop.loadVerdict, STOP)
 
-  // D-061 on an 8192M Mac: swap is sticky, so it is only a backstop at 7680M used
-  const swapAt = (usedMb) => assess({ ...base, swap: { totalMb: 8192, usedMb, freeMb: 8192 - usedMb } })
-  assert.equal(swapAt(7100).swapVerdict, OK, '7100M: the old 7168M line no longer holds a start back')
-  assert.equal(swapAt(7424).swapVerdict, WARN)
-  const under = swapAt(7679)
-  assert.equal(under.swapVerdict, WARN, 'just under the backstop: a start is allowed, one at a time')
-  assert.match(under.findings.join(','), /swap: 7679M used, under 7680M: one start at a time \(D-061\)/)
-  const over = swapAt(7680)
-  assert.equal(over.swapVerdict, STOP)
-  assert.match(over.findings.join(','), /swap: 7680M used >= 7680M, nothing new starts \(D-061 backstop\)/)
+  // D-064: swap is no gate, however full; it is reported as detail only
+  const fullSwap = assess({ ...base, swap: { totalMb: 10240, usedMb: 10200, freeMb: 40 } })
+  assert.equal(fullSwap.verdict, OK, 'a nearly full swap with healthy memory and disk changes nothing')
+  assert.equal(fullSwap.findings.some((f) => f.startsWith('swap')), false)
 
-  // D-061: memory_pressure free is the gate
+  // D-064: memory_pressure free is a gate
   const memAt = (freePct) => assess({ ...base, memory: { freePct } })
   assert.equal(memAt(30).memVerdict, OK)
   assert.equal(memAt(29).memVerdict, WARN)
@@ -165,7 +159,7 @@ test('the assessment warns and stops at the working model\'s lines', () => {
   const short = memAt(24)
   assert.equal(short.memVerdict, STOP)
   assert.equal(short.verdict, STOP)
-  assert.match(short.findings.join(','), /memory: 24% free < 25%, nothing new starts \(D-061\)/)
+  assert.match(short.findings.join(','), /memory: 24% free < 25%, nothing new starts \(D-064\)/)
   assert.equal(assess(base).memVerdict, OK, 'no reading, no memory finding')
 
   const stale = assess({ ...base, slots: [...base.slots.slice(1), { index: 2, state: 'stale', pid: 9, cargo: 0, age: 5, cwd: '/x' }] })
@@ -225,9 +219,9 @@ test('the team share and the desktop share are split from one process list, dete
 })
 
 test('thresholds come from the environment when they are set', () => {
-  const t = thresholdsFrom({ LOAD_CHECK_DISK_WARN_GB: '40', LOAD_CHECK_SWAP_STOP_MB: '8000', LOAD_CHECK_SLOTS: '5' })
+  const t = thresholdsFrom({ LOAD_CHECK_DISK_WARN_GB: '40', LOAD_CHECK_MEM_STOP_PCT: '20', LOAD_CHECK_SLOTS: '5' })
   assert.equal(t.diskWarnGb, 40)
-  assert.equal(t.swapStopMb, 8000)
+  assert.equal(t.memStopPct, 20)
   assert.equal(t.slots, 5)
   assert.equal(t.diskStopGb, 20, 'an unset threshold keeps its default')
 })
@@ -246,8 +240,6 @@ test('the command exits 0 on a healthy machine and 1 on a stale slot', (t) => {
     LOAD_CHECK_LOAD_STOP_PER_CORE: '1001',
     LOAD_CHECK_MEM_WARN_PCT: '0',
     LOAD_CHECK_MEM_STOP_PCT: '0',
-    LOAD_CHECK_SWAP_WARN_MB: '1000000000',
-    LOAD_CHECK_SWAP_STOP_MB: '2000000000',
     LOAD_CHECK_SLOTS: '30',
   }
   const healthy = spawnSync(process.execPath, [SCRIPT, '--home', home, '--slots', slots], { encoding: 'utf8', env: relaxed })
@@ -261,11 +253,11 @@ test('the command exits 0 on a healthy machine and 1 on a stale slot', (t) => {
   assert.match(stale.stdout, /verdict  warn: slots: 1 stale/)
 })
 
-test('memory_pressure is read and printed against the D-061 line', () => {
+test('memory_pressure is read and printed against the D-064 line', () => {
   assert.deepEqual(parseMemory('The system has 17179869184 (4194304 pages with a page size of 4096).\nSystem-wide memory free percentage: 41%\n'), { freePct: 41 })
   assert.throws(() => parseMemory('nothing here'), /memory_pressure not understood/)
   const sources = { ...base, memory: { freePct: 41 } }
   const text = format({ ...sources, at: 'now', thresholds: base.thresholds, assessment: assess(sources) })
-  assert.match(text, /^memory   41% free \[ok\] \(D-061: warn < 30%, stop < 25%\)$/m)
-  assert.match(text, /^swap .*\(D-061 backstop: warn >= 7424M, stop >= 7680M\)$/m)
+  assert.match(text, /^memory   41% free \[ok\] \(D-064: warn < 30%, stop < 25%\)$/m)
+  assert.match(text, /^swap .*, \d+M free \[detail\] \(not a gate: D-064\)$/m)
 })
