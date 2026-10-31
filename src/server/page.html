@@ -6077,7 +6077,10 @@ function renderTodo() {
   )
 }
 
+let sessionViewGeneration = 0
 async function showSession(id) {
+  const generation = ++sessionViewGeneration
+  const superseded = () => generation !== sessionViewGeneration || current !== id
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
   if (schedState.drawer !== null && schedState.drawer.sessionId !== id) closeScheduleDrawer()
@@ -6098,8 +6101,12 @@ async function showSession(id) {
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
   adoptSession(id)
   await refreshSessions()
+  if (superseded()) return
   syncSelectionToSession()
-  if (view === 'trajectory') await showLedger(id)
+  if (view === 'trajectory') {
+    await showLedger(id)
+    if (superseded()) return
+  }
   /**
    * The log is cleared and refilled from the session's own history.
    *
@@ -6109,6 +6116,7 @@ async function showSession(id) {
   log.replaceChildren()
   try {
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
+    if (superseded()) return
     if (!response.ok) {
       /**
        * A session that is no longer there is **not** the session being shown.
@@ -6128,6 +6136,7 @@ async function showSession(id) {
       return
     }
     const body = await response.json()
+    if (superseded()) return
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -6163,14 +6172,18 @@ async function showSession(id) {
     }
     followChatTail(true)
   } catch (error) {
+    if (superseded()) return
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
     note.className = 'turn denied'
     note.textContent = 'could not read this session: ' + (error && error.message)
     log.append(note)
   }
+  if (superseded()) return
   await refreshGoal()
+  if (superseded()) return
   await refreshTodo()
+  if (superseded()) return
   /**
    * The reminders: the transcript's turn tails get their cards, then both sources are re-read — the cards first, so the
    * catalog read is newer than their mount and a task deleted since the turn reads "Deleted".
