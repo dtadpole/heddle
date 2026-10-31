@@ -1,9 +1,9 @@
 ---
 title: The heddle-session public API
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T02:27:08Z
+modified: 2026-10-31T08:22:31Z
 level: L1
-version: 1.1.0
+version: 1.3.0
 description: Every item the crate re-exports at its root, and what each one is for.
 status: unverified
 grounded_in:
@@ -32,6 +32,7 @@ Everything is re-exported at the crate root.
 | `workspace_key`, `log_name`, `meta_name`, `transcript_in`, `default_session_root(&Env)` | where a log is filed |
 | `title_from`, `fork_title` | a session's label from its first message; `<title> (n)` |
 | `SessionTitles`, `TitleModel`, `LlmTitles`, `TitleAnswer`, `TitleDone`, `TitleSpawn`, `TitleTask`, `SESSION_TITLE_PURPOSE`, `normalize_session_title`, `title_from_answer` | the automatic first-prompt title (`src/session/title.ts`; DSH's `dsh-session-title` with its first-prompt model provider): `SessionService::attach_titles(model)` arms the store's shared coordinator (`SessionStore::titles()`), the first prompt's `model/request` starts one `session-title` call on that request's route, the answer replaces the `title_from` fallback through `rename`, and `SessionService::rename` supersedes it |
+| `open_turn_closers`, `interrupted_turn_closers`, `CloserCause`, `INTERRUPTED_RESULT` | the closers of a turn its writer never finished (`src/session/repair.ts`; DSH's `openTurnClosers`): an `error (INTERRUPTED)` result per open call, `assistant/completed`, `turn/completed` with `reason.kind`. `SessionStore::claim` appends them at a fresh write-open; `SessionService::events` adds them, unwritten, while `SessionStore::writer_held` is false (issue #5) |
 | `SessionError`, `SessionFlagError` | failures, with the TypeScript build's messages word for word |
 | `title_text::{clean_session_title, clean_title_text, truncate_title_utf8, MAX_TITLE_BYTES, TITLE_INVALID_CODE, TITLE_INVALID_MESSAGE}` | DSH's `normalizeSessionTitle` at its shipped 80-byte cap (`src/session/title-text.ts`): `rename`, `create` and the definition writers clean every title with it, and the server's title route answers `400 session/title-invalid` when nothing visible is left. Reached by its module path, not re-exported at the root |
 | `command::{run, Command, Args, Context, refuse, write_pretty}` | `heddle sessions` and `heddle transcript`, answered here (D-043); `session new` is in `heddle_workspace::command` |
