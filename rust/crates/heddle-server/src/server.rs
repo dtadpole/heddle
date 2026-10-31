@@ -1139,8 +1139,15 @@ async fn flags_session(
             .collect();
         if running || !jobs.is_empty() {
             if !stop {
+                let error = if running {
+                    format!("session {id} is running; pass stop: true to stop it and archive")
+                } else {
+                    format!(
+                        "session {id} has running background jobs; pass stop: true to stop them and archive"
+                    )
+                };
                 let mut refusal = json!({
-                    "error": format!("session {id} is running; pass stop: true to stop it and archive"),
+                    "error": error,
                     "code": "active",
                     "running": state.runs().running(id.as_str()),
                 });
@@ -3093,6 +3100,10 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let refusal: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(refusal["code"], "active");
+        assert_eq!(
+            refusal["error"],
+            "session session-00000000-0000-0000-0000-000000000001 has running background jobs; pass stop: true to stop them and archive"
+        );
         assert_eq!(refusal["running"], 0);
         assert_eq!(
             refusal["jobs"],
