@@ -9,15 +9,17 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { isolatedHome, removeDir, repoRoot, runCli } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, repoRoot, runCli } from '../../_tools_/verify-runner/lib.mjs'
 
-/** An OpenAI-compatible double that answers every request with "ok" and keeps each request's model and effort. */
+/** An OpenAI-compatible double that answers every turn request with "ok" and keeps each one's model and effort. */
 async function recordingDouble() {
   const seen = []
   const server = createServer((request, response) => {
     let body = ''
     request.on('data', (chunk) => { body += chunk })
     request.on('end', () => {
+      /** A new session's title request is not a turn; this double judges turns (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       const parsed = JSON.parse(body || '{}')
       seen.push({ model: parsed.model, effort: parsed.reasoning_effort })
       response.writeHead(200, { 'content-type': 'text/event-stream' })
