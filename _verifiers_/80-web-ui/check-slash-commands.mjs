@@ -21,6 +21,14 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
 
 const CAPABILITY = 'the Web UI'
 
+/**
+ * Every test and every request is bounded, so a hang fails the test it happened in, by name. The lane once timed this
+ * file out on the Rust build after 300 s with no TAP kept (integrator-one, stack 7, one run in four), and an unbounded
+ * await could not say which test it was.
+ */
+const TEST_TIMEOUT_MS = 120_000
+const REQUEST_TIMEOUT_MS = 60_000
+
 async function startServer(label) {
   const home = isolatedHome(`slash-${label}`)
   const work = fixtureDir(`slash-${label}-work`)
@@ -71,13 +79,13 @@ function startCli(args, options) {
           child.kill('SIGKILL')
           reject(new Error(`heddle web printed no URL within 30s:\n${output}`))
         }
-      }, 30_000)
+      }, 30_000).unref()
     })()
   })
 }
 
 async function cookieFor(url) {
-  const handshake = await fetch(url, { redirect: 'manual' })
+  const handshake = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
   const cookie = handshake.headers.get('set-cookie')
   if (cookie === null) throw new Error(`the handshake set no cookie (status ${handshake.status})`)
   return cookie.split(';')[0]
@@ -85,6 +93,7 @@ async function cookieFor(url) {
 
 async function api(url, cookie, path, init = {}) {
   const response = await fetch(new URL(path, url), {
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     ...init,
     headers: { cookie, 'content-type': 'application/json', ...(init.headers ?? {}) },
   })
@@ -109,7 +118,7 @@ async function openSession(server, cookie) {
 
 /** The session's log as the Download log route serves it: the bytes and the parsed events. */
 async function sessionLog(server, cookie, id) {
-  const response = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/log`, server.url), { headers: { cookie } })
+  const response = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/log`, server.url), { headers: { cookie }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
   assert.equal(response.status, 200, 'the session log downloads')
   const text = await response.text()
   return { text, events: text.split('\n').filter((line) => line.trim() !== '').map((line) => JSON.parse(line)) }
@@ -129,7 +138,7 @@ function reachedModel(events, line) {
   )
 }
 
-test("the server lists DSH's host commands for the composer's slash menu", async (context) => {
+test("the server lists DSH's host commands for the composer's slash menu", { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('list')
   try {
@@ -154,7 +163,7 @@ test("the server lists DSH's host commands for the composer's slash menu", async
   }
 })
 
-test('a command line runs on the host, is recorded in the log, and never reaches the model', async (context) => {
+test('a command line runs on the host, is recorded in the log, and never reaches the model', { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('goal')
   try {
@@ -197,7 +206,7 @@ test('a command line runs on the host, is recorded in the log, and never reaches
   }
 })
 
-test('/export answers a download of exactly the bytes Download log serves, without the model', async (context) => {
+test('/export answers a download of exactly the bytes Download log serves, without the model', { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('export')
   try {
@@ -209,7 +218,7 @@ test('/export answers a download of exactly the bytes Download log serves, witho
     const href = ran.body.action?.href
     assert.equal(ran.body.action?.kind, 'download', 'the page is asked to download')
     assert.equal(typeof href, 'string')
-    const exported = await fetch(new URL(href, server.url), { headers: { cookie } })
+    const exported = await fetch(new URL(href, server.url), { headers: { cookie }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) })
     assert.equal(exported.status, 200)
     const exportedText = await exported.text()
     const { text, events } = await sessionLog(server, cookie, id)
@@ -246,7 +255,15 @@ async function providerDouble(text) {
     })
   })
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
-  return { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, bodies, close: () => server.close() }
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    bodies,
+    /** Kept-alive sockets are closed too, or the file's process could outlive its tests. */
+    close: () => {
+      server.closeAllConnections?.()
+      server.close()
+    },
+  }
 }
 
 /** A server whose one endpoint is the double, for checks that need real turns and a summary. */
@@ -274,7 +291,7 @@ async function startDoubleServer(label, text) {
   }
 }
 
-test('/compact summarises the conversation now: a compaction is logged and the context shrinks (C79)', async (context) => {
+test('/compact summarises the conversation now: a compaction is logged and the context shrinks (C79)', { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startDoubleServer('compact', 'noted')
   try {
@@ -282,6 +299,7 @@ test('/compact summarises the conversation now: a compaction is logged and the c
     const id = await openSession(server, cookie)
     for (const topic of ['the registry', 'the menu', 'the routes']) {
       const response = await fetch(new URL('/api/turn', server.url), {
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         method: 'POST',
         headers: { cookie, 'content-type': 'application/json' },
         body: JSON.stringify({ prompt: `Tell me about ${topic}. ${'Some long context to summarise. '.repeat(60)}`, folder: server.work, session: id }),
@@ -307,7 +325,7 @@ test('/compact summarises the conversation now: a compaction is logged and the c
   }
 })
 
-test("the feedback dialog's route records DSH's feedback/record, and /feedback <text> records the text (C81)", async (context) => {
+test("the feedback dialog's route records DSH's feedback/record, and /feedback <text> records the text (C81)", { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('feedback')
   try {
@@ -333,7 +351,7 @@ test("the feedback dialog's route records DSH's feedback/record, and /feedback <
   }
 })
 
-test('a line that names no command is left for the model, and nothing is recorded for it', async (context) => {
+test('a line that names no command is left for the model, and nothing is recorded for it', { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   const server = await startServer('unknown')
   try {
@@ -379,7 +397,7 @@ async function typeInto(browser, text) {
   await browser.send('Input.insertText', { text })
 }
 
-test('typing / opens the grouped menu at the caret, a picked command runs on the host, and its row survives a reload', async (context) => {
+test('typing / opens the grouped menu at the caret, a picked command runs on the host, and its row survives a reload', { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('menu')
@@ -476,7 +494,7 @@ test('typing / opens the grouped menu at the caret, a picked command runs on the
   }
 })
 
-test("/feedback opens DSH's feedback dialog; a category and details land in the session log (C81)", async (context) => {
+test("/feedback opens DSH's feedback dialog; a category and details land in the session log (C81)", { timeout: TEST_TIMEOUT_MS }, async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   const server = await startServer('feedback-dialog')
