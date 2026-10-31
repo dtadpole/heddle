@@ -11492,7 +11492,11 @@ fileBody.addEventListener('click', async (clickEvent) => {
   if (path === null || path.length === 0) return
   clickEvent.preventDefault()
   const at = (anchor.getAttribute('href') ?? '').split('#')[1] ?? ''
-  await openPath(path)
+  /** The same ticket as a chat link's: only the newest open may place the reader (developer-two's review of #41). */
+  const opening = openPath(path)
+  const ticket = fileFetches
+  await opening
+  if (ticket !== fileFetches) return
   if (at.length > 0) goToFragment(at)
   else fileBody.scrollTop = 0
 })
