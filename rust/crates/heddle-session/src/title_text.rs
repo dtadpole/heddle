@@ -303,6 +303,63 @@ mod tests {
         assert!(!text.contains("\"title\""), "no empty title key: {text}");
     }
 
+    /// A title of only terminal sequences and whitespace has nothing visible left, so it is a blank
+    /// title: the rename clears as three spaces do and a session created with it stores none (the Web
+    /// route refuses it, verifier 70). The cases `test/title-text.test.ts` pins.
+    #[test]
+    fn a_title_of_only_control_or_escape_characters_is_cleaned_to_nothing_as_a_blank_one_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().into_owned();
+        let store = SessionStore::new(&format!("{root}/sessions"), &Env::default());
+        let handle = store
+            .create(CreateOptions {
+                cwd: Some(root.clone()),
+                title: Some("kept title".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        for (what, sent) in [
+            ("three spaces", "   "),
+            ("a clear-screen sequence and a tab", "\u{1b}[2J\t"),
+            ("an empty window-title command", "\u{1b}]0;\u{7}"),
+            (
+                "a C1 control sequence, a reverse index and a line break",
+                "\u{9b}31m\u{1b}M\r\n",
+            ),
+        ] {
+            assert_eq!(
+                clean_session_title(sent),
+                "",
+                "{what}: nothing visible is left"
+            );
+            let kept = store.rename(&handle.id, "kept title").unwrap().unwrap();
+            assert_eq!(kept.title(), Some("kept title"));
+            let cleared = store.rename(&handle.id, sent).unwrap().unwrap();
+            assert_eq!(
+                cleared.title(),
+                None,
+                "{what}: the rename clears, as a blank one does"
+            );
+            assert_eq!(
+                file_title(&handle.meta),
+                None,
+                "{what}: no title key is left"
+            );
+            let made = store
+                .create(CreateOptions {
+                    cwd: Some(root.clone()),
+                    title: Some(sent.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let text = std::fs::read_to_string(&made.meta).unwrap();
+            assert!(
+                !text.contains("\"title\""),
+                "{what}: a session created with it stores none: {text}"
+            );
+        }
+    }
+
     #[test]
     fn a_definition_takes_the_same_cleaned_title_as_its_store_record() {
         let dir = tempfile::tempdir().unwrap();

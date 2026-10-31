@@ -6,6 +6,7 @@ import { test } from 'node:test'
 
 import { readSessionDefinition, updateSessionDefinition, writeSessionDefinition } from '../src/session/definition.ts'
 import { SessionStore } from '../src/session/store.ts'
+import { normalizeSessionTitle } from '../src/session/title-text.ts'
 
 /**
  * A session title is cleaned the way DSH cleans an accepted one (live-testing draft developer-six-1).
@@ -61,6 +62,35 @@ test('a session created with a title stores it cleaned, and one with nothing vis
     assert.equal((JSON.parse(readFileSync(made.meta, 'utf8')) as { title?: string }).title, 'made red here')
     const blank = store.create({ cwd: root, title: '\u200b \u0000' })
     assert.equal('title' in (JSON.parse(readFileSync(blank.meta, 'utf8')) as object), false, 'no empty title key is written')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+/**
+ * A title of only terminal sequences and whitespace has nothing visible left, so it is a blank title: the rename clears
+ * as three spaces do and a session created with it stores none (the Web route refuses it, verifier 70). None of the
+ * sequence reaches the record.
+ */
+const ONLY_CONTROLS: readonly (readonly [string, string])[] = [
+  ['three spaces', '   '],
+  ['a clear-screen sequence and a tab', '\u001b[2J\t'],
+  ['an empty window-title command', '\u001b]0;\u0007'],
+  ['a C1 control sequence, a reverse index and a line break', '\u009b31m\u001bM\r\n'],
+]
+
+test('a title of only control or escape characters is cleaned to nothing, as a blank one is', () => {
+  const { root, store } = scratch()
+  try {
+    const handle = store.create({ cwd: root, title: 'kept title' })
+    for (const [what, sent] of ONLY_CONTROLS) {
+      assert.equal(normalizeSessionTitle(sent), '', `${what}: nothing visible is left`)
+      assert.equal(store.rename(handle.id, 'kept title')?.title, 'kept title')
+      assert.equal(store.rename(handle.id, sent)?.title, undefined, `${what}: the rename clears, as a blank one does`)
+      assert.equal('title' in (JSON.parse(readFileSync(handle.meta, 'utf8')) as object), false, `${what}: no title key is left`)
+      const made = store.create({ cwd: root, title: sent })
+      assert.equal('title' in (JSON.parse(readFileSync(made.meta, 'utf8')) as object), false, `${what}: a session created with it stores none`)
+    }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

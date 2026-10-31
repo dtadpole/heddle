@@ -1854,6 +1854,67 @@ test('a session title is cleaned as DSH cleans it, at creation and on rename, an
   }
 })
 
+test('a session title of only control or escape characters is refused on rename, as a blank one is', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * DSH cleans a title before it judges it (dsh-session-title rename, lib/index.js:295-299), so a title that is only a
+   * terminal sequence and whitespace - a clear-screen and a tab, an empty window-title command, a C1 introducer - has
+   * nothing visible left and takes the path three spaces take: 400 session/title-invalid with DSH's sentence
+   * (dsh-api-session-controller lib/index.js:827-840), the title left alone. It must neither clear the title nor store
+   * the sequence, which the CLI's session list would print to a terminal. Measured on origin/main c9b9cc75 through both
+   * builds: each rename answered 200 and stored the sequence as sent less its surrounding whitespace.
+   */
+  const h = harness('title-controls')
+  let live
+  try {
+    const added = await runCli(adminArgs(h, ['workspace', 'add', h.work]), { env: h.env, cwd: h.work })
+    assert.equal(added.code, 0, `the fixture registered its own root\n${added.stdout}${added.stderr}`)
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      h.env,
+    )
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = async (path, body) => {
+      const response = await fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const text = await response.text()
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        parsed = text
+      }
+      return { status: response.status, body: parsed }
+    }
+    const stored = async (id) => {
+      const response = await fetch(`${origin}/api/sessions`, { headers: { cookie } })
+      return (await response.json()).find((meta) => meta.id === id)?.title
+    }
+
+    const made = await post('/api/sessions', { branch: h.work, title: 'kept title' })
+    assert.equal(made.status, 200, `a session is created with a title (${JSON.stringify(made.body)})`)
+    const id = made.body.session
+    assert.equal(await stored(id), 'kept title', 'and it holds that title')
+
+    for (const [what, sent] of [
+      ['a clear-screen sequence and a tab', '\u001b[2J\t'],
+      ['an empty window-title command', '\u001b]0;\u0007'],
+      ['a C1 control sequence, a reverse index and a line break', '\u009b31m\u001bM\r\n'],
+    ]) {
+      const refused = await post(`/api/sessions/${id}/title`, { title: sent })
+      assert.equal(refused.status, 400, `${what}: refused as three spaces are (${JSON.stringify(refused.body)})`)
+      assert.equal(refused.body.code, 'session/title-invalid', `${what}: with DSH's code`)
+      assert.equal(refused.body.error, 'session title must contain visible characters', `${what}: and DSH's sentence`)
+      assert.equal(await stored(id), 'kept title', `${what}: and the title is left as it was`)
+    }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('New session here, on an instance row, starts a session and writes its definition', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
