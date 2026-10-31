@@ -44,7 +44,8 @@ The registry's gate order, which the port keeps exactly: unknown (`UNKNOWN_TOOL`
 approval (`DENIED`) → `tools/pre-execute` (`HOOKED`) → escalation (`BAD_ARGS`, `ESCALATION_REFUSED`) → the mode,
 resolved once from the session's record or the deployment default and never from the arguments → `run` →
 `tools/post-execute`; a sandbox denial thrown by a tool is `SANDBOX`, any other failure `TOOL_FAILED`. `call`
-never fails: every refusal is a result the model reads.
+never fails: every refusal is a result the model reads. `read_file` classifies a missing file as `FS_NOT_FOUND` and a
+directory as `FS_NOT_REGULAR_FILE`, each `cannot read "<path>": …` with DSH's display spelling (issue #4).
 
 ## Where the port stands
 

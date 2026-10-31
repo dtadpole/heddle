@@ -3,6 +3,7 @@ import { join } from 'node:path'
 
 import { canonicalPath } from '../paths.ts'
 import type { SessionHandle } from './store.ts'
+import { normalizeSessionTitle } from './title-text.ts'
 
 /**
  * The **definition** of one session, written into the folder it belongs to.
@@ -142,12 +143,14 @@ export function writeSessionDefinition(
   const dir = join(ensureSessionsFolder(canonical), name)
   mkdirSync(dir, { recursive: true })
 
+  /** The store's rule for a title (`./title-text.ts`), so the definition and the record name the session alike. */
+  const title = options.title === undefined ? '' : normalizeSessionTitle(options.title)
   const fields: SessionDefinitionFields = {
     id: handle.id,
     log: handle.transcript,
     cwd: canonical,
     createdAt: options.createdAt,
-    ...(options.title !== undefined ? { title: options.title } : {}),
+    ...(title.length > 0 ? { title } : {}),
     ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
@@ -192,7 +195,8 @@ export function updateSessionDefinition(dir: string, patch: { readonly title?: s
   if (current === null) return false
   const next: SessionDefinitionFields = { ...current }
   if (patch.title !== undefined) {
-    const trimmed = patch.title.trim()
+    /** Cleaned as the store cleans a rename (`./title-text.ts`); nothing visible left deletes the key. */
+    const trimmed = normalizeSessionTitle(patch.title)
     if (trimmed.length === 0) delete (next as { title?: string }).title
     else (next as { title?: string }).title = trimmed
   }
