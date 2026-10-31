@@ -6,7 +6,8 @@ import { test } from 'node:test'
 
 import { createHash } from 'node:crypto'
 
-import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, inlineContentType, inlineScripts, pagePolicy, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
+import { attachmentDisposition, attachmentsOf, FILE_ANSWER_HEADERS, HIGHLIGHT_GRAMMARS, highlightAsset, inlineContentType, inlineScripts, pagePolicy, markedPage, pageAccess, scopeAttachmentUrls, tokenFormPage, transcriptTurns, abortSession } from '../src/server/web.ts'
+import { highlightCode } from '../src/server/highlight.ts'
 import { mergeUsage } from '../src/agent/loop.ts'
 
 /**
@@ -45,6 +46,83 @@ test('a person\'s message carries the logged event time, which is the clock its 
   assert.equal(asked.kind, 'user')
   assert.equal(asked.time, '2026-10-17T22:03:00.000Z', 'the user turn carries the event time')
   assert.equal(answered.kind, 'assistant')
+})
+
+test('a goal round is a user turn that names its trigger, and a person\'s message names none', () => {
+  /**
+   * DSH draws a non-human turn trigger as a bordered notice, so the page has to be told which user messages the
+   * harness wrote. A goal round records `source = { kind: 'goal', goalId, revision, round }` on its message; the
+   * fold carries that whole source as `trigger`, and a source without a kind is no trigger.
+   */
+  const source = { kind: 'goal', goalId: 'goal-1', revision: 1, round: 2 }
+  const turns = transcriptTurns([
+    { type: 'message', at: '2026-10-29T00:00:00.000Z', message: { role: 'user', content: [{ type: 'text', text: 'set a goal' }] } },
+    { type: 'message', at: '2026-10-29T00:00:01.000Z', message: { role: 'user', content: [{ type: 'text', text: 'Continue working toward the goal.' }], source } },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'x' }], source: { note: 'no kind' } } },
+  ])
+  assert.equal(turns[0]?.trigger, undefined, 'a person\'s message is not a trigger')
+  assert.deepEqual(turns[1]?.trigger, source, 'the round keeps its whole source')
+  assert.equal('trigger' in (turns[2] ?? {}), false, 'a source without a kind names no trigger')
+})
+
+test('a notice\'s text blocks read as paragraphs, and a person\'s message reads as written', () => {
+  /**
+   * Live-testing draft developer-five-10: a settled subagent's notice is three text blocks (DSH's
+   * `createSettlementMessage`), and the fold joined them with nothing, so the page read one run-on line.
+   */
+  const source = { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent s-1 finished.' }
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one line\nand a second' }] } },
+    {
+      type: 'message',
+      message: {
+        role: 'user',
+        source,
+        content: [
+          { type: 'text', text: 'Background subagent s-1 finished. It cannot receive follow-up messages.' },
+          { type: 'text', text: 'Its closing message:' },
+          { type: 'text', text: 'pong' },
+        ],
+      },
+    },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'see the picture' }, { type: 'image', mimeType: 'image/png', path: '/work/a.png' }] } },
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] } },
+  ])
+  assert.equal(turns[0]?.text, 'one line\nand a second', 'a person\'s message reads as written')
+  assert.equal(turns[1]?.text, 'Background subagent s-1 finished. It cannot receive follow-up messages.\n\nIts closing message:\n\npong', 'each block of a notice is its own paragraph')
+  assert.equal(turns[2]?.text, 'see the picture', 'an attachment adds no text')
+  assert.equal(turns[3]?.text, 'ab', 'an answer\'s text is joined as it streamed')
+})
+
+test('a completed exchange carries its token usage on its answer, only when every round reported it', () => {
+  /**
+   * DSH's per-Turn usage row: a completed Turn shows its usage only when every started model attempt reported exact
+   * usage, and omits a bucket nobody reported. A round is a `model/request`; its report rides an assistant chunk.
+   */
+  const user = (text: string) => ({ type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } })
+  const round = (usage?: Record<string, number>) => [
+    { type: 'model/request' },
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'step ' } },
+    { type: 'assistant/chunk', chunk: { type: 'done', ...(usage !== undefined ? { usage } : {}) } },
+  ]
+  const turns = transcriptTurns([
+    user('two rounds, both reported'),
+    ...round({ inputTokens: 100, outputTokens: 20, cacheReadTokens: 900 }),
+    ...round({ inputTokens: 30, outputTokens: 5, cacheReadTokens: 1000 }),
+    { type: 'assistant/completed', text: 'step step ' },
+    { type: 'turn/completed', rounds: 2 },
+    user('one round unreported'),
+    ...round({ inputTokens: 10, outputTokens: 1 }),
+    ...round(),
+    { type: 'assistant/completed', text: 'step step ' },
+    { type: 'turn/completed', rounds: 2 },
+  ])
+  /** Each round's text is its own run, so the usage sits on the exchange's last answer and on nothing else. */
+  const second = turns.findIndex((turn, index) => index > 0 && turn.kind === 'user')
+  const lastAnswer = (from: number, to: number) => turns.slice(from, to).filter((turn) => turn.kind === 'assistant').at(-1)
+  assert.deepEqual(lastAnswer(0, second)?.usage, { inputTokens: 130, outputTokens: 25, cacheReadTokens: 1900 }, 'the sum of both rounds, with no bucket invented')
+  assert.equal(turns.slice(0, second).filter((turn) => turn.usage !== undefined).length, 1, 'carried once, by the last answer')
+  assert.equal(lastAnswer(second, turns.length)?.usage, undefined, 'a partial account shows no row at all')
 })
 
 test('the answer carries the files its exchange wrote, with the lines each one now has', () => {
@@ -87,6 +165,30 @@ test('writes belong to their own exchange, and a read-only exchange carries no f
   assert.equal(answers.length, 2, 'one answer per exchange')
   assert.deepEqual(answers[0]?.files, [{ path: 'a.txt', added: 1 }])
   assert.equal(answers[1]?.files, undefined, 'the next exchange does not inherit the previous one\'s files')
+})
+
+test('a write the sandbox refused, or whose escalation was rejected, is not an edited file', () => {
+  /**
+   * Live-testing draft developer-five-6: the fold noted a file when its `write_file` was asked for, so a refused write
+   * was listed as edited. DSH lists deliverables, recorded only after the file was written; a refusal's result is
+   * `error (CODE): …`, and a call cut off before its result is not known to have written anything.
+   */
+  const call = (id: string, path: string) => ({ type: 'assistant/chunk', chunk: { type: 'tool-call', id, name: 'write_file', arguments: JSON.stringify({ path, content: 'x\n' }) } })
+  const result = (id: string, text: string) => ({ type: 'message', message: { role: 'tool', content: [{ type: 'text', text }], toolCallId: id } })
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'write four' }] } },
+    call('c1', '../outside.txt'),
+    result('c1', "error (SANDBOX): '../outside.txt' is outside the sandbox root"),
+    call('c2', 'b.txt'),
+    result('c2', "error (REJECTED): the request to run this tool with 'danger-full-access' permissions was rejected; the call stays under 'read-only'"),
+    call('c3', 'c.txt'),
+    result('c3', 'wrote 2 bytes to c.txt'),
+    call('c4', 'd.txt'),
+    { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'one written' } },
+  ])
+  const answer = turns.find((turn) => turn.kind === 'assistant')
+  assert.deepEqual(answer?.files, [{ path: 'c.txt', added: 1 }], 'only the write whose result says it was written')
+  assert.deepEqual(turns.filter((turn) => turn.kind === 'tool').map((turn) => turn.state), ['error', 'error', 'ok', 'running'])
 })
 
 test('a file route answers with the sandbox and nosniff headers DSH puts on its own file route', () => {
@@ -565,4 +667,46 @@ test('D-068 only explicit Browser capability adds HTTP(S) frames without weakeni
   assert.ok(strict.includes("frame-src 'self'"))
   assert.equal(enabled, strict.replace("frame-src 'self'", 'frame-src http: https:'))
   assert.ok(enabled.includes("object-src 'none'") && enabled.includes("frame-ancestors 'none'"))
+})
+
+test('the page highlights a code block exactly as the TypeScript server does, from the modules both servers serve', async () => {
+  /**
+   * C60: the two servers classified the same tokens differently, so the page re-highlights an answer's code blocks with
+   * the highlight.js both serve. That is only parity if the served modules, registered as the page registers them,
+   * colour a fence the way the TypeScript server's own `highlightCode` does - judged here on real files.
+   */
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { pathToFileURL } = await import('node:url')
+  const read = (relative: string) => readFileSync(join('node_modules/highlight.js', relative), 'utf8')
+  const dir = mkdtempSync(join(tmpdir(), 'heddle-hljs-'))
+  try {
+    const core = highlightAsset('core.js', read)
+    assert.ok(core !== null && core.endsWith('export default module.exports;\n'), 'the CommonJS core is served as an ES module')
+    writeFileSync(join(dir, 'core.mjs'), core)
+    const hljs = (await import(pathToFileURL(join(dir, 'core.mjs')).href)).default as {
+      registerLanguage: (name: string, grammar: unknown) => void
+      highlight: (code: string, options: { language: string }) => { value: string }
+    }
+    for (const name of HIGHLIGHT_GRAMMARS) {
+      const grammar = highlightAsset(`languages/${name}.js`, read)
+      assert.ok(grammar !== null, `the ${name} grammar is served`)
+      writeFileSync(join(dir, `${name}.mjs`), grammar)
+      hljs.registerLanguage(name, (await import(pathToFileURL(join(dir, `${name}.mjs`)).href)).default)
+    }
+    const fences: [string, string][] = [
+      ['typescript', 'const x: number = 1 // one\ninterface A { b?: string }'],
+      ['rust', 'fn main() { let v: Vec<u8> = vec![1]; println!("{}", v.len()); }'],
+      ['json', '{"a": [1, true, null], "b": "c"}'],
+      ['python', 'def greet(name):\n    return f"hi {name}"'],
+    ]
+    for (const [language, code] of fences) {
+      assert.equal(hljs.highlight(code, { language }).value, highlightCode(code, language), `${language} is coloured as the server colours it`)
+    }
+    assert.equal(highlightAsset('languages/haskell.js', read), null, 'a grammar the server does not register is not served')
+    assert.equal(highlightAsset('languages/../lib/core.js', read), null, 'nor any other file')
+    assert.equal(highlightAsset('lib/core.js', read), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

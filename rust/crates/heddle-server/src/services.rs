@@ -158,6 +158,9 @@ pub enum ForkOutcome {
         at_seq: u64,
         last_seq: Option<u64>,
     },
+    /// Refused with the store's own sentence — the source's folder is gone (#56). Answered `400 { error, code }`
+    /// (`session/folder-missing`), as #106's unwritable branch is.
+    Refused(ServiceError),
     Forked(CreatedSession),
 }
 
@@ -603,6 +606,17 @@ pub struct ActivityItem {
     pub label: String,
 }
 
+/// The questions a model asks a person (`ask_user_question`), as the three routes see them.
+///
+/// The binary adapts `heddle-questions`, whose answers are already the TypeScript route's exact status and body;
+/// the server only matches the path. A late answer comes back in the body for the page to deliver.
+pub trait QuestionService: Send + Sync {
+    /// `GET /api/questions?session=<id>[&all=1]`: the status and the body.
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String);
+    /// `POST /api/questions/<id>` (or its `/hold`): the status and the body.
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String);
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -656,6 +670,7 @@ pub struct Harness {
     pub approvals: Option<Arc<dyn ApprovalService>>,
     pub goals: Option<Arc<dyn GoalService>>,
     pub todos: Option<Arc<dyn TodoService>>,
+    pub questions: Option<Arc<dyn QuestionService>>,
     pub team: Option<Arc<dyn TeamService>>,
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
@@ -695,6 +710,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -743,6 +759,7 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
@@ -924,6 +941,11 @@ impl HarnessBuilder {
 
     pub fn todos(mut self, service: Arc<dyn TodoService>) -> Self {
         self.harness.todos = Some(service);
+        self
+    }
+
+    pub fn questions(mut self, service: Arc<dyn QuestionService>) -> Self {
+        self.harness.questions = Some(service);
         self
     }
 
