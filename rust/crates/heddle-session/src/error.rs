@@ -117,6 +117,14 @@ pub enum SessionError {
     /// (`cannot write "<path>": …`, dsh-fs-local lib/index.js:495).
     #[error("cannot write to \"{folder}\": permission denied")]
     Unwritable { folder: String },
+    /// A session's folder that is no longer there — deleted or moved outside heddle, or now a file (#56) —
+    /// refused rather than recreated: `This workspace's folder no longer exists: "<folder>"`, the folder by its
+    /// name and never its absolute path, as [`SessionError::Unwritable`] names it. The code is heddle's,
+    /// `session/folder-missing`, in DSH's `session/` family: DSH has no such refusal (its turn fails with
+    /// `working-directory: directory does not exist: "<path>"`, dsh-working-directory lib/index.js:123-131, and its
+    /// create makes the folder). `MissingFolderError` in the TypeScript build, word for word.
+    #[error("This workspace's folder no longer exists: \"{folder}\"")]
+    MissingFolder { folder: String },
 }
 
 /// The last component of a path, or the path itself when it has none.
@@ -135,13 +143,21 @@ fn holder_suffix(pid: &Option<u32>) -> String {
 
 impl SessionError {
     /// The code DSH's session controller answers a held session with (`session/writer-held`), for
-    /// [`SessionError::AlreadyOwned`]; heddle's `session/unwritable` for [`SessionError::Unwritable`];
-    /// `None` for every other error.
+    /// [`SessionError::AlreadyOwned`]; heddle's `session/unwritable` for [`SessionError::Unwritable`] and
+    /// `session/folder-missing` for [`SessionError::MissingFolder`]; `None` for every other error.
     pub fn code(&self) -> Option<&'static str> {
         match self {
             SessionError::AlreadyOwned { .. } => Some("session/writer-held"),
             SessionError::Unwritable { .. } => Some("session/unwritable"),
+            SessionError::MissingFolder { .. } => Some("session/folder-missing"),
             _ => None,
+        }
+    }
+
+    /// [`SessionError::MissingFolder`] for the folder at `path`, named by its last component (#56).
+    pub fn missing_folder(path: &str) -> Self {
+        SessionError::MissingFolder {
+            folder: file_name(path),
         }
     }
 
