@@ -10,7 +10,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, parseJson, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -312,6 +312,8 @@ async function fragmentingChatDouble(answers) {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      /** A new session's title request is not one of the turns this double answers in order (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(body)
       const fragments = answers[Math.min(requests.length, answers.length) - 1]
       response.writeHead(200, { 'content-type': 'text/event-stream' })
