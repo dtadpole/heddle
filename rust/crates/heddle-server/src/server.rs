@@ -3084,7 +3084,12 @@ mod tests {
         for raw in ["session-does-not-exist", "../../etc/passwd"] {
             let body = serde_json::json!({"prompt": "hi", "session": raw});
             let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{raw}: {}", body_text(&bytes));
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{raw}: {}",
+                body_text(&bytes)
+            );
             assert_eq!(
                 body_text(&bytes),
                 "{\"error\":\"no session with that id\",\"code\":\"session/not-found\"}\n",
@@ -3092,14 +3097,23 @@ mod tests {
             );
         }
 
-        let (status, bytes) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"first"}"#).await;
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, r#"{"prompt":"first"}"#).await;
         assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
         let (_, _, listed) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
         let listed: Value = serde_json::from_str(&body_text(&listed)).expect("the list is JSON");
-        let held = listed[0]["id"].as_str().expect("the first turn made a session").to_owned();
+        let held = listed[0]["id"]
+            .as_str()
+            .expect("the first turn made a session")
+            .to_owned();
         let body = serde_json::json!({"prompt": "again", "session": held});
         let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
-        assert_eq!(status, StatusCode::OK, "a held session continues: {}", body_text(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a held session continues: {}",
+            body_text(&bytes)
+        );
         assert!(body_text(&bytes).contains("event: done"));
     }
 
