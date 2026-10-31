@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads'
 
 import { Marked, type Tokens } from 'marked'
-import { markedHighlight } from 'marked-highlight'
 
 import { highlightCode } from './highlight.ts'
 import { sanitizeHtml } from './sanitize.ts'
@@ -310,18 +312,32 @@ function escapeLeadingUnderscores(markdown: string): string {
 }
 
 /**
- * Colour the code, through the marked plugin that pairs the two libraries.
+ * Colour the code, in the renderer's `code` hook.
  *
  * A fence keeps its language while the highlighter colours it: `class="language-ts"` on the `<code>`, and the
  * highlighter's own `hljs-` spans inside. The allow-list accepts both because it permits `span`, `class` and `pre`,
  * and nothing else the highlighter could emit.
+ *
+ * This was `marked-highlight`, and the markup below is that plugin's, byte for byte. It is not the plugin any more
+ * because the plugin colours code from a **`walkTokens`** hook, and registering any `walkTokens` makes `marked` walk
+ * every token of every document with `values = values.concat(...)` — one copy of the whole result per token, which
+ * is quadratic in a long list, a table, or a paragraph of many escapes (issue #19). Measured: a 30,000-item list
+ * took 5.4 s to render (79% of the time in that walk, 16% collecting what it copied) and takes 0.13 s with this hook;
+ * a 30,000-row table went from 3.2 s to 0.34 s. The `code` hook colours the same fences without the walk, and the
+ * output of every tracked markdown file in the repository is unchanged by the swap.
  */
-marked.use(
-  markedHighlight({
-    langPrefix: 'language-',
-    highlight: (code: string, language: string) => highlightCode(code, language),
-  }),
-)
+marked.use({
+  renderer: {
+    code({ text, lang, escaped }: Tokens.Code): string {
+      const language = (lang ?? '').match(/\S*/)?.[0] ?? ''
+      const coloured = highlightCode(text, language)
+      const changed = typeof coloured === 'string' && coloured !== text
+      const code = (changed ? coloured : text).replace(/\n$/, '')
+      const classAttr = language.length > 0 ? ` class="language-${escapeHtml(language)}"` : ''
+      return `<pre><code${classAttr}>${changed || escaped ? code : escapeHtml(code)}\n</code></pre>`
+    },
+  },
+})
 
 /**
  * The two renderer hooks that exist for safety, rather than for formatting.
@@ -444,4 +460,243 @@ export function renderMarkdown(source: string, options: { readonly base?: string
       return rawUrl(resolved)
     },
   })
+}
+
+/**
+ * How long one document may take to render before its text is answered instead.
+ *
+ * `marked`'s emphasis scan is quadratic in the delimiters of one paragraph — measured, 30,000 words of the shape `*n`
+ * took 80 s — and that is in the library, not in anything this file configures. The parse budget above
+ * ({@link withinParseBudget}, 64 KiB and 512 inline markers) now keeps such a document from reaching `marked` at all,
+ * but a document inside it still costs real time, and a session holds many: measured on main with that budget, a
+ * session of eight 62 KB lists stood the event loop still for 2.7 s when a page opened it. A time budget is the bound
+ * that holds for every input: a document that needs longer than this is shown as the text it is (see
+ * {@link markdownFallback}), and a normal one renders well inside it (a 9,000-item list, near the parse budget, takes
+ * about 40 ms).
+ */
+export const MARKDOWN_RENDER_BUDGET_MS = 3_000
+
+/**
+ * What a document that could not be rendered in its budget is shown as: the same block as one past the parse budget
+ * ({@link unrendered}), its own text escaped, so a page tells both apart from a rendered answer in one way.
+ */
+export function markdownFallback(source: string): string {
+  return unrendered(String(source ?? ''))
+}
+
+/** How many recent documents a renderer remembers the answer to. */
+const RECENT_DOCUMENTS = 32
+
+/** The role a worker is started with, so this module serves renders only in a worker it started itself. */
+const WORKER_ROLE = 'heddle-markdown-renderer'
+
+/** What {@link renderMarkdown} is told about a document, carried to the worker whole so the two cannot drift apart. */
+type RenderOptions = NonNullable<Parameters<typeof renderMarkdown>[1]>
+
+interface RenderJob {
+  readonly id: number
+  readonly source: string
+  readonly options: RenderOptions
+}
+
+/**
+ * A worker of this module's own: it renders what it is sent and answers with the HTML.
+ *
+ * The module is its own worker entry, so the worker runs exactly the renderer configured above — the same parser,
+ * hooks and allow-list — and `import.meta.url` names the right file whether this runs from `src/` or `dist/`.
+ */
+if (!isMainThread && parentPort !== null && (workerData as { role?: unknown } | null)?.role === WORKER_ROLE) {
+  const port = parentPort
+  port.on('message', (job: RenderJob) => {
+    try {
+      port.postMessage({ id: job.id, html: renderMarkdown(job.source, job.options) })
+    } catch (error) {
+      port.postMessage({ id: job.id, error: error instanceof Error ? error.message : String(error) })
+    }
+  })
+  port.postMessage({ ready: true })
+}
+
+/**
+ * Markdown rendered **off the server's event loop**, one document at a time, each within a budget (issue #19).
+ *
+ * The server used to call {@link renderMarkdown} inside its request handlers. A Node server has one thread for every
+ * request, stream and probe, so a document that took seconds to render stopped all of them for those seconds:
+ * measured on a scratch server, opening a session that held one 30,000-item list answer stood the event loop still
+ * for 7 s, the stream of another session's turn stopped for 7 s, and `/healthz` missed probes in a row — the
+ * supervisor's rule for "hung", which then kills the process and every turn on it. DSH never has this failure
+ * because its host does not render an answer at all; the browser does (`AssistantMarkdown`, which draws each block
+ * with `MarkdownText`, in `dsh-client-ui-chat`). Heddle keeps rendering on the server, where its allow-list is, and
+ * moves the work to a worker thread instead, so the event loop only posts the text and receives the HTML.
+ *
+ * A render that outlives its budget is ended by terminating the worker — a synchronous parse cannot be interrupted
+ * any other way — and the document is answered as its own text; the next document gets a fresh worker. Documents
+ * wait their turn rather than sharing one worker's time, so each budget is spent on its own document. If no worker
+ * can be started at all, rendering falls back to this thread rather than to no rendering, which is the old cost and
+ * not a new failure.
+ */
+export class MarkdownWorker {
+  private readonly budgetMs: number
+  private worker: Worker | undefined
+  private ready = false
+  private unavailable = false
+  private nextId = 1
+  private readonly queue: { job: RenderJob; settle: (html: string) => void }[] = []
+  /**
+   * The last documents asked for, by content, and their answers (pending or settled).
+   *
+   * Every page that follows a session asks for the same answer when a turn ends, so one document arrives once per
+   * follower within a second; rendering it once and handing every follower that result is what keeps a document
+   * that spends its whole budget from spending it again per page.
+   */
+  private readonly recent = new Map<string, Promise<string>>()
+  private current: { job: RenderJob; settle: (html: string) => void; timer: ReturnType<typeof setTimeout> | undefined } | undefined
+
+  constructor(options: { readonly budgetMs?: number } = {}) {
+    this.budgetMs = options.budgetMs ?? MARKDOWN_RENDER_BUDGET_MS
+  }
+
+  /** Render one document; resolves with its HTML, or with its text as a block when the budget ran out. Never rejects. */
+  render(source: string, options: RenderOptions = {}): Promise<string> {
+    const text = String(source ?? '')
+    if (this.unavailable) return Promise.resolve(renderMarkdown(text, options))
+    /** Options JSON cannot write (a BigInt, a cycle) only cost the document its place in the cache, never a throw. */
+    let key: string | undefined
+    try {
+      key = createHash('sha256').update(JSON.stringify(options)).update('\u0000').update(text).digest('hex')
+    } catch {
+      key = undefined
+    }
+    const known = key === undefined ? undefined : this.recent.get(key)
+    if (known !== undefined) return known
+    const answer = new Promise<string>((settle) => {
+      this.queue.push({ job: { id: this.nextId++, source: text, options: { ...options } }, settle })
+      this.pump()
+    })
+    if (key === undefined) return answer
+    this.recent.set(key, answer)
+    if (this.recent.size > RECENT_DOCUMENTS) this.recent.delete(this.recent.keys().next().value as string)
+    return answer
+  }
+
+  /** Stop the worker; documents still waiting are answered as their text. */
+  async close(): Promise<void> {
+    this.recent.clear()
+    const pending = [...this.queue.splice(0), ...(this.current !== undefined ? [this.current] : [])]
+    if (this.current?.timer !== undefined) clearTimeout(this.current.timer)
+    this.current = undefined
+    for (const entry of pending) entry.settle(markdownFallback(entry.job.source))
+    const worker = this.worker
+    this.worker = undefined
+    this.ready = false
+    if (worker !== undefined) await worker.terminate()
+  }
+
+  /** Start the next document when the worker is idle and ready, starting a worker when there is none. */
+  private pump(): void {
+    if (this.current !== undefined) return
+    const next = this.queue[0]
+    if (next === undefined) {
+      this.worker?.unref()
+      return
+    }
+    if (this.worker === undefined) {
+      this.start()
+      return
+    }
+    if (!this.ready) return
+    this.queue.shift()
+    this.worker.ref()
+    const timer = setTimeout(() => this.expire(), this.budgetMs)
+    this.current = { ...next, timer }
+    try {
+      this.worker.postMessage(next.job)
+    } catch {
+      /**
+       * A job the worker cannot be sent — a DataCloneError, for an option that does not survive structured clone — is
+       * answered as its text and the queue goes on. Thrown from here it escaped as an uncaught exception from the
+       * worker's message listener, or as a rejection from render's executor, and render promises neither.
+       */
+      clearTimeout(timer)
+      this.current = undefined
+      next.settle(markdownFallback(next.job.source))
+      this.pump()
+    }
+  }
+
+  private start(): void {
+    let worker: Worker
+    try {
+      worker = new Worker(fileURLToPath(import.meta.url), { workerData: { role: WORKER_ROLE } })
+    } catch {
+      this.giveUp()
+      return
+    }
+    this.worker = worker
+    this.ready = false
+    worker.on('message', (message: { ready?: boolean; id?: number; html?: string; error?: string }) => {
+      if (worker !== this.worker) return
+      if (message.ready === true) {
+        this.ready = true
+        this.pump()
+        return
+      }
+      const current = this.current
+      if (current === undefined || message.id !== current.job.id) return
+      if (current.timer !== undefined) clearTimeout(current.timer)
+      this.current = undefined
+      current.settle(typeof message.html === 'string' ? message.html : markdownFallback(current.job.source))
+      this.pump()
+    })
+    /** A worker that dies answers its document as text; one that never became ready means workers are unusable here. */
+    const lost = (): void => {
+      if (worker !== this.worker) return
+      const wasReady = this.ready
+      this.worker = undefined
+      this.ready = false
+      const current = this.current
+      this.current = undefined
+      if (current !== undefined) {
+        if (current.timer !== undefined) clearTimeout(current.timer)
+        current.settle(markdownFallback(current.job.source))
+      }
+      if (!wasReady) this.giveUp()
+      else this.pump()
+    }
+    worker.on('error', lost)
+    worker.on('exit', lost)
+  }
+
+  /** The budget ran out: end the worker mid-parse, answer the document as text, and go on with a fresh one. */
+  private expire(): void {
+    const current = this.current
+    const worker = this.worker
+    if (current === undefined || worker === undefined) return
+    this.current = undefined
+    this.worker = undefined
+    this.ready = false
+    current.settle(markdownFallback(current.job.source))
+    void worker.terminate()
+    this.pump()
+  }
+
+  /** No worker can run here: render on this thread from now on, the old behaviour, rather than not at all. */
+  private giveUp(): void {
+    this.unavailable = true
+    for (const entry of this.queue.splice(0)) entry.settle(renderMarkdown(entry.job.source, entry.job.options))
+  }
+}
+
+/** The server's renderer, started on first use. */
+let shared: MarkdownWorker | undefined
+
+/**
+ * Render a document without blocking the event loop — what a request handler calls instead of {@link renderMarkdown}.
+ *
+ * Same output as `renderMarkdown` for every document that renders within {@link MARKDOWN_RENDER_BUDGET_MS}; past it,
+ * {@link markdownFallback}. The synchronous function stays for callers that are not serving anyone.
+ */
+export function renderMarkdownOffThread(source: string, options: RenderOptions = {}): Promise<string> {
+  shared ??= new MarkdownWorker()
+  return shared.render(source, options)
 }
