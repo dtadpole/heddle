@@ -2828,7 +2828,11 @@ mod tests {
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
         // A prompt of only whitespace is refused before anything else, as an empty one is (#32).
-        for blank in [r#"{"prompt":""}"#, r#"{"prompt":"   "}"#, r#"{"prompt":"\n\t "}"#] {
+        for blank in [
+            r#"{"prompt":""}"#,
+            r#"{"prompt":"   "}"#,
+            r#"{"prompt":"\n\t "}"#,
+        ] {
             let (status, bytes) = post_json(&router, "/api/turn", &cookie, blank).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
             assert_eq!(body_text(&bytes), "a prompt is required\n", "{blank}");
