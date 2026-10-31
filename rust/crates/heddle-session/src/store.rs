@@ -43,6 +43,7 @@ use crate::event::{AppendOptions, Events, NewEvent, SessionEvent, SessionHandle,
 use crate::layout::workspace_key;
 use crate::message::{Chunk, Message, RecordedMessage, Role};
 use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
+use crate::repair::interrupted_turn_closers;
 use crate::surface::{
     SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface, fork_seed,
     index_by_seq, is_surface_eligible,
@@ -197,13 +198,17 @@ fn remove_own_lock(path: &Path) {
 /// gives for free is supplied by hand: a holder that died without letting go leaves a file naming a pid that no
 /// longer exists, and that lock is removed and taken rather than blocking the session forever. A live holder is
 /// never expropriated: there is no expiry that could let a stalled writer's resumed appends tear the log.
-fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
+///
+/// Answers whether this process **took** the lock now (`true`) or already held it through another store
+/// (`false`): only a fresh take is a write-open after whatever wrote the session before, which is when an
+/// unfinished turn is closed ([`crate::repair`]).
+fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
     let mut held = HELD_BY_PROCESS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if let Some(count) = held.get_mut(path) {
         *count += 1;
-        return Ok(());
+        return Ok(false);
     }
     let own = std::process::id();
     let shown = path.to_string_lossy().into_owned();
@@ -224,7 +229,7 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
                     return Err(SessionError::io(shown, error));
                 }
                 held.insert(path.to_path_buf(), 1);
-                return Ok(());
+                return Ok(true);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(SessionError::io(shown, error)),
@@ -237,7 +242,7 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
         let holder = lock_holder(&text);
         if holder == Some(own) {
             held.insert(path.to_path_buf(), 1);
-            return Ok(());
+            return Ok(true);
         }
         if let Some(pid) = holder
             && process_alive(pid)
@@ -983,6 +988,28 @@ impl SessionStore {
         }
     }
 
+    /// Whether a live writer holds the session: this process (through any store), or the live process its
+    /// lock names. A reader asks it before it shows a session's unfinished turn as closed
+    /// ([`crate::SessionService::events`]); a lock naming this process that this process does not hold is a
+    /// previous process's that had the same pid.
+    pub fn writer_held(&self, handle: &SessionHandle) -> bool {
+        let path = PathBuf::from(lock_path(handle));
+        if HELD_BY_PROCESS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&path)
+        {
+            return true;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        lock_holder(&text).is_some_and(|pid| pid != std::process::id() && process_alive(pid))
+    }
+
+    /// Taking the lock **fresh** is DSH's write-open, so a turn the previous writer left unfinished is closed
+    /// here, before the write that asked for the lock ([`crate::repair`], issue #5). A turn running in this
+    /// process holds the lock already and never reaches the closers.
     fn claim_locked(
         &self,
         state: &mut StoreState,
@@ -992,10 +1019,56 @@ impl SessionStore {
             return Ok(());
         }
         let path = PathBuf::from(lock_path(handle));
-        acquire_writer_lock(&path, &handle.id)?;
+        let fresh = acquire_writer_lock(&path, &handle.id)?;
         state.held.insert(handle.id.clone(), path);
         state.loaded.remove(&handle.id);
         state.surface_cache.remove(&handle.id);
+        if fresh {
+            self.load_locked(state, handle)?;
+            let events = state
+                .loaded
+                .get(&handle.id)
+                .expect("the log was just loaded")
+                .events
+                .clone();
+            self.record_locked(state, handle, interrupted_turn_closers(&events))?;
+        }
+        Ok(())
+    }
+
+    /// Append events whose seq and time are already assigned, in one write, and without the side effects of
+    /// `append`: no listener hears them and the meta's age does not move. The turn closers are the one caller —
+    /// a repair of what the log already holds, not activity — and DSH seeds them into a resumed session rather
+    /// than publishing them.
+    fn record_locked(
+        &self,
+        state: &mut StoreState,
+        handle: &SessionHandle,
+        records: Vec<SessionEvent>,
+    ) -> Result<(), SessionError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let loaded = state
+            .loaded
+            .get_mut(&handle.id)
+            .expect("the log is loaded before a record");
+        let mut bytes = Vec::new();
+        for record in &records {
+            let line = format!("{}\n", record.to_line());
+            if loaded.framed {
+                bytes.extend(encode_frame(&line));
+            } else {
+                bytes.extend(line.into_bytes());
+            }
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&handle.transcript)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|error| SessionError::io(&handle.transcript, error))?;
+        Arc::make_mut(&mut loaded.events).extend(records.into_iter().map(Arc::new));
         Ok(())
     }
 

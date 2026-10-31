@@ -24,6 +24,7 @@ import { renderMarkdown } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
+import { type InventoryLoader, readPluginInventory } from '../config/plugin-inventory.ts'
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
@@ -123,6 +124,12 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * The module name each configured row declared, by loader entry id, for `GET /api/plugin-inventory`
+   * (`declaredModuleNames` in `../config/plugin-inventory.ts`). Without it an entry shows the name the loader
+   * holds, which for a relative row is the `file://` URL `boot` resolved it to.
+   */
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
   /**
    * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
@@ -279,6 +286,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
       ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
@@ -343,22 +351,46 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
-        clearInterval(heartbeat)
-        detachApprovals?.()
-        for (const client of subscribers) {
-          try {
-            client.end()
-          } catch {
-            // the client is already gone
-          }
-        }
-        subscribers.clear()
-        server.close(() => resolvePromise())
-        server.closeAllConnections?.()
-        for (const socket of sockets) socket.destroy()
+        void stopRunningTurns().finally(() => closeNow(resolvePromise))
       }),
   }
+
+  /**
+   * A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each running
+   * command's process group is ended and its call is recorded as interrupted before the process goes. Without it the
+   * server waited for the command to finish on its own and wrote nothing (live-testing issue #6); DSH cancels its
+   * agents at teardown (`dsh-bash-local` graceMs 3000).
+   */
+  async function stopRunningTurns(): Promise<void> {
+    let stopping = 0
+    for (const id of [...controllers.keys()]) stopping += abortSession(controllers, id)
+    if (stopping === 0) return
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS
+    while ([...running.values()].some((count) => count > 0) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  /** End the subscribers, stop accepting and destroy the sockets that remain (see `close` above). */
+  function closeNow(resolvePromise: () => void): void {
+    clearInterval(heartbeat)
+    detachApprovals?.()
+    for (const client of subscribers) {
+      try {
+        client.end()
+      } catch {
+        // the client is already gone
+      }
+    }
+    subscribers.clear()
+    server.close(() => resolvePromise())
+    server.closeAllConnections?.()
+    for (const socket of sockets) socket.destroy()
+  }
 }
+
+/** How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results. */
+const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
   /** The settings surface, when the server was started with one. */
@@ -404,6 +436,7 @@ interface RequestState {
   readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
 }
 
 /** One request, routed and fenced. */
@@ -831,6 +864,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return window === undefined ? entry : { ...entry, contextWindow: window, contextWindowSource: 'provider-models' }
     })
     respond(response, 200, 'application/json', `${JSON.stringify({ ...described, endpoints: withWindows }, null, 2)}\n`)
+    return
+  }
+
+  /**
+   * The plugin inventory, DSH's read-only `pluginInventory/list`: every non-group loader entry, in loader order,
+   * with its declared module name, whether it is enabled and its fiber's phase, read from the loader now. No
+   * `managementAvailable`, because nothing here can change the profile.
+   */
+  if (url.pathname === '/api/plugin-inventory' && request.method === 'GET') {
+    const loader = (ctx as unknown as { readonly loader?: InventoryLoader }).loader
+    respond(response, 200, 'application/json', `${JSON.stringify(readPluginInventory(loader, state.pluginModuleNames), null, 2)}\n`)
     return
   }
 
@@ -1300,9 +1344,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'the path must be absolute' })}\n`)
       return
     }
+    /**
+     * A leading `~` is the home folder, and what is checked **and stored** is the canonical path of the expanded
+     * spelling — the Rust route's `canonical_path(expand_home(raw))` (heddle-server `add_workspace`). This route used
+     * to check the expanded path and store the raw string, which `canonicalPath` then resolved against the server's
+     * working folder: `~/x` became a record at `<cwd>/~/x`, a folder that does not exist (GitHub issue #1). heddle keeps
+     * the `~` rule on purpose (`rust/crates/heddle-config/INDEX.md` §7); DSH refuses a path that is not fully qualified
+     * (dsh-workspace `realpathNormalize`, lib/index.js:20-24, :48-50). The sentences keep the path as it was written.
+     */
+    const folder = canonicalPath(expandHome(path))
     let stat
     try {
-      stat = statSync(expandHome(path))
+      stat = statSync(folder)
     } catch {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${path} does not exist` })}\n`)
       return
@@ -1316,7 +1369,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a name must be lowercase letters, digits and dashes' })}\n`)
       return
     }
-    const { record, created } = workspaces.add(path, name)
+    const { record, created } = workspaces.add(folder, name)
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
   }
@@ -2239,7 +2292,13 @@ async function readJson(request: IncomingMessage, response: ServerResponse): Pro
     }
   }
   try {
-    return JSON.parse(raw.length === 0 ? '{}' : raw) as Record<string, unknown>
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    // null is the helper's already-answered sentinel, never an admitted request body (Refs #71).
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return null
+    }
+    return parsed as Record<string, unknown>
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return null
@@ -2405,7 +2464,12 @@ export function sessionRequestSelection(
     preset?: string
   }
   try {
-    body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return
+    }
+    body = parsed as typeof body
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return

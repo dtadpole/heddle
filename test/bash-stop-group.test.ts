@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -86,4 +87,17 @@ test('the wall time ends the shell and the command it started, and the call says
   const { result, child } = await runBackgroundSleep({ timeoutMs: 600 })
   assert.equal(result.error?.code, 'TIMEOUT', JSON.stringify(result.error))
   assert.ok(await gone(child, 3_000), 'the background sleep is gone too')
+})
+
+test('the exit backstop ends a tracked group when the process exits (issue #6)', { timeout: 15_000 }, async () => {
+  const module = JSON.stringify(new URL('../src/sandbox/process-group.ts', import.meta.url).href)
+  const script = [
+    "import { spawn } from 'node:child_process'",
+    `import { trackGroup } from ${module}`,
+    "const shell = spawn('/bin/sh', ['-c', 'sleep 41 & echo $!; wait'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] })",
+    "shell.stdout.once('data', (data) => { trackGroup(shell.pid); process.stdout.write(String(data).trim()); process.exit(0) })",
+  ].join('\n')
+  const child = Number(execFileSync(process.execPath, ['--input-type=module', '-e', script]).toString().trim())
+  assert.ok(Number.isInteger(child) && child > 1, 'the background sleep reported its pid')
+  assert.ok(await gone(child, 3_000), 'the exit hook ended the group, so the sleep did not outlive the process')
 })
