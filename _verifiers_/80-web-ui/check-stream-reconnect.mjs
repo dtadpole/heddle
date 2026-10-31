@@ -5,7 +5,17 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { isolatedHome, isTitleRequest, refuseTitleRequest, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+
+/**
+ * A session title request (C6) is not the conversation: refused at once, as lib.mjs's helpers do on newer trees. Kept
+ * here so this check runs on a base that predates them.
+ */
+const isTitleRequest = (body) => typeof body === 'string' && body.includes('Create a concise title for an AI coding-assistant session')
+const refuseTitleRequest = (response) => {
+  response.writeHead(400, { 'content-type': 'application/json' })
+  response.end(JSON.stringify({ error: { message: 'this double answers turns, not session titles' } }))
+}
 
 /**
  * Verifier — a page whose event stream drops and reconnects catches up with the server (#122).
@@ -44,8 +54,15 @@ async function slowDouble() {
       }
       if (isTitleRequest(body)) return refuseTitleRequest(response)
       const messages = JSON.parse(body || '{}').messages ?? []
-      const last = [...messages].reverse().find((message) => message.role === 'user')
-      const prompt = typeof last?.content === 'string' ? last.content : (last?.content ?? []).map((part) => part.text ?? '').join('')
+      /**
+       * The prompt is the newest user message carrying one of this check's markers: the harness follows a prompt with
+       * user messages of its own (the runtime context, the time, the workspace instructions), so the last user
+       * message is not the prompt.
+       */
+      const texts = messages
+        .filter((message) => message.role === 'user')
+        .map((message) => (typeof message.content === 'string' ? message.content : (message.content ?? []).map((part) => part.text ?? '').join('')))
+      const prompt = [...texts].reverse().find((text) => /COUNT|SHORT|AFTER the gap|QUEUED behind/.test(text)) ?? ''
       prompts.push(prompt)
       response.writeHead(200, { 'content-type': 'text/event-stream' })
       const frame = (delta, finish = null) => response.write(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: finish }] })}\n\n`)
@@ -182,8 +199,21 @@ const LOG_TEXT = `document.getElementById('log').innerText`
  * through the proxy with that session shown.
  */
 async function world(label) {
+  const opened = []
+  try {
+    return await openWorld(label, opened)
+  } catch (error) {
+    // A setup that fails still closes what it opened, so the test process can exit and its browser hold ends.
+    for (const close of opened.reverse()) await Promise.resolve(close()).catch(() => {})
+    throw error
+  }
+}
+
+async function openWorld(label, opened) {
   const home = isolatedHome(`stream-reconnect-${label}`)
+  opened.push(() => removeDir(home))
   const double = await slowDouble()
+  opened.push(() => double.close())
   const config = writeJson(join(home, 'heddle.json'), {
     default: 'double',
     endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: double.url, model: 'model-one', capabilities: ['chat', 'stream'] }],
@@ -192,6 +222,7 @@ async function world(label) {
   const env = { HEDDLE_CONFIG: config, HEDDLE_HOME: home, HOME: home }
   const launch = (port) => startCli(['web', '--host', '127.0.0.1', '--port', String(port), '--endpoint', 'double', '--session-root', join(home, 'sessions')], { env })
   let server = await launch(0)
+  opened.push(() => server.kill())
   let cookie = await cookieFor(server.url)
   /** "Another page": a turn sent straight to the server, whose whole answer stream resolves when it ends. */
   const turn = async (body) => {
@@ -209,9 +240,11 @@ async function world(label) {
   assert.ok(typeof session === 'string', 'the first turn made a session')
   const target = new URL(server.url)
   const proxy = await cuttableProxy(target)
+  opened.push(() => proxy.close())
   const pageUrl = new URL(server.url)
   pageUrl.port = String(proxy.port)
   const browser = await openBrowser({ width: 1280, height: 900 })
+  opened.push(() => browser.close())
   await browser.goto(pageUrl.toString())
   assert.ok(await browser.waitFor(`${LOG_TEXT}.includes('answer to: SHORT first')`, 20_000), 'the page shows the session')
   return {
