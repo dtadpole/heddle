@@ -41,7 +41,7 @@ function harness(deferredCommands = false) {
     paintRunningMarks: noop, jobsSessionChanged: noop, applySessionAccess: noop,
     adoptSession: () => calls.push('adopt'), refreshSessions: async () => {}, syncSelectionToSession: noop,
     showLedger: async () => {}, paintSessionHeading: () => calls.push('heading'), renderTree: async () => {},
-    markSelection: noop, paintScheduleHeader: noop, applySessionModel: noop,
+    markSelection: noop, paintScheduleHeader: noop,
     rememberChatScroll: noop, restoreChatScroll: () => calls.push('scroll'), refreshGoal: async () => {}, refreshTodo: async () => {},
     renderScheduleCards: () => calls.push('cards'), renderScheduleDrawer: noop,
     refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
@@ -60,15 +60,23 @@ function harness(deferredCommands = false) {
     let current = null, unavailableSession = null, selectedPath = 'old', view = 'chat', showGeneration = 0;
     let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
     let sessionLoading = null, composerKey = 'S', accessMode;
+    let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map();
+    const recordedSelections = new Set(), pendingSaves = new Set();
+    function applySessionModel(endpoint, model, effort) {
+      chosenEndpoint = endpoint; chosenModel = model; chosenEffort = effort;
+    }
     const schedState = { drawer: null }, unreadSessions = new Set(), sessionMetas = new Map();
     const runningSessions = new Set(), runningSince = new Map(), pendingInteractions = new Map(), queues = new Map();
     let followTail = false, ledgerRefetchTimer = null;
     const QUEUE_KEY_NONE = ''; let activeFolder = 'workspace', workspaceRoutes = 'present'; const firstTreeReady = Promise.resolve();
     let directTurnPending = 0, directPendingKey = null, stopRequested = false;
-    ${['historyFailureText', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn'].map(source).join('\n')}
+    ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn'].map(source).join('\n')}
     ${listener};
     ({ show: showSession, run: runTurn,
        state: () => ({ current, unavailable: unavailableSession, loading: sessionLoading !== null, selectedPath }),
+       selection: () => ({ endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }),
+       seat: (id) => ({ recorded: recordedSelections.has(id), server: serverSeats.get(id), held: heldSeats.get(id) }),
        kept: () => sessionLoading?.events.length ?? 0,
        buffer: () => sessionLoading?.events,
        prepare: (id) => { runningSessions.add(id); runningSince.set(id, 1); pendingInteractions.set(id, {}); queues.set(id, []); },
@@ -77,6 +85,8 @@ function harness(deferredCommands = false) {
   `, context, { timeout: 1000 }) as {
     show(id: string): Promise<boolean>; run(text: string, key: string): Promise<void>;
     state(): { current: string | null; unavailable: string | null; loading: boolean; selectedPath: string | null };
+    selection(): { endpoint: string | null; model: string | null; effort: string | null };
+    seat(id: string): { recorded: boolean; server?: { endpoint: string; model: string | null; effort: string | null }; held?: { endpoint: string; model: string | null; effort: string | null } };
     kept(): number; buffer(): unknown[]; prepare(id: string): void; lifecycle(id: string): boolean[];
   }
   return { ...api, rows, calls, requests, branch, handle: (payload: unknown) => handle({ data: JSON.stringify(payload) }),
@@ -149,6 +159,31 @@ test('older rejected history cannot replace newer successful history', { timeout
   assert.equal(await latest, true); first.reject(new Error('old offline')); assert.equal(await old, false)
   assert.equal(state.state().current, 'T'); assert.equal(state.state().unavailable, null)
   assert.deepEqual(state.rows.map((row) => row.textContent), ['T'])
+})
+test('late A model JSON retains only A seats after B history becomes unavailable', { timeout: 5000 }, async () => {
+  const state = harness()
+  let releaseJSON!: (value: unknown) => void
+  const old = state.show('A'); const first = await started(state)
+  first.resolve({ ok: true, json: () => new Promise((resolve) => { releaseJSON = resolve }) })
+  await flush()
+  const latest = state.show('B'); const second = await started(state, 2)
+  second.resolve({ ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ error: 'B unavailable' }) })
+  assert.equal(await latest, false)
+  const before = { ...state.selection() }
+  const rows = state.rows.map((row) => row.textContent)
+  const calls = [...state.calls]
+  releaseJSON({ endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', turns: [{ kind: 'user', text: 'must not draw A' }] })
+  assert.equal(await old, false)
+  assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'B', loading: false, selectedPath: null })
+  assert.deepEqual({ ...state.selection() }, before, 'late A cannot publish into the unavailable B seat')
+  assert.deepEqual(state.rows.map((row) => row.textContent), rows)
+  assert.deepEqual(state.calls, calls, 'late A cannot resume history drawing or lifecycle work')
+  assert.equal(state.seat('A').recorded, true)
+  assert.deepEqual({ ...state.seat('A').server }, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' })
+  assert.deepEqual({ ...state.seat('A').held }, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' })
+  assert.equal(state.seat('B').recorded, false)
+  assert.equal(state.seat('B').server, undefined)
+  assert.equal(state.seat('B').held, undefined)
 })
 for (const unavailable of [false, true]) {
   test(`pending new-session response ${unavailable ? 'skips unavailable adoption' : 'still adopts normally'}`, { timeout: 5000 }, async () => {
