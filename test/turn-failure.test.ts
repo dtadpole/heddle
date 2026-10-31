@@ -14,6 +14,7 @@ interface Rule {
   WINDOW_MS: number
   isRepeat: (last: { session: string; message: string; at: number } | null, session: string, message: string, now: number) => boolean
   text: (message: unknown) => string
+  shows: (event: unknown) => boolean
 }
 
 const rule = new Function(`${page.slice(begin, end)}\nreturn TurnFailure`)() as Rule
@@ -54,4 +55,28 @@ test('a failed turn is the answer\'s stop reason, so a reload says what the live
   const alone = transcriptTurns([{ seq: 0, at, type: 'turn/failed', message: '' }] as never)
   assert.equal(alone.length, 1, 'a failure with no answer gets a row of its own')
   assert.deepEqual(alone[0]?.ended, ['the turn failed: unknown error'])
+})
+
+test('a turn the archived-session gate blocked is no failure: nothing is drawn live or on a reload (#139)', () => {
+  /**
+   * The gate ends the turn `turn/failed { reason: { kind: 'blocked' } }` with no message (DSH's blocked end,
+   * dsh-agent-loop lib/index.js:960-962). Measured on both builds (developer-four): a reload drew "The turn failed:
+   * unknown error" under the previous, finished answer, and the live stream drew "the turn failed". DSH's chat shows a
+   * failure only for an error, a sign-out abort or an interrupted end (endFailure, dsh-client-ui-chat
+   * lib/client.js:10475-10487).
+   */
+  assert.equal(rule.shows({ type: 'turn/failed', reason: { kind: 'blocked' } }), false, 'the live stream draws nothing for it')
+  assert.equal(rule.shows({ type: 'turn/failed', message: 'upstream answered 502' }), true, 'a real failure is still drawn')
+  assert.equal(rule.shows({ type: 'turn/failed' }), true, 'and so is one without a message')
+  const at = '2026-10-31T00:00:00.000Z'
+  const answered = [
+    { seq: 0, at, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'code word?' }] } },
+    { seq: 1, at, type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'HERON-58' } },
+    { seq: 2, at, type: 'assistant/completed', text: 'HERON-58', finishReason: 'stop', rounds: 1 },
+    { seq: 3, at, type: 'turn/completed' },
+  ]
+  const blocked = transcriptTurns([...answered, { seq: 4, at, type: 'turn/failed', reason: { kind: 'blocked' } }] as never)
+  assert.deepEqual(blocked, transcriptTurns(answered as never), 'a reload shows the session as if the blocked turn left no row')
+  assert.equal(blocked.at(-1)?.ended, undefined, 'and the previous answer carries no failure')
+  assert.deepEqual(transcriptTurns([{ seq: 0, at, type: 'turn/failed', reason: { kind: 'blocked' } }] as never), [], 'a blocked turn alone draws nothing')
 })
