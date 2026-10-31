@@ -164,18 +164,25 @@ test('a round yields to the event loop, so a pause scheduled during it takes eff
       calls += 1
       store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
       if (calls === 1) {
-        /** A macrotask, exactly like an HTTP request from the Web UI, must get a turn before the cap. */
-        setTimeout(() => {
+        /**
+         * A macrotask, exactly like an HTTP request from the Web UI, must get a turn before the cap. It is queued with
+         * `setImmediate`, not `setTimeout(…, 0)`: a timer is due only after at least 1 ms of libuv's cached loop time,
+         * and microtask-fast rounds can pass several loop iterations in that millisecond, so a timer made the count
+         * machine-dependent (about 1 in 3 runs under load ran more than 3 rounds). An immediate queued during round 1
+         * runs before the driver's own between-rounds `setImmediate` (FIFO), so the pause lands before round 2. A
+         * driver that never yielded would still starve it until the cap, which is what this test exists to catch.
+         */
+        setImmediate(() => {
           goals.pause(session, { id: created.id, revision: created.revision })
           void driver.request(session)
-        }, 0)
+        })
       }
       return {}
     },
   })
   const outcome = await driver.advance(handle)
   assert.equal(goals.get(handle)?.phase, 'paused', 'the pause landed while the goal was running')
-  assert.ok(calls <= 3, `the chain stopped soon after the pause, not at the cap (ran ${calls} rounds)`)
+  assert.ok(calls <= 2, `the chain stopped at the next round boundary after the pause, not at the cap (ran ${calls} rounds)`)
   assert.equal(outcome.stopped, 'phase-paused')
 })
 
