@@ -5675,8 +5675,7 @@ async function showSession(id) {
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
        */
       current = null
-      const title = document.getElementById('session-title')
-      if (title !== null) title.textContent = 'No session'
+      paintSessionHeading()
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
@@ -5698,10 +5697,15 @@ async function showSession(id) {
     updateStatusBar()
     /** The session's own access mode, which is what the chip must show after a reload. */
     applySessionAccess(body.permission?.mode ?? null)
-    /** The header follows the conversation, the way DSH's does. */
-    const titleCell = document.getElementById('session-title')
+    /**
+     * The header follows the conversation, the way DSH's does: no title while it is blank, then its display title, never
+     * the raw id (#24). The list read just above knows whether it is blank; this answer is the fresher title.
+     */
+    if (current === id) {
+      const listed = sessionMetas.get(id) ?? { id, turns: Array.isArray(body.turns) ? body.turns.length : 0 }
+      paintSessionHeading({ ...listed, ...(typeof body.title === 'string' ? { title: body.title } : {}), ...(typeof body.cwd === 'string' ? { cwd: body.cwd } : {}) })
+    }
     const branchCell = document.getElementById('session-branch')
-    if (titleCell !== null) titleCell.textContent = typeof body.title === 'string' && body.title.length > 0 ? body.title : id
     if (branchCell !== null) branchCell.textContent = typeof body.cwd === 'string' ? body.cwd : ''
     /**
      * Each turn renders inside its own guard.
@@ -5774,6 +5778,47 @@ function paintComposerAccess() {
   document.body.dataset.composer = readOnly ? 'read-only' : 'writable'
 }
 
+/**
+ * The conversation header and the window title follow the open session's entry in the latest session list (#24).
+ *
+ * DSH's header reads the live session list (`dsh-client-ui-conversation` `lib/client.js:17990`) and its window title the
+ * selected session's title (`dsh-client-ui-layout` `lib/client.js:57-68`), so both change when the title does. The header
+ * here was written once, when a session was opened, from the id when there was no title yet: after *New session* it
+ * printed `session-<uuid>`, and it kept printing it after the first prompt had titled the session, until a reload. Every
+ * read of `/api/sessions` — the tree's, the turn-end refresh's, the flat list's — now repaints both.
+ */
+let sessionMetas = new Map()
+function noteSessions(list) {
+  if (!Array.isArray(list)) return
+  sessionMetas = new Map(list.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string').map((meta) => [meta.id, meta]))
+  if (current !== null && sessionMetas.has(current)) paintSessionHeading()
+}
+
+/**
+ * Paint the header's title and the window title for the open session: `No session` and `Heddle` with nothing open; no
+ * title while the session is blank, then its display title (`WorkspaceTree.headerTitle`); `<title> — Heddle` once it has a
+ * stored title (`WorkspaceTree.documentTitle`). `meta` defaults to the open session's listed entry; an open session the
+ * list does not know yet is left as it is, for the next read to paint.
+ */
+function paintSessionHeading(meta = current === null ? null : sessionMetas.get(current)) {
+  const cell = document.getElementById('session-title')
+  if (current === null || meta === null) {
+    if (cell !== null) {
+      cell.hidden = false
+      cell.textContent = 'No session'
+    }
+    document.title = WorkspaceTree.documentTitle(null)
+    return
+  }
+  if (meta === undefined) return
+  const heading = WorkspaceTree.headerTitle(meta)
+  if (cell !== null) {
+    cell.hidden = heading === null
+    cell.textContent = heading ?? ''
+  }
+  document.title = WorkspaceTree.documentTitle(meta)
+}
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
@@ -5785,6 +5830,7 @@ async function refreshSessions() {
     if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string') listedMetas.set(meta.id, meta)
   }
   paintComposerAccess()
+  noteSessions(sessions)
   /**
    * The server's `running` flag is the authority: a turn whose end this page never saw — a failed turn, a reload
    * mid-turn, a dropped stream — must not leave a session looking active, and a turn already running when the page
@@ -11478,6 +11524,61 @@ const WorkspaceTree = (() => {
     return current !== undefined && placeholder(meta) && meta.id !== current
   }
 
+  /** A session's stored title when it has one that is not blank, else `undefined`. */
+  function storedTitle(meta) {
+    return meta !== null && typeof meta === 'object' && typeof meta.title === 'string' && meta.title.trim().length > 0 ? meta.title : undefined
+  }
+
+  /**
+   * A session row's label, DSH's `displayTitle` (`dsh-client-ui-workspace` `lib/client.js:1801-1804`): the open blank reads
+   * `New Session` (`session.new`, `:4876`), every other row its stored title, else `Untitled` (`session.untitled`, `:4877`),
+   * "rather than a directory name" (its README.md:32). The tree and the flat list both ask this. #24: the page labelled an
+   * unnamed session with its definition folder's name, `session-<yyyymmdd>-<hhmm>`; that folder stays the row's tooltip.
+   */
+  function sessionLabel(meta) {
+    if (placeholder(meta)) return 'New Session'
+    return storedTitle(meta) ?? 'Untitled'
+  }
+
+  /**
+   * The conversation header's title, or `null` for none. DSH hides it while the session is blank (`ConversationHeader`
+   * passes `hideChrome: blank`, `dsh-client-ui-conversation` `lib/client.js:17897-17908`, and the title renders only
+   * `!hideChrome`, `:17994`; its README.md:87) and then prints the session's display title: the stored title, else its
+   * folder's name, else the id (`displayTitleOf`, `dsh-api-session-controller` `lib/client.js:3696-3707`), read from the
+   * live session list (`:17990`) so it follows a title written later. #24: the header printed the raw session id, and kept
+   * it after the first prompt had titled the session.
+   */
+  function headerTitle(meta) {
+    if (placeholder(meta)) return null
+    const title = storedTitle(meta)
+    if (title !== undefined) return title
+    const folder = typeof meta.cwd === 'string' ? basename(meta.cwd) : ''
+    return folder !== '' ? folder : String(meta.id)
+  }
+
+  /**
+   * The window title, DSH's `DocumentTitle` (`dsh-client-ui-layout` `lib/client.js:57-68`): `<title> — <product>` while the
+   * open session has a stored title, the product's name alone otherwise — nothing open, or a session not titled yet.
+   */
+  function documentTitle(meta, product = 'Heddle') {
+    const title = storedTitle(meta)
+    return title === undefined ? product : `${title} — ${product}`
+  }
+
+  /**
+   * What a refused workspace Rename or Delete says (#49). A `404` is the server answering that the workspace is not
+   * registered any more: another tab or client removed it, and this page has no push to have heard. DSH keeps every page's
+   * list live, so a removed workspace is never a row to act on, and its own refusal names a workspace by id, not by folder
+   * (`Workspace "<id>" not found`, `dsh-api-workspace-controller` `lib/index.js:359`). So the page says it in words, and the
+   * caller redraws the tree; the server's `no workspace <absolute path>` is never shown, because the path carries the
+   * home directory. Any other refusal is the server's own sentence (a name conflict is DSH's), else `fallback`.
+   */
+  function workspaceRefusal(status, body, fallback) {
+    if (status === 404) return { gone: true, text: 'This workspace was already removed.' }
+    const said = body !== null && typeof body === 'object' && typeof body.error === 'string' && body.error.length > 0 ? body.error : undefined
+    return { gone: false, text: said ?? fallback }
+  }
+
   /**
    * The groups to draw, in order: `[{key, workspace, label, path, depth, children, sessions}]`.
    *
@@ -11706,7 +11807,36 @@ const WorkspaceTree = (() => {
     return change.wasRunning === true ? true : unread === true
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, placeholder, hiddenBlank, deriveGroups, flatten, shownCount, raisedWatermark, parentsRunning, watermarkRows, nextWatermark, overflow, overflowLabel, rowStatus, completionUnread, ARCHIVED_NOT_OPENABLE, opensOnClick }
+  return {
+    UNGROUPED,
+    INITIAL,
+    STEP,
+    REACH,
+    basename,
+    sessionOrder,
+    visible,
+    containsSession,
+    placeholder,
+    hiddenBlank,
+    storedTitle,
+    sessionLabel,
+    headerTitle,
+    documentTitle,
+    workspaceRefusal,
+    deriveGroups,
+    flatten,
+    shownCount,
+    raisedWatermark,
+    parentsRunning,
+    watermarkRows,
+    nextWatermark,
+    overflow,
+    overflowLabel,
+    rowStatus,
+    completionUnread,
+    ARCHIVED_NOT_OPENABLE,
+    opensOnClick,
+  }
 })()
 /* workspace-tree:end */
 
@@ -11805,10 +11935,10 @@ const definitionOf = new Map()
 let listedSessions = new Set()
 
 /**
- * Remember where a session's definition sits, and let its row say so: a session nobody named is labelled with its
- * definition folder's name and carries that folder as its tooltip, which is what this page showed before the tree
- * grouped sessions by workspace. The row is updated in place, because the listing that reveals a definition arrives
- * after the session rows are drawn.
+ * Remember where a session's definition sits, and let its row carry that folder as its tooltip. The row is updated in
+ * place, because the listing that reveals a definition arrives after the session rows are drawn. Only the tooltip: the
+ * label stays DSH's `New Session` or `Untitled` (`WorkspaceTree.sessionLabel`), never the folder's
+ * `session-<yyyymmdd>-<hhmm>` name, which is an internal identifier (#24).
  */
 function learnDefinition(id, folder) {
   if (definitionOf.get(id) === folder) return
@@ -11817,10 +11947,6 @@ function learnDefinition(id, folder) {
   if (entry === undefined) return
   const row = entry.li.querySelector(':scope > .row')
   if (row !== null) row.title = folder
-  if (entry.node.session?.title) return
-  const label = row?.querySelector(':scope > .label')
-  if (label !== null && label !== undefined) label.textContent = WorkspaceTree.basename(folder)
-  entry.node.label = WorkspaceTree.basename(folder)
 }
 
 /** What a folder listing draws: no nested root (it is a group), and no definition of a session the tree already lists. */
@@ -11833,24 +11959,12 @@ function folderRows(children) {
   )
 }
 
-/**
- * A session's row label: its stored title; else the name of its definition folder when the tree knows one (the name
- * this page always showed for a session nobody named, `session-<date>-<time>`); else DSH's words, `New session` while
- * it has no turn and `Untitled` after.
- */
-function sessionLabel(meta) {
-  if (typeof meta.title === 'string' && meta.title.trim().length > 0) return meta.title
-  const definition = definitionOf.get(meta.id)
-  if (definition !== undefined) return WorkspaceTree.basename(definition)
-  return (meta.turns ?? 0) === 0 ? 'New session' : 'Untitled'
-}
-
-/** One session as a tree node, in the shape `nodeRow` and the session actions already read. */
+/** One session as a tree node, in the shape `nodeRow` and the session actions already read; its label is DSH's (#24). */
 function sessionNode(meta) {
   return {
     kind: 'session',
     path: 'session:' + meta.id,
-    label: sessionLabel(meta),
+    label: WorkspaceTree.sessionLabel(meta),
     cwd: meta.cwd,
     badge: null,
     children: [],
@@ -13273,6 +13387,8 @@ async function loadSearchIndex() {
     sessions: SessionRules.sidebarSessions(sessions),
     roots: (treeBody.children ?? []).map((node) => ({ path: node.path, title: node.label })),
   }
+  /** Every listed session, a subagent's child included: the header follows the open session's title whatever it is. */
+  noteSessions(sessions)
   return searchIndex
 }
 
@@ -13329,7 +13445,8 @@ async function applySearch() {
       button.setAttribute('role', 'treeitem')
       const title = document.createElement('span')
       title.className = 'hit-title'
-      title.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
+      /** DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`), never the id (#24). */
+      title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
       const place = document.createElement('span')
       place.className = 'hit-workspace'
       /**
@@ -13412,7 +13529,8 @@ async function renderFlatList() {
       icon.append(kindIcon('session', false))
       const label = document.createElement('span')
       label.className = 'label'
-      label.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
+      /** DSH's flat rows carry the tree's label (`displayTitle`), not the raw id (#24). */
+      label.textContent = WorkspaceTree.sessionLabel(meta)
       const place = document.createElement('span')
       place.className = 'age'
       place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
@@ -13471,6 +13589,7 @@ async function renderTree() {
     return
   }
   rowIndex.clear()
+  noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
   childSessions = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta?.origin === 'subagent')
   treeGroups = WorkspaceTree.deriveGroups(workspaces, Array.isArray(sessions) ? sessions : [], { grouping: groupingMode, archived: archiveMode, current })
@@ -13924,8 +14043,19 @@ async function confirmRename() {
     })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
+      const refusal = WorkspaceTree.workspaceRefusal(response.status, body, 'could not rename that workspace')
+      dialogError('workspace-rename-error', refusal.text)
+      if (refusal.gone) {
+        /**
+         * #49: another tab or client removed the workspace. The dialog stays to say so, with nothing left to confirm
+         * (Cancel closes it), and the tree is redrawn without the stale row — what New session on that row already did.
+         */
+        if (activeFolder === renameTarget.path) activeFolder = null
+        renameTarget = null
+        await renderTree()
+        return
+      }
       renameTarget.busy = false
-      dialogError('workspace-rename-error', body.error ?? 'could not rename that workspace')
       button.disabled = false
       return
     }
@@ -13989,10 +14119,18 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
     const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.path), { method: 'DELETE' })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
+      document.getElementById('workspace-delete-status').hidden = true
+      const refusal = WorkspaceTree.workspaceRefusal(response.status, body, 'could not delete that workspace')
+      dialogError('workspace-delete-error', refusal.text)
+      if (refusal.gone) {
+        /** #49: already removed elsewhere. Said in words, nothing left to confirm, and the tree redrawn without the row. */
+        if (activeFolder === deleteTarget.path) activeFolder = null
+        deleteTarget = null
+        await renderTree()
+        return
+      }
       deleteTarget.busy = false
       button.disabled = false
-      document.getElementById('workspace-delete-status').hidden = true
-      dialogError('workspace-delete-error', body.error ?? 'could not delete that workspace')
       return
     }
     if (activeFolder === deleteTarget.path) activeFolder = null

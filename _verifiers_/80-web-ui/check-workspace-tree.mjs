@@ -528,3 +528,95 @@ test('the Session Intent hero picks the workspace for a blank session, by keyboa
     for (const dir of [home, alphaDir, betaDir]) removeDir(dir)
   }
 })
+
+test('a new session reads New Session in the tree, shows no id in the header, and both follow its title once it has one (#24)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH: the open blank row reads `New Session` and a row without a stored title `Untitled`, "rather than a directory name"
+   * (dsh-client-ui-workspace lib/client.js:1801-1804, :4876-4877, README.md:32); the conversation header shows no title
+   * while the session is blank and then the session's title, read from the live list (dsh-client-ui-conversation
+   * lib/client.js:17897-17908, :17990-17994); the window title is `<title> — <product>`, else the product
+   * (dsh-client-ui-layout lib/client.js:57-68). Before the fix a New session row read its definition folder's
+   * `session-<yyyymmdd>-<hhmm>`, the header the raw `session-<uuid>`, and the header kept the id after the first prompt
+   * had titled the session, until a reload (#24).
+   */
+  const home = isolatedHome('tree-label')
+  const folder = fixtureDir('tree-label-work')
+  mkdirSync(folder, { recursive: true })
+  const { config } = scriptedConfig({ home, steps: [{ purpose: 'session-title', text: 'Why Rivers Meander' }, { text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: folder }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const workspace = added.body.record
+    const openId = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const reading = `JSON.stringify({
+      id: ${openId},
+      row: document.querySelector('#tree li[data-kind="session"][aria-selected="true"] > .row > .label')?.textContent ?? null,
+      header: document.getElementById('session-title').textContent,
+      headerShown: !document.getElementById('session-title').hidden,
+      window: document.title,
+    })`
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`document.querySelector('#tree > li[data-kind="workspace"] > .row button[aria-label="New session in ${workspace.title}"]') !== null`, 15_000)
+    await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row button[aria-label="New session in ${workspace.title}"]').click()`)
+    assert.ok(await browser.waitFor(`${openId} !== null`, 15_000), 'the workspace\'s + opens a New session, selected')
+    /** The header is painted once the session's own answer is back; give it that moment before reading. */
+    await new Promise((done) => setTimeout(done, 1_000))
+    const blank = JSON.parse(await browser.evaluate(reading))
+    assert.equal(blank.row, 'New Session', `the blank row reads New Session, not its folder's name\nsaw: ${JSON.stringify(blank)}`)
+    assert.ok(!blank.header.includes(blank.id) && !/session-/.test(blank.header), `the header shows no session id\nsaw: ${JSON.stringify(blank)}`)
+    assert.equal(blank.headerShown, false, `and, as DSH's, no title at all while the session is blank\nsaw: ${JSON.stringify(blank)}`)
+    assert.equal(blank.window, 'Heddle', 'the window title is the product while the session has no title')
+
+    /**
+     * The first prompt, sent as another client would send it: the page hears of it only through its event stream and its
+     * own refresh, which is the path the header has to follow (the issue's header stayed on the id for 24 s and more).
+     */
+    await browser.evaluate(`(() => { window.__turn = fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'why do rivers meander?', session: ${JSON.stringify(blank.id)} }) }); return true })()`)
+    const titled = `(() => { const r = JSON.parse(${reading}); return r.row !== null && r.row !== 'New Session' && r.headerShown && r.header === r.row })()`
+    const followed = await browser.waitFor(titled, 20_000).catch(() => false)
+    const after = JSON.parse(await browser.evaluate(reading))
+    assert.ok(followed, `once titled, the header shows the title the row shows\nsaw: ${JSON.stringify(after)}`)
+    assert.equal(after.id, blank.id, 'in the same session')
+    assert.ok(!after.header.includes(after.id), 'and never the id')
+    assert.equal(after.window, `${after.row} — Heddle`, 'and the window title is the title, then the product')
+
+    /** A title written later — here by the row's own Rename — is followed too, without a reload. */
+    const renamedTo = 'Rivers, renamed'
+    const opened = await browser.evaluate(`(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const row = document.querySelector('#tree li[data-kind="session"][aria-selected="true"] > .row')
+      const menu = row === null ? undefined : [...row.querySelectorAll('button')].find((button) => button.textContent === '…')
+      if (menu === undefined) return 'the open row carries no menu'
+      menu.click(); await wait(250)
+      const item = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].find((button) => button.textContent === 'Rename')
+      if (item === undefined) return 'the menu carries no Rename'
+      item.click(); await wait(250)
+      const input = document.getElementById('session-rename-input')
+      input.value = ${JSON.stringify(renamedTo)}
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.getElementById('session-rename-confirm').click()
+      return 'renamed'
+    })()`)
+    assert.equal(opened, 'renamed', 'the open row is renamed from its menu')
+    const follows = `(() => { const r = JSON.parse(${reading}); return r.row === ${JSON.stringify(renamedTo)} && r.header === ${JSON.stringify(renamedTo)} && r.window === ${JSON.stringify(`${renamedTo} — Heddle`)} })()`
+    assert.ok(
+      await browser.waitFor(follows, 10_000).catch(() => false),
+      `the row, the header and the window title all follow the new title\nsaw: ${await browser.evaluate(reading)}`,
+    )
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(folder)
+  }
+})

@@ -6,7 +6,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { dirname, join, resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
@@ -2426,12 +2426,14 @@ test('New session here, on an instance row, starts a session and writes its defi
     /**
      * Since the left column became DSH's workspace tree (owner goal, 2026-10-28), a session is drawn once, as a session
      * row of its **workspace**, rather than inside the folder it works in; its definition folder is its tooltip. So the
-     * visible result is the new session's row, selected, named for its definition folder.
+     * visible result is the new session's row, selected, reading DSH's `New Session` (dsh-client-ui-workspace
+     * lib/client.js:1801-1804, :4876; #24) rather than the folder's clock name, which the tooltip carries.
      */
     assert.equal(outcome.selectedKind, 'session', `the new session is the selected row\nsaw: ${JSON.stringify(outcome)}`)
-    assert.ok(!outcome.rows.includes('session:' + outcome.selected), 'and it is drawn once, under its workspace, not again inside the folder')
-    const name = String(outcome.selected)
-    assert.match(name, /^session-\d{8}-\d{4}$/, `named for the clock, as the convention requires\nsaw: ${name}`)
+    assert.equal(outcome.selected, 'New Session', `it reads New Session, not its folder's name (#24)\nsaw: ${JSON.stringify(outcome)}`)
+    const name = basename(String(outcome.selectedTooltip))
+    assert.ok(!outcome.rows.includes('session:' + name), 'and it is drawn once, under its workspace, not again inside the folder')
+    assert.match(name, /^session-\d{8}-\d{4}$/, `its definition folder is named for the clock, as the convention requires\nsaw: ${name}`)
 
     const definition = join(h.work, '_tools_', 'some-tool', '_sessions_', name, 'session.json')
     assert.ok(existsSync(definition), `and its definition is on disk at ${definition}`)
@@ -2891,12 +2893,18 @@ test('a session is renamed from its own menu, and the row and its definition fol
       ['Pin session', 'Rename', 'Fork session', 'Archive session', 'Copy Session ID'],
       `the menu reads what DSH's reads\nsaw: ${reading.items.join(', ')}`,
     )
-    assert.match(reading.label, /^session-\d{8}-\d{4}$/, 'the row starts with the folder name, because nothing has named it yet')
+    /**
+     * Nothing has named it yet, and it is the open blank (the page opens the newest session), so the row reads DSH's
+     * `New Session` (dsh-client-ui-workspace lib/client.js:1801-1804, :4876), not its folder's clock name (#24).
+     */
+    assert.equal(reading.label, 'New Session', `the row starts as New Session, because nothing has named it yet\nsaw: ${JSON.stringify(reading)}`)
     /** DSH: an unnamed session's dialog starts with an empty draft, and Rename waits for a name. */
     assert.deepEqual(reading.draft, { value: '', confirm: 'disabled' }, `an unnamed session's dialog starts empty and asks for a name\nsaw: ${JSON.stringify(reading.draft)}`)
     assert.equal(reading.closed, true, 'Rename closes the dialog once the server accepted the name')
     assert.equal(reading.renamed, 'a session with a name', 'after the rename the row shows the name it was given')
-    assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', reading.label), 'while the folder stays reachable as the tooltip, because it is the identity')
+    const folderName = basename(dirname(String(made.definition)))
+    assert.match(folderName, /^session-\d{8}-\d{4}$/, 'the definition folder is named for the clock')
+    assert.equal(reading.folder, join(h.work, '_tools_', 'some-tool', '_sessions_', folderName), 'and stays reachable as the tooltip, because it is the identity')
 
     /** Both halves hold the new name: the store the UI reads, and the definition a reader of the repository reads. */
     const listed = await sessionsOf(h)

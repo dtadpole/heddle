@@ -1,7 +1,7 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T06:01:00Z
+modified: 2026-10-31T06:07:00Z
 level: L3
 version: 1.2.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
@@ -51,7 +51,9 @@ grounded_in:
   sessions move to Ungrouped, the split between a chosen root and one adopted because a session ran in it, the
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
   workspace* and *Delete workspace* dialogs end to end; with the server gone, *Add workspace* and *New session* say
-  that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection.
+  that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection; and
+  *Rename* or *Delete workspace* on a row another client already removed says *This workspace was already removed.*
+  (never the server's `no workspace <absolute path>`), leaves nothing to confirm and redraws the tree without the row.
 - [`check-subagents.mjs`](check-subagents.mjs) — a subagent's session at DSH parity (R-developer-eight-26, -1, -28,
   -2): a delegated one-shot child, the newest session in the store, is never what a first start opens, the search and
   the one-column list leave it out as the tree does, a reload reopens the session that was open, and the child, opened,
@@ -61,10 +63,12 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, and the `Workspace` grouping
-  drawing sibling sections; and the Session Intent hero's workspace picker (C36): over a blank session a `Choose
-  workspace` chip naming its workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu
-  keys, and a pick that moves the new session and its draft so the first prompt runs in the picked workspace.
+  starting in the workspace row the person opened rather than the open session's, the `Workspace` grouping
+  drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id and no title in the
+  header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written;
+  and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
+  workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
+  new session and its draft so the first prompt runs in the picked workspace.
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
