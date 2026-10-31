@@ -1547,6 +1547,15 @@ test('a session log that is not a readable log is left out after a restart, and 
       const body = await refused.text()
       assert.equal(refused.status, 404, `direct access to a damaged session is refused as no session\n${body}`)
       assert.equal(JSON.parse(body).error, `no session ${id}`, 'with the words an unknown id gets')
+      /**
+       * A turn into it is refused the same way, before anything runs (developer-six on #130: the Rust turn route
+       * answered with the store's absolute path, and the page offered a live composer on the row).
+       */
+      const refusedTurn = await call('/api/turn', { method: 'POST', body: JSON.stringify({ session: id, prompt: 'are you there?' }) })
+      const answer = await refusedTurn.text()
+      assert.equal(refusedTurn.status, 404, `a turn into a damaged session is refused as no session\n${answer}`)
+      assert.deepEqual(JSON.parse(answer), { error: `no session ${id}`, code: 'session/not-found' }, 'with the turn route\'s answer for an unknown id')
+      assert.ok(!answer.includes(h.home), `and without the store's path on disk\n${answer}`)
     }
 
     const workspaces = await call('/api/workspaces')
@@ -1554,7 +1563,21 @@ test('a session log that is not a readable log is left out after a restart, and 
     assert.equal(workspaces.status, 200, `the workspace plugin is loaded and answers\n${shown}`)
     assert.ok(JSON.parse(shown).workspaces?.some((workspace) => workspace.path === realpathSync(h.work) || workspace.path === h.work), `and lists the folder\n${shown}`)
     const tree = await call(`/api/tree?path=${encodeURIComponent(h.work)}`)
-    assert.equal(tree.status, 200, `the tree answers for the folder\n${await tree.text()}`)
+    const level = await tree.text()
+    assert.equal(tree.status, 200, `the tree answers for the folder\n${level}`)
+    /**
+     * The tree draws a session from the definition it wrote into the folder (_sessions_/<name>/session.json), not from
+     * the store, so after the store dropped the damaged sessions their rows still opened on a 404. They are gone from
+     * the folder's level and from the roots' level; the healthy ones keep theirs.
+     */
+    assert.ok(level.includes(turned) && level.includes(blank), `the healthy sessions keep their rows in the folder\n${level}`)
+    const roots = await call('/api/tree')
+    const top = await roots.text()
+    assert.equal(roots.status, 200, `the roots' level answers\n${top}`)
+    for (const id of [random, plain]) {
+      assert.ok(!level.includes(id), `a damaged session has no row in the folder's tree\n${level}`)
+      assert.ok(!top.includes(id), `nor at the roots' level\n${top}`)
+    }
     assert.ok(readFileSync(randomLog).equals(randomBytes) && readFileSync(plainLog).equals(plainLine), 'and neither damaged file was rewritten')
 
     for (let waited = 0; waited < 2_000 && ![randomLog, plainLog].every((log) => live.output().includes(log)); waited += 100) {

@@ -86,7 +86,7 @@ pub use service::{
 pub use store::{
     EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, SessionStore,
     TRANSCRIPT_NAME, Warn, can_compress, default_session_root, is_framed, lock_path, log_name,
-    meta_name, skipped_log_line, transcript_in,
+    meta_name, read_log_header, skipped_log_line, transcript_in,
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,

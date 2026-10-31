@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
+import { existingSessionNames, writeSessionDefinition } from '../src/session/definition.ts'
 import { SessionStore, type SessionHandle } from '../src/session/store.ts'
 import { frameEnd } from '../src/session/transcript.ts'
+import { tree, type TreeNode } from '../src/session/tree.ts'
 
 /**
  * Issue #130: one session log that is not a readable log, and the rest of the store.
@@ -132,4 +134,46 @@ test('a log whose first record reads but a later line does not is listed, and th
   assert.ok(healthy !== null)
   assert.equal(loads(store, healthy), true, 'a healthy log reads whole')
   assert.deepEqual(lines, [`heddle session: skipped unreadable log ${log}: line 2 is not a session event`], 'one line names the file')
+})
+
+test('a log that does not read names only its file in the error, never the store root on disk', () => {
+  /**
+   * The error reaches HTTP answers: a turn's error frame, and a route's 500. Measured on #130 (developer-six): the turn
+   * route streamed "<data root>/sessions/<folder>/<id>.v2.jsonl.zstd:1 is not valid JSON", the home directory included.
+   * The server's own line keeps the whole path; the error names the file.
+   */
+  const { root, damaged } = fixture()
+  const head = `${JSON.stringify({ seq: 0, at: new Date().toISOString(), type: 'session/created', cwd: scratch })}\n`
+  writeFileSync(damaged.transcript, `${head}not json\n`)
+  const { store } = restarted(root)
+  const handle = store.open(damaged.id)
+  assert.ok(handle !== null)
+  assert.throws(
+    () => store.read(handle),
+    (error: Error) => error.message.startsWith(`${damaged.id}.v2.jsonl.zstd:2 is not valid JSON`) && !error.message.includes(scratch),
+    'the message names the log by its file name, and nothing above it',
+  )
+})
+
+test('the folder tree leaves out the definition row of a session whose log cannot be read, and draws one whose log is missing', () => {
+  /**
+   * Measured on #130 after the store dropped the session: GET /api/tree still drew it from its definition,
+   * <folder>/_sessions_/<name>/session.json, and a click on the row got 404. The tree asks the store's own judgement of
+   * the log the definition names, for a definition the store does not list.
+   */
+  const { root, work, turned, blank, damaged } = fixture()
+  mkdirSync(work, { recursive: true })
+  const branch = realpathSync(work)
+  for (const handle of [turned, blank, damaged]) {
+    writeSessionDefinition(handle, branch, { createdAt: new Date().toISOString(), taken: existingSessionNames(branch) })
+  }
+  writeFileSync(damaged.transcript, '{"not":"zstd"}\n')
+  rmSync(blank.transcript)
+  const { store } = restarted(root)
+  const rows = (tree(branch, { roots: [{ path: branch, title: 'work' }], sessions: store.list() }).children ?? [])
+    .filter((node: TreeNode) => node.kind === 'session')
+    .map((node: TreeNode) => node.session?.id)
+  assert.ok(rows.includes(turned.id), `a healthy session keeps its row\n${rows.join('\n')}`)
+  assert.ok(rows.includes(blank.id), 'a session whose log is missing still draws, as a definition cloned from another machine does')
+  assert.ok(!rows.includes(damaged.id), 'the session whose log cannot be read has no row')
 })

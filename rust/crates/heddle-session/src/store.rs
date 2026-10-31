@@ -371,8 +371,9 @@ pub fn skipped_log_line(path: &str, reason: &str) -> String {
 
 /// Judge a log file by its first record ([`judge_log_header`]), reading only as far as that record ends. A file that
 /// cannot be opened or read is judged as the load reads it, an empty session: the store's rule for a log not written
-/// yet, and the reason a session whose log is missing entirely is still listed and still openable.
-fn read_log_header(path: &str) -> LogHeader {
+/// yet, and the reason a session whose log is missing entirely is still listed and still openable. The workspace tree
+/// asks it too, of the log a session definition names.
+pub fn read_log_header(path: &str) -> LogHeader {
     use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return LogHeader::Readable;

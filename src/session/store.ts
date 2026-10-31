@@ -644,15 +644,17 @@ export class SessionOwnedError extends Error {
 /**
  * A session log the store cannot read: a line that is not JSON, or not a session event.
  *
- * The message is the one the store has always thrown (`<log>:<line> is not valid JSON — <detail>`); `path` and `reason`
- * are apart so a caller that skips the session can name the file once (`heddle session: skipped unreadable log …`).
+ * The message keeps the store's old shape, `<log>:<line> is not valid JSON — <detail>`, with the log named by its
+ * **file name** alone: the message reaches HTTP answers (a turn's `error` frame, a route's `500`), and the absolute
+ * path put the store root, home directory included, into them (#130, measured on both builds). `path` keeps the
+ * absolute path, so the server's own line names the file whole (`heddle session: skipped unreadable log …`).
  */
 export class SessionLogUnreadableError extends Error {
   readonly path: string
   readonly reason: string
 
   constructor(path: string, line: number, problem: string) {
-    super(`${path}:${line} ${problem}`)
+    super(`${basename(path)}:${line} ${problem}`)
     this.name = 'SessionLogUnreadableError'
     this.path = path
     this.reason = `line ${line} ${problem}`
@@ -668,9 +670,10 @@ export function skippedLogLine(path: string, reason: string): string {
  * Judge a log file by its first record ({@link judgeLogHeader}), reading only as far as that record ends.
  *
  * A file that cannot be opened is judged as `readLog` reads it, an empty session: the store's rule for a log not
- * written yet, and the reason a session whose log is missing entirely is still listed and still openable.
+ * written yet, and the reason a session whose log is missing entirely is still listed and still openable. The folder
+ * tree asks it too, of the log a session definition names (`./tree.ts`).
  */
-function readLogHeader(path: string): LogHeader {
+export function readLogHeader(path: string): LogHeader {
   let fd: number
   try {
     fd = openSync(path, 'r')

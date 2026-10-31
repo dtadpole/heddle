@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 
 use heddle_config::Env;
 use heddle_session::{
-    AppendOptions, CreateOptions, NewEvent, SessionHandle, SessionStore, frame_end,
+    AppendOptions, CreateOptions, NewEvent, SessionConfig, SessionHandle, SessionService,
+    SessionStore, frame_end,
 };
 use serde_json::json;
 
@@ -197,4 +198,45 @@ fn the_shapes_the_store_always_tolerated_still_list_and_open() {
         lines.lock().unwrap().is_empty(),
         "and nothing is reported as skipped"
     );
+}
+
+#[test]
+fn the_service_answers_a_session_whose_log_cannot_be_read_as_no_session() {
+    // Every route asks `exists` before it acts on a session. Measured on #130 (developer-six): POST /api/turn into
+    // such a session passed it on its record alone and answered `400 no session '<id>' under <store root>`, naming
+    // the store on disk; web.ts answered `404 session/not-found`.
+    let (_dir, root, work) = scratch();
+    let (turned, _blank, damaged) = fixture(&root, &work);
+    std::fs::write(&damaged.transcript, b"{\"not\":\"zstd\"}\n").unwrap();
+    let service = SessionService::new(
+        &SessionConfig {
+            root: Some(root.clone()),
+        },
+        &Env::default(),
+        None,
+    );
+    service.store().set_warn(Arc::new(|_: &str| {}));
+    assert!(service.exists(&turned.id), "a healthy session exists");
+    assert!(
+        !service.exists(&damaged.id),
+        "the session whose log cannot be read does not"
+    );
+}
+
+#[test]
+fn a_log_that_does_not_read_names_only_its_file_in_the_error_never_the_store_root() {
+    // The error reaches HTTP answers (a turn's `error` frame); the absolute path put the home directory in them.
+    let (_dir, root, work) = scratch();
+    let (_turned, _blank, damaged) = fixture(&root, &work);
+    let head =
+        json!({"seq": 0, "at": "2026-10-31T12:00:00.000Z", "type": "session/created", "cwd": work});
+    std::fs::write(&damaged.transcript, format!("{head}\nnot json\n")).unwrap();
+    let (store, _lines) = restarted(&root);
+    let handle = store.open(&damaged.id).expect("its first record reads");
+    let message = store.read(&handle).unwrap_err().to_string();
+    assert!(
+        message.starts_with(&format!("{}.v2.jsonl.zstd:2 is not valid JSON", damaged.id)),
+        "the message names the log by its file name: {message}"
+    );
+    assert!(!message.contains(&root), "and nothing above it: {message}");
 }
