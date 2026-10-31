@@ -5,6 +5,10 @@
 //                                              entries older than 2 hours
 //   _tools_/local-build/tmp-sweep --dry-run    list what would go
 //   _tools_/local-build/tmp-sweep --age-minutes 240 --dir <folder>
+//   _tools_/local-build/tmp-sweep --no-caches  skip the cache sizes
+//
+// It also reports the size of the npm and uv caches, which hold gigabytes on this Mac's one disk. It only
+// reports them: clearing a cache is the coordinator's call, and every seat would refill it.
 //
 // An entry's age is the newest mtime of the entry and its direct children, so a folder still being written
 // into is young. An entry named on any running process's command line (a live browser's profile) is kept.
@@ -91,6 +95,35 @@ export function sweep({ dir = os.tmpdir(), ageMinutes = 120, dryRun = false, now
   return result
 }
 
+/** The caches to report, from the same settings npm and uv read: npm_config_cache, UV_CACHE_DIR, XDG_CACHE_HOME. */
+export function cacheDirs(env = process.env, home = os.homedir()) {
+  return [
+    ['npm cache', env.npm_config_cache || path.join(home, '.npm')],
+    ['uv cache', env.UV_CACHE_DIR || path.join(env.XDG_CACHE_HOME || path.join(home, '.cache'), 'uv')],
+  ]
+}
+
+/** Each cache's size in KiB with du, null when du failed; absent when the folder does not exist. Removes nothing. */
+export function cacheSizes(dirs = cacheDirs()) {
+  return dirs.map(([name, dir]) => {
+    if (!fs.existsSync(dir)) return { name, dir, absent: true, kib: null }
+    const du = spawnSync('du', ['-sk', dir], { encoding: 'utf8', timeout: 120_000 })
+    const kib = Number((du.stdout || '').split(/\s+/)[0])
+    return { name, dir, absent: false, kib: du.status === 0 && Number.isFinite(kib) ? kib : null }
+  })
+}
+
+export function formatKiB(kib) {
+  if (kib >= 1024 * 1024) return `${(kib / 1024 / 1024).toFixed(1)} GiB`
+  if (kib >= 1024) return `${Math.round(kib / 1024)} MiB`
+  return `${kib} KiB`
+}
+
+export function renderCaches(sizes) {
+  const parts = sizes.map((c) => `${c.name} ${c.absent ? 'absent' : c.kib === null ? '? (du failed)' : formatKiB(c.kib)} (${c.dir})`)
+  return `tmp-sweep: caches, sizes only, never removed: ${parts.join(', ')}`
+}
+
 export function render(result, dryRun) {
   const total = Object.values(result.removed).reduce((a, b) => a + b, 0)
   const byKind = KINDS.map(([kind]) => `${kind} ${result.removed[kind] || 0}`).join(', ')
@@ -104,13 +137,14 @@ export function render(result, dryRun) {
 }
 
 export function main(argv) {
-  const opt = { dryRun: false, ageMinutes: 120, dir: os.tmpdir() }
+  const opt = { dryRun: false, ageMinutes: 120, dir: os.tmpdir(), caches: true }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--dry-run') opt.dryRun = true
+    else if (argv[i] === '--no-caches') opt.caches = false
     else if (argv[i] === '--age-minutes') opt.ageMinutes = Number(argv[++i])
     else if (argv[i] === '--dir') opt.dir = argv[++i]
     else {
-      console.error('usage: tmp-sweep [--dry-run] [--age-minutes <n>] [--dir <folder>]')
+      console.error('usage: tmp-sweep [--dry-run] [--age-minutes <n>] [--dir <folder>] [--no-caches]')
       return 64
     }
   }
@@ -120,6 +154,7 @@ export function main(argv) {
   }
   const result = sweep(opt)
   console.log(render(result, opt.dryRun))
+  if (opt.caches) console.log(renderCaches(cacheSizes()))
   return result.errors.length ? 1 : 0
 }
 

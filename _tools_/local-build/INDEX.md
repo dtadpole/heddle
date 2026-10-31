@@ -1,12 +1,12 @@
 ---
 title: Local build
-version: 1.7.0
+version: 1.10.0
 description: Runs a cargo command in one of three build slots on the owner's Mac, so the eighteen seats of the Rust port share ten cores and one disk instead of all building at once, and queues the seats fairly for the one browser slot.
 grounded_in:
   - source: owner statement 2026-10-22 that the team works locally on this Mac, not on the h8 devservers
   - source: rust/INDEX.md, the build environment of the Rust port
 created: 2026-10-23T03:10:31Z
-modified: 2026-10-31T02:30:00Z
+modified: 2026-10-31T05:00:00Z
 ---
 
 # `local-build`
@@ -25,8 +25,16 @@ started in the wrong tree tests the wrong tree.
 ```bash
 _tools_/local-build/run test --manifest-path rust/Cargo.toml -p heddle-config  # debug tests
 _tools_/local-build/run build --release --manifest-path rust/Cargo.toml      # release, integrators only
-_tools_/local-build/run status                                               # who holds which slot
+_tools_/local-build/run status                                               # who holds which slot, and the queue
+_tools_/local-build/run --ts -- npm test                                     # a TypeScript test run
 ```
+
+Waiting runs are served **first come, first served** from a ticket queue, not by whoever polls first. The
+coordinator can put one waiter first, once, with `echo <seat> > ~/.hd-build-slots/slot.next`. [queue.md](queue.md)
+has the rules.
+
+A TypeScript test run takes a **ts slot**: two at once on the Mac, apart from the cargo slots, and each run's
+node tests four files at a time. [ts-slots.md](ts-slots.md) has the rules and the coordinator's `ts-cap`.
 
 ## Shared target
 
@@ -53,7 +61,8 @@ and the hand-made lock during the switch.
 
 After a gate, run `_tools_/local-build/tmp-sweep` (`--dry-run` to list). It removes `heddle-*`,
 `hd-*-browser-*`, `scoped_dir*` and `com.google.Chrome*` entries older than two hours from the user TMPDIR,
-but never one a running process names. [tmp-sweep.md](tmp-sweep.md) has the details.
+but never one a running process names. It also reports the npm and uv cache sizes, and never removes them.
+[tmp-sweep.md](tmp-sweep.md) has the details.
 
 ## Build output sweep
 
@@ -70,15 +79,17 @@ node --test _tools_/local-build/_tests_/tmp-sweep/unit.test.mjs
 node --test _tools_/local-build/_tests_/deps-sweep/unit.test.mjs
 ```
 
-Last run 2026-10-30 19:25 PDT, on hd/tool-developer on main c9b9cc75: `node --test _tools_/local-build/_tests_/slot-runner/unit.test.mjs`, 20 passed, 0 failed.
+Last run 2026-10-30 21:49 PDT, this change on main e3843905, in a ts slot: slot-runner 32, browser-slot 24, tmp-sweep 5 and deps-sweep 5 passed, 0 failed.
 
 The suite runs the script against a temporary slot root and a fake cargo: no real slot, no real build. It
 judges slot release, the exit status, the job cap, six concurrent callers held until released (so a full set of slots is proven, not timed), a killed owner, an old stamp, a live
-owner, an ownerless directory, the ownership guard, both owner-file formats, the usage errors, that a held caller exits once its test is gone, and the shared target: the touch on a switch of tree and none on a rebuild, one build at a time, the lock's cargo pid, and a dead or live lock.
+owner, an ownerless directory, the ownership guard, both owner-file formats, the usage errors, the queue (arrival order over polling speed, a live waiter ahead, dropped and passed-over waiters, the `.next` turn, the status listing, a signal while waiting, a raised cap while waiting, the head's one-second poll), the private copy that a rewrite of `run` mid-wait cannot change, that a held caller exits once its test is gone, the ts class (its own pool of two, `ts-cap`, the node shim's `--test-concurrency`, no `-j`, a missing command), and the shared target: the touch on a switch of tree and none on a rebuild, one build at a time, the lock's cargo pid, and a dead or live lock.
 
 ## Read next
 
 - [slots.md](slots.md): what a slot guarantees, and its bounds.
+- [queue.md](queue.md): the first-come-first-served queue, the 60 s head bypass and the `.next` turn.
+- [ts-slots.md](ts-slots.md): TypeScript test runs, their pool of two and the node test concurrency.
 - [shared-target.md](shared-target.md): worktrees sharing one target, the wrong-tree trap and the guard.
 - [browser-slot.md](browser-slot.md): the browser slot queue, its priority turn and stale-holder rule.
 - [tmp-sweep.md](tmp-sweep.md): what the TMPDIR sweep removes and keeps.

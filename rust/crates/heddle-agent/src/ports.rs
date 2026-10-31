@@ -67,6 +67,24 @@ pub trait ModelPort: Send + Sync {
         cancel: Option<CancellationToken>,
     ) -> BoxStream<'static, Result<Chunk, ModelError>>;
 
+    /// The request [`ModelPort::stream`] would send, after the service's `model/request` waterfall.
+    ///
+    /// The loop records this, not the request it built, so a step a selection policy moved to the session's
+    /// current model is logged under that model (issue #14). A port with no waterfall sends what it is given.
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        Ok(request)
+    }
+
+    /// Stream a request [`ModelPort::resolve`] already answered, without running the waterfall again, so a call runs
+    /// its request hooks exactly once and sends what was recorded. A port with no waterfall streams it as given.
+    fn stream_resolved(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        self.stream(request, cancel)
+    }
+
     /// The endpoint a session with none recorded runs on.
     fn default_endpoint(&self) -> Option<String>;
 }
@@ -160,6 +178,23 @@ pub trait SessionPort: Send + Sync {
     /// Whether a message waits in the session's next-step inbox. The loop asks before it ends a turn.
     fn has_pending_input(&self, _session: &SessionHandle) -> bool {
         false
+    }
+
+    /// The agent preset the session recorded (`SessionMeta.preset`, inventory A96), or `None` for a session that
+    /// recorded none. The default knows no record, for a session that does not keep one.
+    fn recorded_preset(&self, _session: &SessionHandle) -> Option<String> {
+        None
+    }
+
+    /// Record `preset` as the session's agent preset **only when it has none** (`SessionStore::record_preset`), and
+    /// answer the preset the session now records. A session keeps its preset, so this never replaces one. The default
+    /// records nothing and answers `None`, and the loop then runs the preset it asked to record.
+    fn record_preset(
+        &self,
+        _session: &SessionHandle,
+        _preset: &str,
+    ) -> Result<Option<String>, PortError> {
+        Ok(None)
     }
 }
 

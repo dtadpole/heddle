@@ -596,6 +596,7 @@ mod tests {
             endpoint: Some("scripted".to_owned()),
             model: Some("m".to_owned()),
             team_id: None,
+            preset: None,
         });
         let live = Arc::new(FakeLive::new());
         let runner = Arc::new(RecordingRunner::new(Arc::clone(&store), None));

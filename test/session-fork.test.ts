@@ -49,7 +49,7 @@ function turn(service: SessionService, handle: SessionHandle, prompt: string, op
 test('a fork keeps the runtime-context note a note, so the child shows the same turns as its source', () => {
   const service = new SessionService(new Context(), { root: join(scratch, 'root-1') })
   const source = service.start({ cwd: scratch, title: 'Source' })
-  /** A system prompt at the head, which the child assembles for itself and must not inherit. */
+  /** A system prompt at the head, which the child inherits where it stood, as DSH's seed does (#52, #55). */
   service.store.append(
     source,
     { type: 'context/note', message: { role: 'system', content: [{ type: 'text', text: 'you are heddle' }] }, origin: 'system-prompt' },
@@ -75,21 +75,21 @@ test('a fork keeps the runtime-context note a note, so the child shows the same 
     'the child counts as many turns as its source',
   )
 
-  const notes = events.filter((event) => event.type === 'context/note')
+  const notes = events.filter((event) => event.type === 'context/note' && event.origin === 'runtime-context')
   assert.equal(notes.length, 1, `the snapshot came across as one note\nsaw: ${JSON.stringify(events.map((event) => event.type))}`)
-  assert.equal(notes[0]?.origin, 'runtime-context', 'with its origin')
-  assert.equal(notes[0]?.identity, SNAPSHOT, 'and its identity, so the next round does not write it again')
-  assert.equal(notes[0]?.surfaceOp, undefined, "and none of the source's surface positions")
+  assert.equal(notes[0]?.identity, SNAPSHOT, 'with its identity, so the next round does not write it again')
+  assert.equal(notes[0]?.surfaceOp, 'append', 'and the surface marker it was written with')
   assert.ok(
     !events.some((event) => event.type === 'message' && JSON.stringify(event.message).includes('Current runtime context')),
     'no message carries the snapshot',
   )
-  assert.ok(
-    !events.some((event) => JSON.stringify(event).includes('you are heddle')),
-    'and the system prompt is not inherited',
+  assert.equal(
+    events.filter((event) => event.type === 'context/note' && JSON.stringify(event).includes('you are heddle')).length,
+    1,
+    'and the system prompt comes along once, as the note it was, so the child writes no second one',
   )
 
   /** The model still reads what the source's model read, in the same order. */
   const texts = service.store.messages(child).map((message) => message.content.map((part) => ('text' in part ? part.text : '')).join(''))
-  assert.deepEqual(texts, ['first question', SNAPSHOT, 'answer to first question', 'second question', 'answer to second question'])
+  assert.deepEqual(texts, ['you are heddle', 'first question', SNAPSHOT, 'answer to first question', 'second question', 'answer to second question'])
 })

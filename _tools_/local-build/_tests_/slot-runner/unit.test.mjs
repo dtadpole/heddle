@@ -68,8 +68,8 @@ function run(sb, args, extra = {}, cwd = CWD) {
   return spawnSync('/bin/sh', [RUN, ...args], { cwd, env: env(sb, extra), encoding: 'utf8' })
 }
 
-function start(sb, args, extra = {}, cwd = CWD) {
-  const child = spawn('/bin/sh', [RUN, ...args], {
+function start(sb, args, extra = {}, cwd = CWD, script = RUN) {
+  const child = spawn('/bin/sh', [script, ...args], {
     cwd,
     env: env(sb, extra),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -95,11 +95,11 @@ function args(sb) {
 }
 
 // Poll `status` until it prints the wanted substring, or the deadline passes.
-async function waitForStatus(sb, wanted, timeoutMs = 10000) {
+async function waitForStatus(sb, wanted, timeoutMs = 10000, statusArgs = ['status']) {
   const deadline = Date.now() + timeoutMs
   let last = ''
   while (Date.now() < deadline) {
-    last = run(sb, ['status']).stdout
+    last = run(sb, statusArgs).stdout
     if (last.includes(wanted)) return last
     await new Promise((r) => setTimeout(r, 100))
   }
@@ -154,10 +154,10 @@ test('a caller\'s own -j is kept, in every spelling, and no -j is added to fmt',
 
 // Concurrency is proven by holding every fake cargo until released, not by timing: on a
 // loaded Mac short sleeps can run one after another and a peak of three never happen.
-async function holdAndRelease(sb, { runners, expectBusy, extra = {} }) {
+async function holdAndRelease(sb, { runners, expectBusy, extra = {}, cmd = ['check'], statusArgs = ['status'] }) {
   const release = join(sb.dir, 'release')
-  const runs = Array.from({ length: runners }, () => start(sb, ['check'], { FAKE_HOLD: release, ...extra }))
-  await waitForStatus(sb, `summary: busy=${expectBusy} `)
+  const runs = Array.from({ length: runners }, () => start(sb, cmd, { FAKE_HOLD: release, ...extra }))
+  await waitForStatus(sb, `summary: busy=${expectBusy} `, 10000, statusArgs)
   // One full retry cycle of the waiting runners (they poll every 3 s): none may get in.
   await new Promise((done) => setTimeout(done, 3500))
   const startedWhileHeld = logLines(sb).filter((line) => line.startsWith('+')).length
@@ -461,4 +461,273 @@ test('a dead holder\'s lock is reclaimed; a live one makes the run wait, then gi
   assert.match(blocked.stderr, /stayed locked by \/x\/live/)
   assert.deepEqual(args(sb), [], 'cargo never ran')
   assert.equal(readFileSync(join(lock, 'owner'), 'utf8'), `${process.pid} ${now} 0 /x/live\n`, 'a live lock is untouched')
+})
+
+// TypeScript test runs: a pool of their own and a capped node test concurrency.
+const tsSlotDirs = (sb) => (existsSync(sb.root) ? readdirSync(sb.root).filter((n) => n.startsWith('ts-slot-')) : [])
+const EXEC_ARGV = ['node', '-e', 'console.log(process.execArgv.join(" "))']
+
+test('a --ts command runs in a ts slot, not through cargo, and every node it starts gets --test-concurrency=4', (t) => {
+  const sb = sandbox(t)
+  const r = run(sb, ['--ts', '--', ...EXEC_ARGV])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.stdout, /--test-concurrency=4/)
+  assert.match(r.stderr, /ts slot 0, cap 2 of 4, node test concurrency 4/)
+  assert.deepEqual(args(sb), [], 'cargo never ran')
+  assert.deepEqual(tsSlotDirs(sb), [], 'the ts slot, and the node shim in it, go with the command')
+
+  const shell = run(sb, ['--ts', 'sh', '-c', 'command -v node'], { LOCAL_BUILD_TS_CONCURRENCY: '2' })
+  assert.equal(shell.status, 0, shell.stderr)
+  assert.match(shell.stdout, /ts-slot-0\/bin\/node$/m, 'the -- is optional, and the shim is first on PATH')
+  const two = run(sb, ['--ts', '--', ...EXEC_ARGV], { LOCAL_BUILD_TS_CONCURRENCY: '2' })
+  assert.match(two.stdout, /--test-concurrency=2/)
+  const bad = run(sb, ['--ts', '--', ...EXEC_ARGV], { LOCAL_BUILD_TS_CONCURRENCY: 'many' })
+  assert.match(bad.stdout, /--test-concurrency=4/)
+  assert.match(bad.stderr, /LOCAL_BUILD_TS_CONCURRENCY must be a whole number/)
+})
+
+test('the ts pool holds two by default, apart from the cargo slots, and a third ts run waits', async (t) => {
+  const sb = sandbox(t)
+  const tsCmd = ['--ts', '--', sb.cargo]
+  const { results, startedWhileHeld, peak, started } = await holdAndRelease(sb, {
+    runners: 4,
+    expectBusy: 2,
+    cmd: tsCmd,
+    statusArgs: ['--ts', 'status'],
+  })
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  assert.equal(startedWhileHeld, 2, 'two ts slots filled, and a third never got in while they were held')
+  assert.ok(peak <= 2, `two at most (peak ${peak})`)
+  assert.equal(started, 4)
+
+  writeFileSync(sb.log, '')
+  const release = join(sb.dir, 'release-2')
+  const held = [start(sb, tsCmd, { FAKE_HOLD: release }), start(sb, tsCmd, { FAKE_HOLD: release })]
+  const busy = await waitForStatus(sb, 'summary: busy=2 ', 10000, ['--ts', 'status'])
+  assert.match(busy, /^class: ts {2}slots: 4 {2}node test concurrency: 4$/m)
+  assert.match(busy, /ts slot 0: busy pid=\d+ cmd=\d+ /)
+  assert.match(busy, /cap: 2 of 4 slots \(default; no cap file\)/)
+  const cargo = run(sb, ['check'], { LOCAL_BUILD_WAIT_SECONDS: '5' })
+  assert.equal(cargo.status, 0, 'a cargo command is not held up by the ts pool')
+  assert.match(run(sb, ['status']).stdout, /summary: busy=0 stale=0 free=3/)
+  const third = run(sb, tsCmd, { LOCAL_BUILD_WAIT_SECONDS: '2' })
+  assert.equal(third.status, 75, 'a third ts run waits, then gives up')
+  writeFileSync(release, '')
+  for (const r of await Promise.all(held.map((h) => h.done))) assert.equal(r.code, 0, r.stderr)
+  assert.deepEqual(tsSlotDirs(sb), [])
+})
+
+test('ts-cap sets the ts pool alone, and an unreadable one is ignored', (t) => {
+  const sb = sandbox(t)
+  mkdirSync(sb.root, { recursive: true })
+  writeFileSync(join(sb.root, 'ts-cap'), '1\n')
+  assert.match(run(sb, ['--ts', 'status']).stdout, /cap: 1 of 4 slots \(set by .*\/ts-cap\)/)
+  assert.match(run(sb, ['status']).stdout, /cap: 3 of 3 slots \(default; no cap file\)/)
+  writeFileSync(join(sb.root, 'ts-cap'), '9\n')
+  const ignored = run(sb, ['--ts', 'status'])
+  assert.match(ignored.stderr, /ignoring .*ts-cap: it must hold a whole number from 1 to 4/)
+  assert.match(ignored.stdout, /cap: 2 of 4 slots \(cap file ignored/)
+})
+
+test('a ts run adds no -j, leaves a CARGO_TARGET_DIR alone, and needs a command that exists', (t) => {
+  const sb = sandbox(t)
+  const td = join(sb.dir, 'shared-target')
+  const r = run(sb, ['--ts', '--', sb.cargo, 'build'], { CARGO_TARGET_DIR: td })
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(args(sb), ['build'], 'the command\'s arguments are its own')
+  assert.ok(!existsSync(td), 'no target lock or stamp')
+  assert.equal(run(sb, ['--ts', '--', 'test', '-n', 'x']).status, 0, 'a command named like a cargo subcommand gets no -j either')
+  assert.equal(run(sb, ['--ts']).status, 64)
+  assert.equal(run(sb, ['--ts', '--']).status, 64)
+  const missing = run(sb, ['--ts', '--', 'no-such-command-xyz'])
+  assert.equal(missing.status, 127)
+  assert.match(missing.stderr, /command not found: no-such-command-xyz/)
+  assert.deepEqual(tsSlotDirs(sb), [])
+})
+
+// The queue: waiters are served first come, first served, not by whoever polls first.
+const queueDir = (sb, prefix = 'slot') => join(sb.root, `${prefix}.queue`)
+const tickets = (sb, prefix = 'slot') => (existsSync(queueDir(sb, prefix)) ? readdirSync(queueDir(sb, prefix)) : [])
+/** A ticket for another waiter, queued agoS seconds ago and last polled quietS seconds ago. */
+function fakeTicket(sb, { pid = process.pid, agoS = 30, quietS = 0, seat = '-', tree = '/x/ahead', prefix = 'slot' } = {}) {
+  mkdirSync(queueDir(sb, prefix), { recursive: true })
+  const file = join(queueDir(sb, prefix), `${String(Date.now() - agoS * 1000).padStart(13, '0')}-${pid}`)
+  writeFileSync(file, `${pid} ${Math.floor(Date.now() / 1000) - agoS} ${seat} ${tree}\n`)
+  const polled = new Date(Date.now() - quietS * 1000)
+  utimesSync(file, polled, polled)
+  return file
+}
+
+test('a waiter that arrived first is served first, though a later one polls thirty times as often', async (t) => {
+  const sb = sandbox(t)
+  const one = { LOCAL_BUILD_SLOTS: '1' }
+  const release = join(sb.dir, 'release')
+  const holder = start(sb, ['check', '-p', 'holder'], { ...one, FAKE_HOLD: release })
+  await waitForStatus(sb, 'summary: busy=1 ')
+  const first = start(sb, ['check', '-p', 'first'], { ...one, LOCAL_BUILD_POLL_SECONDS: '3' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  const second = start(sb, ['check', '-p', 'second'], { ...one, LOCAL_BUILD_POLL_SECONDS: '0.1' })
+  const both = await waitForStatus(sb, 'queue: 2 waiting')
+  assert.match(both, /1\. pid=\d+ seat=- waiting=\d+s tree=.*\n {2}2\. pid=\d+ /)
+  writeFileSync(release, '')
+  const results = await Promise.all([holder.done, first.done, second.done])
+  for (const r of results) assert.equal(r.code, 0, r.stderr)
+  const order = args(sb).filter((a) => ['holder', 'first', 'second'].includes(a))
+  assert.deepEqual(order, ['holder', 'first', 'second'], 'the slot went to the waiter that came first')
+  assert.match(results[2].stderr, /queued for a slot at position 2 of 2 \(cap 1\); first is pid \d+ in /)
+  assert.deepEqual(tickets(sb), [], 'every ticket left with its run')
+})
+
+test('a live waiter ahead holds its place; a dead or long-silent one is dropped, a silent one passed over', (t) => {
+  const sb = sandbox(t)
+  const one = { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_WAIT_SECONDS: '2' }
+  const ahead = fakeTicket(sb)
+  const blocked = run(sb, ['check'], one)
+  assert.equal(blocked.status, 75, blocked.stderr)
+  assert.match(blocked.stderr, /no free slot within 2s \(queue position 2 of 2\)/)
+  assert.deepEqual(args(sb), [], 'cargo never ran while a live waiter was ahead with the slot free')
+  assert.deepEqual(tickets(sb), [ahead.split('/').pop()], 'the run took its own ticket away when it gave up')
+
+  // Silent past the 60 s grace, but alive and within the 300 s bound: passed over, keeps its place.
+  utimesSync(ahead, new Date(Date.now() - 120000), new Date(Date.now() - 120000))
+  const passed = run(sb, ['check'], one)
+  assert.equal(passed.status, 0, passed.stderr)
+  assert.ok(existsSync(ahead), 'a passed-over waiter keeps its ticket')
+
+  utimesSync(ahead, new Date(Date.now() - 400000), new Date(Date.now() - 400000))
+  assert.equal(run(sb, ['check'], one).status, 0)
+  assert.ok(!existsSync(ahead), 'a ticket silent past 300 s is dropped')
+
+  const gone = fakeTicket(sb, { pid: 999999 })
+  assert.equal(run(sb, ['check'], one).status, 0)
+  assert.ok(!existsSync(gone), 'a ticket whose run is gone is dropped')
+  assert.deepEqual(tickets(sb), [])
+})
+
+test('the coordinator puts one waiter first with a .next file, used once; an old one is ignored', (t) => {
+  const sb = sandbox(t)
+  const one = { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_WAIT_SECONDS: '2' }
+  fakeTicket(sb)
+  const next = join(sb.root, 'slot.next')
+  writeFileSync(next, '-\n')
+  assert.equal(run(sb, ['check'], one).status, 75, 'a .next of "-" names no one, though seatless tickets say "-"')
+  writeFileSync(next, 'developer-x\n')
+  const status = run(sb, ['status'])
+  assert.match(status.stdout, /^next: developer-x \(from .*slot\.next; that waiter goes first, once\)$/m)
+  assert.equal(run(sb, ['check'], { ...one, HD_SEAT: 'developer-y' }).status, 75, 'another seat is not named')
+  assert.ok(existsSync(next))
+  const named = run(sb, ['check'], { ...one, HD_SEAT: 'developer-x' })
+  assert.equal(named.status, 0, named.stderr)
+  assert.ok(!existsSync(next), 'the turn is used once')
+
+  // A folder named "<repo>--<seat>" or "<repo>--<seat>-<suffix>" matches the seat key, with no HD_SEAT set.
+  const z = tree(sb, 'heddle--developer-z')
+  const zb = tree(sb, 'heddle--developer-z-b4')
+  const zz = tree(sb, 'heddle--developer-zz')
+  writeFileSync(next, 'developer-z\n')
+  assert.equal(run(sb, ['check'], one).status, 75, 'a run in another tree is not named')
+  assert.equal(run(sb, ['check'], one, zz.dir).status, 75, 'a seat whose key only starts the same is not named')
+  assert.equal(run(sb, ['check'], one, z.dir).status, 0)
+  assert.ok(!existsSync(next))
+  writeFileSync(next, 'developer-z\n')
+  assert.equal(run(sb, ['check'], one, zb.dir).status, 0, 'another worktree of the seat is named too')
+  assert.ok(!existsSync(next))
+
+  writeFileSync(next, 'developer-x\n')
+  utimesSync(next, new Date(Date.now() - 3600000), new Date(Date.now() - 3600000))
+  assert.equal(run(sb, ['check'], { ...one, HD_SEAT: 'developer-x' }).status, 75, 'a .next older than 30 minutes is ignored')
+  assert.match(run(sb, ['status']).stdout, /^next: none$/m)
+})
+
+test('status lists the queue in serving order and says why a waiter is skipped', (t) => {
+  const sb = sandbox(t)
+  assert.match(run(sb, ['status']).stdout, /^next: none\nqueue: empty\nsummary: /m)
+  fakeTicket(sb, { agoS: 50, tree: '/x/first' })
+  fakeTicket(sb, { agoS: 40, tree: '/x/quiet', quietS: 90 })
+  fakeTicket(sb, { agoS: 30, tree: '/x/named', seat: 'developer-x' })
+  fakeTicket(sb, { agoS: 20, tree: '/x/gone', pid: 999999 })
+  writeFileSync(join(sb.root, 'slot.next'), 'developer-x\n')
+  const r = run(sb, ['status'])
+  assert.equal(r.status, 0, r.stderr)
+  const lines = r.stdout.split('\n')
+  const at = lines.findIndex((l) => l.startsWith('queue: '))
+  assert.equal(lines[at], 'queue: 4 waiting, first come first served')
+  assert.match(lines[at + 1], /^ {2}1\. pid=\d+ seat=developer-x waiting=3\ds tree=\/x\/named \(named by next\)$/)
+  assert.match(lines[at + 2], /^ {2}2\. pid=\d+ seat=- waiting=5\ds tree=\/x\/first$/)
+  assert.match(lines[at + 3], /^ {2}3\. .*tree=\/x\/quiet \(silent 9\ds; passed over, keeps its place\)$/)
+  assert.match(lines[at + 4], /^ {2}4\. pid=999999 .*tree=\/x\/gone \(run gone; dropped on the next poll\)$/)
+  assert.equal(tickets(sb).length, 4, 'status changes nothing')
+  assert.match(run(sb, ['--ts', 'status']).stdout, /^queue: empty$/m, 'the ts pool has a queue of its own')
+})
+
+test('a waiter stopped by a signal leaves the queue', async (t) => {
+  const sb = sandbox(t)
+  const release = join(sb.dir, 'release')
+  const holder = start(sb, ['check'], { LOCAL_BUILD_SLOTS: '1', FAKE_HOLD: release })
+  await waitForStatus(sb, 'summary: busy=1 ')
+  const waiter = start(sb, ['check'], { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_POLL_SECONDS: '0.2' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  waiter.child.kill('SIGTERM')
+  const stopped = await waiter.done
+  assert.equal(stopped.code, 143, stopped.stderr)
+  assert.deepEqual(tickets(sb), [], 'the ticket went with the run')
+  writeFileSync(release, '')
+  assert.equal((await holder.done).code, 0)
+})
+
+// A held slot that only this test process owns, so a waiter waits until the test removes it.
+function holdSlot(sb, n = 0) {
+  const dir = join(sb.root, `slot-${n}`)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'owner'), `${process.pid} ${Math.floor(Date.now() / 1000)} 0 /x/held\n`)
+  return dir
+}
+
+test('a run that waits through a rewrite of its own script runs the text it started with, and leaves no copy', async (t) => {
+  const sb = sandbox(t)
+  const script = join(sb.dir, 'tools', 'run')
+  mkdirSync(join(sb.dir, 'tools'))
+  writeFileSync(script, readFileSync(RUN))
+  const tmp = join(sb.dir, 'tmp')
+  mkdirSync(tmp)
+  const held = holdSlot(sb)
+  const extra = { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_WAIT_SECONDS: '30', LOCAL_BUILD_DEPS_SWEEP: '0', TMPDIR: tmp, LOCAL_BUILD_HEAD_POLL_SECONDS: '0.2' }
+  const waiter = start(sb, ['check', '-p', 'kept'], extra, CWD, script)
+  await waitForStatus(sb, 'queue: 1 waiting')
+  assert.deepEqual(readdirSync(tmp), [], 'the private copy deleted itself as soon as it ran')
+  // What a worktree sync or an in-place edit does: the same file, other bytes.
+  writeFileSync(script, 'exit 99\n'.repeat(20000))
+  await new Promise((r) => setTimeout(r, 500))
+  rmSync(held, { recursive: true, force: true })
+  const r = await waiter.done
+  assert.equal(r.code, 0, r.stderr)
+  assert.ok(args(sb).includes('kept'), 'cargo ran from the text the run started with')
+  assert.deepEqual(readdirSync(tmp), [])
+  const usage = run(sb, ['status', 'extra'])
+  assert.match(usage.stderr, new RegExp(`usage: ${RUN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} `), 'usage names the script, not its private copy')
+})
+
+test('a raised cap serves a waiting run at once', async (t) => {
+  const sb = sandbox(t)
+  holdSlot(sb)
+  writeFileSync(join(sb.root, 'cap'), '1\n')
+  const waiter = start(sb, ['check'], { LOCAL_BUILD_WAIT_SECONDS: '20', LOCAL_BUILD_HEAD_POLL_SECONDS: '0.2' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  writeFileSync(join(sb.root, 'cap'), '2\n')
+  const r = await waiter.done
+  assert.equal(r.code, 0, r.stderr)
+  assert.match(r.stderr, /local-build: slot 1, cap 2 of 3/)
+})
+
+test('the head polls every second, so it gets a freed slot before a 3 s poller from before the queue', async (t) => {
+  const sb = sandbox(t)
+  const held = holdSlot(sb)
+  const waiter = start(sb, ['check'], { LOCAL_BUILD_SLOTS: '1', LOCAL_BUILD_POLL_SECONDS: '30', LOCAL_BUILD_WAIT_SECONDS: '60' })
+  await waitForStatus(sb, 'queue: 1 waiting')
+  await new Promise((r) => setTimeout(r, 1500))
+  const freed = Date.now()
+  rmSync(held, { recursive: true, force: true })
+  const r = await waiter.done
+  assert.equal(r.code, 0, r.stderr)
+  assert.ok(Date.now() - freed < 10000, `the head took the slot ${Date.now() - freed} ms after it freed, not on the 30 s poll`)
 })

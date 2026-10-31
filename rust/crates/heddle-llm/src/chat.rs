@@ -129,6 +129,15 @@ pub fn chat_request(
         );
     }
     body.insert("stream".into(), Value::Bool(streaming));
+    // A stream asks for its usage (#69), as DSH's OpenAI-completions layer does unless a model's compat says the
+    // provider cannot (pi-ai `supportsUsageInStreaming`): DeepSeek reports usage unasked, an OpenAI-shaped gateway
+    // does not. Only on a stream, since a non-streamed call refuses `stream_options`.
+    if streaming {
+        body.insert(
+            "stream_options".into(),
+            serde_json::json!({ "include_usage": true }),
+        );
+    }
 
     Ok(PreparedCall {
         url: format!(
@@ -351,9 +360,14 @@ pub fn chunks_from_chat_json(answer: &Value) -> Vec<Chunk> {
 
 /// The streamed fold: deltas, live tool-call fragments, assembly by `index`, `done` on `finish_reason` with usage
 /// from the same frame; `[DONE]` with no finish frame is a plain `stop`.
+///
+/// A finish frame without usage holds its `done` (#69): with `include_usage`, an OpenAI-shaped stream reports
+/// usage in its own last frame, `choices: []`, after the finish frame and before `[DONE]`. The held `done` goes
+/// out with that frame's usage, or bare at `[DONE]` or the end.
 #[derive(Debug, Default)]
 pub struct ChatFold {
     calls: Vec<(u32, crate::types::ToolCall)>,
+    finished: Option<String>,
 }
 
 impl ChatFold {
@@ -377,7 +391,7 @@ impl StreamFold for ChatFold {
         if event.data == "[DONE]" {
             return Ok(Folded {
                 chunks: vec![Chunk::Done {
-                    finish_reason: "stop".into(),
+                    finish_reason: self.finished.take().unwrap_or_else(|| "stop".into()),
                     usage: None,
                 }],
                 finished: true,
@@ -388,6 +402,20 @@ impl StreamFold for ChatFold {
             // An unparseable `data:` is skipped, as the TypeScript read loop does.
             Err(_) => return Ok(Folded::default()),
         };
+        if self.finished.is_some() {
+            let usage =
+                crate::usage::openai_chat_usage(parsed.get("usage").unwrap_or(&Value::Null));
+            if usage.is_none() {
+                return Ok(Folded::default());
+            }
+            return Ok(Folded {
+                chunks: vec![Chunk::Done {
+                    finish_reason: self.finished.take().unwrap_or_default(),
+                    usage,
+                }],
+                finished: true,
+            });
+        }
         let mut chunks = Vec::new();
         let choice = parsed
             .get("choices")
@@ -470,17 +498,19 @@ impl StreamFold for ChatFold {
             }
             let usage =
                 crate::usage::openai_chat_usage(parsed.get("usage").unwrap_or(&Value::Null));
-            chunks.push(Chunk::Done {
-                finish_reason: crate::types::canonical_finish_reason(
-                    Some(finish),
-                    self.calls.len(),
-                ),
-                usage,
-            });
-            return Ok(Folded {
-                chunks,
-                finished: true,
-            });
+            let reason = crate::types::canonical_finish_reason(Some(finish), self.calls.len());
+            // DeepSeek puts usage on the finish frame itself: done at once, as before.
+            if usage.is_some() {
+                chunks.push(Chunk::Done {
+                    finish_reason: reason,
+                    usage,
+                });
+                return Ok(Folded {
+                    chunks,
+                    finished: true,
+                });
+            }
+            self.finished = Some(reason);
         }
         Ok(Folded {
             chunks,
@@ -490,7 +520,7 @@ impl StreamFold for ChatFold {
 
     fn end(&mut self) -> Vec<Chunk> {
         vec![Chunk::Done {
-            finish_reason: "stop".into(),
+            finish_reason: self.finished.take().unwrap_or_else(|| "stop".into()),
             usage: None,
         }]
     }
@@ -582,35 +612,43 @@ mod tests {
             .expect("folds");
         assert_eq!(
             folded.chunks,
-            vec![
-                Chunk::ToolCall(crate::types::ToolCall {
-                    id: "call_1".into(),
-                    name: "write_file".into(),
-                    arguments: "{\"path\":\"a.txt\"}".into(),
-                }),
-                Chunk::Done {
-                    finish_reason: "tool_calls".into(),
-                    usage: None,
-                },
-            ]
+            vec![Chunk::ToolCall(crate::types::ToolCall {
+                id: "call_1".into(),
+                name: "write_file".into(),
+                arguments: "{\"path\":\"a.txt\"}".into(),
+            })],
+            "the assembled call goes out with the finish frame"
         );
-        assert!(folded.finished);
+        // A finish frame without usage holds its `done` for the usage frame, `[DONE]` or the end (#69).
+        assert!(!folded.finished);
+        let done = fold.event(&sse("[DONE]")).expect("folds");
+        assert_eq!(
+            done.chunks,
+            vec![Chunk::Done {
+                finish_reason: "tool_calls".into(),
+                usage: None,
+            }]
+        );
+        assert!(done.finished);
     }
 
     #[test]
     fn the_finish_frame_carries_the_usage_and_the_loop_word_for_the_provider_word() {
-        let folded = ChatFold::new()
+        let mut fold = ChatFold::new();
+        let folded = fold
             .event(&delta(serde_json::json!({
                 "delta": {},
                 "finish_reason": "length"
             })))
             .unwrap_or_else(|error| panic!("{error}"));
+        assert!(folded.chunks.is_empty() && !folded.finished);
         assert_eq!(
-            folded.chunks,
+            fold.end(),
             vec![Chunk::Done {
                 finish_reason: "max_output_tokens".into(),
                 usage: None,
-            }]
+            }],
+            "a stream that ends after a usage-less finish frame still finishes with its word"
         );
 
         let with_usage = ChatFold::new()
@@ -627,6 +665,41 @@ mod tests {
                 usage: Some(TokenUsage {
                     input_tokens: Some(10),
                     output_tokens: Some(4),
+                    ..TokenUsage::default()
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_openai_usage_frame_after_the_finish_frame_reaches_the_done() {
+        // With `include_usage`, OpenAI sends the finish frame, then `choices: []` with the usage, then `[DONE]` (#69).
+        let mut fold = ChatFold::new();
+        let text = fold
+            .event(&delta(serde_json::json!({ "delta": { "content": "hi" } })))
+            .expect("folds");
+        assert_eq!(text.chunks, vec![Chunk::TextDelta { text: "hi".into() }]);
+        let finish = fold
+            .event(&delta(
+                serde_json::json!({ "delta": {}, "finish_reason": "stop" }),
+            ))
+            .expect("folds");
+        assert!(finish.chunks.is_empty() && !finish.finished);
+        let usage = fold
+            .event(&sse(&serde_json::json!({
+                "choices": [],
+                "usage": { "prompt_tokens": 12, "completion_tokens": 3 }
+            })
+            .to_string()))
+            .expect("folds");
+        assert!(usage.finished);
+        assert_eq!(
+            usage.chunks,
+            vec![Chunk::Done {
+                finish_reason: "stop".into(),
+                usage: Some(TokenUsage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(3),
                     ..TokenUsage::default()
                 }),
             }]
@@ -827,6 +900,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 
@@ -866,6 +940,11 @@ mod tests {
         assert_eq!(call.body["max_tokens"], serde_json::json!(64));
         assert_eq!(call.body["temperature"], serde_json::json!(0.2));
         assert_eq!(call.body["stream"], serde_json::json!(true));
+        assert_eq!(
+            call.body["stream_options"],
+            serde_json::json!({ "include_usage": true }),
+            "a stream asks for its usage (#69)"
+        );
     }
 
     #[test]
@@ -904,6 +983,10 @@ mod tests {
         let call = chat_request(&endpoint, &request).expect("builds");
         assert!(!call.stream);
         assert_eq!(call.body["stream"], serde_json::json!(false));
+        assert!(
+            call.body.get("stream_options").is_none(),
+            "a single answer refuses stream_options"
+        );
 
         let mut endpoint = base_endpoint();
         endpoint.stream = None;
