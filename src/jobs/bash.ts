@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 
 import { classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
+import { killProcessGroup } from '../sandbox/process-group.ts'
 import type { SandboxMode, SandboxService } from '../sandbox/service.ts'
 import type { SessionEvent, SessionHandle } from '../session/store.ts'
 import { launchShell, shellEnv, type BashBackground } from '../tools/builtin.ts'
@@ -14,7 +15,9 @@ import { JobError, type JobHooks, type JobOutcome, type JobRegistry, type JobToo
  *
  * The command is confined by the same sandbox path a foreground call takes (`launchShell` in `src/tools/builtin.ts`),
  * runs in the call's folder with the same environment, and is spawned **detached**, in a process group of its own,
- * so a kill reaches the whole tree: SIGTERM to the group, then SIGKILL after a grace period (DSH's 3000 ms).
+ * so a kill reaches the whole tree: SIGTERM to the group, then SIGKILL after a grace period (DSH's 3000 ms). Both
+ * signals go through the sandbox's one group helper (`killProcessGroup` in `src/sandbox/process-group.ts`), the one a
+ * foreground `bash` stops its group with.
  */
 
 /** DSH's parameter description, verbatim (BASH:514-517). */
@@ -74,13 +77,12 @@ export interface BackgroundProcess {
   readonly onSpawn?: (pid: number) => void
 }
 
-/** Signal a whole process group, ignoring a group that is already gone. */
-function signalGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    // ESRCH: the group has already exited, which is what the signal wanted.
-  }
+/**
+ * Signal a whole process group through the sandbox's helper (a group already gone counts as signalled); where the
+ * group cannot be signalled, the shell alone is.
+ */
+function signalGroup(pid: number, signal: NodeJS.Signals, child: { kill(signal: NodeJS.Signals): boolean } | undefined): void {
+  if (!killProcessGroup(pid, signal)) child?.kill(signal)
 }
 
 /**
@@ -92,6 +94,7 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
   let closed = false
   let killTimer: ReturnType<typeof setTimeout> | undefined
   let pid: number | undefined
+  let spawned: ReturnType<typeof spawn> | undefined
   let stderrTail = ''
 
   const done = new Promise<JobOutcome>((resolve) => {
@@ -114,6 +117,7 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       return
     }
     pid = child.pid
+    spawned = child
     if (pid !== undefined) spec.onSpawn?.(pid)
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') }
     const take = (channel: 'stdout' | 'stderr', text: string): void => {
@@ -153,9 +157,10 @@ export function runProcess(spec: BackgroundProcess, append: (text: string, chann
       if (cancelled) return
       cancelled = true
       if (pid === undefined || closed) return
-      signalGroup(pid, 'SIGTERM')
       const group = pid
-      killTimer = setTimeout(() => signalGroup(group, 'SIGKILL'), spec.killGraceMs ?? DEFAULT_KILL_GRACE_MS)
+      const shell = spawned
+      signalGroup(group, 'SIGTERM', shell)
+      killTimer = setTimeout(() => signalGroup(group, 'SIGKILL', shell), spec.killGraceMs ?? DEFAULT_KILL_GRACE_MS)
     },
     done,
   }

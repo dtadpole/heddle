@@ -145,10 +145,14 @@ pub fn signal_name(number: i32) -> String {
         .map_or_else(|| format!("SIG{number}"), |(_, name)| (*name).to_owned())
 }
 
-/// Signal a whole process group, ignoring a group that is already gone (ESRCH is what the signal wanted).
+/// Signal a whole process group through the sandbox's one group helper (`heddle_sandbox::signal_process_group`,
+/// which a foreground `bash` stops its group with), a group already gone counting as signalled.
 pub fn signal_group(pgid: i32, signal: rustix::process::Signal) {
-    if let Some(pid) = rustix::process::Pid::from_raw(pgid) {
-        let _ = rustix::process::kill_process_group(pid, signal);
+    let Ok(leader) = u32::try_from(pgid) else {
+        return;
+    };
+    if let Err(error) = heddle_sandbox::signal_process_group(leader, signal) {
+        tracing::warn!(%error, leader, "a background job's process group could not be signalled");
     }
 }
 

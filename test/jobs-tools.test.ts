@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,7 @@ import { ApprovalService } from '../src/approvals/service.ts'
 import { bashBackground, processOutcome, runningToolCall, RUN_IN_BACKGROUND_DESCRIPTION } from '../src/jobs/bash.ts'
 import { JobRegistry, type JobEvent, type JobOutcome } from '../src/jobs/registry.ts'
 import { jobTools, renderJobList, renderModelDelta, statusLine } from '../src/jobs/tools.ts'
+import { killProcessGroup } from '../src/sandbox/process-group.ts'
 import { SandboxService } from '../src/sandbox/service.ts'
 import { SessionService } from '../src/session/service.ts'
 import type { SessionEvent } from '../src/session/store.ts'
@@ -204,6 +205,23 @@ test('a command that ignores SIGTERM is killed with SIGKILL after the grace peri
   assert.match(end.job.detail ?? '', /^signal: SIG(KILL|TERM)$/)
   await new Promise((resolve) => setTimeout(resolve, 300))
   assert.equal(groupAlive(pid), false, 'nothing of the group survives')
+})
+
+test('a job kill and a foreground stop share one group helper: it sends the signal it is given, and refuses pids 0 and 1', async () => {
+  // The jobs producer sends SIGTERM, then SIGKILL, through the helper the foreground bash sends SIGKILL with.
+  assert.equal(killProcessGroup(0, 'SIGTERM'), false)
+  assert.equal(killProcessGroup(1, 'SIGTERM'), false)
+  const shell = spawn('/bin/sh', ['-c', 'sleep 30 & wait'], { detached: true, stdio: 'ignore' })
+  const pid = shell.pid as number
+  const exited = new Promise<NodeJS.Signals | null>((resolve) => shell.on('exit', (_code, signal) => resolve(signal)))
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  assert.equal(groupAlive(pid), true)
+  assert.equal(killProcessGroup(pid, 'SIGTERM'), true)
+  assert.equal(await exited, 'SIGTERM', 'the leader died of the signal it was sent, not SIGKILL')
+  const deadline = Date.now() + 3_000
+  while (groupAlive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(groupAlive(pid), false, 'the sleep the shell started got the SIGTERM too')
+  assert.equal(killProcessGroup(pid, 'SIGTERM'), true, 'a group already gone counts as signalled')
 })
 
 test('echo x; exit 3 settles completed with exit code 3, and job_output renders it verbatim', async () => {

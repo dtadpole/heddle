@@ -18,10 +18,13 @@ heddle-agent.workspace = true
 # The session store: an owner must exist, the lifecycle events go to its log, the running tool call is read from
 # it, and a notice for a running turn is queued in its inbox.
 heddle-session.workspace = true
+# A killed job's group gets SIGTERM, then SIGKILL, through the sandbox's one group helper, the one a foreground
+# `bash` uses (`signal_process_group`).
+heddle-sandbox.workspace = true
 # The three tools join the run's registry, and background `bash` attaches to the tools row's `bash` through its
 # seam (`heddle_tools::background`), confined by the same `launch_shell`.
 heddle-tools.workspace = true
-# A killed job's process group is signalled (SIGTERM, then SIGKILL) without unsafe code. Already in the lockfile.
+# Signal names and the liveness probe of a job's process group, without unsafe code. Already in the lockfile.
 rustix = { version = "1", features = ["process"] }
 serde.workspace = true
 # `preserve_order`: a view, a session-log event and a route body are written with the TypeScript build's key
@@ -36,6 +39,5 @@ uuid = { version = "1", features = ["v4"] }
 # The compose tests boot a real session store and a real turn on a scripted endpoint.
 heddle-config.workspace = true
 heddle-llm.workspace = true
-heddle-sandbox.workspace = true
 # The route tests drive the router in-process.
 tower = { version = "0.5", features = ["util"] }
