@@ -1866,29 +1866,41 @@ test('a delayed old session read cannot overwrite the latest selected conversati
     await post('/api/workspaces', { path: server.work })
     const a = (await post('/api/sessions', { branch: server.work })).session
     const b = (await post('/api/sessions', { branch: server.work })).session
+    assert.notEqual(a, b, 'fixture requires distinct sessions')
     await post('/api/sessions/' + a + '/title', { title: 'OLD-A' })
     await post('/api/sessions/' + b + '/title', { title: 'LATEST-B' })
     await browser.goto(server.url)
     const row = (id) => `document.querySelector('#tree li[data-session-id=${JSON.stringify(id)}] > .row')`
     await browser.waitFor(`${row(a)} !== null && ${row(b)} !== null`, 15000)
+    await browser.evaluate(`${row(b)}.click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent === 'LATEST-B'`, 10000)
+    await browser.evaluate('new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
     await browser.evaluate(`(() => {
       const real = window.fetch.bind(window)
       window.__sessionWaiting = false
+      window.__sessionFinished = false
+      window.__sessionTitleBeforeRelease = null
       window.fetch = async (input, options) => {
         const response = await real(input, options)
         if (String(input) === ${JSON.stringify('/api/sessions/' + a)}) {
           window.__sessionWaiting = true
+          // Freeze response data now; do not allow a later refetch or body read to hide the stale view publication.
+          const originalJson = response.json.bind(response)
+          const captured = await originalJson()
+          response.json = async () => captured
           await new Promise((resolve) => { window.__releaseSession = resolve })
+          window.__sessionFinished = true
         }
         return response
       }
     })()`)
-    await browser.evaluate(`${row(a)}.click()`)
+    await browser.evaluate(`void (window.__oldOpen = globalThis.showSession(${JSON.stringify(a)}))`)
     await browser.waitFor('window.__sessionWaiting', 10000)
-    await browser.evaluate(`${row(b)}.click()`)
+    await browser.evaluate(`globalThis.showSession(${JSON.stringify(b)})`)
     await browser.waitFor(`document.getElementById('session-title').textContent === 'LATEST-B'`, 10000)
     await browser.evaluate('window.__releaseSession()')
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    await browser.waitFor('window.__sessionFinished === true', 10000)
+    await browser.evaluate('window.__oldOpen')
     assert.equal(await browser.evaluate(`document.getElementById('session-title').textContent`), 'LATEST-B', 'Refs #120: late A title must not replace B')
     assert.equal(await browser.evaluate(`document.querySelector('#tree li[data-session-id=${JSON.stringify(b)}]')?.getAttribute('aria-selected')`), 'true', 'late A caller must not move selection')
   } finally { browser.close(); await server.close() }
