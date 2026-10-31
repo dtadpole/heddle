@@ -121,7 +121,11 @@ pub fn page_policy_with_browser(html: &str, browser_enabled: bool) -> String {
         "img-src 'self' data: blob: https:",
         "font-src 'self' data: https:",
         "media-src 'self' https:",
-        if browser_enabled { "frame-src http: https:" } else { "frame-src 'self'" },
+        if browser_enabled {
+            "frame-src http: https:"
+        } else {
+            "frame-src 'self'"
+        },
         "object-src 'none'",
         "base-uri 'self'",
         "frame-ancestors 'none'",
@@ -386,7 +390,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod browser_policy_tests {
     use super::*;
@@ -395,7 +398,12 @@ mod browser_policy_tests {
         let strict = page_policy("<script>const x = 1</script>");
         let enabled = page_policy_with_browser("<script>const x = 1</script>", true);
         assert!(strict.contains("frame-src 'self'"));
-        assert_eq!(enabled, strict.replace("frame-src 'self'", "frame-src http: https:"));
-        assert!(enabled.contains("object-src 'none'") && enabled.contains("frame-ancestors 'none'"));
+        assert_eq!(
+            enabled,
+            strict.replace("frame-src 'self'", "frame-src http: https:")
+        );
+        assert!(
+            enabled.contains("object-src 'none'") && enabled.contains("frame-ancestors 'none'")
+        );
     }
 }

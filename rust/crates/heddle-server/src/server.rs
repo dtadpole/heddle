@@ -777,7 +777,9 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
             let policy = page::page_policy_with_browser(&html, state.options().browser);
             let mut answer = respond::html(StatusCode::OK, html);
             if let Ok(value) = axum::http::HeaderValue::from_str(&policy) {
-                answer.headers_mut().insert("content-security-policy", value);
+                answer
+                    .headers_mut()
+                    .insert("content-security-policy", value);
             }
             return answer;
         }
