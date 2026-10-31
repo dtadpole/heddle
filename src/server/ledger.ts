@@ -98,6 +98,12 @@ export interface LedgerRecord {
   readonly state?: 'running' | 'ok' | 'error'
   /** Which note wrote a context row: the system prompt, the instruction baseline, or another note. */
   readonly origin?: string
+  /**
+   * On a record outside every turn (`Ledger.loose`): the index of the turn it follows, `0` when it came before the
+   * first. A slash command, a goal change or a standalone compaction between two turns is placed by it, so the table
+   * draws it in its own Between turns section where it happened, as DSH does, not after the last turn.
+   */
+  readonly afterTurn?: number
 }
 
 /** A step: one model request and everything it produced. */
@@ -122,7 +128,10 @@ export interface LedgerTurn {
 /** The whole ledger, plus the totals a header shows. */
 export interface Ledger {
   readonly turns: readonly LedgerTurn[]
-  /** Records that belong to no turn — a session that recorded events before the first prompt. */
+  /**
+   * Records that belong to no turn: events recorded before the first prompt or between two turns (a slash command, a
+   * goal change, a standalone compaction). Each carries `afterTurn`, the turn it follows.
+   */
   readonly loose: readonly LedgerRecord[]
   readonly tokens: {
     readonly input?: number
@@ -324,7 +333,10 @@ export interface LedgerRow {
   readonly turnStart: boolean
   /** True on a step's first row. */
   readonly stepStart: boolean
-  /** True for a record that belongs to no turn: a session that logged before its first prompt. */
+  /**
+   * True for a record that belongs to no turn: logged before the first prompt or between two turns. Such a row has turn
+   * `0`, and the first row of each run of them is a `turnStart`, the head of its Between turns section.
+   */
   readonly loose: boolean
   /**
    * The one line the table shows for the row, decided here rather than in the page.
@@ -369,6 +381,25 @@ export function previewOf(record: LedgerRecord): string {
  */
 export function projectRows(ledger: Ledger): readonly LedgerRow[] {
   const rows: LedgerRow[] = []
+  /**
+   * Records that belong to no turn sit where they happened, in a section of their own (DSH's `Between turns`): before
+   * the first turn, or after the turn their `afterTurn` names. They say so rather than inventing a turn number. A
+   * record without `afterTurn` (a ledger built by hand) follows the last turn, and a run whose turn is missing still
+   * comes last, so no record is dropped.
+   */
+  const lastTurn = ledger.turns.at(-1)?.index ?? 0
+  const between = new Map<number, LedgerRecord[]>()
+  for (const record of ledger.loose) {
+    const after = record.afterTurn ?? lastTurn
+    between.set(after, [...(between.get(after) ?? []), record])
+  }
+  const section = (after: number): void => {
+    ;(between.get(after) ?? []).forEach((record, index) => {
+      rows.push({ turn: 0, kind: record.kind, record, turnStart: index === 0, stepStart: false, loose: true, preview: previewOf(record) })
+    })
+    between.delete(after)
+  }
+  section(0)
   for (const turn of ledger.turns) {
     for (const step of turn.steps) {
       step.records.forEach((record, index) => {
@@ -384,14 +415,9 @@ export function projectRows(ledger: Ledger): readonly LedgerRow[] {
         })
       })
     }
+    section(turn.index)
   }
-  /**
-   * Records that belong to no turn come last, and say so rather than inventing a turn number: a session
-   * that recorded context before its first prompt has no turn to belong to.
-   */
-  for (const record of ledger.loose) {
-    rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true, preview: previewOf(record) })
-  }
+  for (const after of [...between.keys()].sort((left, right) => left - right)) section(after)
   return rows
 }
 
@@ -515,11 +541,11 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     turn = null
   }
 
-  /** Where a record goes: the open step, or the turn's prologue. */
+  /** Where a record goes: the open step, or the turn's prologue, or the loose records, marked with the turn they follow. */
   const put = (record: LedgerRecord): void => {
     if (step !== null) step.records.push(record)
     else if (turn !== null) prologue.push(record)
-    else loose.push(record)
+    else loose.push({ ...record, afterTurn: turns.at(-1)?.index ?? 0 })
   }
 
   /**

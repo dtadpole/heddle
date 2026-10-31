@@ -1,9 +1,9 @@
 ---
 title: heddle-web-trajectory public API
 created: 2026-10-23T05:10:00Z
-modified: 2026-10-23T05:10:00Z
+modified: 2026-10-31T16:03:56Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: What heddle-web-trajectory exports, what it reads from other crates, and where it deliberately differs from the TypeScript build.
 status: unverified
 grounded_in:
@@ -18,8 +18,8 @@ grounded_in:
 | Item | What it is |
 |---|---|
 | `project_ledger(&[Value]) -> Ledger` | events → turns → steps → records, with totals and the in-flight count |
-| `project_rows`, `preview_of`, `lane_of` | the table's flat rows with their turn and step boundaries, one-line previews, the three lanes |
-| `project_timeline(&Ledger) -> Timeline` | the lane strip: one span per turn on the recorded domain |
+| `project_rows`, `preview_of`, `lane_of` | the table's flat rows with their turn and step boundaries, one-line previews, the three lanes; a record outside every turn (`Ledger::loose`, placed by its `after_turn`) sits where it happened, in its own Between turns section |
+| `project_timeline(&Ledger) -> Timeline` | the lane strip: one span per turn on the recorded domain, and `records`, one timed record per overview bar with an answer's TTFT split |
 | `project_session_stats`, `context_breakdown_with_fallback`, `session_stats_view` | the composer dock's figures and the context panel's sections, for the chat route's `stats` |
 | `inspect_tool`, `render_payload`, trait `JsonHighlighter` | a tool row's inspector blocks; highlighting is heddle-web-files' `render_code(.., "json", gutter: false)` |
 | `log_file_name`, `content_disposition`, `ndjson` | the downloaded log's name, header and body |

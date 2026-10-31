@@ -104,6 +104,10 @@ pub struct LedgerRecord {
     /// Which note wrote a context row: `system-prompt`, `instructions`, `runtime-context`, ….
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// On a record outside every turn (`Ledger::loose`): the index of the turn it follows, `0` before the first. The
+    /// table draws it where it happened, in its own Between turns section, as DSH does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_turn: Option<u32>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -129,6 +133,7 @@ impl LedgerRecord {
             result: None,
             state: None,
             origin: None,
+            after_turn: None,
         }
     }
 
@@ -197,7 +202,8 @@ pub struct LedgerTokens {
 #[serde(rename_all = "camelCase")]
 pub struct Ledger {
     pub turns: Vec<LedgerTurn>,
-    /// Records that belong to no turn — events recorded before the first prompt.
+    /// Records that belong to no turn: events recorded before the first prompt or between two turns (a slash command,
+    /// a goal change, a standalone compaction). Each carries `after_turn`, the turn it follows.
     pub loose: Vec<LedgerRecord>,
     pub tokens: LedgerTokens,
     /// How many records the ledger holds, loose ones included.
@@ -349,13 +355,15 @@ impl Projector {
         }
     }
 
-    /// Where a record goes: the open step, or the turn's prologue, or the loose records.
-    fn put(&mut self, record: LedgerRecord) {
+    /// Where a record goes: the open step, or the turn's prologue, or the loose records, marked with the turn they
+    /// follow.
+    fn put(&mut self, mut record: LedgerRecord) {
         if let Some(step) = self.step.as_mut() {
             step.records.push(record);
         } else if self.turn.is_some() {
             self.prologue.push(record);
         } else {
+            record.after_turn = Some(self.turns.last().map_or(0, |turn| turn.index));
             self.loose.push(record);
         }
     }
