@@ -1588,7 +1588,8 @@ mod tests {
             calls[0]
                 .messages
                 .last()
-                .map(|message| text_of(message).starts_with("Summarise the conversation above"))
+                .map(|message| text_of(message)
+                    .starts_with("You are now acting as a compaction engine"))
                 .unwrap_or(false),
             "the summariser is asked the compaction instruction"
         );

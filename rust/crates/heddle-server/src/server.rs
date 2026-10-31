@@ -1353,6 +1353,12 @@ async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPat
     )
 }
 
+/// One level of the folder tree (web.ts's `GET /api/tree`): the registered roots without a `path`,
+/// else the children of `path` — and only when a registered root owns it. A path outside every root
+/// is refused with web.ts's `400 {"error": "<canonical> is not under any workspace root"}` before
+/// anything is read, as the CLI's `tree` and the file routes refuse it. The path is canonical
+/// first, so `..` and a symlink that leads out of a root are judged where they land. An empty
+/// `path` is the roots, as in web.ts.
 async fn tree(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1360,7 +1366,16 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
-    let path = query.get("path").map(canonical_path);
+    let path = query
+        .get("path")
+        .filter(|path| !path.is_empty())
+        .map(canonical_path);
+    if let Some(path) = path.as_deref().filter(|path| !workspaces.owns(path)) {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            format!("{} is not under any workspace root", path.display()),
+        );
+    }
     let archived =
         crate::services::ArchivedFilter::from_query(query.get("archived").map(String::as_str));
     let sessions = state.harness().sessions.list();
@@ -1801,7 +1816,11 @@ fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
 }
 
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
-    let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
+    // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
+    let Some(prompt) = body
+        .str("prompt")
+        .filter(|prompt| !prompt.trim().is_empty())
+    else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
     };
     let attachments = match state.harness().attachments.as_ref() {
@@ -2800,6 +2819,133 @@ mod tests {
         );
     }
 
+    /// A registry with one root: it owns what is at or under that folder, and records every tree it
+    /// is asked for, so a test can tell a refusal from a listing that was read and then dropped.
+    struct OneRoot {
+        root: PathBuf,
+        asked: std::sync::Mutex<Vec<Option<PathBuf>>>,
+    }
+
+    impl crate::services::WorkspaceService for OneRoot {
+        fn owns(&self, path: &std::path::Path) -> bool {
+            path.starts_with(&self.root)
+        }
+        fn tree(
+            &self,
+            path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            self.asked.lock().unwrap().push(path.map(Path::to_path_buf));
+            Ok(json!({"children": ["listed"]}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// Percent-encode a path for a query string, every byte outside the unreserved set.
+    fn query_value(path: &Path) -> String {
+        path.to_string_lossy()
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (byte as char).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_tree_route_refuses_a_path_outside_every_root_as_web_ts_does() {
+        let base = std::env::temp_dir().join(format!("heddle-tree-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("root").join("inner")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::fs::write(base.join("elsewhere").join("not-yours.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), base.join("root").join("way-out"))
+            .unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let root = base.join("root");
+        let elsewhere = base.join("elsewhere");
+        let registry = Arc::new(OneRoot {
+            root: root.clone(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_root = harness();
+        with_root.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_root,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("tree-owner")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let tree = |path: &Path| format!("/api/tree?path={}", query_value(path));
+        let refusal = format!(
+            "{{\"error\":\"{} is not under any workspace root\"}}\n",
+            elsewhere.display()
+        );
+
+        // A folder outside every root, a symlink in the root that leads to it, and a `..` walk out
+        // of the root: each is web.ts's 400 naming the canonical path, and nothing is listed.
+        for (what, uri) in [
+            ("a folder outside every root", tree(&elsewhere)),
+            ("a symlink that leads out", tree(&root.join("way-out"))),
+            ("a dot-dot walk", tree(&root.join("..").join("elsewhere"))),
+        ] {
+            let (status, headers, bytes) = call(&router, Method::GET, &uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what} is refused");
+            assert_eq!(headers["content-type"], "application/json");
+            assert_eq!(body_text(&bytes), refusal, "{what} gets web.ts's answer");
+        }
+        assert!(
+            registry.asked.lock().unwrap().is_empty(),
+            "a refused path is never handed to the tree: {:?}",
+            registry.asked.lock().unwrap()
+        );
+
+        // Inside the root it lists, and no path (or an empty one, as web.ts reads it) is the roots.
+        for (uri, expected) in [
+            (tree(&root.join("inner")), Some(root.join("inner"))),
+            (tree(&root), Some(root.clone())),
+            ("/api/tree".to_owned(), None),
+            ("/api/tree?path=".to_owned(), None),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {}", body_text(&bytes));
+            assert_eq!(
+                registry.asked.lock().unwrap().pop(),
+                Some(expected),
+                "{uri}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn the_html_route_previews_only_an_html_document() {
         let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
@@ -2972,6 +3118,16 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
+        // A prompt of only whitespace is refused before anything else, as an empty one is (#32).
+        for blank in [
+            r#"{"prompt":""}"#,
+            r#"{"prompt":"   "}"#,
+            r#"{"prompt":"\n\t "}"#,
+        ] {
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, blank).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
+            assert_eq!(body_text(&bytes), "a prompt is required\n", "{blank}");
+        }
     }
 
     #[tokio::test]

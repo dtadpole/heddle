@@ -21,6 +21,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`backend.rs`](backend.rs) | the backend trait, platform selection, the fail-closed error, outcome classification and the shell's sentences | `src/sandbox/backend.ts` |
 | [`seatbelt.rs`](seatbelt.rs) | the macOS rung: the SBPL profile and its functional probe | `src/sandbox/seatbelt.ts` |
 | [`linux.rs`](linux.rs) | the bubblewrap and Landlock rungs and their chain | `src/sandbox/linux.ts` |
+| [`process.rs`](process.rs) | `kill_process_group`: a Stop or a timeout reaches every process a command started, as DSH signals a child's group | `src/sandbox/process-group.ts` |
 | [`escalation.rs`](escalation.rs) | the one-call wider-retry ladder and its approval ask | `src/sandbox/escalation.ts` |
 | [`transition.rs`](transition.rs) | the owner's session-mode change rule | `permissionTransition` in `src/sandbox/service.ts` |
 | [`service.rs`](service.rs) | the sandbox service: the file fence and the shell seam | `SandboxService` in `src/sandbox/service.ts` |

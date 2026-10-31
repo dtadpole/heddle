@@ -235,6 +235,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 

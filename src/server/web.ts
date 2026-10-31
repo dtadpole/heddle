@@ -2324,7 +2324,12 @@ export function sessionRequestSelection(
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
   }
-  if (typeof body.prompt !== 'string' || body.prompt.length === 0) {
+  /**
+   * A prompt of only whitespace is no prompt (#32). Measured: `"   "` was accepted and ran a model turn while `""`
+   * was refused. DSH refuses content without non-whitespace text (`hasPromptContent`, "prompt content must include
+   * non-whitespace text or an attachment"); a prompt here always carries its text, so blank text is refused.
+   */
+  if (typeof body.prompt !== 'string' || body.prompt.trim().length === 0) {
     respond(response, 400, 'text/plain', 'a prompt is required\n')
     return
   }
