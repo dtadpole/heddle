@@ -1544,11 +1544,14 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
-            // A store that announces its titles has pushed this one already (#33).
+            // A store that announces its titles has pushed this one already (#33). Otherwise the push names the
+            // title cleaned as the store cleans what it keeps, as the announcing store and the TypeScript server do,
+            // not the raw body.
             if !state.inner.renames_announced {
+                let kept = heddle_session::title_text::clean_session_title(&title);
                 state.events().push(
                     "sessions",
-                    &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
+                    &json!({"type": "session/renamed", "session": id.as_str(), "title": kept}),
                 );
             }
             respond::json(StatusCode::OK, &meta)
@@ -5613,7 +5616,7 @@ mod tests {
             &router,
             &format!("/api/sessions/{session}/title"),
             &cookie,
-            r#"{"title":"renamed"}"#,
+            r#"{"title":"  renamed \u0007  "}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -5621,7 +5624,8 @@ mod tests {
         assert_eq!(event, "sessions");
         assert_eq!(
             data,
-            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+            json!({"type": "session/renamed", "session": session, "title": "renamed"}),
+            "the push names the title cleaned as the store keeps it, not the raw body"
         );
         assert!(
             id.is_some(),
@@ -5983,6 +5987,33 @@ mod tests {
                 .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
             "{turns:?}"
         );
+
+        // #33: a store that announces its titles pushes a person's rename exactly once, as the store kept it
+        // (cleaned); the route adds no second push.
+        let mut renamed = state.events().subscribe();
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/title"),
+            &cookie,
+            r#"{"title":"  Loom   notes  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut pushed = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), renamed.next_frame()).await
+        {
+            if frame.event == "sessions"
+                && frame.data.contains("session/renamed")
+                && frame.data.contains("Loom")
+            {
+                pushed.push(frame.data);
+            }
+        }
+        assert_eq!(pushed.len(), 1, "one push per rename: {pushed:?}");
+        let data: Value = serde_json::from_str(&pushed[0]).unwrap();
+        assert_eq!(data["session"], id.as_str());
+        assert_eq!(data["title"], "Loom notes", "the title the store kept");
         std::fs::remove_dir_all(&scratch).ok();
     }
 
