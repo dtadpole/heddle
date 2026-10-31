@@ -16,6 +16,8 @@ import { SubagentError, type SubagentService } from '../agent/subagent.ts'
 export function subagentTools(service: SubagentService): ToolDefinition[] {
   return [
     {
+      /** Returns at once with the child's id, so two delegates of one step start together (DSH's subagent spawn). */
+      concurrencySafe: true,
       spec: {
         name: 'delegate',
         description:

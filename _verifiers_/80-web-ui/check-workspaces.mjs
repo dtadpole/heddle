@@ -339,6 +339,11 @@ test('the page adds, renames and deletes a workspace with its own dialogs', asyn
       await browser.waitFor(`!document.getElementById('workspace-picker').open && ${row('picked')} !== undefined`, 10_000),
       'Add workspace registers the folder on screen and the tree shows it without a reload',
     )
+    /** DSH (dsh-client-ui-workspace): Add workspace registers the directory "and open[s] a Session" (live issue #22). */
+    assert.ok(
+      await browser.waitFor(`${row('picked')}.closest('li').querySelectorAll('li[data-kind=session]').length === 1`, 10_000),
+      'and opens a session in it, as DSH does',
+    )
     const views = (await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []
     assert.ok(views.some((view) => view.path === join(real, 'picked') && view.origin === 'added'), 'it is a registered workspace')
 
@@ -348,8 +353,8 @@ test('the page adds, renames and deletes a workspace with its own dialogs', asyn
 
     await browser.evaluate(`Array.from(${row('picked')}.querySelectorAll('button')).find((entry) => entry.getAttribute('aria-label') === 'New session in picked').click()`)
     assert.ok(
-      await browser.waitFor(`${row('picked')}.closest('li').querySelectorAll('li[data-kind=session]').length === 1`, 10_000),
-      'its + starts a session in it',
+      await browser.waitFor(`${row('picked')}.closest('li').querySelectorAll('li[data-kind=session]').length === 2`, 10_000),
+      'its + starts another session in it',
     )
     const sessionId = await browser.evaluate(`${row('picked')}.closest('li').querySelector('li[data-kind=session]').dataset.sessionId`)
 
@@ -401,5 +406,69 @@ test('the page adds, renames and deletes a workspace with its own dialogs', asyn
     browser.close()
     await server.close()
     removeDir(place)
+  }
+})
+
+test('after Add workspace the next message starts its conversation in the new folder, not in the session that was open', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Live issue #22 (developer-six-3, 2026-10-29): after Add workspace the note read "a new conversation in picked", but
+   * the composer stayed bound to the session that was open, so the next message went into that session and nothing
+   * started in the new folder. DSH: Add workspace registers the directory "and open[s] a Session".
+   */
+  const place = fixtureDir('workspaces-add-then-send')
+  const server = await startServer('add-then-send', { home: place })
+  const picked = join(place, 'picked')
+  const other = join(place, 'other')
+  const browser = await openBrowser({ width: 1400, height: 900 })
+  const row = (label) => `Array.from(document.querySelectorAll('#tree li[data-kind=workspace] > .row')).find((entry) => entry.querySelector('.label')?.textContent === ${JSON.stringify(label)})`
+  try {
+    mkdirSync(picked, { recursive: true })
+    mkdirSync(other, { recursive: true })
+    const real = realpathSync(place)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: other }) })
+    const started = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: join(real, 'other') }) })
+    const open = started.body.session
+    assert.equal(typeof open, 'string', `a session to have open first (${JSON.stringify(started.body)})`)
+    await browser.goto(server.url)
+    const openRow = `document.querySelector('#tree li[data-kind=session][data-session-id=${JSON.stringify(open)}] > .row')`
+    /** The only workspace starts expanded on a first visit, so its session's row is drawn without a click. */
+    assert.ok(await browser.waitFor(`${row('other')} !== undefined && ${openRow} !== null`, 10_000), 'the open session is in the tree')
+    await browser.evaluate(`${openRow}.click()`)
+    assert.ok(
+      await browser.waitFor(`document.querySelector('#tree li[data-kind=session][data-session-id=${JSON.stringify(open)}]')?.getAttribute('aria-selected') === 'true'`, 10_000),
+      'and it is the session the page has open',
+    )
+
+    await browser.evaluate('document.getElementById("add-workspace").click()')
+    /** The chooser first lists the home folder; a path typed before that listing lands would be overwritten by it. */
+    await browser.waitFor(`document.getElementById('workspace-picker').open && document.querySelectorAll('#workspace-picker-list button').length > 0`, 10_000)
+    await browser.evaluate(`(() => { const input = document.getElementById('workspace-picker-path'); input.value = ${JSON.stringify(picked)}; input.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    await browser.evaluate(`document.getElementById('workspace-picker-form').requestSubmit()`)
+    await browser.waitFor(`document.getElementById('workspace-picker-path').value === ${JSON.stringify(join(real, 'picked'))}`, 10_000)
+    await browser.evaluate(`document.getElementById('workspace-picker-add').click()`)
+    assert.ok(await browser.waitFor(`!document.getElementById('workspace-picker').open && ${row('picked')} !== undefined`, 10_000), 'the folder is added')
+
+    await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'hello in the new folder'; field.dispatchEvent(new Event('input', { bubbles: true })) })()`)
+    await browser.evaluate(`document.getElementById('send').click()`)
+    const inPicked = async () => {
+      const listed = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(listed) ? listed : []
+    }
+    let sessions = []
+    const deadline = Date.now() + 20_000
+    while (Date.now() < deadline) {
+      sessions = await inPicked()
+      if (sessions.some((meta) => meta.cwd === join(real, 'picked') && (meta.turns ?? 0) > 0) || sessions.some((meta) => meta.id === open && (meta.turns ?? 0) > 0)) break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    const summary = JSON.stringify(sessions.map((meta) => ({ id: meta.id === open ? 'the open one' : meta.id, cwd: meta.cwd, turns: meta.turns })))
+    assert.ok(sessions.some((meta) => meta.cwd === join(real, 'picked') && (meta.turns ?? 0) > 0), `the message started a conversation in the new folder (${summary})`)
+    assert.equal(sessions.find((meta) => meta.id === open)?.turns ?? 0, 0, `and the session that was open received nothing (${summary})`)
+  } finally {
+    browser.close()
+    await server.close()
   }
 })

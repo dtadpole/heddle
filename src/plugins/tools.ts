@@ -38,12 +38,22 @@ export default class ToolsPlugin extends ToolRegistry {
     bashTimeoutMs: Schema.number().default(30_000),
     /** Characters of a `bash` call's combined output the model is shown; the rest is cut and marked (DSH's output cap). */
     bashOutputLimit: Schema.natural().min(1).default(20_000),
+    /** Parallel-safe tool calls one model step runs at once; 1 runs every call alone (DSH's `maxParallelToolCalls`). */
+    maxParallelToolCalls: Schema.natural().min(1).default(10),
   })
 
   static readonly inject = ['approvals', 'sandbox', 'session']
 
-  constructor(ctx: import('@deepseek-ai/cordis').Context, config: { allow?: readonly string[]; includeBuiltins?: boolean; bashTimeoutMs?: number; bashOutputLimit?: number } = {}) {
+  constructor(ctx: import('@deepseek-ai/cordis').Context, config: {
+      allow?: readonly string[]
+      includeBuiltins?: boolean
+      bashTimeoutMs?: number
+      bashOutputLimit?: number
+      maxParallelToolCalls?: number
+    } = {},
+  ) {
     super(ctx, ctx.approvals, ctx.sandbox, ctx.session)
+    if (config.maxParallelToolCalls !== undefined) this.maxParallelToolCalls = config.maxParallelToolCalls
     /** Tools the configuration named and nothing registered, reported once the tree is loaded. */
     const cfgProblems: string[] = []
 

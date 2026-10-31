@@ -6285,12 +6285,28 @@ async function sendNow(text, attachments = []) {
   }
   directTurnPending += 1
   renderComposerState()
+  /**
+   * Whether the server took the message: `runTurn` says so when the turn's response opens, before its stream is read.
+   *
+   * Live issue #48 (2026-10-30): when the connection dropped at the end of a turn, the answer had streamed in full, but
+   * reading the stream's end threw, and this catch said "the message could not be sent" and put the answered prompt back
+   * in the composer, so Enter sent it again as a duplicate turn and the next message was appended to it. DSH restores a
+   * draft only for a failed **submission**; once the host has the message its echo is retired and nothing comes back.
+   * The queue's pump already drew this line (`accepted` in `pumpQueue`).
+   */
+  let accepted = false
   try {
-    await runTurn(text, composerKey, attachments)
+    await runTurn(text, composerKey, attachments, () => {
+      accepted = true
+    })
   } catch (error) {
-    if (field.value.trim() === '') field.value = text
-    growComposer()
-    add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    if (accepted) {
+      add('denied', `the connection dropped while the answer was arriving (${(error && error.message) || error}); the message itself was delivered`)
+    } else {
+      if (field.value.trim() === '') field.value = text
+      growComposer()
+      add('denied', `the message could not be sent: ${(error && error.message) || error}`)
+    }
   } finally {
     directTurnPending = Math.max(0, directTurnPending - 1)
     if (directTurnPending === 0) {
@@ -11574,7 +11590,16 @@ async function browseTo(path) {
   }
 }
 
-/** Register a folder, then show it: the tree redrawn, the new workspace open and selected, the composer aimed at it. */
+/**
+ * Register a folder, then open a session in it: the tree redrawn, the new workspace open, its new session selected and
+ * shown, and the composer bound to that session.
+ *
+ * DSH (dsh-client-ui-workspace): "Choose Add workspace and select a directory to register it and open a Session." Live
+ * issue #22 (developer-six-3, 2026-10-29): this used to set `activeFolder` and select the workspace row while the
+ * composer stayed bound to the session that was open, so the note read "a new conversation in <folder>" and the next
+ * message went into the previous session (the turn route resumes a named session and ignores the folder). Opening the
+ * session through `startSessionAt`, the workspace row's own New session, makes the page do what it says.
+ */
 async function adoptWorkspace(path) {
   const response = await fetch('/api/workspaces', {
     method: 'POST',
@@ -11588,7 +11613,7 @@ async function adoptWorkspace(path) {
   expanded.add(added)
   rememberExpanded()
   await renderTree()
-  chooseSelected(added)
+  await startSessionAt({ path: added })
   const row = Array.from(treeList.querySelectorAll('.row')).find((entry) => entry.dataset.path === added)
   row?.scrollIntoView({ block: 'nearest' })
   return null

@@ -48,8 +48,9 @@ pub fn builtin_tools(sandbox: Arc<dyn SandboxGate>, options: BuiltinOptions) -> 
     let escalation = escalation_fields(sandbox.as_ref());
     vec![
         write_file_tool(Arc::clone(&sandbox)),
-        read_file_tool(Arc::clone(&sandbox)),
-        list_dir_tool(Arc::clone(&sandbox)),
+        // Reads only, so two reads of one step run together (DSH's fs read tools are concurrency-safe).
+        crate::tool::parallel_safe(read_file_tool(Arc::clone(&sandbox))),
+        crate::tool::parallel_safe(list_dir_tool(Arc::clone(&sandbox))),
         bash_tool(
             sandbox,
             options.bash_timeout_ms,
