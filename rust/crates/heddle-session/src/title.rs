@@ -823,6 +823,62 @@ mod tests {
         );
     }
 
+    /// #33: every title the store writes is announced, after the write, and not only a person's rename. DSH records
+    /// each title change and every view of the session follows it; the server pushes these as `session/renamed`.
+    #[test]
+    fn every_title_the_store_writes_is_announced_after_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new(|| Ok(stop("Quarterly revenue comparison")), false);
+        let service = service(&dir, &fake);
+        type Heard = Vec<(String, String, Option<String>)>;
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let recorder = Arc::clone(&heard);
+        let reader = service.clone();
+        service
+            .store()
+            .on_renamed(Arc::new(move |id: &str, title: &str| {
+                // The title the record holds when the announcement is heard: a listener never hears ahead of the file.
+                let stored = reader
+                    .meta(id)
+                    .and_then(|meta| meta.title().map(str::to_string));
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), title.to_string(), stored));
+            }));
+        let handle = start(&service, &dir);
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "a new session is untitled, so nothing is announced"
+        );
+
+        service.user(&handle, PROMPT, None).unwrap();
+        request(&service, &handle, None);
+        service.rename(&handle.id, "named by a person").unwrap();
+        service
+            .user(&handle, "a second prompt names nothing", None)
+            .unwrap();
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            3,
+            "a message that writes no title announces none"
+        );
+        service.rename(&handle.id, "").unwrap();
+        let id = handle.id.clone();
+        let fallback = title_from(PROMPT);
+        let generated = "Quarterly revenue comparison".to_string();
+        let named = "named by a person".to_string();
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![
+                (id.clone(), fallback.clone(), Some(fallback)),
+                (id.clone(), generated.clone(), Some(generated)),
+                (id.clone(), named.clone(), Some(named)),
+                (id, String::new(), None),
+            ]
+        );
+    }
+
     #[test]
     fn a_rename_during_generation_pins_the_name_even_when_unchanged() {
         let dir = tempfile::tempdir().unwrap();

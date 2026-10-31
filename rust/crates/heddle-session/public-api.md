@@ -1,9 +1,9 @@
 ---
 title: The heddle-session public API
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T08:22:31Z
+modified: 2026-10-31T15:30:32Z
 level: L1
-version: 1.3.0
+version: 1.4.0
 description: Every item the crate re-exports at its root, and what each one is for.
 status: unverified
 grounded_in:
@@ -19,9 +19,9 @@ Everything is re-exported at the crate root.
 
 | Item | What it is |
 |---|---|
-| `SessionStore` | the store: `create`, `open`, `open_newest`, `meta`, `list`, `append`, `read`, `count`, `surface`, `derive_messages`, `message`, `assistant_chunk`, `model_request`, `fork`, `rename`, `flags`, `set_model`, `touch`, `last_answer`, `bytes`, `framed`. `Send + Sync`, `&self` everywhere; share as `Arc` |
+| `SessionStore` | the store: `create`, `open`, `open_newest`, `meta`, `list`, `append`, `read`, `count`, `surface`, `derive_messages`, `message`, `assistant_chunk`, `model_request`, `fork`, `rename`, `on_renamed`, `flags`, `set_model`, `touch`, `last_answer`, `bytes`, `framed`. `Send + Sync`, `&self` everywhere; share as `Arc` |
 | `SessionService` | the face the loop, CLI and server call: `start`, `open`/`meta`/`exists`, `open_at` (one folder, one session; `fresh` for `--new`), `current`, `create_at` (session + definition), `fork` → `ForkOutcome`, `user`/`user_content` (titles from the first message), `folder`, `recorded_mode`/`effective_mode`/`set_mode`, and pass-throughs |
-| `SessionConfig`, `EventListener` | the config row `{ root }`; the listener the boot wires to the `session/event` hook. `SessionStore::new(root, &Env)` and `SessionService::new(&config, &Env, listener)` take the environment, as every reader of `HEDDLE_HOME` does |
+| `SessionConfig`, `EventListener`, `RenameListener` | the config row `{ root }`; the listener the boot wires to the `session/event` hook; and the one `SessionStore::on_renamed` tells about every title the store writes (a person's rename, the first message's fallback, a fork's name, the title model's answer), which the server pushes as `session/renamed` (#33). `SessionStore::new(root, &Env)` and `SessionService::new(&config, &Env, listener)` take the environment, as every reader of `HEDDLE_HOME` does |
 | `SessionEvent`, `NewEvent`, `Events`, `SessionHandle`, `SurfaceOp`, `AppendOptions` | an event (`seq`, `at`, `kind`, ordered `fields`); what a caller appends (`NewEvent::new("x").field(k, v)` or `json!` via `TryFrom`); a snapshot `Arc<Vec<Arc<SessionEvent>>>`; the four paths of a session; `append` / `replace {start_seq, end_seq}` |
 | `SessionMeta` + `CreateOptions`, `ForkAttribution`, `ModelSelection`, `FlagPatch`, `SessionOrigin` | the meta record as its ordered JSON with getters, and what creates or edits it |
 | `fold_surface`, `derive_message`, `derive_node_message`, `index_by_seq`, `completed_prefix`, `inherits_answer`, `fork_seed`, `inherited_by_fork`, `SurfaceState` | the surface, generic over `Borrow<SessionEvent>`; a fork's seed is the source's completed log (#52, #55) |
