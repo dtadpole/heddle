@@ -1797,13 +1797,26 @@ test('the transcript follows its tail, and never yanks a reader who scrolled bac
     )
     assert.ok((await distance()) >= awayFrom - 2, `and it does not pull the reader back (${await distance()} vs ${awayFrom})`)
 
-    /** Scrolling back to the floor re-engages following, as the reference's near-bottom test does. */
-    await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+    /**
+     * Scrolling back to the floor re-engages following, as the reference's near-bottom test does. Both judge the
+     * reader's arrival against the floor when the scroll is sampled (DSH's `ScrollFollow.sample` reads the metrics at
+     * that moment), so while the stream grows, an arrival can land a frame short of a floor that has just moved, and
+     * the reader scrolls again (#94: two re-runs timed out waiting for the re-engaged follow). The check does what the
+     * reader does, up to three times, until the page's own intent says it follows; a page that never re-engages fails.
+     */
+    let engaged = false
+    for (let attempt = 0; attempt < 3 && !engaged; attempt += 1) {
+      await browser.evaluate('(() => { const log = document.getElementById("log"); log.dispatchEvent(new Event("wheel")); log.scrollTop = log.scrollHeight })()')
+      engaged = await browser.waitFor('document.getElementById("log").dataset.following === "true"', 3000).catch(() => false)
+    }
+    assert.ok(engaged, 'scrolling back to the floor re-engages following')
     assert.ok(
       await browser.waitFor('Math.round((() => { const log = document.getElementById("log"); return log.scrollHeight - log.scrollTop - log.clientHeight })()) <= 1', 10_000),
       'the floor is reachable again',
     )
     const markFollow = await rows()
+    /** The second turn may have ended during the return; a third gives the re-engaged follow growth to follow. */
+    if (!(await browser.evaluate('document.getElementById("send").hidden'))) await sendMessage(browser, 'and once more')
     assert.ok(
       await browser.waitFor(`document.querySelectorAll("#log .turn").length > ${markFollow}`, 15_000),
       'and more content arrives',
