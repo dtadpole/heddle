@@ -66,6 +66,9 @@ use crate::services::{
     ServiceError, SessionMeta, StartSession,
 };
 use crate::stream::{self, EventHub, SseFrame, names, sse_response};
+use crate::terminals::{
+    CreateRefusal, InputResult, ResizeResult, TerminalEvent, TerminalRegistry, TerminalSpawn,
+};
 use crate::token::{
     self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
 };
@@ -96,6 +99,12 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/permission"),
     ("POST", "/api/sessions/{id}/steer"),
     ("POST", "/api/sessions/{id}/stop"),
+    ("GET", "/api/sessions/{id}/terminals"),
+    ("POST", "/api/sessions/{id}/terminals"),
+    ("DELETE", "/api/sessions/{id}/terminals/{terminal}"),
+    ("GET", "/api/sessions/{id}/terminals/{terminal}/stream"),
+    ("POST", "/api/sessions/{id}/terminals/{terminal}/input"),
+    ("POST", "/api/sessions/{id}/terminals/{terminal}/resize"),
     ("POST", "/api/folders/session"),
     ("POST", "/api/turn"),
     ("GET", "/api/tree"),
@@ -237,6 +246,8 @@ struct Shared {
     launch_token: String,
     secret: String,
     port: u16,
+    /// The page's interactive terminals, per session (#85).
+    terminals: TerminalRegistry,
 }
 
 impl AppState {
@@ -269,6 +280,11 @@ impl AppState {
     /// A registered session view by name.
     pub fn session_view(&self, name: &str) -> Option<Arc<dyn SessionView>> {
         self.inner.views.get(name).cloned()
+    }
+
+    /// Each session's interactive terminals (#85).
+    pub fn terminals(&self) -> &TerminalRegistry {
+        &self.inner.terminals
     }
 }
 
@@ -371,6 +387,7 @@ impl ServerBuilder {
                 launch_token,
                 secret,
                 port,
+                terminals: TerminalRegistry::default(),
             }),
         };
 
@@ -390,6 +407,26 @@ impl ServerBuilder {
             .route("/api/sessions/{id}/permission", post(permission_session))
             .route("/api/sessions/{id}/steer", post(steer_session))
             .route("/api/sessions/{id}/stop", post(stop_session))
+            .route(
+                "/api/sessions/{id}/terminals",
+                get(list_terminals).post(create_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}",
+                delete(close_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/stream",
+                get(stream_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/input",
+                post(input_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/resize",
+                post(resize_terminal),
+            )
             .route("/api/folders/session", post(folder_session))
             .route("/api/turn", post(turn))
             .route("/api/tree", get(tree))
@@ -582,6 +619,8 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        // Terminals end first, and their processes with them, so a restart leaves no orphan shell (#85).
+        self.state.terminals().close_all().await;
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
@@ -1142,7 +1181,14 @@ async fn flags_session(
         .set_flags(id.as_str(), FlagPatch { pinned, archived })
     {
         Ok(None) => respond::no_session(id.as_str()),
-        Ok(Some(meta)) => respond::json(StatusCode::OK, &meta),
+        Ok(Some(meta)) => {
+            // Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end
+            // with their owner (#85).
+            if archived == Some(true) {
+                state.terminals().close_session(id.as_str()).await;
+            }
+            respond::json(StatusCode::OK, &meta)
+        }
         Err(error) => {
             let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
@@ -1952,6 +1998,375 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         receiver.recv().await.map(|frame| (frame, receiver))
     });
     sse_response(stream)
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Terminals (#85)
+
+/// Whether a write says it is JSON (`/^application\/json\s*(;|$)/i`, as web.ts judges it). A page sends JSON,
+/// and a form on another site cannot.
+fn json_write(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.strip_prefix("application/json").is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.is_empty() || rest.starts_with(';')
+            })
+        })
+}
+
+fn not_json_write() -> Response {
+    respond::error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "a terminal request must be sent as application/json",
+    )
+}
+
+/// The checks every terminal route makes after the door, in web.ts's order:
+/// - the session id's shape (`400`);
+/// - the session is this server's (`404`) and its folder sits under one of its workspace roots (`403`);
+/// - an archived session is refused (`409`) unless the route lists or closes.
+fn terminal_session(
+    state: &AppState,
+    raw: &str,
+    allow_archived: bool,
+) -> Result<(SessionId, SessionMeta), Box<Response>> {
+    let id = SessionId::parse(raw).ok_or_else(|| Box::new(respond::not_a_session_id()))?;
+    let meta = state
+        .harness()
+        .sessions
+        .meta(id.as_str())
+        .ok_or_else(|| Box::new(respond::no_session(id.as_str())))?;
+    if let Some(workspaces) = &state.harness().workspaces
+        && !workspaces.owns(&canonical_path(meta.cwd.as_deref().unwrap_or("")))
+    {
+        return Err(Box::new(respond::error_with_code(
+            StatusCode::FORBIDDEN,
+            format!("session {id} is not under any workspace root of this server"),
+            "not-owned",
+        )));
+    }
+    let archived = meta.rest.get("archived").and_then(Value::as_bool) == Some(true);
+    if archived && !allow_archived {
+        return Err(Box::new(respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!("session {id} is archived"),
+            "archived",
+        )));
+    }
+    Ok((id, meta))
+}
+
+/// A write's JSON body, read after the checks as web.ts reads it: empty is `{}`, a non-object is `{}`, and
+/// anything else is `400 the body must be JSON`.
+fn terminal_body(bytes: &[u8]) -> Result<Map<String, Value>, Box<Response>> {
+    if bytes.is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_slice::<Value>(bytes) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Ok(Map::new()),
+        Err(_) => Err(Box::new(respond::text(
+            StatusCode::BAD_REQUEST,
+            "the body must be JSON\n",
+        ))),
+    }
+}
+
+fn no_terminal(terminal: &str, session: &SessionId) -> Response {
+    respond::error(
+        StatusCode::NOT_FOUND,
+        format!("no terminal {terminal} in session {session}"),
+    )
+}
+
+fn terminal_size_refusal(state: &AppState) -> Response {
+    let limits = state.terminals().limits();
+    respond::error(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "cols and rows must be whole numbers from 1 to {} and {}",
+            limits.max_cols, limits.max_rows
+        ),
+    )
+}
+
+async fn list_terminals(
+    State(state): State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Response {
+    let (id, _) = match terminal_session(&state, &raw, true) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    respond::json_compact(
+        StatusCode::OK,
+        &json!({
+            "terminals": state.terminals().list(id.as_str()),
+            "limits": state.terminals().limits(),
+        }),
+    )
+}
+
+async fn create_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+    body: bytes::Bytes,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, meta) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(&body) {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let size = |key: &str, default: f64| match body.get(key) {
+        None => Some(default),
+        Some(value) => value.as_f64(),
+    };
+    let (Some(cols), Some(rows)) = (size("cols", 80.0), size("rows", 24.0)) else {
+        return terminal_size_refusal(&state);
+    };
+    let limits = state.terminals().limits();
+    if !limits.fits(cols, rows) {
+        return terminal_size_refusal(&state);
+    }
+    let sandbox = state.harness().sandbox.clone();
+    let mode = state
+        .harness()
+        .sessions
+        .effective_mode(id.as_str(), &sandbox.default_mode());
+    let root = sandbox.root_for(meta.cwd.as_deref().map(std::path::Path::new));
+    if !root.is_dir() {
+        return respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "the session's folder {} is not an available directory",
+                root.display()
+            ),
+            "cwd-missing",
+        );
+    }
+    let spawn = TerminalSpawn {
+        session: id.as_str().to_owned(),
+        cwd: root.clone(),
+        mode: mode.clone(),
+        cols: cols as u32,
+        rows: rows as u32,
+        shell: None,
+    };
+    match state
+        .terminals()
+        .create(spawn, |argv| sandbox.confine(argv, &mode, &root))
+    {
+        Ok(info) => respond::json_compact(StatusCode::CREATED, &json!({ "terminal": info })),
+        Err(CreateRefusal::Limit) => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "session {id} already holds {} terminals; close one first",
+                limits.max_terminals
+            ),
+            "limit",
+        ),
+        Err(CreateRefusal::Sandbox(message)) => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "sandbox-unavailable",
+        ),
+        Err(CreateRefusal::Spawn(message)) => respond::internal_error(message),
+    }
+}
+
+async fn close_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, true) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    if !state.terminals().close(id.as_str(), &terminal).await {
+        return no_terminal(&terminal, &id);
+    }
+    respond::json_compact(
+        StatusCode::OK,
+        &json!({ "closed": true, "terminal": terminal }),
+    )
+}
+
+async fn input_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+    body: bytes::Bytes,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(&body) {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let Some(data) = body.get("data").and_then(Value::as_str) else {
+        return respond::error(StatusCode::BAD_REQUEST, "data must be a string");
+    };
+    match state.terminals().input(id.as_str(), &terminal, data).await {
+        InputResult::Ok => respond::json_compact(StatusCode::OK, &json!({ "ok": true })),
+        InputResult::Missing => no_terminal(&terminal, &id),
+        InputResult::Exited => {
+            respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
+        }
+        InputResult::TooLarge => respond::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "input is limited to {} bytes per request",
+                state.terminals().limits().max_input_bytes
+            ),
+        ),
+    }
+}
+
+async fn resize_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+    body: bytes::Bytes,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(&body) {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let (Some(cols), Some(rows)) = (
+        body.get("cols").and_then(Value::as_f64),
+        body.get("rows").and_then(Value::as_f64),
+    ) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "cols and rows are required numbers",
+        );
+    };
+    match state
+        .terminals()
+        .resize(id.as_str(), &terminal, cols, rows)
+        .await
+    {
+        ResizeResult::Ok => respond::json_compact(
+            StatusCode::OK,
+            &json!({ "ok": true, "cols": cols as u32, "rows": rows as u32 }),
+        ),
+        ResizeResult::Missing => no_terminal(&terminal, &id),
+        ResizeResult::Exited => {
+            respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
+        }
+        ResizeResult::OutOfRange => terminal_size_refusal(&state),
+        ResizeResult::Unavailable => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the terminal could not be resized",
+            "unavailable",
+        ),
+    }
+}
+
+/// One frame of a terminal stream, as web.ts writes it: `event: <type>` and the event's JSON.
+fn terminal_frame(event: &TerminalEvent) -> String {
+    let name = match event {
+        TerminalEvent::Output { .. } => "output",
+        TerminalEvent::Exit { .. } => "exit",
+    };
+    format!(
+        "event: {name}\ndata: {}\n\n",
+        serde_json::to_string(event).expect("a terminal event serializes")
+    )
+}
+
+/// One terminal's output as an event stream: a `snapshot` of the retained tail first, then `output` frames and
+/// one `exit`, after which the stream ends. The listener is attached before the snapshot is taken, so no output
+/// falls between them. A heartbeat comment keeps an idle stream open; dropping the body detaches.
+async fn stream_terminal(
+    State(state): State<AppState>,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+) -> Response {
+    use futures::StreamExt;
+
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let Some((snapshot, receiver, hold)) = state.terminals().attach(id.as_str(), &terminal) else {
+        return no_terminal(&terminal, &id);
+    };
+    let opening = format!(
+        "{}event: snapshot\ndata: {}\n\n",
+        stream::STREAM_OPEN,
+        serde_json::to_string(&snapshot).expect("a snapshot serializes")
+    );
+    let ended = snapshot.exited;
+    let closing = ended.then(|| {
+        terminal_frame(&TerminalEvent::Exit {
+            code: snapshot.exit_code,
+        })
+    });
+    let mut ticker = tokio::time::interval(stream::heartbeat_interval());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let live = futures::stream::unfold(
+        (receiver, hold, ticker, ended, false),
+        |(mut receiver, hold, mut ticker, ended, primed)| async move {
+            if ended {
+                return None;
+            }
+            let mut primed = primed;
+            if !primed {
+                // The first tick of an interval completes at once; it is spent here, not sent.
+                ticker.tick().await;
+                primed = true;
+            }
+            tokio::select! {
+                event = receiver.recv() => match event {
+                    Some(event) => {
+                        let last = matches!(event, TerminalEvent::Exit { .. });
+                        Some((terminal_frame(&event), (receiver, hold, ticker, last, primed)))
+                    }
+                    None => None,
+                },
+                _ = ticker.tick() => Some((": heartbeat\n\n".to_owned(), (receiver, hold, ticker, false, primed))),
+            }
+        },
+    );
+    let body = futures::stream::once(async move { opening })
+        .chain(futures::stream::iter(closing))
+        .chain(live)
+        .map(Ok::<_, std::io::Error>);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-store")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(body))
+        .expect("a response builder with static headers")
 }
 
 #[cfg(test)]
