@@ -673,3 +673,21 @@ test('only a loose record names the turn it follows, and a hand-built one withou
   const last = rows.at(-1)
   assert.deepEqual([last?.loose, last?.turnStart, last?.record.label], [true, false, 'note'], 'it joins the section after the last turn, not dropped')
 })
+
+test("a user record carries its images and files in content order, as DSH's inspector lists them (shared fixture)", () => {
+  /**
+   * S151: DSH's trajectory inspector lists a user message's attachments after its text (image thumbnail or file icon,
+   * name, size, type), and its row counts them. The ledger dropped every non-text part. Repeats are kept, an unnamed image
+   * is named by its stored file, a zero-byte file keeps its size, and a part with no stored path is skipped.
+   */
+  const events = readFileSync(new URL('attachments.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+  const users = projectRows(projectLedger(events))
+    .filter((row) => row.kind === 'user')
+    .map((row) => ({ text: row.record.text, attachments: row.record.attachments }))
+  assert.deepEqual(users, JSON.parse(readFileSync(new URL('attachments.expected.json', timelineFixture), 'utf8')))
+  const plain = projectLedger([{ seq: 1, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } }])
+  assert.equal('attachments' in (plain.turns[0]?.steps[0]?.records[0] ?? {}), false, 'a message without attachments carries no key')
+})

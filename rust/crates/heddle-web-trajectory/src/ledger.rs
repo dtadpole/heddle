@@ -108,6 +108,76 @@ pub struct LedgerRecord {
     /// table draws it where it happened, in its own Between turns section, as DSH does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_turn: Option<u32>,
+    /// On a user record: the images and files the message carried, in content order (repeats kept), as DSH's inspector
+    /// lists them after the text. Empty, and not serialised, when it carried none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<LedgerAttachment>,
+}
+
+/// What an attachment is: an image the page can preview, or another file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    File,
+}
+
+/// One image or file a user message carried (S151), served at `/api/uploads/<stored name>` as the chat's cards are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerAttachment {
+    pub kind: AttachmentKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub bytes: u64,
+    pub url: String,
+}
+
+/// The attachments of a message's content, as the TypeScript `ledgerAttachmentsOf`: its image and file parts in order,
+/// each named by its recorded name (else its stored file's name); a part with no stored path is skipped.
+pub fn ledger_attachments_of(event: &Value) -> Vec<LedgerAttachment> {
+    let Some(parts) = event
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            let kind = match part.get("type").and_then(Value::as_str) {
+                Some("image") => AttachmentKind::Image,
+                Some("file") => AttachmentKind::File,
+                _ => return None,
+            };
+            let leaf = part
+                .get("path")
+                .and_then(Value::as_str)
+                .and_then(|path| path.rsplit('/').next())
+                .filter(|leaf| !leaf.is_empty())?;
+            let name = part
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(leaf);
+            Some(LedgerAttachment {
+                kind,
+                name: name.to_owned(),
+                mime_type: part
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .filter(|mime| !mime.is_empty())
+                    .map(str::to_owned),
+                bytes: part.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+                url: format!(
+                    "/api/uploads/{}",
+                    heddle_web_composer::js::encode_uri_component(leaf)
+                ),
+            })
+        })
+        .collect()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -134,6 +204,7 @@ impl LedgerRecord {
             state: None,
             origin: None,
             after_turn: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -584,12 +655,10 @@ impl Projector {
                     rounds: None,
                     steps: Vec::new(),
                 });
-                self.prologue = vec![LedgerRecord::started(
-                    LedgerKind::User,
-                    "user",
-                    message_text(event),
-                    at,
-                )];
+                let mut prompt =
+                    LedgerRecord::started(LedgerKind::User, "user", message_text(event), at);
+                prompt.attachments = ledger_attachments_of(event);
+                self.prologue = vec![prompt];
             }
             Some("tool") => {
                 let text = message_text(event);

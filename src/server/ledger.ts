@@ -27,7 +27,11 @@ export interface LedgerEvent {
   readonly seq?: number
   readonly at?: string
   readonly type: string
-  readonly message?: { readonly role?: string; readonly content?: readonly { readonly type?: string; readonly text?: string }[]; readonly toolCallId?: string }
+  readonly message?: {
+    readonly role?: string
+    readonly content?: readonly { readonly type?: string; readonly text?: string; readonly name?: string; readonly path?: string; readonly mimeType?: string; readonly bytes?: number }[]
+    readonly toolCallId?: string
+  }
   readonly chunk?: { readonly type?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly text?: string; readonly finishReason?: string; readonly usage?: TokenUsage }
   readonly text?: string
   readonly reasoning?: string
@@ -104,6 +108,43 @@ export interface LedgerRecord {
    * draws it in its own Between turns section where it happened, as DSH does, not after the last turn.
    */
   readonly afterTurn?: number
+  /**
+   * On a user record: the images and files the message carried, in their content order (repeats kept), as DSH's
+   * inspector lists them after the text. Absent when it carried none. `url` is this server's read-only upload address;
+   * the page adds its session, as the chat's attachment cards do.
+   */
+  readonly attachments?: readonly LedgerAttachment[]
+}
+
+/** One image or file a user message carried (S151): what the trajectory's row counts and its inspector lists. */
+export interface LedgerAttachment {
+  readonly kind: 'image' | 'file'
+  readonly name: string
+  readonly mimeType?: string
+  readonly bytes: number
+  readonly url: string
+}
+
+/**
+ * The attachments of a message's content: its image and file parts, in order, each named by its recorded name (else its
+ * stored file's name) and served at `/api/uploads/<stored name>`, the address the chat's cards use. A part with no
+ * stored path is skipped: there is nothing to show.
+ */
+export function ledgerAttachmentsOf(content: NonNullable<LedgerEvent['message']>['content']): LedgerAttachment[] {
+  const attachments: LedgerAttachment[] = []
+  for (const part of content ?? []) {
+    if (part.type !== 'image' && part.type !== 'file') continue
+    const leaf = typeof part.path === 'string' ? (part.path.split('/').pop() ?? '') : ''
+    if (leaf === '') continue
+    attachments.push({
+      kind: part.type,
+      name: typeof part.name === 'string' && part.name !== '' ? part.name : leaf,
+      ...(typeof part.mimeType === 'string' && part.mimeType !== '' ? { mimeType: part.mimeType } : {}),
+      bytes: typeof part.bytes === 'number' && Number.isFinite(part.bytes) && part.bytes >= 0 ? part.bytes : 0,
+      url: `/api/uploads/${encodeURIComponent(leaf)}`,
+    })
+  }
+  return attachments
 }
 
 /** A step: one model request and everything it produced. */
@@ -619,7 +660,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
         settleAssistant(event.at, true)
         closeTurn(event.at)
         turn = { index: turns.length + 1, startedAt: event.at, steps: [] }
-        prologue = [{ kind: 'user', label: 'user', text, ...(event.at !== undefined ? { startedAt: event.at } : {}) }]
+        const attachments = ledgerAttachmentsOf(event.message?.content)
+        prologue = [{ kind: 'user', label: 'user', text, ...(event.at !== undefined ? { startedAt: event.at } : {}), ...(attachments.length > 0 ? { attachments } : {}) }]
         continue
       }
       if (role === 'tool') {
