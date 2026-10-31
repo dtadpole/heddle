@@ -366,3 +366,96 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
   const again = await shape()
   assert.deepEqual({ expanded: again.expanded, focused: again.focused }, { expanded: 'false', focused: true }, `Space folds them back\nsaw: ${JSON.stringify(again)}`)
 })
+
+test('a row menu, a workspace menu and View options have DSH\'s menu keyboard, and Escape gives focus back to the trigger (#95)', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const f = await fixture()
+  const { browser } = f
+  await load(f)
+
+  /** The state of the menu whose trigger is `trigger`: open, its trigger's aria-expanded, and what holds focus. */
+  const state = (trigger) =>
+    browser.evaluate(`JSON.stringify((() => {
+      const button = ${trigger}
+      const list = button.parentElement.querySelector(':scope > .menu')
+      const active = document.activeElement
+      return {
+        open: list.hidden === false,
+        expanded: button.getAttribute('aria-expanded'),
+        focus: active === button ? 'trigger' : list.contains(active) ? 'item:' + active.textContent.trim() : active === document.body ? 'body' : active.tagName,
+        items: [...list.querySelectorAll('button:not(:disabled)')].map((item) => item.textContent.trim()),
+      }
+    })())`).then(JSON.parse)
+
+  /** A session row's `…`: Enter opens it with focus left on the trigger, as DSH's row menu opens without autoFocus. */
+  const label = await browser.evaluate(`[...document.querySelectorAll('#tree > li[data-kind="workspace"] > ul > li[data-kind="session"]')].find((li) => li.querySelector('.menu-wrap') !== null).querySelector(':scope > .row > .label').textContent`)
+  const trigger = `${rowOf(label)}.querySelector('.menu-wrap > button')`
+  assert.equal(await focusControl(browser, rowOf(label), 'actions for'), 'focused', `the keyboard reaches the … of ${label}`)
+  await press(browser, 'Enter')
+  await settle(browser, `${trigger}.getAttribute('aria-expanded') === 'true'`, 5_000)
+  const opened = await state(trigger)
+  assert.deepEqual({ open: opened.open, expanded: opened.expanded, focus: opened.focus }, { open: true, expanded: 'true', focus: 'trigger' }, `Enter on the … opens its menu\nsaw: ${JSON.stringify(opened)}`)
+  const items = opened.items
+  assert.ok(items.length >= 3, `the row menu has items to rove\nsaw: ${JSON.stringify(items)}`)
+
+  /** ArrowDown moves into the menu; the arrows rove and wrap; Home and End jump. */
+  const walk = []
+  for (const key of ['ArrowDown', 'ArrowDown', 'ArrowUp', 'ArrowUp', 'Home', 'End', 'ArrowDown']) {
+    await press(browser, key)
+    walk.push((await state(trigger)).focus)
+  }
+  const at = (index) => `item:${items[index]}`
+  assert.deepEqual(
+    walk,
+    [at(0), at(1), at(0), at(items.length - 1), at(0), at(items.length - 1), at(0)],
+    `ArrowDown enters the menu at its first item, the arrows rove and wrap, Home and End jump\nsaw: ${JSON.stringify(walk)}`,
+  )
+
+  /** Escape closes the menu and gives focus back to its trigger. */
+  await press(browser, 'Escape')
+  const escaped = await state(trigger)
+  assert.deepEqual({ open: escaped.open, expanded: escaped.expanded, focus: escaped.focus }, { open: false, expanded: 'false', focus: 'trigger' }, `Escape closes the menu and returns focus to the …\nsaw: ${JSON.stringify(escaped)}`)
+
+  /** Tab from the open trigger enters the list; Shift+Tab closes it onto the trigger. */
+  await press(browser, 'Enter')
+  await settle(browser, `${trigger}.getAttribute('aria-expanded') === 'true'`, 5_000)
+  await press(browser, 'Tab')
+  const tabbed = await state(trigger)
+  assert.equal(tabbed.focus, at(0), `Tab from the open trigger lands on the first item\nsaw: ${JSON.stringify(tabbed)}`)
+  await press(browser, 'Tab', { shift: true })
+  const back = await state(trigger)
+  assert.deepEqual({ open: back.open, focus: back.focus }, { open: false, focus: 'trigger' }, `Shift+Tab closes the menu onto its trigger\nsaw: ${JSON.stringify(back)}`)
+
+  /** A workspace row's `…`: the same keys. */
+  const workspaceTrigger = `document.querySelector('#tree > li[data-kind="workspace"] > .row .menu-wrap > button')`
+  assert.equal(await focusControl(browser, `document.querySelector('#tree > li[data-kind="workspace"]')`, 'actions for'), 'focused', 'the keyboard reaches the workspace row\'s …')
+  await press(browser, 'Enter')
+  await settle(browser, `${workspaceTrigger}.getAttribute('aria-expanded') === 'true'`, 5_000)
+  await press(browser, 'ArrowDown')
+  const workspaceMenu = await state(workspaceTrigger)
+  assert.equal(workspaceMenu.focus, `item:${workspaceMenu.items[0]}`, `ArrowDown moves into the workspace menu\nsaw: ${JSON.stringify(workspaceMenu)}`)
+  await press(browser, 'Escape')
+  const workspaceEscaped = await state(workspaceTrigger)
+  assert.deepEqual({ open: workspaceEscaped.open, focus: workspaceEscaped.focus }, { open: false, focus: 'trigger' }, `Escape closes it and returns focus to its …\nsaw: ${JSON.stringify(workspaceEscaped)}`)
+
+  /** View options: the same keys, and a choice made from the keyboard gives focus back to the trigger. */
+  const viewTrigger = `document.querySelector('#view-options .menu-wrap > button')`
+  await browser.evaluate(`${viewTrigger}.focus()`)
+  await press(browser, 'Enter')
+  await settle(browser, `${viewTrigger}.getAttribute('aria-expanded') === 'true'`, 5_000)
+  await press(browser, 'ArrowDown')
+  const view = await state(viewTrigger)
+  assert.equal(view.focus, `item:${view.items[0]}`, `ArrowDown moves into View options\nsaw: ${JSON.stringify(view)}`)
+  await press(browser, 'Escape')
+  const viewEscaped = await state(viewTrigger)
+  assert.deepEqual({ open: viewEscaped.open, focus: viewEscaped.focus }, { open: false, focus: 'trigger' }, `Escape closes View options and returns focus to it\nsaw: ${JSON.stringify(viewEscaped)}`)
+  await press(browser, 'Enter')
+  await settle(browser, `${viewTrigger}.getAttribute('aria-expanded') === 'true'`, 5_000)
+  await press(browser, 'ArrowDown')
+  /** The first item is the grouping already in use, so choosing it changes nothing but the menu. */
+  await press(browser, 'Enter')
+  await settle(browser, `document.activeElement === ${viewTrigger}`, 3_000)
+  const chosen = await state(viewTrigger)
+  assert.deepEqual({ open: chosen.open, focus: chosen.focus }, { open: false, focus: 'trigger' }, `a choice made with Enter closes the menu and gives focus back to its trigger\nsaw: ${JSON.stringify(chosen)}`)
+})

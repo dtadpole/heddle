@@ -93,7 +93,10 @@ grounded_in:
   events: Enter or Space on a row's `Pin session`, `Archive session`, `…` or `New session in` acts on that control and
   never opens the row (#98); a row is one Tab stop (a session row's `…`, Archive and Pin, then the next row, which
   Enter opens; a workspace row's `…` and New session in, then its first row), and `Show {n} more sessions` is a
-  `<button>` whose `aria-expanded` follows Enter and Space with focus kept on it (#92).
+  `<button>` whose `aria-expanded` follows Enter and Space with focus kept on it (#92); and a session row's menu, a
+  workspace row's menu and View options have DSH's `Menu` keyboard: ArrowDown enters at the first item, the arrows rove
+  and wrap, Home and End jump, Tab enters and Shift+Tab closes onto the trigger, Escape closes and gives focus back to
+  the trigger, and a choice made with Enter does the same (#95).
 
 ## What it deliberately does not judge
 

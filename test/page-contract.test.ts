@@ -510,3 +510,20 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
   const flat = pageFunction('async function renderFlatList() {')
   assert.match(flat, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'a flat list row opens on Enter too')
 })
+
+test('every menu menuButton makes has DSH\'s menu keyboard: arrows, Home and End, Tab, and Escape back to the trigger (#95)', () => {
+  /**
+   * The tree's row menus, the workspace menus and View options are built by `menuButton`, which had no keyboard: arrows
+   * did not enter the menu and Escape neither closed it nor gave focus back. DSH's `Menu` (dsh-web-frontend
+   * dist/assets/index-CN7NIWNw.js:129, exported at :188) does both. The keys are judged in 80's check-tree-keyboard.mjs;
+   * this detects the handlers going away.
+   */
+  const from = page.indexOf("document.addEventListener('click', closeMenus)")
+  assert.ok(from > 0, 'the menus close on a click elsewhere')
+  const keys = page.slice(from, page.indexOf('The page\'s **seam for the verifiers**', from))
+  assert.match(keys, /keyEvent\.key !== 'Escape' \|\| keyEvent\.shiftKey[\s\S]*?closeMenus\(\)\s*if \(inside && open\.trigger !== null\) open\.trigger\.focus\(\)\s*\},\s*true,\s*\)/, 'Escape closes the open menu in the capture phase and gives focus back to its trigger')
+  assert.match(keys, /HeroPicker\.step\(keyEvent\.key, items\.indexOf\(active\), items\.length\)/, 'the arrows, Home and End rove with DSH\'s arithmetic')
+  assert.match(keys, /if \(keyEvent\.key === 'Tab'\) \{\s*if \(keyEvent\.shiftKey\) \{\s*keyEvent\.preventDefault\(\)\s*closeMenus\(\)\s*open\.trigger\.focus\(\)/, 'Shift+Tab closes the menu onto its trigger')
+  const builder = pageFunction('function menuButton(node, items, options = {}) {')
+  assert.match(builder, /if \(event\.detail === 0\) \{\s*queueMicrotask\(/, 'a choice from the keyboard gives focus back to the trigger')
+})

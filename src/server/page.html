@@ -11365,6 +11365,17 @@ function menuButton(node, items, options = {}) {
     entry.onclick = async (event) => {
       event.stopPropagation()
       closeMenus()
+      /**
+       * A choice made from the keyboard (a click with no pointer, `detail` 0) gives focus back to the trigger unless the
+       * act took it elsewhere, a dialog say: DSH's Menu does that after every choice (index-CN7NIWNw.js:129, its `U`). A
+       * pointer's choice leaves focus as it was, because the trigger it would land on keeps the row's controls drawn.
+       */
+      if (event.detail === 0) {
+        queueMicrotask(() => {
+          const active = document.activeElement
+          if (button.isConnected && (active === null || active === document.body || list.contains(active))) button.focus()
+        })
+      }
       await item.run()
     }
     list.append(entry)
@@ -11383,6 +11394,76 @@ function menuButton(node, items, options = {}) {
 }
 
 document.addEventListener('click', closeMenus)
+
+/**
+ * The keyboard of every menu `menuButton` makes — the tree rows', the workspace rows', View options and the session's
+ * More actions (#95) — which is DSH's shared `Menu` (dsh-web-frontend dist/assets/index-CN7NIWNw.js:129, the function
+ * exported as `Menu` at :188; the row menus open it without `autoFocus`, dsh-client-ui-workspace lib/client.js:1996-2010,
+ * :2328-2334, so focus stays on the trigger until a key moves it):
+ *
+ * - Escape (not Shift+Escape) closes the open menu, in the capture phase so nothing under it takes the key, and gives
+ *   focus back to the trigger when focus was in the menu or on its trigger;
+ * - with focus there, ArrowDown and ArrowUp rove the enabled items and wrap, Home and End jump, and from the trigger
+ *   ArrowDown lands on the first item and ArrowUp on the last (`HeroPicker.step`, DSH's arithmetic);
+ * - Tab from the trigger enters the list, Tab on a `menuitem` chooses it, and Shift+Tab closes the menu onto its trigger;
+ * - Ctrl, Alt and Meta chords and a key already handled are left alone.
+ */
+function openMenuWrap() {
+  const list = document.querySelector('.menu-wrap > .menu:not([hidden])')
+  if (list === null) return null
+  const wrap = list.parentElement
+  return { wrap, list, trigger: wrap.querySelector(':scope > button') }
+}
+function menuKeyIgnored(keyEvent) {
+  return keyEvent.defaultPrevented || keyEvent.ctrlKey || keyEvent.altKey || keyEvent.metaKey
+}
+document.addEventListener(
+  'keydown',
+  (keyEvent) => {
+    if (keyEvent.key !== 'Escape' || keyEvent.shiftKey || menuKeyIgnored(keyEvent)) return
+    const open = openMenuWrap()
+    if (open === null) return
+    keyEvent.preventDefault()
+    keyEvent.stopPropagation()
+    if (keyEvent.repeat) return
+    const inside = open.wrap.contains(document.activeElement)
+    closeMenus()
+    if (inside && open.trigger !== null) open.trigger.focus()
+  },
+  true,
+)
+document.addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key === 'Escape' || menuKeyIgnored(keyEvent)) return
+  const open = openMenuWrap()
+  if (open === null || open.trigger === null) return
+  const active = document.activeElement
+  if (!open.wrap.contains(active)) return
+  const inList = open.list.contains(active)
+  const items = [...open.list.querySelectorAll('button:not(:disabled)')]
+  if (keyEvent.key === 'Tab') {
+    if (keyEvent.shiftKey) {
+      keyEvent.preventDefault()
+      closeMenus()
+      open.trigger.focus()
+      return
+    }
+    if (inList) {
+      if (active.getAttribute('role') === 'menuitem') {
+        keyEvent.preventDefault()
+        active.click()
+      }
+      return
+    }
+    if (items.length === 0) return
+    keyEvent.preventDefault()
+    items[0].focus()
+    return
+  }
+  const next = HeroPicker.step(keyEvent.key, items.indexOf(active), items.length)
+  if (next === null) return
+  keyEvent.preventDefault()
+  items[next].focus()
+})
 
 /**
  * The page's **seam for the verifiers**.
