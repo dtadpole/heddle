@@ -440,7 +440,7 @@ test('a session is labelled and headed by DSH\'s words and its title, never its 
   assert.doesNotMatch(body('function learnDefinition(id, folder) {'), /textContent|\.label =/, 'learning a definition folder does not set the label')
   assert.match(body('async function renderFlatList() {'), /label\.textContent = WorkspaceTree\.sessionLabel\(meta\)/, 'and so does a flat row')
   assert.match(page, /title\.textContent = WorkspaceTree\.storedTitle\(meta\) \?\? 'Untitled'/, 'a search hit reads its title, else Untitled')
-  const show = body('async function showSession(id) {')
+  const show = body('async function showSession(id, retry = true) {')
   assert.doesNotMatch(show, /: id\n/, 'the header never falls back to the raw id')
   assert.match(show, /paintSessionHeading\(\{ \.\.\.listed,/, 'it is painted from the session\'s listed entry and its own answer')
   const paint = body('function paintSessionHeading(')

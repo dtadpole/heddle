@@ -46,7 +46,8 @@ test('a session that cannot be loaded shows the failure line, is not kept, and l
   const show = lift('showSession')
   const refused = /if \(!response\.ok\) \{[\s\S]*?\n {4}\}/.exec(show)?.[0] ?? ''
   assert.ok(refused.length > 0, 'showSession has a branch for a refused read')
-  assert.match(refused, /if \(current !== id\) return false/, 'a later open that replaced this one is not overwritten')
+  assert.match(refused, /if \((?:current !== id|stale\(\) \|\| load\.abandoned \|\| transcriptLoads\.get\(id\) !== load)\) return false/, 'a later open that replaced this one is not overwritten')
+  assert.match(show, /const stale = \(\) => generation !== historyLoadGeneration \|\| current !== id/, 'the folded guard protects both selection and generation')
   assert.match(refused, /unavailableSession = id/, 'the session is marked unavailable')
   assert.match(refused, /current = null/, 'and it is not the open session (the stack-1 404 branch)')
   assert.match(refused, /historyFailureText\(response\.status/, 'the failure line is written')
