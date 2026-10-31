@@ -5892,8 +5892,60 @@ function setSidebarCollapsed(collapsed) {
   sidebarToggle.title = `${label} (⌥⌘B)`
 }
 
+/**
+ * Below 1024 pixels the sidebar **collapses to its rail by itself**, as DSH's does (`dsh-client-ui-layout`:
+ * `SIDEBAR_AUTO_COLLAPSE = 1024`, "below 1024px it collapses automatically"). Without it a phone-width window kept the
+ * panel open at most of the width, wrapped the transcript a few letters per line and pushed the composer and its send
+ * button off the screen (live-testing draft developer-ten-9).
+ *
+ * The state is DSH's two facts, not one. Wide, the toggle is a preference (`sidebarWideCollapsed`); narrow, the rail is
+ * the default and the toggle opens the panel over the squeezed conversation until it is toggled back
+ * (`sidebarNarrowExpanded`). Crossing the breakpoint either way forgets the narrow opening, so a window widened and
+ * narrowed again starts from the rail, and the wide preference is untouched by anything done while narrow.
+ */
+const SIDEBAR_AUTO_COLLAPSE_PX = 1024
+let sidebarWideCollapsed = false
+let sidebarNarrowExpanded = false
+
+/** Whether the window is below the breakpoint where the rail is the default. */
+function sidebarNarrow() {
+  return window.innerWidth < SIDEBAR_AUTO_COLLAPSE_PX
+}
+
+/** The collapsed state the two facts give at a viewport width, as DSH computes `sidebarCollapsed`. */
+function sidebarCollapsedFor(viewportWidth, wideCollapsed, narrowExpanded) {
+  return viewportWidth < SIDEBAR_AUTO_COLLAPSE_PX ? !narrowExpanded : wideCollapsed
+}
+
+function paintSidebarCollapse() {
+  setSidebarCollapsed(sidebarCollapsedFor(window.innerWidth, sidebarWideCollapsed, sidebarNarrowExpanded))
+}
+
+/** The toggle (the control and its chord): the narrow opening while narrow, the wide preference while wide. */
+function toggleSidebarCollapse() {
+  if (sidebarNarrow()) sidebarNarrowExpanded = !sidebarNarrowExpanded
+  else sidebarWideCollapsed = !sidebarWideCollapsed
+  paintSidebarCollapse()
+}
+
+/** Put the panel back, for a gesture that needs the tree or the search field on screen. */
+function openSidebar() {
+  if (sidebarNarrow()) sidebarNarrowExpanded = true
+  else sidebarWideCollapsed = false
+  paintSidebarCollapse()
+}
+
+let sidebarWasNarrow = sidebarNarrow()
+window.addEventListener('resize', () => {
+  const narrow = sidebarNarrow()
+  if (narrow === sidebarWasNarrow) return
+  sidebarWasNarrow = narrow
+  sidebarNarrowExpanded = false
+  paintSidebarCollapse()
+})
+
 sidebarToggle.addEventListener('click', () => {
-  setSidebarCollapsed(!sidebarCollapsed())
+  toggleSidebarCollapse()
   sidebarToggle.focus()
 })
 
@@ -5904,14 +5956,17 @@ sidebarToggle.addEventListener('click', () => {
  * gesture rather than a separate step.
  */
 document.getElementById('sidebar-search').addEventListener('click', () => {
-  setSidebarCollapsed(false)
+  openSidebar()
   const field = document.getElementById('session-search')
   field.focus()
   field.select()
 })
 
-/** Every visit starts wide: a collapse is a look at the content, and DSH does not carry it across a reload either. */
-setSidebarCollapsed(false)
+/**
+ * Every visit starts wide on a wide window and on the rail on a narrow one: a collapse is a look at the content, and
+ * DSH does not carry it across a reload either.
+ */
+paintSidebarCollapse()
 
 /**
  * The composer: the draft, the queue it feeds, and the model seat — DSH's input bar, reduced to heddle's parts.
@@ -10179,7 +10234,7 @@ document.addEventListener('keydown', (event) => {
   if (action === null) return
   event.preventDefault()
   if (action === 'sidebar') {
-    setSidebarCollapsed(!sidebarCollapsed())
+    toggleSidebarCollapse()
     sidebarToggle.focus()
     return
   }
@@ -10193,7 +10248,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (action === 'search') {
     /** The field is put away while the sidebar is a rail, so reaching it means putting the panel back first. */
-    if (sidebarCollapsed()) setSidebarCollapsed(false)
+    if (sidebarCollapsed()) openSidebar()
     const field = document.getElementById('session-search')
     field.focus()
     field.select()
