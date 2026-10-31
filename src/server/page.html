@@ -14646,6 +14646,37 @@ function glideRows(previous) {
   }
 }
 
+/**
+ * The failure a level's listing answered with, when it is one the tree draws as a line of its own — `null` otherwise.
+ *
+ * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:564-581): a failed
+ * level is one line, by code, and never "Empty directory". The tree route answers a folder the server may not read with
+ * `workspace-file/unreadable` (#106); it was `200` with no children, drawn as "nothing inside", which was false.
+ */
+async function failedLevel(response) {
+  try {
+    const body = await response.json()
+    return body !== null && body.code === 'workspace-file/unreadable' && typeof body.error === 'string' ? { code: body.code, message: body.error } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The line a failed level shows, in DSH's words: a code DSH's tree names has its own sentence, and any other says
+ * "Read failed: <message>" with the transport's own message (`failureLine` and `error.unavailable`,
+ * dsh-client-ui-sidebar-files lib/client.js:483-489 and :773). DSH has no `workspace-file/unreadable`, so it is the
+ * second: `Read failed: cannot list "locked": permission denied`.
+ */
+function failedLevelLine(failure) {
+  const line = document.createElement('div')
+  line.className = 'empty'
+  line.dataset.filesRow = 'failed'
+  line.dataset.filesCode = failure.code
+  line.textContent = 'Read failed: ' + failure.message
+  return line
+}
+
 /** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
 async function loadChildren(node, li) {
   const group = document.createElement('ul')
@@ -14662,18 +14693,22 @@ async function loadChildren(node, li) {
     for (const child of node.group.children) group.append(groupRow(child))
     paintSessionRows(group, node.group, depth + 1)
     let files = []
+    let failed = null
     if (node.kind === 'workspace') {
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-        if (!response.ok) throw new Error('the tree answered ' + response.status)
-        files = folderRows((await response.json()).children ?? [])
+        if (!response.ok) {
+          failed = await failedLevel(response)
+          if (failed === null) throw new Error('the tree answered ' + response.status)
+        } else files = folderRows((await response.json()).children ?? [])
       } catch (error) {
         setNote('could not read ' + node.label + ': ' + (error && error.message))
       }
     }
     /** The group may have been closed (or the tree redrawn) while its folders were being read. */
     if (!group.isConnected) return
-    if (files.length > 0) {
+    /** A workspace folder the server may not read keeps its `Files` heading, over the one line that says why (#106). */
+    if (files.length > 0 || failed !== null) {
       const heading = document.createElement('li')
       heading.className = 'tree-heading'
       heading.setAttribute('role', 'none')
@@ -14681,6 +14716,7 @@ async function loadChildren(node, li) {
       heading.textContent = 'Files'
       group.append(heading)
       for (const child of files) group.append(nodeRow(child, depth + 1))
+      if (failed !== null) group.append(failedLevelLine(failed))
     }
     if (group.children.length === 0) {
       const empty = document.createElement('div')
@@ -14692,6 +14728,7 @@ async function loadChildren(node, li) {
     return
   }
   let children = node.children
+  let failed = null
   if (children === null) {
     try {
       /**
@@ -14700,12 +14737,20 @@ async function loadChildren(node, li) {
        * every reopened branch replaced it with the unfiltered list — the row existed and could not be seen.
        */
       const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-      if (!response.ok) throw new Error('the tree answered ' + response.status)
-      children = (await response.json()).children ?? []
+      if (!response.ok) {
+        failed = await failedLevel(response)
+        if (failed === null) throw new Error('the tree answered ' + response.status)
+        children = []
+      } else children = (await response.json()).children ?? []
     } catch (error) {
       setNote('could not read ' + node.label + ': ' + (error && error.message))
       children = []
     }
+  }
+  /** A level the server may not read is that one line, never "nothing inside" (#106). */
+  if (failed !== null) {
+    group.append(failedLevelLine(failed))
+    return
   }
   if (children.length === 0) {
     /**

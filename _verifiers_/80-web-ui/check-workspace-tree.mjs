@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, renameSync } from 'node:fs'
+import { chmodSync, mkdirSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { test } from 'node:test'
 
@@ -19,7 +19,9 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
  * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
  * with the composer disabled, not to a blank page that takes a message (#56); and Archived only with nothing archived
- * says DSH's "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107).
+ * says DSH's "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107);
+ * and a folder the server may not read, or a workspace whose folder it may not read, draws DSH's one failure line
+ * ("Read failed: …"), never "nothing inside" (#106).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -1129,6 +1131,129 @@ test('Archived only with nothing archived says "No archived sessions yet", and V
   } finally {
     browser.close()
     server.kill()
+    for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('a folder the server may not read draws DSH\'s failure line, not "nothing inside", and so does a workspace whose folder it may not read (#106)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** `chmod 000` does not stop the superuser, so the claim cannot be judged as root. */
+  if (!skipUnless(context, typeof process.getuid !== 'function' || process.getuid() !== 0, 'a user that file modes apply to')) return
+  /**
+   * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:564-581): a failed
+   * level is one line, by code, and a code its tree does not name says "Read failed: {message}" with the transport's own
+   * message (:483-489, words at :773). The tree route answers a folder the server may not read with
+   * `400 workspace-file/unreadable` and a sentence (#106); before, it answered `200` with no children and the page said
+   * "nothing inside", which was false — the folder holds a file. A workspace whose own folder cannot be read kept its
+   * sessions and silently lost its Files heading; it keeps the heading now, over the same kind of line. The modes are
+   * restored in `finally`, before the fixture is removed.
+   */
+  const home = isolatedHome('tree-unreadable')
+  const work = fixtureDir('tree-unreadable-work')
+  const locked = join(work, 'locked')
+  mkdirSync(locked, { recursive: true })
+  writeFileSync(join(locked, 'held.txt'), 'a file the server cannot list\n')
+  mkdirSync(join(work, 'open'), { recursive: true })
+  writeFileSync(join(work, 'open', 'kept.txt'), 'readable\n')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const title = added.body.record.title
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: work, title: 'plain notes' }) })
+    assert.equal(made.status, 200, `created a session (${JSON.stringify(made.body)})`)
+    const session = made.body.session
+    chmodSync(locked, 0o000)
+
+    const folderRow = (label) => `[...document.querySelectorAll('#tree li[data-kind="folder"] > .row')].find((row) => row.querySelector('.label')?.textContent === ${JSON.stringify(label)})`
+    const level = (label) =>
+      browser.evaluate(`JSON.stringify((() => {
+        const row = ${folderRow(label)}
+        if (row === undefined) return { missing: true }
+        const li = row.closest('li')
+        const group = li.querySelector(':scope > ul[role=group]')
+        return {
+          open: li.dataset.open,
+          lines: group === null ? [] : [...group.querySelectorAll(':scope > .empty')].map((line) => ({ text: line.textContent, row: line.dataset.filesRow ?? null, code: line.dataset.filesCode ?? null })),
+          rows: group === null ? 0 : group.querySelectorAll(':scope > li').length,
+        }
+      })())`)
+    const workspaceGroup = () =>
+      browser.evaluate(`JSON.stringify((() => {
+        const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(added.body.record.path)})
+        if (row === undefined) return { missing: true }
+        const group = row.closest('li').querySelector(':scope > ul[role=group]')
+        if (group === null) return { open: false }
+        return {
+          open: true,
+          headings: [...group.querySelectorAll(':scope > .tree-heading')].map((heading) => heading.textContent),
+          lines: [...group.querySelectorAll(':scope > .empty')].map((line) => ({ text: line.textContent, row: line.dataset.filesRow ?? null, code: line.dataset.filesCode ?? null })),
+          session: group.querySelector('li[data-kind="session"][data-session-id="${session}"]') !== null,
+        }
+      })())`)
+    const until = async (expression, what, seen, timeoutMs = 10_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await seen()}`)
+      }
+    }
+
+    /** The page opens the session by name; its workspace group is open, with the folder's files under Files. */
+    await browser.gotoSession(server.url, session)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading', workspaceGroup)
+    await until(`${folderRow('locked')} !== undefined && ${folderRow('open')} !== undefined`, 'the workspace lists both folders under Files', workspaceGroup)
+
+    /** A readable folder still opens to its file. */
+    await browser.evaluate(`${folderRow('open')}.click()`)
+    await until(`${folderRow('open')}.closest('li').querySelector('ul[role=group] li[data-kind="file"]') !== null`, 'the readable folder lists its file', () => level('open'))
+
+    /** The unreadable one opens to DSH's failure line and nothing else. */
+    await browser.evaluate(`${folderRow('locked')}.click()`)
+    await until(`${folderRow('locked')}.closest('li').querySelector('ul[role=group] > .empty') !== null`, 'the unreadable folder draws a line under it', () => level('locked'))
+    const opened = JSON.parse(await level('locked'))
+    assert.equal(opened.open, 'true', `the folder is open\nsaw: ${JSON.stringify(opened)}`)
+    assert.deepEqual(
+      opened.lines,
+      [{ text: 'Read failed: cannot list "locked": permission denied', row: 'failed', code: 'workspace-file/unreadable' }],
+      `one failure line in DSH's words, with its code, not "nothing inside"\nsaw: ${JSON.stringify(opened)}`,
+    )
+    assert.equal(opened.rows, 0, 'and no rows')
+
+    /** The workspace's own folder made unreadable: its session stays, and its Files heading holds the line. */
+    chmodSync(work, 0o000)
+    await browser.gotoSession(server.url, session)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading again', workspaceGroup)
+    await until(
+      `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].some((row) => row.dataset.path === ${JSON.stringify(added.body.record.path)} && row.closest('li').querySelector(':scope > ul[role=group] > .empty') !== null)`,
+      'the workspace group draws a line where its files were',
+      workspaceGroup,
+    )
+    const group = JSON.parse(await workspaceGroup())
+    assert.equal(group.session, true, `the workspace still shows its session\nsaw: ${JSON.stringify(group)}`)
+    assert.deepEqual(group.headings, ['Files'], 'it keeps its Files heading')
+    assert.deepEqual(
+      group.lines,
+      [{ text: `Read failed: cannot list "${title}": permission denied`, row: 'failed', code: 'workspace-file/unreadable' }],
+      `over one failure line naming the workspace, not "nothing inside"\nsaw: ${JSON.stringify(group)}`,
+    )
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [work, locked]) {
+      try {
+        chmodSync(dir, 0o755)
+      } catch {
+        // already gone, or never made
+      }
+    }
     for (const dir of [home, work]) removeDir(dir)
   }
 })
