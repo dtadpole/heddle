@@ -15,13 +15,15 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use heddle_session::{Events, SessionHandle};
 use heddle_tools::{
-    BashBackground, ConfinedArgv, SandboxGate, SandboxMode, SandboxOutcome, ToolArgs, ToolFailure,
-    ToolResult, ToolRunContext,
+    BashBackground, ConfinedArgv, ForegroundRun, SandboxGate, SandboxMode, SandboxOutcome,
+    ShellEnd, ToolArgs, ToolFailure, ToolResult, ToolRunContext,
 };
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
-use crate::registry::{JobHooks, JobOutcome, JobRegistry, JobSpec, JobToolCall, OutcomeStatus};
+use crate::registry::{
+    JobHooks, JobOutcome, JobRegistry, JobSpec, JobStatus, JobToolCall, OutcomeStatus,
+};
 use crate::ring::{AppendOptions, JobChannel};
 
 pub use heddle_tools::RUN_IN_BACKGROUND_DESCRIPTION;
@@ -199,6 +201,9 @@ pub struct BackgroundProcess {
     pub kill_grace_ms: Option<u64>,
     /// Told the process id once it is spawned, so a caller (a test) can watch the group.
     pub on_spawn: Option<Box<dyn FnOnce(i32) + Send>>,
+    /// Told the exit code (`None` for a signal) before the job settles: a promoting foreground call renders its own
+    /// answer from it.
+    pub on_end: Option<Box<dyn FnOnce(Option<i32>) + Send>>,
 }
 
 /// Decodes a byte stream as UTF-8 across chunk boundaries, as Node's `StringDecoder` does: an incomplete sequence
@@ -258,6 +263,7 @@ pub fn run_process(spec: BackgroundProcess, append: AppendOutput) -> JobHooks {
         sandbox,
         escalation_modes,
         on_spawn,
+        on_end,
         ..
     } = spec;
     let mut command = tokio::process::Command::new(&argv[0]);
@@ -350,6 +356,9 @@ pub fn run_process(spec: BackgroundProcess, append: AppendOutput) -> JobHooks {
                 Ok(status) => {
                     use std::os::unix::process::ExitStatusExt;
                     let code = status.code();
+                    if let Some(on_end) = on_end {
+                        on_end(code);
+                    }
                     let signal = status.signal().map(signal_name);
                     let reading = confined.as_ref().map(|confined| {
                         let tail = stderr_tail
@@ -485,6 +494,12 @@ pub fn running_tool_call(
         })
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Reads a session's log, to find the tool call that started a job.
 pub type ReadLog = Arc<dyn Fn(&SessionHandle) -> Option<Events> + Send + Sync>;
 
@@ -494,6 +509,35 @@ pub struct BashBackgroundOptions {
     pub read_log: Option<ReadLog>,
     pub kill_grace_ms: Option<u64>,
     pub on_spawn: Option<SpawnObserver>,
+    /// Run every foreground call as a job, so one that outlives its wall time moves to the background instead of
+    /// being killed: DSH's `promoteOnTimeout`, default true (BASH:181-183, 386-491). `Some(false)` leaves the
+    /// foreground run, and its wall-time kill, to the tool.
+    pub promote_on_timeout: Option<bool>,
+}
+
+/// The promoted call's answer, DSH's `renderPromoted` verbatim (BASH:181-183).
+pub fn render_promoted(output: &str, timeout_ms: u64, job_id: &str) -> String {
+    let lead = if output.is_empty() {
+        String::new()
+    } else if output.ends_with('\n') {
+        output.to_owned()
+    } else {
+        format!("{output}\n")
+    };
+    format!(
+        "{lead}[still running after {timeout_ms}ms; moved to background job {job_id}]\nThe command keeps running in the background. You will be notified when it finishes; read newer output with job_output, stop it with job_kill."
+    )
+}
+
+/// A promoting call's output, kept for its foreground answer until it stops waiting.
+#[derive(Default)]
+struct Captured {
+    stdout: String,
+    stderr: String,
+    /// Set once the call answered promoted: the job's output is then the ring's alone.
+    promoted: bool,
+    /// The exit code once the process ended (`Some(None)` for a signal).
+    ended: Option<Option<i32>>,
 }
 
 /// The runner the jobs row attaches to `bash` ([`heddle_tools::attach_bash_background`]): register the command as a
@@ -563,6 +607,7 @@ impl BashBackground for BashRunner {
                             Box::new(move |pid: i32| notify(&job_id, pid))
                                 as Box<dyn FnOnce(i32) + Send>
                         }),
+                        on_end: None,
                     },
                     Arc::new(move |text: &str, channel: JobChannel| {
                         append_handle.append(text, AppendOptions::channel(channel));
@@ -581,6 +626,157 @@ impl BashBackground for BashRunner {
                 ("cwd".to_owned(), json!(context.cwd.display().to_string())),
             ]);
             Ok(ToolResult::ok(format!("started background job {id}")).with_data(data))
+        })
+    }
+
+    fn promotes(&self) -> bool {
+        self.options.promote_on_timeout != Some(false)
+    }
+
+    /// A foreground call as a job (BASH:386-491, `waitOnJob`). The job is registered at the call's start and waited
+    /// on for the wall time. Ended in time: the record is removed (the wait collected the settle, so no notice
+    /// follows) and the call answers as a foreground one would. Still running: nothing is killed; the call answers
+    /// the output so far (one consuming read, so `job_output` goes on after it) and the promoted marker. Stopped: the
+    /// job is killed with `tool call aborted`, waited on and removed, and the call answers stopped.
+    fn run_foreground(
+        &self,
+        run: ForegroundRun,
+    ) -> BoxFuture<'static, Option<Result<ToolResult, ToolFailure>>> {
+        let jobs = self.jobs.clone();
+        let options = self.options.clone();
+        Box::pin(async move {
+            let ForegroundRun {
+                args,
+                context,
+                sandbox,
+                launch,
+                limit_ms,
+                render,
+            } = run;
+            let command = command_of(&args);
+            let owner = context.session.as_ref().map(|session| session.id.clone());
+            let tool_call = match (&context.session, &options.read_log) {
+                (Some(session), Some(read_log)) => {
+                    read_log(session).and_then(|events| running_tool_call(&events, "bash", &args))
+                }
+                _ => None,
+            };
+            let captured = Arc::new(Mutex::new(Captured::default()));
+            let cwd = context.cwd.clone();
+            let mode = context.mode();
+            let escalation_modes = sandbox.escalation_targets();
+            let kill_grace_ms = options.kill_grace_ms;
+            let on_spawn = options.on_spawn.clone();
+            let producer_captured = Arc::clone(&captured);
+            let mut spec = JobSpec::new("bash", command, move |handle| {
+                let job_id = handle.id().to_owned();
+                let append_handle = handle.clone();
+                let ended = Arc::clone(&producer_captured);
+                let appended = Arc::clone(&producer_captured);
+                run_process(
+                    BackgroundProcess {
+                        argv: launch.argv,
+                        cwd,
+                        confined: launch.confined,
+                        mode,
+                        sandbox,
+                        escalation_modes,
+                        kill_grace_ms,
+                        on_spawn: on_spawn.map(|notify| {
+                            Box::new(move |pid: i32| notify(&job_id, pid))
+                                as Box<dyn FnOnce(i32) + Send>
+                        }),
+                        on_end: Some(Box::new(move |code: Option<i32>| {
+                            lock(&ended).ended = Some(code);
+                        })),
+                    },
+                    Arc::new(move |text: &str, channel: JobChannel| {
+                        append_handle.append(text, AppendOptions::channel(channel));
+                        let mut kept = lock(&appended);
+                        if !kept.promoted {
+                            if channel == JobChannel::Stderr {
+                                kept.stderr.push_str(text);
+                            } else {
+                                kept.stdout.push_str(text);
+                            }
+                        }
+                    }),
+                )
+            });
+            spec.owner = owner.clone();
+            spec.tool_call = tool_call;
+            let id = match jobs.start(spec) {
+                Ok(id) => id,
+                Err(error) => {
+                    context.log(&format!(
+                        "bash: job registration refused, running in the foreground with the wall-time kill instead: {}",
+                        error.message
+                    ));
+                    return None;
+                }
+            };
+            let caller = owner.as_deref();
+            let end = |stopped: bool| {
+                let kept = lock(&captured);
+                ShellEnd {
+                    stdout: kept.stdout.clone(),
+                    stderr: kept.stderr.clone(),
+                    code: kept.ended.flatten(),
+                    stopped,
+                    timed_out: false,
+                    limit_ms,
+                }
+            };
+            let live =
+                |status: JobStatus| matches!(status, JobStatus::Running | JobStatus::Stopping);
+            match jobs
+                .wait(&id, limit_ms as f64, caller, context.cancel.clone())
+                .await
+            {
+                Err(_) => {
+                    let _ = jobs.kill(&id, caller, Some("tool call aborted"));
+                    let grace = kill_grace_ms.unwrap_or(DEFAULT_KILL_GRACE_MS);
+                    let settle = limit_ms.max(grace + 1_000) as f64;
+                    if let Ok(view) = jobs.wait(&id, settle, caller, None).await
+                        && !live(view.status)
+                    {
+                        let _ = jobs.remove(&id, caller);
+                    }
+                    Some(Ok(render(end(true))))
+                }
+                Ok(view) if live(view.status) => {
+                    lock(&captured).promoted = true;
+                    let output = match jobs.read(&id, caller) {
+                        Ok(read) => crate::tools::render_model_delta(
+                            &read.chunks,
+                            read.lossy,
+                            read.job.output.spill_paths.as_deref().unwrap_or_default(),
+                        ),
+                        Err(_) => String::new(),
+                    };
+                    context.log(&format!(
+                        "moved the command to background job {id} after {limit_ms}ms"
+                    ));
+                    let data = serde_json::Map::from_iter([
+                        ("jobId".to_owned(), json!(id)),
+                        ("promoted".to_owned(), json!(true)),
+                        ("cwd".to_owned(), json!(context.cwd.display().to_string())),
+                    ]);
+                    Some(Ok(
+                        ToolResult::ok(render_promoted(&output, limit_ms, &id)).with_data(data)
+                    ))
+                }
+                Ok(view) => {
+                    let _ = jobs.remove(&id, caller);
+                    if view.status == JobStatus::Failed {
+                        let detail = view
+                            .detail
+                            .unwrap_or_else(|| "the command could not start".to_owned());
+                        return Some(Ok(ToolResult::refused("TOOL_FAILED", detail)));
+                    }
+                    Some(Ok(render(end(false))))
+                }
+            }
         })
     }
 }

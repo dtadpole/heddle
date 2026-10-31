@@ -26,6 +26,9 @@ import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, readTr
  *    returns it — and the kill route stops the job with `cancelled by the user`, which still notifies.
  * 8. **A54's guidance** a model request that offers the job tools carries DSH's `tool:jobs` prompt section at the end
  *    of its system prompt ("Track every background job id you start. …"), as the request reaches the provider.
+ * 9. **A50, promoted** a foreground `bash` that outlives its `timeoutMs` is not killed: it answers the output so far
+ *    and `[still running after <ms>ms; moved to background job <id>]` with DSH's hand-off, and the job goes on, so a
+ *    later `job_output` reads the rest (DSH's `promoteOnTimeout`, default true while a job registry is loaded).
  *
  * It is gated on the Web command alone, never on the jobs capability, so a build without background jobs fails
  * here rather than skipping. Every model step comes from the offline scripted endpoint. The script is re-read on
@@ -419,5 +422,29 @@ test('A54 guidance: a request that offers the job tools ends its system prompt w
     await double.close()
     removeDir(home)
     removeDir(work)
+  }
+})
+
+const PROMOTED = /^([\s\S]*)\[still running after (\d+)ms; moved to background job (bash-[0-9a-f]{16})\]\nThe command keeps running in the background\. You will be notified when it finishes; read newer output with job_output, stop it with job_kill\.$/
+
+test('A50 promoted: a foreground bash that outlives its wall time moves to a background job instead of being killed', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('promote')
+  try {
+    const folder = join(server.work, 'promote')
+    const session = await openSession(server, folder)
+    let mark = events(server, session).length
+    await turn(server, session, folder, [{ toolCall: { name: 'bash', arguments: { command: 'echo early; sleep 1.5; echo late', timeoutMs: 500 } } }, { text: 'promoted' }])
+    const answer = toolTexts(server, session, mark)[0]
+    const match = PROMOTED.exec(answer ?? '')
+    assert.ok(match, `the call answers DSH's promoted text, not a timeout\nsaw: ${JSON.stringify(answer)}`)
+    assert.equal(match[1], 'early\n', 'the output so far comes first')
+    assert.equal(match[2], '500')
+    const id = match[3]
+    mark = events(server, session).length
+    await turn(server, session, folder, [{ toolCall: { name: 'job_output', arguments: { job_id: id, wait: true, timeout_ms: 10_000 } } }, { text: 'read it' }])
+    assert.equal(toolTexts(server, session, mark)[0], 'late\n[status: completed, exit code: 0]', 'the command went on, and job_output reads after what the call answered')
+  } finally {
+    await server.close()
   }
 })

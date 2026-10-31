@@ -41,6 +41,12 @@ export interface Config {
   readonly killGraceMs?: number
   /** The round cap of a notice's turn; the loop's own default when absent. */
   readonly maxRounds?: number
+  /**
+   * Run foreground `bash` calls as jobs, so one that outlives its wall time moves to the background instead of being
+   * killed: DSH's `promoteOnTimeout` (a `dsh-tool-bash` option there; here the row that owns jobs carries it, since
+   * the tools row builds `bash` without knowing about jobs). Default true, as DSH's.
+   */
+  readonly promoteOnTimeout?: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -54,6 +60,7 @@ export const Config: Schema<Config> = Schema.object({
   maxConsecutiveWakes: Schema.number().step(1).min(1),
   killGraceMs: Schema.number().min(0).default(3_000),
   maxRounds: Schema.number(),
+  promoteOnTimeout: Schema.boolean().default(true),
 })
 
 declare module '@deepseek-ai/cordis' {
@@ -174,6 +181,7 @@ export function apply(ctx: Context, config: Config = {}): void {
     bashBackground(registry, ctx.sandbox, {
       readLog: (handle) => store.read(handle),
       ...(config.killGraceMs !== undefined ? { killGraceMs: config.killGraceMs } : {}),
+      ...(config.promoteOnTimeout !== undefined ? { promoteOnTimeout: config.promoteOnTimeout } : {}),
     }),
   )
 

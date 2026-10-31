@@ -1,8 +1,8 @@
 ---
 title: The heddle-jobs crate
 created: 2026-10-31T01:30:00Z
-modified: 2026-10-31T02:38:25Z
-version: 0.1.1
+modified: 2026-10-31T02:58:42Z
+version: 0.1.2
 description: The Rust port crate for background jobs — the registry and its output ring, the three job tools, background bash, the completion notices and the page's job routes — what it ports and what judges it.
 grounded_in:
   - source: src/jobs (ring, registry, tools, bash, notice, http, INDEX.md) and src/plugins/jobs.ts, read 2026-10-30
@@ -52,7 +52,9 @@ A tool answers heddle's `{code, message}` with DSH's sentence; the codes are the
 - **Teardown** runs when the boot's services are dropped (`JobsTeardown`), the binary's stand-in for `ctx.effect`.
 - **The `tool:jobs` prompt section** is a `model/request` hook (`prompt::JobsPromptSection`), registered by the binary
   beside the row and removed when the boot's services are dropped; the text lands as the TypeScript build's does.
-- **Not ported**, as in the TypeScript build: `promoteOnTimeout`, the `outputLimitBytes` truncation, spill files, the
+- **`promoteOnTimeout`** is the row's option (`promoteOnTimeout`, default true), handed to `bash` as
+  `BashBackground::run_foreground`; the behaviour is the TypeScript build's (`src/jobs/INDEX.md`).
+- **Not ported**, as in the TypeScript build: the `outputLimitBytes` truncation, spill files, the
   archive hook (`kill_owned_by` exists, nothing calls it), and the streamed `job.list` / `job.follow` frames.
 
 ## Read next
