@@ -241,7 +241,7 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
 /// DSH's display spelling for a path a tool names (`dsh-fs-local` `localDisplayPath`, POSIX): absolute, and
 /// normalised unless the spelling walks `..`, which is kept as written. It is the path a refusal names, so the model
 /// can tell which of several reads failed (live-testing issue #4: this build named no file at all).
-fn display_path(cwd: &std::path::Path, path: &str) -> String {
+fn requested_display_path(cwd: &std::path::Path, path: &str) -> String {
     let raw = if std::path::Path::new(path).is_absolute() {
         path.to_owned()
     } else {
@@ -288,7 +288,7 @@ fn read_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                 let target = sandbox.assert_readable(&path, context.mode())?;
                 // A missing file and a directory are classified and named, as DSH's read tool does (`dsh-tool-fs`
                 // `resolveRegularReadTarget`), not reported as the platform's raw error (live-testing issue #4).
-                let shown = display_path(&context.cwd, &path);
+                let shown = requested_display_path(&context.cwd, &path);
                 match tokio::fs::metadata(&target).await {
                     Ok(info) if info.is_file() => {}
                     Ok(_) => {
@@ -873,12 +873,12 @@ mod tests {
     }
 
     #[test]
-    fn display_path_is_dshs_spelling() {
+    fn requested_display_path_is_dshs_spelling() {
         let cwd = std::path::Path::new("/work");
-        assert_eq!(display_path(cwd, "notes/missing.txt"), "/work/notes/missing.txt");
-        assert_eq!(display_path(cwd, "./notes//missing.txt"), "/work/notes/missing.txt");
-        assert_eq!(display_path(cwd, "/elsewhere/./x.txt"), "/elsewhere/x.txt");
-        assert_eq!(display_path(cwd, "../outside/x.txt"), "/work/../outside/x.txt", "a walk up is kept as written");
+        assert_eq!(requested_display_path(cwd, "notes/missing.txt"), "/work/notes/missing.txt");
+        assert_eq!(requested_display_path(cwd, "./notes//missing.txt"), "/work/notes/missing.txt");
+        assert_eq!(requested_display_path(cwd, "/elsewhere/./x.txt"), "/elsewhere/x.txt");
+        assert_eq!(requested_display_path(cwd, "../outside/x.txt"), "/work/../outside/x.txt", "a walk up is kept as written");
     }
 
     #[tokio::test]
