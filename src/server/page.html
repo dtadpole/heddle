@@ -2787,6 +2787,49 @@
   #team-mail { opacity: .7; }
 
   /**
+   * The right sidebar and its Browser tabs (#86), after DSH's `ui-sidebar-right` and `ui-sidebar-browser`.
+   *
+   * Opt-in, as DSH's Web profile ships it: nothing here is reachable unless `/api/status` says `browser: true`. The
+   * column sits beside the conversation while DSH's budget leaves room for it (`layoutRightSidebar`), covers the
+   * conversation column when it does not, and covers the window below 768 pixels, where a third column would squeeze
+   * the composer off the screen (#35).
+   */
+  #browser-open { width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; flex: none; border-radius: var(--radius); background: none; border: 0; color: var(--text-3); }
+  #browser-open:hover, #browser-open[aria-expanded='true'] { background: var(--hover); color: var(--text); }
+  /** With no session there is no More menu to carry the header's `margin-left: auto`, so the globe takes it. */
+  #session-more:empty + #browser-open { margin-left: auto; }
+  #right-sidebar { flex: none; width: min(480px, 45vw); min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg); }
+  #rs-head { flex: none; display: flex; align-items: center; gap: 4px; padding: 6px 6px 6px 8px; border-bottom: 1px solid var(--line); }
+  #rs-tabs { flex: 1 1 auto; min-width: 0; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  .rs-tab { flex: none; display: inline-flex; align-items: center; max-width: 180px; border-radius: var(--radius); color: var(--text-3); }
+  .rs-tab:hover, .rs-tab[data-active='true'] { background: var(--hover); color: var(--text); }
+  .rs-tab > [role='tab'] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 4px 4px 4px 8px; font: inherit; font-size: 12px; color: inherit; background: none; border: 0; }
+  .rs-tab-close, #rs-new, #rs-close { flex: none; width: 24px; height: 24px; padding: 0; display: inline-grid; place-items: center; font: inherit; font-size: 13px; color: var(--text-3); background: none; border: 0; border-radius: 6px; }
+  .rs-tab-close:hover, #rs-new:hover, #rs-close:hover { background: color-mix(in oklab, currentColor 12%, transparent); color: var(--text); }
+  #rs-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .browser-tab { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  /** A row, stated: the page's `form` rule makes every form a column. */
+  .browser-bar { flex: none; display: flex; flex-direction: row; align-items: center; gap: 2px; padding: 6px; border-bottom: 1px solid var(--line); }
+  .browser-bar button { flex: none; height: 28px; min-width: 28px; padding: 0 6px; display: inline-grid; place-items: center; font: inherit; font-size: 12px; color: var(--text-2); background: none; border: 0; border-radius: var(--radius); }
+  .browser-bar button:not(:disabled):hover { background: var(--hover); color: var(--text); }
+  .browser-bar button:disabled { opacity: .4; }
+  .browser-bar svg { width: 14px; height: 14px; }
+  .browser-address { flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 8px; font: inherit; font-size: 12px; color: var(--text); background: color-mix(in oklab, currentColor 6%, transparent); border: 1px solid var(--line); border-radius: var(--radius); }
+  .browser-address[aria-invalid='true'] { border-color: #d14343; }
+  .browser-address[data-address='unknown'] { color: var(--text-3); font-style: italic; }
+  .browser-notice { flex: none; margin: 0; padding: 6px 10px; font-size: 12px; color: var(--text-2); border-bottom: 1px solid var(--line); }
+  .browser-notice[data-kind='error'] { color: #f0a0a0; }
+  .browser-view { position: relative; flex: 1 1 auto; min-height: 0; background: var(--bg); }
+  .browser-view iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+  .browser-start { margin: 0; padding: 24px 16px; color: var(--text-3); font-size: 13px; text-align: center; }
+  /** No room for a track: the pane covers the conversation column and leaves the left sidebar and its gutter usable. */
+  #right-sidebar[data-presentation='cover'] { position: fixed; top: 0; right: 0; bottom: 0; left: var(--rs-cover-left, 0px); z-index: 40; width: auto; }
+  #right-sidebar[data-presentation='fullscreen'] { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
+  @media (max-width: 767px) {
+    #right-sidebar { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
+  }
+
+  /**
    * Schedules and reminders — DSH's `dsh-client-ui-schedule` views in this page's palette: the transcript's
    * created-reminder card, the session header's reminder clock and its popover, the sidebar row's clock mark and hover
    * card, the Automation tasks page and the task detail it shares with the conversation's task drawer. The numbers are
@@ -3188,6 +3231,11 @@
     -->
     <span id="schedule-catalog-action" hidden></span>
     <span id="session-more"></span>
+    <!--
+      The Browser tab's entry point (#86): hidden unless the server was started with the Browser enabled, because
+      DSH's Web profile ships its Browser off too. It shows or hides the right sidebar, opening a first tab.
+    -->
+    <button type="button" id="browser-open" aria-label="Browser" title="Browser" aria-controls="right-sidebar" aria-expanded="false" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c1.8 1.9 2.7 4 2.7 6.5S9.8 12.6 8 14.5M8 1.5C6.2 3.4 5.3 5.5 5.3 8s.9 4.6 2.7 6.5"/></svg></button>
   </header>
   <!--
     The ring is a **tablist**, which is what DSH uses for the same control and what this control actually is: one of
@@ -3500,6 +3548,19 @@
   </div>
 </div>
 </main>
+<!--
+  The right sidebar (#86), after DSH's `ui-sidebar-right`: a column of tabs beside the conversation. Its one kind of tab
+  so far is the Browser, drawn by `openBrowserTab()`; the tabs are this page's, not the session's, so they stay open
+  across a session switch and are gone after a reload.
+-->
+<section id="right-sidebar" aria-label="Right sidebar" hidden>
+  <header id="rs-head">
+    <div id="rs-tabs" role="tablist" aria-label="Right sidebar tabs"></div>
+    <button type="button" id="rs-new" aria-label="New browser tab" title="New browser tab">+</button>
+    <button type="button" id="rs-close" aria-label="Hide the right sidebar" title="Hide">✕</button>
+  </header>
+  <div id="rs-body"></div>
+</section>
 <!--
   The settings surface, as a **native dialog**: the reference's own shape (measured 2026-10-17: `role=dialog` 800x765,
   radius 28, `rgb(44,44,46)`, sections and a `Close` action). This one is read-only, and it says so: the endpoint file
@@ -9372,11 +9433,405 @@ async function loadStatus() {
     const body = await response.json()
     const mode = body?.sandbox?.mode
     if (typeof mode === 'string') accessDefaultMode = mode
+    applyBrowserFeature(body?.browser === true)
   } catch {
     // A status the page cannot read must not stop the composer from being one.
   }
   renderAccess()
 }
+
+/**
+ * The right sidebar's Browser tabs (#86), after DSH's `ui-sidebar-browser` on Web.
+ *
+ * A tab frames an HTTP(S) page and keeps the history this page asked for; the server never fetches, proxies or probes
+ * the page. DSH's rules, kept as written there:
+ *
+ * - The address parser accepts `http:` and `https:`, loopback included, and a bare host becomes HTTPS. `file:`, script,
+ *   data and blob input, a user name or password, and this application's own origin are refused before anything loads.
+ * - The frame carries DSH's default sandbox, sends no referrer, and is made anew for every load this page requests.
+ * - The first `load` of a requested address is known. A later `load` proves the page moved somewhere this page cannot
+ *   read (another origin's URL is not ours to see), so the address is marked, Back, Forward and Open in system browser
+ *   are disabled, and Reload returns to the last known address.
+ * - An iframe `error` shows a transient load-failure notice until the next load this page requests.
+ *
+ * Differences from DSH, stated rather than hidden: there is no per-tab switch that removes the sandbox; this
+ * application's port under any loopback name counts as its own origin; the tabs belong to the page rather than to the
+ * session and are not restored after a reload; no keyboard shortcut opens a tab.
+ */
+const BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox'
+const BROWSER_MAX_ADDRESS = 16384
+const BROWSER_MAX_HISTORY = 100
+const BROWSER_REFUSALS = {
+  empty: 'Enter an address.',
+  invalid: 'That address is invalid or too long.',
+  protocol: 'Only HTTP and HTTPS addresses are supported; open local files from the workspace tree.',
+  credentials: 'Addresses cannot contain a username or password.',
+  'application-origin': 'The browser tab cannot open this application itself.',
+}
+const BROWSER_UNKNOWN = 'The page navigated; this tab cannot read its new URL.'
+const BROWSER_FAILED = 'The page could not load; reload or open it in the system browser.'
+const BROWSER_LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
+const rightSidebar = document.getElementById('right-sidebar')
+const rsTabs = document.getElementById('rs-tabs')
+const rsBody = document.getElementById('rs-body')
+const browserOpen = document.getElementById('browser-open')
+/** Whether the server enabled the Browser (`/api/status` `browser: true`); nothing below runs while it is false. */
+let browserEnabled = false
+const sidebarTabs = []
+let activeSidebarTab = null
+let sidebarTabCount = 0
+
+/** The port a URL reaches, with the scheme's default filled in. */
+function effectivePort(url) {
+  return url.port !== '' ? url.port : url.protocol === 'https:' ? '443' : '80'
+}
+
+/**
+ * One address-bar value, checked against the fixed allowlist before anything is framed.
+ *
+ * DSH's `parseBrowserAddress`: the scheme test does not take `localhost:8080` for a scheme, because what follows its
+ * colon is a port.
+ * @returns `{ ok: true, target: { url, title } }` or `{ ok: false, reason }`, a key of `BROWSER_REFUSALS`.
+ */
+function parseBrowserAddress(input, applicationOrigin) {
+  const trimmed = String(input).trim()
+  if (trimmed === '') return { ok: false, reason: 'empty' }
+  if (trimmed.length > BROWSER_MAX_ADDRESS) return { ok: false, reason: 'invalid' }
+  const candidate = /^[A-Za-z][A-Za-z\d+.-]*:(?!\d+(?:[/?#]|$))/u.test(trimmed) ? trimmed : `https://${trimmed}`
+  let url
+  try {
+    url = new URL(candidate)
+  } catch {
+    return { ok: false, reason: 'invalid' }
+  }
+  if (url.username !== '' || url.password !== '') return { ok: false, reason: 'credentials' }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return { ok: false, reason: 'protocol' }
+  if (applicationOrigin !== undefined && applicationOrigin !== 'null') {
+    let app = null
+    try {
+      app = new URL(applicationOrigin)
+    } catch {
+      app = null
+    }
+    if (app !== null) {
+      if (url.origin === app.origin) return { ok: false, reason: 'application-origin' }
+      const sameLoopbackPort = BROWSER_LOOPBACK.has(app.hostname) && BROWSER_LOOPBACK.has(url.hostname) && effectivePort(url) === effectivePort(app)
+      if (sameLoopbackPort) return { ok: false, reason: 'application-origin' }
+    }
+  }
+  return { ok: true, target: { url: url.href, title: url.hostname } }
+}
+
+/** A toolbar icon, drawn in `currentColor`. */
+function browserIcon(d) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 16 16')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.4')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.append(svgPath(d))
+  return svg
+}
+
+function browserButton(name, label, d) {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.dataset.browser = name
+  button.setAttribute('aria-label', label)
+  button.title = label
+  button.append(browserIcon(d))
+  return button
+}
+
+/** Draw a tab from its navigation state; the state is the only thing that decides what is enabled. */
+function renderBrowserTab(tab) {
+  const nav = tab.nav
+  const target = nav.entries[nav.index]
+  const unknown = nav.status === 'unknown'
+  tab.back.disabled = unknown || nav.index <= 0
+  tab.forward.disabled = unknown || nav.index < 0 || nav.index >= nav.entries.length - 1
+  tab.reload.disabled = target === undefined
+  tab.external.disabled = target === undefined || unknown
+  tab.address.dataset.address = target === undefined ? 'empty' : unknown ? 'unknown' : nav.status
+  tab.address.setAttribute('aria-invalid', nav.refusal === null ? 'false' : 'true')
+  const message = nav.refusal !== null ? BROWSER_REFUSALS[nav.refusal] : nav.failed ? BROWSER_FAILED : unknown ? BROWSER_UNKNOWN : ''
+  tab.notice.textContent = message
+  tab.notice.dataset.kind = nav.refusal !== null || nav.failed ? 'error' : 'info'
+  tab.notice.hidden = message === ''
+  tab.panel.setAttribute('aria-busy', String(nav.status === 'loading' && !nav.failed))
+  tab.label.textContent = target === undefined ? 'Browser' : target.title
+  tab.button.title = target === undefined ? 'Browser' : target.url
+}
+
+/** Frame the current entry under a new revision, so a late `load` from an older frame is not mistaken for this one. */
+function browserRequest(tab, index) {
+  const nav = tab.nav
+  const target = nav.entries[index]
+  if (target === undefined) return
+  nav.index = index
+  nav.revision += 1
+  nav.status = 'loading'
+  nav.failed = false
+  nav.refusal = null
+  const revision = nav.revision
+  tab.frame?.remove()
+  tab.start.remove()
+  const frame = document.createElement('iframe')
+  // The sandbox and the referrer policy are set before the address, so the first request already carries both.
+  frame.setAttribute('sandbox', BROWSER_SANDBOX)
+  frame.referrerPolicy = 'no-referrer'
+  frame.dataset.browserFrame = 'iframe'
+  frame.title = target.title
+  frame.addEventListener('load', () => {
+    if (tab.frame !== frame || nav.revision !== revision) return
+    if (nav.status === 'loading') nav.status = 'known'
+    else if (nav.status === 'known') nav.status = 'unknown'
+    renderBrowserTab(tab)
+  })
+  frame.addEventListener('error', () => {
+    if (tab.frame !== frame || nav.revision !== revision) return
+    nav.failed = true
+    renderBrowserTab(tab)
+  })
+  frame.src = target.url
+  tab.frame = frame
+  tab.view.append(frame)
+  tab.address.value = target.url
+  renderBrowserTab(tab)
+}
+
+/** Validate an address and load it; the current address reloads, any other discards the forward branch. */
+function browserLoad(tab, value) {
+  const parsed = parseBrowserAddress(value, location.origin)
+  if (!parsed.ok) {
+    tab.nav.refusal = parsed.reason
+    renderBrowserTab(tab)
+    return
+  }
+  const nav = tab.nav
+  const current = nav.entries[nav.index]
+  if (current !== undefined && current.url === parsed.target.url) {
+    browserRequest(tab, nav.index)
+    return
+  }
+  nav.entries = [...nav.entries.slice(0, nav.index + 1), parsed.target]
+  if (nav.entries.length > BROWSER_MAX_HISTORY) nav.entries.splice(0, nav.entries.length - BROWSER_MAX_HISTORY)
+  browserRequest(tab, nav.entries.length - 1)
+}
+
+function selectSidebarTab(tab) {
+  activeSidebarTab = tab
+  for (const each of sidebarTabs) {
+    const selected = each === tab
+    each.tab.dataset.active = String(selected)
+    each.button.setAttribute('aria-selected', String(selected))
+    each.button.tabIndex = selected ? 0 : -1
+    each.panel.hidden = !selected
+  }
+}
+
+/**
+ * The column budget, DSH's `computeColumns` (`dsh-client-ui-layout`): beside a right track the conversation keeps 400
+ * pixels, and the track is the reader's preference — 45% of the window at the first opening, kept after that — held
+ * between 300 pixels and 70% of the window and shrunk to the room that is left. Below 768 pixels the pane covers the
+ * window, DSH's automatic fullscreen.
+ *
+ * One difference, stated: where the room is under 300 pixels DSH drops the track and hides its panel, which makes the
+ * opening gesture do nothing; here the pane covers the conversation column instead, and becomes a track again by
+ * itself once the left sidebar or the window makes room. The left sidebar's own bounds (12–48rem, 80% of the window)
+ * are its owner's and are not narrowed here.
+ */
+const RIGHTBAR_CENTER_MIN = 400
+const RIGHTBAR_MIN = 300
+const RIGHTBAR_MAX_RATIO = 0.7
+const RIGHTBAR_DEFAULT_RATIO = 0.45
+const RIGHTBAR_FULLSCREEN_BELOW = 768
+let rightbarPreference = null
+const conversationColumn = document.querySelector('main')
+
+/** Place the open pane: a track of the budget's width, or a cover where there is no room for one. */
+function layoutRightSidebar() {
+  if (rightSidebar.hidden) return
+  const viewport = document.documentElement.clientWidth
+  rightbarPreference ??= Math.max(RIGHTBAR_MIN, Math.round(viewport * RIGHTBAR_DEFAULT_RATIO))
+  // Everything left of the conversation is the left sidebar and its gutter, whichever width they have now.
+  const start = Math.round(conversationColumn.getBoundingClientRect().left)
+  const available = viewport - start - RIGHTBAR_CENTER_MIN
+  let presentation = 'push'
+  if (viewport < RIGHTBAR_FULLSCREEN_BELOW) presentation = 'fullscreen'
+  else if (available < RIGHTBAR_MIN) presentation = 'cover'
+  const track = Math.min(viewport * RIGHTBAR_MAX_RATIO, Math.max(RIGHTBAR_MIN, rightbarPreference))
+  rightSidebar.dataset.presentation = presentation
+  rightSidebar.style.width = presentation === 'push' ? `${Math.floor(Math.min(available, track))}px` : ''
+  rightSidebar.style.setProperty('--rs-cover-left', `${start}px`)
+}
+
+function showRightSidebar(open) {
+  // DSH's `openRightbar`: opening below 1024 pixels puts a narrow opening of the left sidebar back to its rail.
+  if (open && rightSidebar.hidden && sidebarNarrow() && sidebarNarrowExpanded) {
+    sidebarNarrowExpanded = false
+    paintSidebarCollapse()
+  }
+  rightSidebar.hidden = !open
+  browserOpen.setAttribute('aria-expanded', String(open))
+  layoutRightSidebar()
+}
+
+/** The left sidebar's drag, keys, collapse and stored width all move the conversation's left edge, and so does the window. */
+window.addEventListener('resize', layoutRightSidebar)
+new ResizeObserver(() => layoutRightSidebar()).observe(document.getElementById('workspace-sidebar'))
+
+function closeSidebarTab(tab) {
+  const at = sidebarTabs.indexOf(tab)
+  if (at < 0) return
+  sidebarTabs.splice(at, 1)
+  tab.frame?.remove()
+  tab.tab.remove()
+  tab.panel.remove()
+  if (sidebarTabs.length === 0) {
+    activeSidebarTab = null
+    showRightSidebar(false)
+    browserOpen.focus()
+    return
+  }
+  if (activeSidebarTab === tab) {
+    const next = sidebarTabs[Math.min(at, sidebarTabs.length - 1)]
+    selectSidebarTab(next)
+    next.button.focus()
+  }
+}
+
+/** Open another Browser tab, as DSH's guide action does each time, and put the cursor in its address bar. */
+function openBrowserTab(initialAddress) {
+  if (!browserEnabled) return null
+  sidebarTabCount += 1
+  const id = `rs-tab-${sidebarTabCount}`
+  const tab = { id, nav: { entries: [], index: -1, revision: 0, status: 'empty', failed: false, refusal: null }, frame: null }
+  tab.tab = document.createElement('div')
+  tab.tab.className = 'rs-tab'
+  tab.button = document.createElement('button')
+  tab.button.type = 'button'
+  tab.button.id = id
+  tab.button.setAttribute('role', 'tab')
+  tab.button.setAttribute('aria-controls', `${id}-panel`)
+  tab.label = document.createElement('span')
+  tab.button.append(tab.label)
+  const close = document.createElement('button')
+  close.type = 'button'
+  close.className = 'rs-tab-close'
+  close.setAttribute('aria-label', 'Close tab')
+  close.title = 'Close tab'
+  close.textContent = '×'
+  tab.tab.append(tab.button, close)
+
+  tab.panel = document.createElement('div')
+  tab.panel.className = 'browser-tab'
+  tab.panel.id = `${id}-panel`
+  tab.panel.setAttribute('role', 'tabpanel')
+  tab.panel.setAttribute('aria-labelledby', id)
+  const bar = document.createElement('form')
+  bar.className = 'browser-bar'
+  bar.setAttribute('aria-label', 'Browser navigation')
+  tab.back = browserButton('back', 'Back', 'M10 3.5 5.5 8l4.5 4.5')
+  tab.forward = browserButton('forward', 'Forward', 'M6 3.5 10.5 8 6 12.5')
+  tab.reload = browserButton('reload', 'Reload', 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
+  tab.address = document.createElement('input')
+  tab.address.type = 'text'
+  tab.address.className = 'browser-address'
+  tab.address.dataset.browser = 'address'
+  tab.address.setAttribute('aria-label', 'Address')
+  tab.address.placeholder = 'Enter an HTTP(S) address'
+  tab.address.spellcheck = false
+  tab.address.autocomplete = 'off'
+  tab.address.setAttribute('autocapitalize', 'off')
+  tab.address.setAttribute('enterkeyhint', 'go')
+  const go = document.createElement('button')
+  go.type = 'submit'
+  go.dataset.browser = 'go'
+  go.textContent = 'Go'
+  tab.external = browserButton('external', 'Open in system browser', 'M9 3h4v4M13 3 7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5')
+  bar.append(tab.back, tab.forward, tab.reload, tab.address, go, tab.external)
+  tab.notice = document.createElement('p')
+  tab.notice.className = 'browser-notice'
+  tab.notice.dataset.browser = 'notice'
+  tab.notice.setAttribute('role', 'status')
+  tab.notice.hidden = true
+  tab.view = document.createElement('div')
+  tab.view.className = 'browser-view'
+  tab.start = document.createElement('p')
+  tab.start.className = 'browser-start'
+  tab.start.textContent = 'Enter an HTTP(S) address to start browsing'
+  tab.view.append(tab.start)
+  tab.panel.append(bar, tab.notice, tab.view)
+
+  bar.addEventListener('submit', (submitEvent) => {
+    submitEvent.preventDefault()
+    browserLoad(tab, tab.address.value)
+  })
+  tab.back.addEventListener('click', () => {
+    if (!tab.back.disabled) browserRequest(tab, tab.nav.index - 1)
+  })
+  tab.forward.addEventListener('click', () => {
+    if (!tab.forward.disabled) browserRequest(tab, tab.nav.index + 1)
+  })
+  tab.reload.addEventListener('click', () => {
+    if (tab.nav.index >= 0) browserRequest(tab, tab.nav.index)
+  })
+  tab.external.addEventListener('click', () => {
+    const target = tab.nav.entries[tab.nav.index]
+    if (target !== undefined && tab.nav.status !== 'unknown') window.open(target.url, '_blank', 'noopener,noreferrer')
+  })
+  tab.button.addEventListener('click', () => selectSidebarTab(tab))
+  close.addEventListener('click', () => closeSidebarTab(tab))
+
+  sidebarTabs.push(tab)
+  rsTabs.append(tab.tab)
+  rsBody.append(tab.panel)
+  renderBrowserTab(tab)
+  selectSidebarTab(tab)
+  showRightSidebar(true)
+  if (initialAddress !== undefined) browserLoad(tab, initialAddress)
+  tab.address.focus()
+  return tab
+}
+
+/** Reveal the entry point once the server says the Browser is enabled; a default server never shows it. */
+function applyBrowserFeature(enabled) {
+  browserEnabled = enabled
+  browserOpen.hidden = !enabled
+}
+
+browserOpen.addEventListener('click', () => {
+  if (!browserEnabled) return
+  if (!rightSidebar.hidden) {
+    showRightSidebar(false)
+    return
+  }
+  if (activeSidebarTab === null) {
+    openBrowserTab()
+    return
+  }
+  showRightSidebar(true)
+  activeSidebarTab.address.focus()
+})
+document.getElementById('rs-new').addEventListener('click', () => openBrowserTab())
+document.getElementById('rs-close').addEventListener('click', () => {
+  showRightSidebar(false)
+  browserOpen.focus()
+})
+/** Arrow keys move between the sidebar's tabs, the behaviour `role=tablist` promises. */
+rsTabs.addEventListener('keydown', (keyEvent) => {
+  if (keyEvent.key !== 'ArrowLeft' && keyEvent.key !== 'ArrowRight') return
+  const at = sidebarTabs.indexOf(activeSidebarTab)
+  if (at < 0) return
+  const next = sidebarTabs[(at + (keyEvent.key === 'ArrowRight' ? 1 : sidebarTabs.length - 1)) % sidebarTabs.length]
+  keyEvent.preventDefault()
+  selectSidebarTab(next)
+  next.button.focus()
+})
 
 accessButton.addEventListener('click', (clickEvent) => {
   clickEvent.stopPropagation()
@@ -12023,6 +12478,8 @@ async function fillSettings() {
     const sandbox = status === null || status.sandbox === undefined ? null : status.sandbox.mode
     server.append(...settingsTerm('Sandbox', sandbox ?? 'unknown'))
     server.append(...settingsTerm('Working directory', status === null || typeof status.cwd !== 'string' ? 'unknown' : status.cwd))
+    // The Browser tab is the operator's choice at start (#86), so the page says how to make it rather than offering a switch.
+    server.append(...settingsTerm('Browser tab', status !== null && status.browser === true ? 'enabled' : 'off — start the server with HEDDLE_WEB_BROWSER=1'))
   }
 
   if (endpointsRead.failure !== undefined) {

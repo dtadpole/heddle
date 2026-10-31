@@ -528,6 +528,8 @@ async function runWeb(args: Args): Promise<void> {
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
       // The plugin inventory reports each row's module name as the layer wrote it, not as `boot` resolved it.
       pluginModuleNames: declaredModuleNames(app),
+      // The page's Browser tab is opt-in, as DSH's Web profile ships it (#86); exactly `1` enables it.
+      browser: process.env.HEDDLE_WEB_BROWSER === '1',
     })
     /**
      * The sessions the startup sweeps read: every listed one whose log reads whole. A log that does not is named once

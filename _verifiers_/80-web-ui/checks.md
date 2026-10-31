@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T15:00:00Z
+modified: 2026-10-31T15:45:00Z
 level: L3
-version: 1.2.1
+version: 1.3.1
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -79,6 +79,14 @@ grounded_in:
   the status line stay readable (#117): a long model name ends before the send button and after the access chip and is
   shortened with an ellipsis, as DSH's block-level model trigger does, and every status-line item stays inside the
   composer column, as DSH's shrinkable pills do; a desktop window still shows the whole name.
+- [`check-browser-tab.mjs`](check-browser-tab.mjs) — the right sidebar's Browser tab (#86), opt-in as DSH's Web
+  profile ships it: a default server reports no `browser` on `/api/status` and shows no entry point; with
+  `HEDDLE_WEB_BROWSER=1` the tab refuses `javascript:`, `file:`, `data:` and `blob:` input, credentials and the
+  application's own origin before anything reaches the network, frames a loopback page in DSH's default sandbox with
+  no referrer, keeps its own Back and Forward, marks a page that moved itself unknown, and covers the window at phone
+  width. On a desktop it keeps DSH's column budget whatever the left sidebar's stored or dragged width and the
+  window's: beside a track the conversation keeps 400 pixels and the track 300, a pane with no room for that covers the
+  conversation column, and opening it below 1024 pixels returns a narrow opening of the left sidebar to its rail.
 - [`check-shortcut-keys.mjs`](check-shortcut-keys.mjs) — the session shortcuts pressed through
   `Input.dispatchKeyEvent` with the `key` values Chrome delivers (on a Mac, ⌥⌘A arrives as `å` and ⌥⌘N as a dead
   key), matched on the physical key with DSH's `Mod`, Command on a Mac and Control elsewhere (R-developer-seven-7):

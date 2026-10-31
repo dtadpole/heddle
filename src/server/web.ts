@@ -137,6 +137,13 @@ export interface WebServerOptions {
    */
   readonly pluginModuleNames?: ReadonlyMap<string, string>
   /**
+   * Whether the page may offer its Browser tab (#86), which frames HTTP(S) pages beside the conversation.
+   *
+   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
+   * The server only reports the choice on `/api/status`; it never fetches, proxies or probes a page.
+   */
+  readonly browser?: boolean
+  /**
    * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
    */
@@ -314,6 +321,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
       ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
+      browser: options.browser === true,
       ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
@@ -479,6 +487,8 @@ interface RequestState {
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
   readonly pluginModuleNames?: ReadonlyMap<string, string>
+  /** Whether the operator enabled the page's Browser tab (`HEDDLE_WEB_BROWSER=1`). */
+  readonly browser: boolean
 }
 
 /** One request, routed and fenced. */
@@ -2339,13 +2349,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * reports while no session is open. A session that switched does not appear here — its own mode travels
    * with `GET /api/sessions/<id>`, because a server-wide answer would misreport every session that chose
    * otherwise.
+   *
+   * `browser: true` appears only when the operator enabled the page's Browser tab, so a default server's answer is
+   * the same bytes it always was.
    */
   if (url.pathname === '/api/status' && request.method === 'GET') {
     respond(
       response,
       200,
       'application/json',
-      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot })}\n`,
+      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot, ...(state.browser ? { browser: true } : {}) })}\n`,
     )
     return
   }
