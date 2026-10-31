@@ -125,6 +125,12 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.team = Some(Arc::new(Team { service }));
     }
+    // The jobs row: a session's live background jobs block its archive and are stopped by `stop: true`.
+    if let Some(jobs) = boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs") {
+        harness.activity = Some(Arc::new(JobActivity {
+            jobs: jobs.registry.clone(),
+        }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -1054,6 +1060,25 @@ impl heddle_server::services::GoalService for Goals {
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
+}
+
+/// The jobs row as the server's archive admission (`sessionJobActivity` / `stopSessionJobs` in the TypeScript
+/// build's `src/jobs/http.ts`).
+struct JobActivity {
+    jobs: heddle_jobs::JobRegistry,
+}
+
+impl heddle_server::services::SessionActivity for JobActivity {
+    fn jobs(&self, session: &str) -> Vec<Value> {
+        heddle_jobs::http::session_job_activity(&self.jobs, session)
+            .into_iter()
+            .map(|(id, label)| serde_json::json!({ "id": id, "label": label }))
+            .collect()
+    }
+
+    fn stop(&self, session: &str) {
+        heddle_jobs::http::stop_session_jobs(&self.jobs, session);
+    }
 }
 
 impl heddle_server::services::TodoService for Todos {
