@@ -519,7 +519,11 @@ async function runWeb(args: Args): Promise<void> {
 
     const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
-      settings: settingsServiceFor(bootOptions(args)),
+      /**
+       * A settings write applies to the running tree as it lands, as DSH's settings do: the loader re-applies the
+       * entry with its newly composed config (committing a volatile value in place, remounting otherwise).
+       */
+      settings: settingsServiceFor(bootOptions(args), process.env, (ns, config) => app.ctx.loader.update(ns, { config: config as never })),
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),

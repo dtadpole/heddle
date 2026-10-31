@@ -938,9 +938,13 @@ fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
     let accept = headers
         .get(header::ACCEPT_LANGUAGE)
         .and_then(|value| value.to_str().ok());
+    // Read on every request: a settings write to the `locale` row replaces the held preference, and the next page is
+    // served in the new language without a restart (developer-ten's condition for #80's settings row).
     let locale = state
         .harness()
         .locale
+        .as_ref()
+        .map(|live| live.get())
         .unwrap_or_default()
         .for_request(accept);
     heddle_config::document_language(locale)
@@ -3153,6 +3157,48 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(headers["content-type"], "image/svg+xml");
         assert!(!bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_page_reads_the_held_language_on_every_request() {
+        // Issue #80: a settings write replaces the held preference, and the next page is served in it, no restart.
+        let live = Arc::new(heddle_config::LiveLocale::default());
+        let mut harness = harness();
+        harness.locale = Some(Arc::clone(&live));
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("live-locale")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let lang = |bytes: &[u8]| {
+            let html = body_text(bytes);
+            html.split("<html lang=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let (_, _, bytes) = call(&router, Method::GET, "/", Some(&cookie)).await;
+        assert_eq!(
+            lang(&bytes),
+            "en",
+            "no choice and no Accept-Language: English"
+        );
+        live.set_config(&serde_json::json!({"preference": "zh"}))
+            .unwrap();
+        let (_, _, bytes) = call(&router, Method::GET, "/", Some(&cookie)).await;
+        assert_eq!(
+            lang(&bytes),
+            "zh-CN",
+            "the written choice is the next page's language"
+        );
     }
 
     #[tokio::test]

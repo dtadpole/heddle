@@ -335,6 +335,17 @@
   #settings-server { display: grid; grid-template-columns: 8rem 1fr; gap: .3rem .6rem; margin: 0; font-size: .875rem; }
   #settings-server dt { color: var(--text-3); }
   #settings-server dd { margin: 0; overflow-wrap: anywhere; }
+  /** A setting a person changes: its label on the left, its control on the right, as DSH's General rows are laid out. */
+  .settings-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .35rem 0; font-size: .875rem; }
+  .settings-row select {
+    height: 32px;
+    padding: 0 .6rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+  }
   #settings-models, #settings-workspaces { display: flex; flex-direction: column; gap: .35rem; margin: 0; padding: 0; list-style: none; }
   .settings-endpoint {
     display: flex;
@@ -3490,23 +3501,31 @@
 -->
 <dialog id="settings-dialog" aria-labelledby="settings-title">
   <header id="settings-head">
-    <h2 id="settings-title">Settings</h2>
-    <button id="settings-close" type="button" aria-label="Close">✕</button>
+    <h2 id="settings-title" data-i18n="settings.title">Settings</h2>
+    <button id="settings-close" type="button" aria-label="Close" data-i18n-aria-label="settings.close">✕</button>
   </header>
   <div id="settings-body">
     <section>
-      <h3>Server</h3>
+      <h3 data-i18n="settings.general">General</h3>
+      <div class="settings-row">
+        <label for="settings-language" data-i18n="settings.language">Language</label>
+        <select id="settings-language"></select>
+      </div>
+      <p id="settings-language-note" class="meta" hidden></p>
+    </section>
+    <section>
+      <h3 data-i18n="settings.server">Server</h3>
       <dl id="settings-server"></dl>
     </section>
     <section>
-      <h3>Models</h3>
+      <h3 data-i18n="settings.models">Models</h3>
       <ul id="settings-models"></ul>
     </section>
     <section>
-      <h3>Workspaces</h3>
+      <h3 data-i18n="settings.workspaces">Workspaces</h3>
       <ul id="settings-workspaces"></ul>
     </section>
-    <p id="settings-note" class="meta">Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.</p>
+    <p id="settings-note" class="meta" data-i18n="settings.note">Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.</p>
   </div>
 </dialog>
 <!--
@@ -3602,6 +3621,122 @@
 <!-- The sidebar row's reminder hover card: DSH's `sidebar.session.row.hover` entry `schedule-tasks`. -->
 <div id="schedule-row-hover" hidden></div>
 <script type="module">
+/**
+ * The interface language (issue #80), DSH's dsh-client-locale: English and Chinese, a person's choice applied at once
+ * and kept as the `locale` row's `preference` through the settings API (DSH's `locale.preference`).
+ *
+ * The server picks the first language, so the page opens in it with no flash: the stored choice, else the first
+ * supported language the browser's `Accept-Language` asks for, else English, served as `<html lang>` (`zh-CN` for
+ * Chinese, as DSH writes it). The page reads that tag back here. Copy enters through `t(key)`: the active language's
+ * dictionary, then English's, then the key itself, as DSH's lookup falls back. Static copy is marked
+ * `data-i18n="key"` (text) or `data-i18n-aria-label`, `-title`, `-placeholder` (attributes) and is rewritten when the
+ * language changes; copy a script draws listens for the `heddle:locale` event and draws itself again. Strings arrive
+ * one page section at a time (#80 slice 3); a section not yet moved here stays English. The labels are each
+ * language's own name and are never translated, as DSH's selector shows them.
+ */
+const LOCALES = Object.freeze([
+  Object.freeze({ id: 'en', label: 'English' }),
+  Object.freeze({ id: 'zh', label: '中文' }),
+])
+const MESSAGES = Object.freeze({
+  en: Object.freeze({
+    'settings.title': 'Settings',
+    'settings.close': 'Close',
+    'settings.general': 'General',
+    'settings.language': 'Language',
+    'settings.language.notSaved': 'Not saved ({reason}); this page keeps it until it is reloaded.',
+    'settings.server': 'Server',
+    'settings.models': 'Models',
+    'settings.workspaces': 'Workspaces',
+    'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
+  }),
+  zh: Object.freeze({
+    'settings.title': '设置',
+    'settings.close': '关闭',
+    'settings.general': '通用设置',
+    'settings.language': '语言',
+    'settings.language.notSaved': '未保存（{reason}）；本页在重新加载前保持此设置。',
+    'settings.server': '服务器',
+    'settings.models': '模型',
+    'settings.workspaces': '工作区',
+    'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
+  }),
+})
+
+/** The language the served `<html lang>` names: `zh` for any Chinese tag, else English. */
+function documentLocale() {
+  const tag = (document.documentElement.getAttribute('lang') ?? 'en').toLowerCase()
+  return tag === 'zh' || tag.startsWith('zh-') ? 'zh' : 'en'
+}
+
+let activeLocale = documentLocale()
+
+/** One string in the active language, `{name}` replaced from `vars`. */
+function t(key, vars = {}) {
+  const text = MESSAGES[activeLocale]?.[key] ?? MESSAGES.en[key] ?? key
+  return text.replace(/\{(\w+)\}/g, (whole, name) => (Object.hasOwn(vars, name) ? String(vars[name]) : whole))
+}
+
+/** Rewrite every marked element under `root` in the active language. */
+function applyLocale(root = document) {
+  for (const element of root.querySelectorAll('[data-i18n]')) element.textContent = t(element.dataset.i18n)
+  for (const attribute of ['aria-label', 'title', 'placeholder']) {
+    for (const element of root.querySelectorAll(`[data-i18n-${attribute}]`)) {
+      element.setAttribute(attribute, t(element.getAttribute(`data-i18n-${attribute}`)))
+    }
+  }
+}
+
+/** Show the page in `id` now: the copy, `<html lang>` (written only when it changes, as DSH does), and an event. */
+function useLocale(id) {
+  if (!LOCALES.some((locale) => locale.id === id)) return
+  activeLocale = id
+  const tag = id === 'zh' ? 'zh-CN' : id
+  if (document.documentElement.getAttribute('lang') !== tag) document.documentElement.setAttribute('lang', tag)
+  applyLocale()
+  window.dispatchEvent(new CustomEvent('heddle:locale', { detail: { locale: id } }))
+}
+
+/** The preference writes, one after another, so the stored choice is always the last one made. */
+let localeWrites = Promise.resolve()
+/** Which choice is the latest: only its outcome may speak in the Language row. */
+let localeGeneration = 0
+
+/**
+ * A person's choice: shown at once, then kept as the `locale` row's `preference`. Written even when it matches what
+ * is on screen, because that may be the browser's language rather than a stored choice, as DSH's `setLocale` does.
+ *
+ * Writes are chained, so two quick changes (en, then zh, then en) reach the server in the order they were made and
+ * the stored choice is the one on screen. Resolves to the reason the write failed, or `null` when it was kept — and
+ * `null` as well for a choice a later one has already replaced, so an older failure never shows under a newer
+ * success. The page keeps the language until it is reloaded either way.
+ */
+async function chooseLocale(id) {
+  useLocale(id)
+  const generation = ++localeGeneration
+  const write = localeWrites.then(async () => {
+    try {
+      const response = await fetch('/api/settings/locale', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ update: { preference: id } }),
+      })
+      if (response.ok) return null
+      const body = await response.json().catch(() => null)
+      return body !== null && typeof body.error === 'string' ? body.error : `the server answered ${response.status}`
+    } catch (error) {
+      return (error && error.message) || String(error)
+    }
+  })
+  localeWrites = write.then(() => undefined)
+  const failure = await write
+  return generation === localeGeneration ? failure : null
+}
+
+/** For the page's other scripts, which are not modules. */
+window.heddleLocale = Object.freeze({ t, choose: chooseLocale, get active() { return activeLocale } })
+applyLocale()
+
 const log = document.getElementById('log')
 const ledger = document.getElementById('ledger')
 const timeline = document.getElementById('timeline')
@@ -12051,9 +12186,35 @@ function settingsWorkspaceOrder(records) {
 }
 
 async function showSettings() {
+  fillLanguageRow()
   await fillSettings()
   if (!settingsDialog.open) settingsDialog.showModal()
 }
+
+/** The Language row (issue #80): each shipped language by its own name, the active one selected. */
+function fillLanguageRow() {
+  const select = document.getElementById('settings-language')
+  select.replaceChildren(
+    ...LOCALES.map((locale) => {
+      const option = document.createElement('option')
+      option.value = locale.id
+      option.textContent = locale.label
+      option.lang = locale.id === 'zh' ? 'zh-CN' : locale.id
+      return option
+    }),
+  )
+  select.value = activeLocale
+}
+
+document.getElementById('settings-language').addEventListener('change', async (changeEvent) => {
+  const note = document.getElementById('settings-language-note')
+  note.hidden = true
+  const failure = await chooseLocale(changeEvent.target.value)
+  if (failure !== null) {
+    note.textContent = t('settings.language.notSaved', { reason: failure })
+    note.hidden = false
+  }
+})
 
 document.getElementById('settings-open').addEventListener('click', () => {
   void showSettings()

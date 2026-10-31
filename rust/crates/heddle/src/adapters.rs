@@ -104,25 +104,27 @@ impl Component for ModelComponent {
             composed.nominated.as_deref(),
         )
         .map_err(|error| error.to_string())?;
-        // The machine's file applies to the next request without a restart, as `plugins/model.ts` keeps it: the
-        // service asks before every read and call, and an edit that cannot be read keeps the previous endpoints.
-        if config.read_local_config {
-            let source = heddle_config::ModelRowSource::new(
-                config.endpoints.clone(),
-                config.default.clone(),
-                true,
-                self.env.clone(),
-            );
-            service.set_refresh(Arc::new(move || match source.changed()? {
-                Ok(composed) => Some((composed.endpoints, composed.nominated)),
-                Err(error) => {
-                    eprintln!(
-                        "model: the machine configuration changed but could not be read ({error}); the previous endpoints stay"
-                    );
-                    None
-                }
-            }));
-        }
+        // The machine's file and the row's own configuration apply to the next request without a restart, as
+        // `plugins/model.ts` keeps them: the service asks before every read and call, and an edit that cannot be
+        // read keeps the previous endpoints. The source is shared as `model-row`, so a settings write to this row
+        // replaces the row's configuration in place (DSH applies a settings write to the running tree).
+        let source = Arc::new(heddle_config::ModelRowSource::new(
+            config.endpoints.clone(),
+            config.default.clone(),
+            config.read_local_config,
+            self.env.clone(),
+        ));
+        let watched = Arc::clone(&source);
+        service.set_refresh(Arc::new(move || match watched.changed()? {
+            Ok(composed) => Some((composed.endpoints, composed.nominated)),
+            Err(error) => {
+                eprintln!(
+                    "model: the configuration changed but could not be read ({error}); the previous endpoints stay"
+                );
+                None
+            }
+        }));
+        services.provide("model-row", source);
         let service = Arc::new(service);
         // `model/request` reaches the bus, where a hook may rewrite the request.
         if let Some(hooks) = bus_hooks(services) {
@@ -1173,7 +1175,9 @@ impl Component for LocaleComponent {
             heddle_config::locale_preference(Some(config)).map_err(|error| error.to_string())?;
         services.provide(
             "locale",
-            Arc::new(heddle_config::LocalePreference(preference)),
+            Arc::new(heddle_config::LiveLocale::new(
+                heddle_config::LocalePreference(preference),
+            )),
         );
         Ok(())
     }

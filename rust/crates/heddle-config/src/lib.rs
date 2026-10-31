@@ -91,8 +91,8 @@ pub use home::{expand_home, heddle_home, profiles_dir};
 pub use layer::{INLINE_FILE, Layer, NamedLayer, anchor_dir, read_layer};
 pub use local::{LocalConfig, LocalConfigLocation, local_config_candidates, read_local_config};
 pub use locale::{
-    FALLBACK_LOCALE, LocalePreference, SUPPORTED_LOCALES, accepted_languages, document_language,
-    locale_label, locale_preference, locale_schema, negotiate_locale,
+    FALLBACK_LOCALE, LiveLocale, LocalePreference, SUPPORTED_LOCALES, accepted_languages,
+    document_language, locale_label, locale_preference, locale_schema, negotiate_locale,
 };
 pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
 pub use paths::{canonical_path, depth_of, is_under};
