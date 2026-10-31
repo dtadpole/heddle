@@ -363,6 +363,14 @@ export class SessionService extends Service {
   }
 
   /**
+   * Whether an archived session owns this one's steps: it is archived itself, or a session above it in its subagent
+   * lineage is. DSH's archived-session gate asks exactly this before every model step; the agent loop asks it here.
+   */
+  underArchived(id: SessionId): boolean {
+    return this.store.underArchived(id)
+  }
+
+  /**
    * Switch a session onto an endpoint, replacing any model override it carried.
    *
    * Exposed on the service rather than read from `store` by the route, because the store is the layer a

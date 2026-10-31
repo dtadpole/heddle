@@ -528,6 +528,12 @@ impl SessionService {
         self.store.flags(id, patch)
     }
 
+    /// Whether an archived session owns this one's steps: it is archived itself, or a session above it in its
+    /// subagent lineage is. DSH's archived-session gate asks exactly this before every model step.
+    pub fn under_archived(&self, id: &str) -> bool {
+        self.store.under_archived(id)
+    }
+
     /// Record the agent preset a session runs under, only when it has none (inventory A96); see
     /// [`SessionStore::record_preset`]. Answers the record as it now is; `Ok(None)` for an unknown session.
     pub fn record_preset(

@@ -10,7 +10,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 
 import { decodeTranscript } from '../../src/session/transcript.ts'
-import { fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
+import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, isTitleRequest, parseJson, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, scriptedConfig, sessionsUnder, skipUnless, transcriptFile } from '../../_tools_/verify-runner/lib.mjs'
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
 
 /**
@@ -1524,6 +1524,164 @@ test('a turn into a one-shot subagent\'s session is refused the way DSH refuses 
     assert.equal(readTranscript(join(root, child.id)).length, eventsBefore, 'and its log gained nothing')
   } finally {
     live?.kill()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
+test('a turn into an archived session is accepted and blocked before any model request, as DSH\'s gate blocks it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26. DSH's ArchivedSessionGate (dsh-api-session-controller lib/index.js:2508-2541) answers the agent's
+   * pre-step with reject while its session is archived: the prompt is accepted, the turn opens, its claimed input is
+   * dropped, no model request is made and the turn ends blocked (dsh-agent-loop lib/index.js:956-963). Measured before
+   * this gate on both builds: POST /api/turn into an archived session asked the model, answered, and grew the session
+   * from one turn to two while it stayed archived. The endpoint here is an HTTP double, so "no model request reached
+   * the endpoint" is a count of what it received, not a reading of the log alone.
+   */
+  const home = isolatedHome('archived-turn')
+  const work = fixtureDir('archived-turn-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the endpoint answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  /** What a turn must not leave in an archived session's log: an input message, a model call, an answer, a completion. */
+  const answerTypes = new Set(['message', 'model/request', 'assistant/chunk', 'assistant/completed', 'turn/completed'])
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1, 'and asked the endpoint once')
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const meta = async () => (await (await fetch(origin + '/api/sessions', { headers: { cookie } })).json()).find((one) => one.id === id)
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const turnsBefore = (await meta())?.turns
+    assert.equal(turnsBefore, 1, 'with its one turn')
+    const eventsBefore = transcript().length
+
+    const response = await post('/api/turn', { session: id, prompt: 'into the archive' })
+    const text = await response.text()
+    assert.equal(response.status, 200, `the turn is accepted, as DSH accepts the prompt\nsaw: ${response.status} ${text.slice(0, 300)}`)
+    const doneLine = text.split('\n\n').find((frame) => frame.startsWith('event: done\n'))
+    assert.ok(doneLine !== undefined, `the turn ended\nsaw: ${text.slice(0, 600)}`)
+    const done = JSON.parse(doneLine.slice(doneLine.indexOf('data: ') + 'data: '.length))
+    assert.equal(done.finishReason, 'blocked', `it ended blocked\nsaw: ${JSON.stringify(done)}`)
+    assert.equal(done.rounds, 0, 'without a step')
+    assert.equal(done.text, '', 'and without an answer')
+    assert.ok(!text.includes('the endpoint answered'), 'the endpoint\'s answer never streamed')
+    assert.equal(double.requests.length, 1, 'no model request reached the endpoint')
+    const added = transcript().slice(eventsBefore)
+    assert.deepEqual(added.filter((event) => answerTypes.has(event.type)).map((event) => event.type), [], 'no input, model call or answer was appended')
+    assert.deepEqual(
+      added.filter((event) => event.type === 'turn/failed').map((event) => event.reason),
+      [{ kind: 'blocked' }],
+      `the log records the turn as blocked, DSH's turn-end reason\nsaw: ${JSON.stringify(added)}`,
+    )
+    const inserted = added.find((event) => event.type === 'agent/inbox/spliced' && event.target === 'next-turn' && Array.isArray(event.inserted) && event.inserted.length === 1)
+    assert.equal(inserted?.inserted[0]?.content?.[0]?.text, 'into the archive', 'the dropped prompt is recorded as claimed input, as DSH records it')
+    const after = await meta()
+    assert.equal(after?.turns, turnsBefore, 'the session records the same number of turns')
+    assert.equal(after?.archived, true, 'and stays archived')
+
+    /** The command line's --resume --turn into the same session meets the same gate. */
+    live.kill()
+    live = undefined
+    const resumed = await runCli([...args, '--resume', id, '--turn', 'the command line into the archive', '--json'], { env, cwd: work })
+    assert.equal(resumed.code, 0, `the command line's turn is accepted\n${resumed.stdout}${resumed.stderr}`)
+    assert.equal(parseJson(resumed.stdout).finishReason, 'blocked', `and ends blocked\n${resumed.stdout}`)
+    assert.equal(double.requests.length, 1, 'still without a model request')
+    const afterCli = transcript().slice(eventsBefore)
+    assert.deepEqual(afterCli.filter((event) => answerTypes.has(event.type)).map((event) => event.type), [], 'and without an answer')
+    assert.equal(afterCli.filter((event) => event.type === 'turn/failed').length, 2, 'two blocked turns, one per caller')
+    const listed = await runCli([...args, 'sessions', '--json'], { env, cwd: work })
+    assert.equal(parseJson(listed.stdout).find((one) => one.id === id)?.turns, turnsBefore, 'the turn count is unchanged')
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
+test('a goal round into an archived session blocks its goal as DSH does (prompt-rejected), and a resume after the unarchive runs it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26, the goal half. A goal round is a turn, so the archived-session gate refuses its first step before any
+   * model request. DSH's goal-round driver then blocks the goal with "prompt-rejected" and its own sentence
+   * (dsh-goal-round-driver lib/index.js:326-333), so the goal is not run again by itself, and after an unarchive a
+   * resume starts it. Measured before on both builds: the goal stayed active and armed, so the resume was refused as
+   * "already active and armed".
+   */
+  const home = isolatedHome('archived-goal')
+  const work = fixtureDir('archived-goal-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the goal round answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1)
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const goal = async () => (await (await fetch(`${origin}/api/goal?session=${id}`, { headers: { cookie } })).json()).goal
+    const reasonOf = (view) => view?.blockedReason ?? view?.blocked_reason
+    const waitFor = async (condition, what) => {
+      for (const started = Date.now(); Date.now() - started < 15_000; ) {
+        const value = await condition()
+        if (value !== undefined) return value
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+      return assert.fail(`timed out waiting for ${what}; the goal is ${JSON.stringify(await goal())}`)
+    }
+    const goalRounds = () =>
+      transcript().filter((event) => event.type === 'message' && event.message?.source?.kind === 'goal').map((event) => event.message.source.round)
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const created = await post('/api/goal', { session: id, action: 'create', objective: 'finish the report', max_goal_rounds: 1 })
+    assert.equal(created.status, 200, `the goal is created\n${await created.text()}`)
+
+    const blocked = await waitFor(async () => {
+      const current = await goal()
+      return current !== undefined && current.phase !== 'active' ? current : undefined
+    }, 'the refused round to block its goal (without DSH\'s prompt-rejected it stays active and armed)')
+    assert.equal(blocked.phase, 'blocked')
+    assert.deepEqual(reasonOf(blocked), { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' }, 'with DSH\'s code and sentence')
+    assert.equal(double.requests.length, 1, 'the refused round made no model request')
+    assert.deepEqual(goalRounds(), [], 'and admitted no message')
+    assert.deepEqual(transcript().filter((event) => event.type === 'turn/failed').map((event) => event.reason), [{ kind: 'blocked' }], 'one blocked turn, not started again')
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: false })).status, 200, 'the session is unarchived')
+    const resumed = await post('/api/goal', { session: id, action: 'resume', goal_id: blocked.id, revision: blocked.revision })
+    assert.equal(resumed.status, 200, `the blocked goal resumes\n${await resumed.text()}`)
+    const settled = await waitFor(async () => {
+      const current = await goal()
+      return reasonOf(current)?.code === 'round-limit' ? current : undefined
+    }, 'the resumed round to run to its cap')
+    assert.equal(settled.phase, 'blocked')
+    assert.deepEqual(goalRounds(), [1], 'the resume ran round 1')
+    assert.equal(double.requests.length, 2, 'and asked the endpoint for it')
+  } finally {
+    live?.kill()
+    await double.close()
     removeDir(home)
     removeDir(work)
   }
@@ -4204,7 +4362,11 @@ test("a session row's controls appear on hover, and a search replaces the tree w
     assert.equal(reading.menuChrome.position, 'fixed', `a menu floats in viewport coordinates\nsaw: ${JSON.stringify(reading.menuChrome)}`)
     assert.equal(reading.menuChrome.insideViewport, true, 'and is entirely on screen')
     assert.equal(reading.menuChrome.background, 'rgb(35, 35, 36)', 'with an opaque surface')
-    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
+    /**
+     * Eight items since C17 added DSH's `Manual` (dsh-client-ui-workspace/lib/client.js:2914-2918, with its chevrons
+     * glyph): Workspace Tree, Workspace, In one list, Manual, Last updated, and the archive trio.
+     */
+    assert.deepEqual(reading.menuChrome.itemGlyphs, [true, true, true, true, true, true, true, true], `and a glyph on every item\nsaw: ${JSON.stringify(reading.menuChrome.itemGlyphs)}`)
 
     /** **A session's glyph is a conversation**, not a folder: the reference's bubble artwork, distinct from the folder path. */
     const glyphs = JSON.parse(
@@ -4294,8 +4456,9 @@ test("a session row's controls appear on hover, and a search replaces the tree w
      */
     /**
      * DSH's View options, read from its own menu on 2026-10-17, is four groups: a `WorkSpace` heading, the grouping pair,
-     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, `Last updated` (the only
-     * order it has) and the archive trio, in DSH's order — asserted as the list, because the order is the claim.
+     * the ordering pair, and the archive trio. This UI carries the heading, the grouping pair, the ordering pair
+     * (`Manual` / `Last updated`, since C17) and the archive trio, in DSH's order — asserted as the list, because the
+     * order is the claim.
      */
     assert.deepEqual(
       reading.viewItems.filter((item) => item.label !== null).map((item) => item.label),
@@ -4303,7 +4466,7 @@ test("a session row's controls appear on hover, and a search replaces the tree w
        * The grouping is DSH's three since the workspace tree (owner goal, 2026-10-28; DSH 0.2.1's `SessionGroupBy` is
        * `workspace-tree | workspace | flat`): `Workspace Tree`, `Workspace` (sibling sections) and `In one list`.
        */
-      ['Workspace Tree', 'Workspace', 'In one list', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
+      ['Workspace Tree', 'Workspace', 'In one list', 'Manual', 'Last updated', 'Hide archived', 'All conversations (show archived)', 'Archived only'],
       `View options reads what DSH's reads\nsaw: ${JSON.stringify(reading.viewItems)}`,
     )
     assert.deepEqual(
@@ -6011,18 +6174,26 @@ test('a pinned row glides to its new place, and reduced motion skips the glide',
   }
 })
 
-test('the later pin leads, and the tree and the flat list put the same sessions in the same order', async (context) => {
+test('pins follow DSH in both orders: prompt time under Last updated, the later pin first under Manual, the flat list like the tree', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
   /**
-   * R-developer-eight-17 (DSH parity C13), measured on both builds: two pins showed in one order in the tree and in the
-   * other order in In one list, because the tree ordered pins by when they were pinned and the flat list by when the
-   * sessions were created. DSH keeps one registry-global pin list, most recent pin first, and fronts a new pin in both the
-   * group and the flat list. The flat list also ordered the unpinned rows by creation while the tree and the View options
-   * item (Last updated) order them by the last write.
+   * R-developer-eight-17 (DSH parity C13) with C17 and issue #63. Two pins read one way in the tree and the other way in
+   * In one list, which sorted by creation. Since C17 the flat list follows the tree's rule in the **selected order**,
+   * as DSH's flat list partitions its own account's order (dsh-client-ui-workspace/lib/client.js:1146-1154,
+   * 3583-3584). The rule, from DSH's README (*Reordering and view options*):
+   * - **Last updated** sorts each partition by the latest prompt or steer, and pin time does not affect it.
+   * - **Manual** keeps a saved sequence. Entering it freezes the order on screen.
+   * - Pinning "moves the Session to the front of its complete saved sequence without changing the selected mode. It
+   *   leads the pinned partition in Manual but need not lead it in Last updated. Unpinning leaves the saved position
+   *   unchanged."
+   * DSH fronts a pin in the group's account and the flat list's (`pinSessionOrder` / `pinOrderAccounts`,
+   * client.js:1303-1309, 1343-1345). This check judged "the later pin leads" in the only order main had, and is
+   * rewritten to that rule.
    *
-   * The fixture makes every one of those rules disagree with creation order: four sessions in one workspace, the third
-   * pinned before the second, and the first written to last.
+   * The fixture: four sessions in one workspace, prompted first..fourth, then first again, so it has the latest prompt.
+   * The third is pinned before the second, so the second is the later pin and the third has the later prompt. Manual is
+   * entered from a freshly loaded In one list, so the tree has not been drawn in that page load.
    */
   const h = harness('session-pin-order')
   let live
@@ -6049,15 +6220,15 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const handshake = await fetch(live.url, { redirect: 'manual' })
     const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
     assert.ok(cookie.length > 0, 'the server issued a cookie')
-    /** The first session is written to last, so it is the most recently updated of the unpinned two. */
+    /** The first session is prompted again, so it has the latest prompt of the unpinned two. */
     const written = await fetch(new URL('/api/turn', live.url), {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest written', folder: h.work }),
+      body: JSON.stringify({ session: first, prompt: 'a follow-up that makes the oldest session the latest prompted', folder: h.work }),
     })
     assert.equal(written.status, 200, `the follow-up turn runs\n${await written.clone().text()}`)
     await written.text()
-    /** The third session is pinned, then the second: the second is the later pin, though it was created earlier. */
+    /** The third session is pinned, then the second: the second is the later pin, the third the later prompt. */
     const pin = (id) =>
       fetch(new URL(`/api/sessions/${id}/flags`, live.url), {
         method: 'POST',
@@ -6070,53 +6241,127 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const metas = await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json()
     const metaOf = (id) => metas.find((meta) => meta.id === id)
     assert.ok(String(metaOf(second)?.pinnedAt) > String(metaOf(third)?.pinnedAt), `the store says which pin is later\nsaw: ${JSON.stringify(metas)}`)
-    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which session was written last\nsaw: ${JSON.stringify(metas)}`)
-    const expected = [second, third, first, fourth]
+    assert.ok(String(metaOf(third)?.updated) > String(metaOf(second)?.updated), `and which pinned session was prompted later\nsaw: ${JSON.stringify(metas)}`)
+    assert.ok(String(metaOf(first)?.updated) > String(metaOf(fourth)?.updated), `and which unpinned session was prompted last\nsaw: ${JSON.stringify(metas)}`)
+
+    /**
+     * Page helpers, installed once per page load: read the rows of whichever view is drawn, choose a View options item,
+     * and press a row's pin control. Each read waits until it sees four rows, opening the workspace if it is closed.
+     */
+    const helpers = `(() => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const sessionLis = () => [...document.querySelectorAll('#tree li[data-kind="session"]')]
+      window.__pinOrder = {
+        async read() {
+          for (let attempt = 0; attempt < 40; attempt += 1) {
+            const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
+            if (workspaceLi !== null && workspaceLi.dataset.open !== 'true' && attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
+            if (sessionLis().length >= 4 && (workspaceLi === null || workspaceLi.dataset.open === 'true')) break
+            await wait(150)
+          }
+          await wait(400)
+          return {
+            view: document.querySelector('#tree li[data-kind="workspace"]') === null ? 'flat' : 'tree',
+            ids: sessionLis().map((li) => li.dataset.sessionId ?? null),
+            pinned: sessionLis().map((li) => li.dataset.pinned === 'true'),
+          }
+        },
+        async choose(label) {
+          document.querySelector('#view-options button').click()
+          await wait(250)
+          const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === label)
+          if (item === undefined) return false
+          item.click()
+          await wait(1200)
+          return true
+        },
+        async pin(id) {
+          const button = document.querySelector('#tree li[data-kind="session"][data-session-id="' + id + '"] > .row button.pin-action')
+          if (button === null) return false
+          button.click()
+          await wait(1500)
+          return true
+        },
+        stored() {
+          return localStorage.getItem('heddle.tree.order.v1')
+        },
+      }
+      return true
+    })()`
+    const page = async (call) => JSON.parse(await browser.evaluate(`(async () => JSON.stringify(await window.__pinOrder.${call}))()`, 30_000))
+    const name = (ids) => (ids ?? []).map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
+    const byPrompt = [third, second, first, fourth]
 
     browser = await openBrowser()
     await browser.goto(live.url)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
-    const reading = JSON.parse(
-      await browser.evaluate(`(async () => {
-        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
-        const rows = () => [...document.querySelectorAll('#tree .row')]
-        const sessionIds = () => [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId ?? null)
-        /** The workspace is opened only if closed: a first visit opens the first workspace on its own. */
-        for (let attempt = 0; attempt < 30 && rows().length === 0; attempt += 1) await wait(150)
-        const workspaceLi = document.querySelector('#tree li[data-kind="workspace"]')
-        if (workspaceLi === null) return JSON.stringify({ error: 'no workspace row' })
-        for (let attempt = 0; attempt < 30 && workspaceLi.dataset.open !== 'true'; attempt += 1) {
-          if (attempt % 5 === 0) workspaceLi.querySelector(':scope > .row').click()
-          await wait(200)
-        }
-        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
-        const tree = sessionIds()
-        const treePinned = [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.pinned === 'true')
-        document.querySelector('#view-options button').click()
-        await wait(250)
-        const item = [...document.querySelectorAll('#view-options .menu:not([hidden]) button')].find((button) => (button.textContent || '').trim() === 'In one list')
-        if (item === undefined) return JSON.stringify({ error: 'no In one list item', tree })
-        item.click()
-        for (let attempt = 0; attempt < 30 && document.querySelector('#tree li[data-kind="workspace"]') !== null; attempt += 1) await wait(150)
-        for (let attempt = 0; attempt < 30 && sessionIds().length < 4; attempt += 1) await wait(150)
-        await wait(300)
-        const flat = sessionIds()
-        const ages = [...document.querySelectorAll('#tree li[data-kind="session"] > .row .age')].map((age) => age.textContent)
-        return JSON.stringify({ tree, treePinned, flat, ages })
-      })()`, 30_000),
-    )
-    assert.equal(reading.error, undefined, `the page drew the workspace and offered In one list\nsaw: ${JSON.stringify(reading)}`)
-    const name = (ids) => ids.map((id) => ['first', 'second', 'third', 'fourth'][made.indexOf(id)] ?? id)
-    /** The tree: the later pin first, then the earlier pin, then the rest by their last write. */
-    assert.deepEqual(name(reading.tree), name(expected), `the tree puts the later pin first, then the latest written\nsaw: ${JSON.stringify(name(reading.tree))}`)
-    assert.deepEqual(reading.treePinned, [true, true, false, false], 'and draws the two leading rows as pinned')
-    /** The flat list: the same rule, so the same order — which is the regression this check was written for. */
+    await browser.evaluate(helpers)
+
+    /** Last updated (the default): the pinned part by prompt time, so the later pin does not lead, in both views. */
+    const treeUpdated = await page('read()')
+    assert.equal(treeUpdated.view, 'tree', `the page opens on the tree\nsaw: ${JSON.stringify(treeUpdated)}`)
+    assert.deepEqual(name(treeUpdated.ids), name(byPrompt), `Last updated: the pin prompted later leads, not the later pin\nsaw: ${JSON.stringify(name(treeUpdated.ids))}`)
+    assert.deepEqual(treeUpdated.pinned, [true, true, false, false], 'and the two leading rows are drawn as pinned')
+    assert.equal(await page(`choose('In one list')`), true, 'View options offers In one list')
+    const flatUpdated = await page('read()')
+    assert.equal(flatUpdated.view, 'flat', `In one list drew no workspace rows\nsaw: ${JSON.stringify(flatUpdated)}`)
+    assert.deepEqual(name(flatUpdated.ids), name(treeUpdated.ids), `In one list reads as the tree does under Last updated\nsaw: ${JSON.stringify(name(flatUpdated.ids))}`)
+
+    /** Reload into the flat list, choose Manual there, and the tree keeps the order on screen rather than pin time. */
+    await browser.goto(live.url)
+    await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    await browser.evaluate(helpers)
+    assert.equal(await page(`choose('Manual')`), true, 'View options offers Manual')
+    const flatManual = await page('read()')
+    assert.equal(flatManual.view, 'flat', 'the reload kept In one list')
+    assert.deepEqual(name(flatManual.ids), name(byPrompt), `entering Manual freezes the flat list as it was\nsaw: ${JSON.stringify(name(flatManual.ids))}`)
+    assert.equal(JSON.parse(String(await page('stored()'))).orderBy, 'manual', 'the browser stores Manual')
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'View options offers Workspace Tree')
+    const treeManual = await page('read()')
     assert.deepEqual(
-      name(reading.flat),
-      name(expected),
-      `In one list puts the later pin first and orders the rest by their last write, as the tree does\nsaw: ${JSON.stringify({ flat: name(reading.flat), tree: name(reading.tree) })}`,
+      name(treeManual.ids),
+      name(byPrompt),
+      `Manual chosen in the flat list froze the tree's order too, rather than putting the later pin first\nsaw: ${JSON.stringify(name(treeManual.ids))}`,
     )
-    assert.equal(reading.ages.length, 4, `every flat row says where it lives and when\nsaw: ${JSON.stringify(reading.ages)}`)
+
+    /**
+     * Under Manual an unpin moves nothing in the saved sequence. Manual froze Last updated's sequence, in which the second
+     * (the oldest prompt) is last, so the row returns to that slot.
+     */
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control')
+    const unpinned = await page('read()')
+    assert.deepEqual(name(unpinned.ids), name([third, first, fourth, second]), `the unpinned row goes back to its saved slot\nsaw: ${JSON.stringify(name(unpinned.ids))}`)
+    assert.deepEqual(unpinned.pinned, [true, false, false, false], 'and only the third is drawn as pinned')
+
+    /** Pinning it again under Manual fronts it: the later pin leads, in the tree and in the flat list alike. */
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control again')
+    const repinned = await page('read()')
+    const latestPinFirst = [second, third, first, fourth]
+    assert.deepEqual(name(repinned.ids), name(latestPinFirst), `under Manual the later pin leads the pinned part\nsaw: ${JSON.stringify(name(repinned.ids))}`)
+    assert.deepEqual(repinned.pinned, [true, true, false, false], 'and both pins are drawn')
+    assert.equal(await page(`choose('In one list')`), true, 'back to In one list')
+    const flatRepinned = await page('read()')
+    assert.deepEqual(name(flatRepinned.ids), name(latestPinFirst), `the pin fronted the flat list as well\nsaw: ${JSON.stringify(name(flatRepinned.ids))}`)
+
+    /** Unpinned again, it keeps the front slot the pin gave it: it heads the rest, ahead of later prompts. */
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'back to Workspace Tree')
+    assert.equal(await page(`pin(${JSON.stringify(second)})`), true, 'the second row offers its pin control a third time')
+    const kept = [third, second, first, fourth]
+    const unpinnedAgain = await page('read()')
+    assert.deepEqual(name(unpinnedAgain.ids), name(kept), `an unpin leaves the saved position under Manual\nsaw: ${JSON.stringify(name(unpinnedAgain.ids))}`)
+    assert.deepEqual(unpinnedAgain.pinned, [true, false, false, false], 'with only the third pinned')
+    assert.equal(await page(`choose('In one list')`), true, 'In one list once more')
+    const flatKept = await page('read()')
+    assert.deepEqual(name(flatKept.ids), name(kept), `and the flat list keeps it there too\nsaw: ${JSON.stringify(name(flatKept.ids))}`)
+
+    /** Last updated discards the layout: every part by prompt time again, in either view. */
+    assert.equal(await page(`choose('Last updated')`), true, 'View options offers Last updated')
+    const backByPrompt = [third, first, fourth, second]
+    const flatBack = await page('read()')
+    assert.deepEqual(name(flatBack.ids), name(backByPrompt), `Last updated orders by prompt time again\nsaw: ${JSON.stringify(name(flatBack.ids))}`)
+    assert.equal(await page(`choose('Workspace Tree')`), true, 'back to Workspace Tree')
+    const treeBack = await page('read()')
+    assert.deepEqual(name(treeBack.ids), name(flatBack.ids), `and the tree reads as the flat list does\nsaw: ${JSON.stringify(name(treeBack.ids))}`)
   } finally {
     browser?.close()
     live?.kill()
@@ -6198,6 +6443,48 @@ test("a session's turn runs its tools in the session's own folder, through the s
     assert.equal(results[1], expected, `the resumed turn's bash ran in the session's folder, not in A (${folderA})`)
   } finally {
     live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test("a session is Last updated by a person's latest prompt, not by the answer or the tool work written after it", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * R-developer-eight-20 (DSH parity C17), DSH's Last updated: a row is dated by the latest prompt or steer a person
+   * wrote. DSH's list takes lastPromptAt from a user-sourced user/message, as that event's own time
+   * (dsh-api-session-controller/lib/index.js:1872-1879), and dates the row max(createdAt, lastPromptAt) (index.js:2124-2125).
+   * heddle dated it by its last write, so the answer and the turn boundary re-dated it. The turn here runs one scripted
+   * bash call that sleeps, so everything written after the prompt is measurably later than the prompt itself.
+   */
+  const h = harness('last-prompt')
+  scriptedConfig({ home: h.home, steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 0.4' } } }, { text: 'answered after the pause' }] })
+  try {
+    const first = await runCli([...h.args, '--turn', 'the prompt that dates this row'], { env: h.env, cwd: h.work })
+    assert.equal(first.code, 0, `the turn ran\n${first.stdout}${first.stderr}`)
+    const id = sessionsUnder(join(h.home, 'sessions'))[0]
+    assert.ok(id, 'the turn left a session')
+    /** The prompt is a user message with no source: a message the harness wrote carries one. */
+    const lastPrompt = () =>
+      readTranscript(join(h.home, 'sessions', id))
+        .filter((event) => event.type === 'message' && event.message?.role === 'user' && event.message?.source === undefined)
+        .at(-1)
+    const events = readTranscript(join(h.home, 'sessions', id))
+    const prompt = lastPrompt()
+    const answered = events.filter((event) => event.type === 'assistant/completed' || event.type === 'turn/completed').at(-1)
+    assert.ok(prompt !== undefined && answered !== undefined, `the log holds the prompt and the answer\nsaw: ${events.map((event) => event.type).join(', ')}`)
+    assert.ok(Date.parse(answered.at) - Date.parse(prompt.at) >= 300, `the answer was written well after the prompt\nprompt ${prompt.at}, answer ${answered.at}`)
+    const listed = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(listed?.updated, prompt.at, `the session is dated by its prompt, not by what was written after it\nsaw: ${JSON.stringify(listed)}`)
+
+    /** The next prompt moves it. */
+    const second = await runCli([...h.args, '--turn', 'a second prompt', '--resume', id], { env: h.env, cwd: h.work })
+    assert.equal(second.code, 0, `the resumed turn ran\n${second.stdout}${second.stderr}`)
+    const again = lastPrompt()
+    assert.notEqual(again?.at, prompt.at, 'the second prompt is a new event')
+    const relisted = (await sessionsOf(h)).find((meta) => meta.id === id)
+    assert.equal(relisted?.updated, again?.at, `the next prompt re-dates it\nsaw: ${JSON.stringify(relisted)}`)
+  } finally {
     removeDir(h.home)
     removeDir(h.work)
   }

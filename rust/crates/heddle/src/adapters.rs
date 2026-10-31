@@ -1006,7 +1006,8 @@ impl Component for GoalComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::goal_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1208,7 +1209,8 @@ impl Component for ContextComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::context_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1387,7 +1389,8 @@ impl Component for SubagentToolComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::subagent_tool_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1533,7 +1536,8 @@ impl Component for TeamComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::team_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1578,7 +1582,8 @@ impl Component for ScheduleComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::schedule_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1631,7 +1636,8 @@ impl Component for JobsComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::jobs_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
