@@ -42,12 +42,18 @@ interface Tree {
   deriveGroups: (workspaces: unknown[], sessions: unknown[], options?: Record<string, unknown>) => Group[]
 }
 
-const pureBlocks = `${block('workspace-tree')}\n${block('content-search')}`
+const pureBlocks = `${block('session-rules')}\n${block('workspace-tree')}\n${block('content-search')}`
 const libraries = new Function(
-  `${pureBlocks}\nreturn { WorkspaceTree, ContentSearch: typeof ContentSearch === 'undefined' ? undefined : ContentSearch, workspaceDisplayTitle: typeof workspaceDisplayTitle === 'undefined' ? (title) => title : workspaceDisplayTitle }`,
+  `${pureBlocks}\nreturn {
+    WorkspaceTree,
+    ContentSearch: typeof ContentSearch === 'undefined' ? undefined : ContentSearch,
+    SessionRules: typeof SessionRules === 'undefined' ? { sidebarSessions: (sessions) => sessions } : SessionRules,
+    workspaceDisplayTitle: typeof workspaceDisplayTitle === 'undefined' ? (title) => title : workspaceDisplayTitle,
+  }`,
 )() as {
   WorkspaceTree: Tree
   ContentSearch: unknown
+  SessionRules: unknown
   workspaceDisplayTitle: (title: string) => string
 }
 
@@ -133,7 +139,7 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     'archiveMode',
     'groupingMode',
     'treeGroups',
-    'sessionLabel',
+    'SessionRules',
     'relativeAge',
     'openSearchResult',
     'setTimeout',
@@ -147,6 +153,12 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     'shownOrders',
     'wireSessionDrag',
     'workspaceDisplayTitle',
+    'noteSessions',
+    'treeFocus',
+    'heldTreeFocus',
+    'paintEmptyList',
+    'paintConversationTarget',
+    'restoreTreeFocus',
     `${body}\nreturn { applySearch, renderFlatList }`,
   )(
     document,
@@ -157,7 +169,7 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     'hide',
     options.grouping ?? 'tree',
     options.treeGroups,
-    (meta: { title?: string; id: string }) => meta.title ?? meta.id,
+    libraries.SessionRules,
     () => '',
     () => undefined,
     (callback: () => void) => {
@@ -175,6 +187,13 @@ function loadPage(options: { treeGroups: Group[]; route: Route; grouping?: strin
     {},
     () => undefined,
     libraries.workspaceDisplayTitle,
+    /** The header's title cache, the tree's keyboard focus and the empty-list and target painters: not judged here. */
+    () => undefined,
+    () => null,
+    null,
+    () => undefined,
+    () => undefined,
+    () => undefined,
   ) as { applySearch: () => Promise<void>; renderFlatList: () => Promise<void> }
 
   /** Type a query, then let every pending answer and debounce run, as a person waiting a moment would. */

@@ -3,7 +3,7 @@ import { basename, join, sep } from 'node:path'
 
 import { canonicalPath, depthOf, isUnder } from '../paths.ts'
 import { readSessionDefinition } from './definition.ts'
-import type { SessionMeta } from './store.ts'
+import { readLogHeader, type SessionMeta } from './store.ts'
 
 /**
  * The folder tree the Web UI's left column shows, and the content a file node opens.
@@ -427,6 +427,19 @@ function capturedIn(dir: string): ReadonlySet<string> {
 }
 
 /**
+ * Whether a definition names a log the store refuses: one on this machine whose first record cannot be read.
+ *
+ * The store leaves such a session out of `list()` and opens it as no session (`SessionStore.logReadable`, DSH's rule
+ * that an unreadable header is "omitted from discovery and `list()`"), so its definition row would open on nothing:
+ * measured on #130, the row stayed in the tree after the store dropped the session, and a click got `404`. Only a
+ * definition the store does not list is asked, and only a log that is there and unreadable hides its row: a missing
+ * log, as on a clone of the repository on another machine, still draws the row as before.
+ */
+function refusedLog(log: unknown): boolean {
+  return typeof log === 'string' && log.length > 0 && readLogHeader(log).kind === 'unreadable'
+}
+
+/**
  * The session a `_sessions_` instance stands for.
  *
  * A **hoisted** session node is not bound to its folder the way an instance is bound to its `cwd`: the folder
@@ -508,9 +521,10 @@ function childrenOf(dir: string, kind: NodeKind, context: Context, listing: read
           ...(meta?.pinnedAt !== undefined ? { pinnedAt: meta.pinnedAt } : {}),
           ...(meta?.updated !== undefined ? { updated: meta.updated } : {}),
           archived: meta?.archived === true,
+          refused: meta === undefined && definition !== null && refusedLog(definition.log),
         }
       })
-      const visible = flagged.filter((one) =>
+      const visible = flagged.filter((one) => !one.refused).filter((one) =>
         context.archived === 'show' ? true : context.archived === 'only' ? one.archived : !one.archived,
       )
       for (const one of visible.sort((left, right) => {

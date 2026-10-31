@@ -405,7 +405,8 @@ test('typing / opens the grouped menu at the caret, a picked command runs on the
   try {
     const cookie = await cookieFor(server.url)
     const id = await openSession(server, cookie)
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
     await browser.waitFor(`${FIELD} !== null`, 10_000)
@@ -478,7 +479,8 @@ test('typing / opens the grouped menu at the caret, a picked command runs on the
     )
 
     // A reload draws the row again from the log, in place.
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
     const reloaded = `[...document.querySelectorAll(".hc-command")].find((element) => element.querySelector(".hc-text")?.textContent.startsWith(${JSON.stringify(created)}))`
@@ -502,7 +504,8 @@ test("/feedback opens DSH's feedback dialog; a category and details land in the 
   try {
     const cookie = await cookieFor(server.url)
     const id = await openSession(server, cookie)
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, id)
     await browser.waitFor('typeof globalThis.showSession === "function"', 20_000)
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(id)})`)
     await browser.waitFor(`${FIELD} !== null`, 10_000)

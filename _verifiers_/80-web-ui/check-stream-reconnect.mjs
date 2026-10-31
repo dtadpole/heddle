@@ -245,7 +245,8 @@ async function openWorld(label, opened) {
   pageUrl.port = String(proxy.port)
   const browser = await openBrowser({ width: 1280, height: 900 })
   opened.push(() => browser.close())
-  await browser.goto(pageUrl.toString())
+  /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+  await browser.gotoSession(pageUrl.toString(), session)
   assert.ok(await browser.waitFor(`${LOG_TEXT}.includes('answer to: SHORT first')`, 20_000), 'the page shows the session')
   return {
     double,
