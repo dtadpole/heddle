@@ -80,7 +80,9 @@ a display or a window.
   API, no browser.
 - [`check-shutdown-kills-group.mjs`](check-shutdown-kills-group.mjs) — a **restart** during a bash call: SIGTERM
   to the server ends the command's whole process group, the server goes within seconds instead of waiting for the
-  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6). No browser.
+  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6); and a turn asked
+  for during the shutdown grace (a command that ignores SIGTERM keeps it open for its 3 s) is refused with 503 instead
+  of starting a command nothing would stop. No browser.
 
 ## Running it
 
@@ -117,7 +119,9 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
   API, no browser.
 - [`check-shutdown-kills-group.mjs`](check-shutdown-kills-group.mjs) — a **restart** during a bash call: SIGTERM
   to the server ends the command's whole process group, the server goes within seconds instead of waiting for the
-  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6). No browser.
+  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6); and a turn asked
+  for during the shutdown grace (a command that ignores SIGTERM keeps it open for its 3 s) is refused with 503 instead
+  of starting a command nothing would stop. No browser.
 
 ## Running it
 

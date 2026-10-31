@@ -4095,7 +4095,7 @@ function runningStartFor(key) {
  * the reference's two phrases.
  */
 function refreshRunningStatus() {
-  const ownPending = directTurnPending > 0 && (composerKey === QUEUE_KEY_NONE || directPendingKey === null || composerKey === directPendingKey)
+  const ownPending = directTurnsFor() > 0
   const running = sessionRunning() || ownPending
   if (!running) {
     if (runClock !== null) {
@@ -6355,7 +6355,7 @@ events.addEventListener('session', (message) => {
      * waiting on a turn this page never started. The pump refuses to run twice for one queue, so this can
      * never double-send.
      */
-    if (payload.session === composerKey) void pumpQueue()
+    if (queues.has(payload.session)) void pumpQueue(payload.session)
     renderComposerState()
     /**
      * And it is when the answer stops arriving, so the rows settle and the document is drawn.
@@ -6966,6 +6966,7 @@ function adoptSession(id) {
   }
   composerKey = id
   renderQueue()
+  void pumpQueue(id)
 }
 
 function sessionRunning() {
@@ -6983,6 +6984,15 @@ function turnInFlight() {
  * queued, so the next message waits.
  */
 let directTurnPending = 0
+/** Direct sends belong to their queue, not the page's currently selected session (Refs #72, #73). */
+const directTurnsByQueue = new WeakMap()
+function directTurnsFor(key = composerKey) {
+  return directTurnsByQueue.get(queueOf(key)) ?? 0
+}
+function keyOfQueue(queue, fallback) {
+  for (const [key, value] of queues) if (value === queue) return key
+  return fallback
+}
 
 /**
  * Queues whose pump has a turn out: from the moment the pump sends a queued message until that turn's stream settles.
@@ -6995,9 +7005,12 @@ let directTurnPending = 0
  * session cannot show Stop on this one; `adoptSession` moves the same array to the session a fresh panel's turn created.
  */
 const queueTurnOut = new WeakSet()
+/** Stop retains queued work without automatically starting another turn (Refs #75; DSH keepInbox:true). */
+const stoppedQueues = new WeakSet()
+
 
 function anyRunning() {
-  return directTurnPending > 0 || queueTurnOut.has(queueOf()) || turnInFlight() || sessionRunning()
+  return directTurnsFor() > 0 || queueTurnOut.has(queueOf()) || turnInFlight() || sessionRunning()
 }
 
 /**
@@ -7037,6 +7050,7 @@ function submitDraft(gesture) {
   growComposer()
   updateSendDisabled()
   const attachments = takeAttachments()
+  stoppedQueues.delete(queueOf())
   const mode = resolveSubmitMode(BUSY_ENTER, anyRunning(), gesture)
   if (mode === 'steer') {
     void deliverSteered(text, attachments)
@@ -7047,7 +7061,7 @@ function submitDraft(gesture) {
    * queue row. It used to go through the dock and sit there marked `Sending…` until its whole turn ended, which is
    * the owner's nit: idle sends are not queueing, so they must not look like they are.
    */
-  if (!anyRunning()) {
+  if (!anyRunning() && !queueOf().some((item) => item.status === 'pending')) {
     void sendNow(text, attachments)
     return
   }
@@ -7061,6 +7075,9 @@ function submitDraft(gesture) {
  * queued row; the message was never recorded, so restoring it cannot duplicate anything.
  */
 async function sendNow(text, attachments = []) {
+  const sentKey = composerKey
+  const sentQueue = queueOf(sentKey)
+  directTurnsByQueue.set(sentQueue, (directTurnsByQueue.get(sentQueue) ?? 0) + 1)
   if (directTurnPending === 0) {
     directPendingSince = Date.now()
     directPendingKey = composerKey
@@ -7069,6 +7086,7 @@ async function sendNow(text, attachments = []) {
      * session forever. Fifteen minutes is far longer than a turn, and the guard is cleared when the promise settles.
      */
     pendingWatchdog = setTimeout(() => {
+      directTurnsByQueue.set(sentQueue, 0)
       directTurnPending = 0
       directPendingSince = null
       directPendingKey = null
@@ -7089,18 +7107,19 @@ async function sendNow(text, attachments = []) {
    */
   let accepted = false
   try {
-    await runTurn(text, composerKey, attachments, () => {
+    await runTurn(text, sentKey, attachments, () => {
       accepted = true
     })
   } catch (error) {
     if (accepted) {
       add('denied', `the connection dropped while the answer was arriving (${(error && error.message) || error}); the message itself was delivered`)
     } else {
-      if (field.value.trim() === '') field.value = text
+      if (keyOfQueue(sentQueue, sentKey) === composerKey && field.value.trim() === '') field.value = text
       growComposer()
       add('denied', `the message could not be sent: ${(error && error.message) || error}`)
     }
   } finally {
+    directTurnsByQueue.set(sentQueue, Math.max(0, (directTurnsByQueue.get(sentQueue) ?? 1) - 1))
     directTurnPending = Math.max(0, directTurnPending - 1)
     if (directTurnPending === 0) {
       directPendingSince = null
@@ -7111,8 +7130,8 @@ async function sendNow(text, attachments = []) {
       }
     }
     renderComposerState()
-    /** The turn this page started just ended: now a message that was waiting behind it can go. */
-    void pumpQueue()
+    /** Drain this send's own queue even when the reader has since switched sessions (Refs #72). */
+    void pumpQueue(keyOfQueue(sentQueue, sentKey))
   }
 }
 
@@ -7378,6 +7397,7 @@ async function pumpQueue(key = composerKey) {
   pumping.add(queue)
   try {
     for (;;) {
+      if (stoppedQueues.has(queue)) break
       const item = queue.find((entry) => entry.status === 'pending')
       if (item === undefined) break
       /**
@@ -7385,8 +7405,8 @@ async function pumpQueue(key = composerKey) {
        * waiting message must not start a second turn beside one already running. `turn/completed` calls this pump
        * again, so a message that waits here is sent the moment the turn it waits for ends.
        */
-      const waitingFor = key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE ? composerKey : key
-      if (runningSessions.has(waitingFor) || (waitingFor === composerKey && directTurnPending > 0)) break
+      const waitingFor = keyOfQueue(queue, key)
+      if (runningSessions.has(waitingFor) || directTurnsFor(waitingFor) > 0) break
       item.status = 'sending'
       renderQueue()
       /**
@@ -7399,7 +7419,7 @@ async function pumpQueue(key = composerKey) {
        * their words vanish while four turns quietly ran. `adoptSession` moves the queue onto the id the first
        * turn created; this reads that id at send time.
        */
-      const forKey = key === QUEUE_KEY_NONE && composerKey !== QUEUE_KEY_NONE ? composerKey : key
+      const forKey = keyOfQueue(queue, key)
       /**
        * Retire the row as soon as the turn is **accepted**, which is DSH's rule for a local submission echo: it
        * lives only until the host has the message. Removing it at the end of the turn (the previous behaviour) kept
@@ -7434,7 +7454,7 @@ async function pumpQueue(key = composerKey) {
          * dock marked `Not sent`, so both halves of the refusal are still visible and neither overwrites the
          * other.
          */
-        if (field.value.trim() === '') {
+        if (keyOfQueue(queue, key) === composerKey && field.value.trim() === '') {
           field.value = item.text
           const at = queue.findIndex((entry) => entry.id === item.id)
           if (at !== -1) queue.splice(at, 1)
@@ -7614,6 +7634,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         await renderTree()
         await refreshSessions()
       } else if (name === 'cancelled') {
+        stoppedQueues.add(queueOf(typeof payload.session === 'string' ? payload.session : key))
         /**
          * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
          * sentence in the transcript for something the reader asked for.
@@ -8201,6 +8222,7 @@ let stopRequested = false
 
 /** Ask the server to end the turn that is running. A no-op when it already ended is not a failure. */
 async function stopTurn() {
+  stoppedQueues.add(queueOf())
   if (composerKey === QUEUE_KEY_NONE) {
     stopRequested = true
     return
