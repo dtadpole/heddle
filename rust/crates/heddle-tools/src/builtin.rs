@@ -557,10 +557,8 @@ async fn run_command(
             // The child was killed for its wall time or by the caller's Stop: dropping it killed the shell
             // (`kill_on_drop`), and the group signal stops whatever the shell had started, which outlives the
             // shell as long as one member of the group is left.
-            if let Some(leader) = leader {
-                if let Err(error) = heddle_sandbox::kill_process_group(leader) {
-                    tracing::warn!(%error, leader, "the command's process group could not be stopped");
-                }
+            if let Some(Err(error)) = leader.map(heddle_sandbox::kill_process_group) {
+                tracing::warn!(%error, ?leader, "the command's process group could not be stopped");
             }
             let stopped = context.is_cancelled();
             let message = if stopped {
