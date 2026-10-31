@@ -10457,6 +10457,28 @@ const WorkspaceTree = (() => {
     return leftId === rightId ? 0 : leftId < rightId ? -1 : 1
   }
 
+  /**
+   * DSH's `In one list` rows: every session the archive filter shows, in **the tree's order** — the newest pin first,
+   * then the last write, then id. DSH keeps one pin list, most recent pin first, and fronts a new pin in the group and in
+   * the flat list alike (`dsh-workspace` `pinSession`; `dsh-client-ui-workspace` `pinSessionOrder` / `pinOrderAccounts`),
+   * and its flat list orders the rest by `Last updated` as a group does. The list used to sort by creation, so two pins
+   * read in one order here and in the other in the tree (R-developer-eight-17).
+   *
+   * Only the order is the tree's: the list keeps every session it listed before, the archive filter aside.
+   */
+  function flatList(sessions, options = {}) {
+    const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
+    const metas = Array.isArray(sessions) ? sessions.filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string') : []
+    return metas
+      .filter((meta) => {
+        const isArchived = meta.archived === true
+        if (archived === 'only') return isArchived
+        if (archived === 'show') return true
+        return !isArchived
+      })
+      .sort(sessionOrder)
+  }
+
   /** Whether a session is a row under the archive filter: `hide` (the default), `show`, or `only`. */
   function visible(meta, archived) {
     if (meta === null || typeof meta !== 'object' || typeof meta.id !== 'string') return false
@@ -10596,7 +10618,7 @@ const WorkspaceTree = (() => {
     return shown > INITIAL ? 'less' : null
   }
 
-  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
+  return { UNGROUPED, INITIAL, STEP, REACH, basename, sessionOrder, flatList, visible, containsSession, deriveGroups, flatten, shownCount, nextWatermark, overflow }
 })()
 /* workspace-tree:end */
 
@@ -11332,7 +11354,8 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
 
 /**
  * DSH's `In one list`: every session in one flat column, newest first, pinned first — the same order the tree uses
- * inside a branch, without the folders.
+ * inside a branch, without the folders. `WorkspaceTree.flatList` picks and orders the rows, so the two views cannot
+ * drift apart again; each row's age is the stamp it sorts by, last written, as a tree row's is.
  *
  * It is a **reading** list rather than a second tree: a row opens its session, and the hover controls that need a
  * session's definition folder stay on the tree's rows, where that folder is known. A flat row that offered a rename it
@@ -11342,13 +11365,7 @@ async function renderFlatList() {
   treeList.replaceChildren()
   rowIndex.clear()
   const index = await loadSearchIndex()
-  const visible = index.sessions.filter((meta) => {
-    const archived = meta.archived === true
-    if (archiveMode === 'only') return archived
-    if (archiveMode === 'hide') return !archived
-    return true
-  })
-  visible.sort((left, right) => Number(right.pinned === true) - Number(left.pinned === true) || String(right.created).localeCompare(String(left.created)))
+  const visible = WorkspaceTree.flatList(index.sessions, { archived: archiveMode })
   treeList.replaceChildren(
     ...visible.map((meta) => {
       const li = document.createElement('li')
@@ -11368,7 +11385,7 @@ async function renderFlatList() {
       label.textContent = meta.title !== undefined && meta.title.length > 0 ? meta.title : meta.id
       const place = document.createElement('span')
       place.className = 'age'
-      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
+      place.textContent = [workspaceOf(meta.cwd, index.roots), relativeAge(meta.updated ?? meta.created)].filter((part) => part !== null && part.length > 0).join(' · ')
       row.append(icon, label, place)
       /**
        * A row in the flat list is also **the selected row**.
