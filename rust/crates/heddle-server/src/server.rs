@@ -142,6 +142,8 @@ pub struct ServerOptions {
     pub default_endpoint: Option<String>,
     /// Installation roots searched for `node_modules/dompurify` ([`crate::preview::purify_path`]).
     pub asset_roots: Vec<PathBuf>,
+    /// D-068 explicit Browser capability; default remains same-origin framing.
+    pub browser: bool,
 }
 
 impl ServerOptions {
@@ -816,7 +818,15 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
             let lang = page_language(&state, request.headers());
-            return respond::html(StatusCode::OK, page::with_language(page::page(), lang));
+            let html = page::with_language(page::page(), lang);
+            let policy = page::page_policy_with_browser(&html, state.options().browser);
+            let mut answer = respond::html(StatusCode::OK, html);
+            if let Ok(value) = axum::http::HeaderValue::from_str(&policy) {
+                answer
+                    .headers_mut()
+                    .insert("content-security-policy", value);
+            }
+            return answer;
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
