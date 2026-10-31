@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, httpConfig, readTranscript, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, httpConfig, isTitleRequest, readTranscript, refuseTitleRequest, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — a steer sent during a step that calls a tool is written after the tool's result (#31).
@@ -34,6 +34,9 @@ async function toolDouble() {
         response.end(JSON.stringify({ error: 'no model list' }))
         return
       }
+      // A session title request (C6) is not the turn: since #68 the TS build sends it first, and answering it with
+      // the turn's script made the real first step answer at once, ending the turn before the steer could land.
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push(JSON.parse(body || '{}').messages ?? [])
       const first = requests.length === 1
       const frame = (delta, finish = null) =>
