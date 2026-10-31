@@ -8104,6 +8104,19 @@ function effectiveEffort(option, modelId) {
   return { levels, id, name }
 }
 
+/**
+ * Whether the seat's model is one its endpoint's catalogue no longer lists (issue #47).
+ *
+ * A session keeps the model it recorded after the configuration drops it, and its turns still name it, which is
+ * DSH's rule too ("a saved selection can still submit requests after its catalog entry disappears"). What DSH does
+ * not do is show the stale id as if it were a choice: "when the saved selection is absent from the catalog, the
+ * composer shows 'Select model' in regular weight and hides the reasoning effort caption". Restoring the entry
+ * restores its name and caption, because both are read from the catalogue each time the seat is drawn.
+ */
+function modelMissingFrom(option, modelId) {
+  return option !== undefined && modelId !== null && modelsOf(option).length > 0 && modelEntryOf(option, modelId) === undefined
+}
+
 /** The endpoint the seat is set to: the page's choice, then the run's nomination, then the first it offers. */
 function currentEndpointName() {
   const names = endpointOptions.map((option) => option.name)
@@ -8141,6 +8154,14 @@ function renderModelSeat() {
     return
   }
   const modelId = selectedModelId(option)
+  if (modelMissingFrom(option, modelId)) {
+    modelLabel.textContent = 'Select model'
+    modelEffort.hidden = true
+    modelEffort.textContent = ''
+    modelTrigger.setAttribute('aria-label', 'Select model')
+    modelTrigger.title = 'Select model'
+    return
+  }
   const label = modelId === null ? wanted : modelTitle(option, modelId)
   modelLabel.textContent = label
   const effort = effectiveEffort(option, modelId)
@@ -8325,11 +8346,13 @@ function buildRootPane() {
   const name = currentEndpointName()
   const option = configuredEndpoint(name)
   const modelId = option === undefined ? null : selectedModelId(option)
+  /** A model the catalogue no longer lists keeps DSH's placeholder here too, and has no Effort row (issue #47). */
+  const missingModel = modelMissingFrom(option, modelId)
   const label = option === undefined
     ? `${name ?? 'no model'} (not configured)`
-    : modelId === null ? option.name : modelTitle(option, modelId)
+    : missingModel ? 'Select model' : modelId === null ? option.name : modelTitle(option, modelId)
   modelMenu.append(menuCell('Model', label, 'model'))
-  const effort = option === undefined ? { name: undefined } : effectiveEffort(option, modelId)
+  const effort = option === undefined || missingModel ? { name: undefined } : effectiveEffort(option, modelId)
   /**
    * The Effort row exists only when the selected model publishes reasoning metadata. A model that declares no
    * levels has no row, because a control there would offer values the adapter would refuse to send.
