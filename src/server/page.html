@@ -3978,6 +3978,42 @@ const MESSAGES = Object.freeze({
     'settings.config.conflict': 'This entry changed since Settings opened; close and reopen it to see the current values.',
     'settings.config.refused': 'the server refused the change ({status})',
     'settings.config.saved': 'Saved; {applies}.',
+    'archive.unarchiveSession': 'Unarchive session',
+    'archive.unarchive': 'Unarchive',
+    'archive.notOpenable': 'Archived sessions cannot be opened. Unarchive it to view.',
+    'archive.archived': 'Session archived. You can ',
+    'archive.stoppedAndArchived': 'Session stopped and archived. You can ',
+    'archive.undo': 'undo',
+    'archive.or': ' or ',
+    'archive.filter': 'filter archived sessions',
+    'archive.confirm.title': 'Stop and archive this session?',
+    'archive.confirm.desc': '\u201c{title}\u201d still has work in progress. Archiving stops it first; you can restore the session later from the \u201cAll conversations (show archived)\u201d filter in the sidebar, and the stopped work will not resume on its own.',
+    'archive.confirm.activity': 'Work that will be stopped',
+    'archive.confirm.turn': 'The turn in progress',
+    'archive.confirm.subagents.one': '{n} running subagent: {names}',
+    'archive.confirm.subagents.other': '{n} running subagents: {names}',
+    'archive.confirm.jobs.one': '{n} background job: {names}',
+    'archive.confirm.jobs.other': '{n} background jobs: {names}',
+    'archive.confirm.schedules.one': '{n} scheduled reminder: {names}',
+    'archive.confirm.schedules.other': '{n} scheduled reminders: {names}',
+    'archive.confirm.other.one': '{n} other item of work ({kind})',
+    'archive.confirm.other.other': '{n} other items of work ({kind})',
+    'archive.confirm.listSeparator': ', ',
+    'archive.confirm.action': 'Stop and archive',
+    'archive.confirm.pending': 'Stopping and archiving\u2026',
+    'sessionId.menu': 'Copy Session ID',
+    'sessionId.copied': 'Session ID copied',
+    'sessionId.failed': 'Copy failed. Try again.',
+    'tree.empty.none': 'No sessions yet',
+    'tree.empty.noneArchived': 'No archived sessions yet',
+    'tree.empty.viewOthers': 'View other sessions',
+    'tree.empty.noRoots': 'no workspace root yet \u2014 register one with the + above',
+    'nav.searchFailed': 'Search could not run: the session list did not load',
+    'nav.searchHasMore': 'Showing the first {n} results. Narrow your search.',
+    'tree.running': 'Running',
+    'tree.pinned': 'Pinned',
+    'tree.loadingWorkspaces': 'Loading workspaces\u2026',
+    'tree.copied': 'Copied',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
     'empty.title': 'Start a conversation',
     'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
@@ -4121,6 +4157,42 @@ const MESSAGES = Object.freeze({
     'settings.config.conflict': '自打开设置以来，此条目已被更改；请关闭后重新打开以查看当前值。',
     'settings.config.refused': '服务器拒绝了此更改（{status}）',
     'settings.config.saved': '已保存；{applies}。',
+    'archive.unarchiveSession': '取消归档',
+    'archive.unarchive': '取消归档',
+    'archive.notOpenable': '已归档对话暂时无法查看，请取消归档后查看',
+    'archive.archived': '会话已归档，可',
+    'archive.stoppedAndArchived': '已停止并归档，可',
+    'archive.undo': '撤销',
+    'archive.or': '或',
+    'archive.filter': '筛选已归档会话',
+    'archive.confirm.title': '停止并归档此会话？',
+    'archive.confirm.desc': '“{title}”仍有正在进行的工作。归档会先停止这些工作；之后可在侧栏筛选“全部对话（显示已归档）”中恢复会话，被停止的工作不会自动继续。',
+    'archive.confirm.activity': '将被停止的工作',
+    'archive.confirm.turn': '进行中的回合',
+    'archive.confirm.subagents.one': '{n} 个运行中的子智能体：{names}',
+    'archive.confirm.subagents.other': '{n} 个运行中的子智能体：{names}',
+    'archive.confirm.jobs.one': '{n} 个后台任务：{names}',
+    'archive.confirm.jobs.other': '{n} 个后台任务：{names}',
+    'archive.confirm.schedules.one': '{n} 条定时提醒：{names}',
+    'archive.confirm.schedules.other': '{n} 条定时提醒：{names}',
+    'archive.confirm.other.one': '{n} 项其他工作（{kind}）',
+    'archive.confirm.other.other': '{n} 项其他工作（{kind}）',
+    'archive.confirm.listSeparator': '、',
+    'archive.confirm.action': '停止并归档',
+    'archive.confirm.pending': '正在停止并归档…',
+    'sessionId.menu': '复制 Session ID',
+    'sessionId.copied': 'Session ID 已复制',
+    'sessionId.failed': '复制失败，请重试',
+    'tree.empty.none': '暂无会话',
+    'tree.empty.noneArchived': '暂无已归档会话',
+    'tree.empty.viewOthers': '查看其他会话',
+    'tree.empty.noRoots': '还没有工作区根目录——用上方的 + 注册一个',
+    'nav.searchFailed': '搜索无法运行：会话列表未能加载',
+    'nav.searchHasMore': '仅显示前 {n} 条结果，请缩小搜索范围。',
+    'tree.running': '运行中',
+    'tree.pinned': '已置顶',
+    'tree.loadingWorkspaces': '正在加载工作区…',
+    'tree.copied': '已复制',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
     'empty.title': '开始对话',
     'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
@@ -11940,8 +12012,8 @@ function runningMark() {
   mark.className = 'status-dot'
   mark.dataset.state = 'ongoing'
   mark.setAttribute('role', 'img')
-  mark.setAttribute('aria-label', 'Running')
-  mark.title = 'Running'
+  mark.setAttribute('aria-label', t('tree.running'))
+  mark.title = t('tree.running')
   mark.append(runningSpinner())
   return mark
 }
@@ -13874,7 +13946,7 @@ async function openHeroMenu() {
   const ticket = ++heroMenuTicket
   const status = document.createElement('div')
   status.setAttribute('role', 'status')
-  status.textContent = 'Loading workspaces…'
+  status.textContent = t('tree.loadingWorkspaces')
   heroMenu.replaceChildren(status)
   heroMenu.hidden = false
   heroChip.setAttribute('aria-expanded', 'true')
@@ -15828,11 +15900,26 @@ const SessionArchive = (() => {
     confirmPending: 'Stopping and archiving…',
   }
 
+  /**
+   * The page's words (#80): `lookup(key, vars)` answers DSH's key in the page's language. Unset, as when a test loads
+   * this block on its own, every sentence below is DSH's English.
+   */
+  let lookup = null
+  function useWords(next) {
+    lookup = typeof next === 'function' ? next : null
+  }
+  function say(key, english, vars = {}) {
+    const text = lookup === null ? undefined : lookup(key, vars)
+    return typeof text === 'string' && text !== key ? text : english
+  }
+
   /** `archive.confirm.desc`: what stops, where the session comes back from, and that the work does not resume. */
   function confirmDescription(title) {
-    return (
+    return say(
+      'archive.confirm.desc',
       `“${title}” still has work in progress. Archiving stops it first; you can restore the session later from the ` +
-      '“All conversations (show archived)” filter in the sidebar, and the stopped work will not resume on its own.'
+        '“All conversations (show archived)” filter in the sidebar, and the stopped work will not resume on its own.',
+      { title },
     )
   }
 
@@ -15840,19 +15927,20 @@ const SessionArchive = (() => {
   function activityLine(entry) {
     const items = Array.isArray(entry?.items) ? entry.items : []
     const n = items.length
-    const names = items.map((item) => item.label ?? item.id).join(', ')
+    const names = items.map((item) => item.label ?? item.id).join(say('archive.confirm.listSeparator', ', '))
     const one = n === 1
+    const plural = one ? 'one' : 'other'
     switch (entry?.kind) {
       case 'turn':
-        return 'The turn in progress'
+        return say('archive.confirm.turn', 'The turn in progress')
       case 'subagent':
-        return `${n} running ${one ? 'subagent' : 'subagents'}: ${names}`
+        return say(`archive.confirm.subagents.${plural}`, `${n} running ${one ? 'subagent' : 'subagents'}: ${names}`, { n, names })
       case 'job':
-        return `${n} background ${one ? 'job' : 'jobs'}: ${names}`
+        return say(`archive.confirm.jobs.${plural}`, `${n} background ${one ? 'job' : 'jobs'}: ${names}`, { n, names })
       case 'schedule':
-        return `${n} scheduled ${one ? 'reminder' : 'reminders'}: ${names}`
+        return say(`archive.confirm.schedules.${plural}`, `${n} scheduled ${one ? 'reminder' : 'reminders'}: ${names}`, { n, names })
       default:
-        return `${n} other ${one ? 'item' : 'items'} of work (${String(entry?.kind)})`
+        return say(`archive.confirm.other.${plural}`, `${n} other ${one ? 'item' : 'items'} of work (${String(entry?.kind)})`, { n, kind: String(entry?.kind) })
     }
   }
 
@@ -15876,9 +15964,41 @@ const SessionArchive = (() => {
     return { text: kind === 'stoppedAndArchived' ? TEXT.stoppedAndArchived : TEXT.archived, tone: 'success', holdMs: 6000, actions }
   }
 
-  return { TEXT, confirmDescription, activityLine, refusedActivity, notice }
+  return { TEXT, useWords, confirmDescription, activityLine, refusedActivity, notice }
 })()
+
 /* session-archive:end */
+
+/**
+ * The shared blocks (SessionArchive, SessionIdCopy, the tree's empty states) keep DSH's English for their own tests;
+ * the page hands them its language here, at load and on every language change (#80). Each value is DSH's own key.
+ */
+function localizeBlocks() {
+  Object.assign(SessionArchive.TEXT, {
+    unarchiveSession: t('archive.unarchiveSession'),
+    unarchive: t('archive.unarchive'),
+    archivedNotOpenable: t('archive.notOpenable'),
+    archived: t('archive.archived'),
+    stoppedAndArchived: t('archive.stoppedAndArchived'),
+    undo: t('archive.undo'),
+    or: t('archive.or'),
+    filter: t('archive.filter'),
+    confirmTitle: t('archive.confirm.title'),
+    confirmActivity: t('archive.confirm.activity'),
+    confirmAction: t('archive.confirm.action'),
+    confirmPending: t('archive.confirm.pending'),
+  })
+  SessionArchive.useWords((key, vars) => t(key, vars))
+  Object.assign(SessionIdCopy.TEXT, { menu: t('sessionId.menu'), copied: t('sessionId.copied'), failed: t('sessionId.failed') })
+  Object.assign(WorkspaceTree.EMPTY_TEXT, {
+    none: t('tree.empty.none'),
+    noneArchived: t('tree.empty.noneArchived'),
+    viewOthers: t('tree.empty.viewOthers'),
+    noRoots: t('tree.empty.noRoots'),
+  })
+}
+localizeBlocks()
+window.addEventListener('heddle:locale', localizeBlocks)
 
 /**
  * The page's state for the workspace tree: the groups the last render drew, each group's watermark, and the definition
@@ -16597,8 +16717,8 @@ function nodeRow(node, depth = 0) {
     pinSlot.append(kindIcon('pin-fill'))
     pinSlot.setAttribute('role', 'img')
     /** DSH's PinnedIndicator is named by its `row.pinned` string, "Pinned" (dsh-client-ui-workspace client.js:2126-2134, :4933; #109). */
-    pinSlot.setAttribute('aria-label', 'Pinned')
-    pinSlot.title = 'Pinned'
+    pinSlot.setAttribute('aria-label', t('tree.pinned'))
+    pinSlot.title = t('tree.pinned')
     li.dataset.pinned = 'true'
   }
   rowRight.append(pinSlot)
@@ -17314,10 +17434,10 @@ const rowHoverCard = (() => {
     if (!done || key === null || shownKey !== key) return
     card.style.minHeight = `${card.offsetHeight}px`
     card.classList.add('copied')
-    const copied = element('span', 'hover-copied', 'Copied')
+    const copied = element('span', 'hover-copied', t('tree.copied'))
     copied.setAttribute('aria-hidden', 'true')
     card.replaceChildren(copied)
-    announcer.textContent = 'Copied'
+    announcer.textContent = t('tree.copied')
     copiedTimer = setTimeout(() => {
       announcer.textContent = ''
       card.classList.remove('copied')
@@ -17667,7 +17787,7 @@ async function applySearch() {
     results.replaceChildren()
     paintSearchPending(0)
     note.hidden = false
-    note.textContent = 'Search could not run: the session list did not load'
+    note.textContent = t('nav.searchFailed')
     more.hidden = true
     more.textContent = ''
     return
@@ -17753,7 +17873,7 @@ async function applySearch() {
   note.hidden = items.length > 0 || pending
   note.textContent = note.hidden ? '' : 'No matching sessions'
   more.hidden = !hasMore
-  more.textContent = hasMore ? `Showing the first ${WorkspaceTree.SEARCH_LIMIT} results. Narrow your search.` : ''
+  more.textContent = hasMore ? t('nav.searchHasMore', { n: WorkspaceTree.SEARCH_LIMIT }) : ''
 }
 
 /**

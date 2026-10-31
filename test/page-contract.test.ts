@@ -613,7 +613,8 @@ test('the pin marker is named "Pinned", as DSH names its PinnedIndicator (#109)'
    * the tree item's accessible name is its content, and this word is part of it.
    */
   const row = pageFunction('function nodeRow(node, depth = 0) {')
-  assert.match(row, /pinSlot\.setAttribute\('aria-label', 'Pinned'\)/, 'the marker\'s accessible name')
-  assert.match(row, /pinSlot\.title = 'Pinned'/, 'and its tooltip')
+  assert.match(row, /pinSlot\.setAttribute\('aria-label', (?:'Pinned'|t\('tree\.pinned'\))\)/, 'the marker\'s accessible name')
+  assert.match(row, /pinSlot\.title = (?:'Pinned'|t\('tree\.pinned'\))/, 'and its tooltip')
+  assert.match(page, /'tree\.pinned': 'Pinned',/, 'whose English is DSH\'s row.pinned, word for word (#80)')
   assert.doesNotMatch(row, /'pinned'\)|= 'pinned'/, 'no lower-case name is left')
 })
