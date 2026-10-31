@@ -125,6 +125,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     {
         harness.team = Some(Arc::new(Team { service }));
     }
+    // The live-turn registry: a Stop also reaches the turns the rows start themselves (#93).
+    if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
+        harness.interrupter = Some(Arc::new(LiveTurns { turns }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -1060,6 +1064,17 @@ impl heddle_server::services::GoalService for Goals {
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
+}
+
+/// The agent runtime's live-turn registry as the server's interrupter: what `turns.abort` is in web.ts's stop route.
+struct LiveTurns {
+    turns: heddle_agent::TurnRegistry,
+}
+
+impl heddle_server::services::TurnInterrupter for LiveTurns {
+    fn interrupt(&self, session: &str) -> bool {
+        self.turns.abort(session, Some("stopped by the user"))
+    }
 }
 
 impl heddle_server::services::TodoService for Todos {
