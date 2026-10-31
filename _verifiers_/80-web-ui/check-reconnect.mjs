@@ -106,8 +106,9 @@ async function supportsWeb() {
  * Hold the answer of the page's next write whose URL contains `window.__holdFor`, after its body has arrived: the server
  * has applied it, and the page has not been told. `window.__landed` counts the held answers, `window.__release()` hands
  * them over. From the moment that answer arrives until it is released, the tree's own reads wait too and are sent only
- * on the release (see the header: the server's push of the change must not be read before the cut). And record every
- * unhandled rejection, which is what #91's console showed.
+ * on the release (see the header: the server's push of the change must not be read before the cut). `window.__treeReads`
+ * counts the tree's reads in flight and `window.__treeReadAt` is when one last started or ended, so `settled` can wait
+ * for the tree to stop redrawing. And record every unhandled rejection, which is what #91's console showed.
  */
 const INSTRUMENT = `(() => {
   window.__unhandled = []
@@ -118,6 +119,8 @@ const INSTRUMENT = `(() => {
   window.__readGate = null
   window.__openReads = null
   window.__gatedReads = 0
+  window.__treeReads = 0
+  window.__treeReadAt = performance.now()
   window.__release = () => {
     const open = window.__openReads
     window.__readGate = null
@@ -131,9 +134,19 @@ const INSTRUMENT = `(() => {
   window.fetch = async (input, init) => {
     const method = String(init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
     const url = String(input instanceof Request ? input.url : input)
-    if (method === 'GET' && window.__readGate !== null && treeReads.has(new URL(url, location.href).pathname)) {
-      window.__gatedReads += 1
-      await window.__readGate
+    if (method === 'GET' && treeReads.has(new URL(url, location.href).pathname)) {
+      window.__treeReads += 1
+      window.__treeReadAt = performance.now()
+      try {
+        if (window.__readGate !== null) {
+          window.__gatedReads += 1
+          await window.__readGate
+        }
+        return await original(input, init)
+      } finally {
+        window.__treeReads -= 1
+        window.__treeReadAt = performance.now()
+      }
     }
     const response = await original(input, init)
     if (method !== 'GET' && window.__holdFor !== null && url.includes(window.__holdFor)) {
@@ -155,19 +168,45 @@ const sessionRow = (id) => `document.querySelector('#tree li[data-kind="session"
 const sessionLabel = (id) => `(${sessionRow(id)}?.querySelector(':scope > .row .label')?.textContent ?? null)`
 const workspaceRow = (path) => `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(path)})`
 
-/** Open a row's `…` menu and choose one item. */
+/**
+ * Wait until the page's stream is connected and its tree has stopped reading: no tree read in flight and none started or
+ * ended for 800 ms, twice the page's 400 ms redraw debounce. A reconnect after a cut brings the page's own baseline
+ * read, and on its replay the frames' debounced redraws; a row menu opened while one of them redraws the tree is
+ * replaced with its row before an item can be chosen. Needs `INSTRUMENT`.
+ */
+async function settled(browser, what, seen) {
+  const quiet = `document.body.dataset.connection === 'open' && window.__treeReads === 0 && performance.now() - window.__treeReadAt > 800`
+  try {
+    await browser.waitFor(quiet, 20_000)
+  } catch (error) {
+    assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await seen()}`)
+  }
+}
+
+/**
+ * Open a row's `…` menu and choose one item. A redraw that replaces the row while its menu is open takes the menu with
+ * it, so a menu that is gone 200 ms after its trigger was pressed is dismissed and opened again on the row as it is
+ * drawn now, up to five times.
+ */
 async function choose(browser, rowExpression, item) {
-  const chosen = await browser.evaluate(`(async () => {
-    const wait = (ms) => new Promise((done) => setTimeout(done, ms))
-    const row = ${rowExpression}
-    const trigger = row?.querySelector('[aria-haspopup]')
-    if (trigger === undefined || trigger === null) return 'the row carries no menu'
-    trigger.click(); await wait(200)
-    const entry = [...document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')].find((node) => node.textContent.trim() === ${JSON.stringify(item)})
-    if (entry === undefined) return 'the menu carries no ${item}'
-    entry.click()
-    return 'chosen'
-  })()`)
+  let chosen = null
+  for (let attempt = 0; attempt < 5 && chosen !== 'chosen'; attempt += 1) {
+    if (attempt > 0) {
+      await browser.evaluate(`(document.dispatchEvent(new MouseEvent('click', { bubbles: true })), true)`)
+      await new Promise((done) => setTimeout(done, 300))
+    }
+    chosen = await browser.evaluate(`(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const row = ${rowExpression}
+      const trigger = row?.querySelector('[aria-haspopup]')
+      if (trigger === undefined || trigger === null) return 'the row carries no menu'
+      trigger.click(); await wait(200)
+      const entry = [...document.querySelectorAll('#tree .menu:not([hidden]) [role=menuitem]')].find((node) => node.isConnected && node.textContent.trim() === ${JSON.stringify(item)})
+      if (entry === undefined) return 'the menu carries no ${item}'
+      entry.click()
+      return 'chosen'
+    })()`)
+  }
   assert.equal(chosen, 'chosen', `${item} is chosen from the row's menu`)
 }
 
@@ -243,6 +282,8 @@ test('a rename and a workspace delete the server applied as the browser went off
         deleteStatus: document.getElementById('workspace-delete-status').hidden ? null : document.getElementById('workspace-delete-status').textContent,
         landed: window.__landed ?? null,
         gated: window.__gatedReads ?? null,
+        treeReads: window.__treeReads ?? null,
+        connection: document.body.dataset.connection ?? null,
         unhandled: window.__unhandled ?? null,
       })`)
     const until = async (expression, what, timeoutMs = 10_000) => {
@@ -273,6 +314,7 @@ test('a rename and a workspace delete the server applied as the browser went off
     await openWorkspace(browser, outerPath, `${sessionRow(renamed)} !== null && ${workspaceRow(innerPath)} !== undefined`)
     await until(`${sessionLabel(renamed)} === 'before the cut' && ${workspaceRow(innerPath)} !== undefined`, 'the session to rename and the nested workspace are drawn')
     await browser.evaluate(INSTRUMENT)
+    await settled(browser, 'the page has finished drawing the tree', state)
 
     /** Rename: the request lands, the browser goes offline, then the page gets the answer and tries to redraw. */
     await browser.evaluate(`window.__holdFor = '/title'; true`)
@@ -293,7 +335,12 @@ test('a rename and a workspace delete the server applied as the browser went off
     const back = JSON.parse(await state())
     assert.deepEqual(back.unhandled, [], `nothing was left to the console as an unhandled rejection\nsaw: ${JSON.stringify(back)}`)
 
-    /** Delete workspace: the same cut, for the nested workspace whose session moves to its parent. */
+    /**
+     * Delete workspace: the same cut, for the nested workspace whose session moves to its parent. First the page's stream
+     * is back too (it may reconnect seconds after the browser is online) and the reads it brings are drawn, so the row
+     * menu below is not replaced by one of their redraws while it is open.
+     */
+    await settled(browser, 'back online, the page\'s stream is connected and its tree has stopped redrawing', state)
     await browser.evaluate(`window.__holdFor = '/api/workspaces/'; true`)
     await choose(browser, workspaceRow(innerPath), 'Delete workspace')
     await until(`document.getElementById('workspace-delete').open === true`, 'the Delete workspace dialog opens')
@@ -360,6 +407,8 @@ test('a rename the server applied just before it went away shows once the page\'
         renameOpen: document.getElementById('session-rename').open,
         landed: window.__landed ?? null,
         gated: window.__gatedReads ?? null,
+        treeReads: window.__treeReads ?? null,
+        connection: document.body.dataset.connection ?? null,
         unhandled: window.__unhandled ?? null,
       })`)
     const until = async (expression, what, timeoutMs = 10_000) => {
@@ -376,6 +425,7 @@ test('a rename the server applied just before it went away shows once the page\'
     await openWorkspace(browser, workPath, `${sessionRow(renamed)} !== null`)
     await until(`${sessionLabel(renamed)} === 'before the restart'`, 'the session to rename is drawn')
     await browser.evaluate(INSTRUMENT)
+    await settled(browser, 'the page has finished drawing the tree', state)
 
     await browser.evaluate(`window.__holdFor = '/title'; true`)
     await renameThroughDialog(browser, renamed, 'after the restart')
