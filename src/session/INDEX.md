@@ -44,6 +44,12 @@ SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-genera
 [`unicode61.ts`](unicode61.ts) and its Rust twin, and the search is a scan that re-reads a log only when it changed
 (R-developer-eight-19).
 
+[`activity.ts`](activity.ts) names the **running work** a plain archive is refused for, in DSH's
+`workspace/session-activity` shape: the session's own turn, and its running subagent descendants found by
+lineage (parent plus subagent origin, any depth). The Web route's `409` carries it and the page's
+stop-and-archive dialog lists it (R-developer-eight-13). DSH's jobs have no runtime here; its reminders landed on
+main (`src/schedule/`) after this walk, and reporting them is a follow-up.
+
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
 where that happens.

@@ -152,6 +152,12 @@ pub enum ForkOutcome {
     Unavailable {
         code: String,
     },
+    /// Refused — an explicit `atSeq` names no event of the source. Answered `409` with DSH's sentence, which
+    /// cites the source's last seq (`none` for an empty log).
+    NoSuchEvent {
+        at_seq: u64,
+        last_seq: Option<u64>,
+    },
     Forked(CreatedSession),
 }
 
@@ -207,8 +213,8 @@ pub trait SessionService: Send + Sync {
         preset: Option<&str>,
     ) -> Result<CreatedSession, ServiceError>;
 
-    /// Fork a session at its last completed turn.
-    fn fork(&self, id: &str) -> ForkOutcome;
+    /// Fork a session at its last completed turn, or at `at_seq` (DSH's inclusive `atSeq`) when given.
+    fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome;
 
     /// Pin, unpin, archive or unarchive. `Ok(None)` is an unknown session; `Err` is a refusal answered
     /// `409` with its code (`archived` when the store gave none).
@@ -408,6 +414,20 @@ pub trait TurnRunner: Send + Sync {
         &self,
         request: TurnRequest,
     ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>>;
+
+    /// Whether the agent runtime has a turn in flight for `session` that this server did not start — a
+    /// subagent's, a teammate's, a settlement notice's (the TypeScript build's `ctx.get('turns').isRunning`).
+    /// The archive route asks it so a session doing work the page never started is still refused. A runner
+    /// without a live-turn registry knows of none.
+    fn is_live(&self, _session: &str) -> bool {
+        false
+    }
+
+    /// Stop every such turn of `session`; whether there was one (`turns.abort`). The stop-and-archive path
+    /// calls it for the session and each running subagent descendant.
+    fn interrupt(&self, _session: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -765,7 +785,7 @@ impl SessionService for UnavailableSessions {
     ) -> Result<CreatedSession, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
-    fn fork(&self, _id: &str) -> ForkOutcome {
+    fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
         ForkOutcome::NotFound
     }
     fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {

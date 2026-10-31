@@ -524,6 +524,7 @@ async function runWeb(args: Args): Promise<void> {
        * entry with its newly composed config (committing a volatile value in place, remounting otherwise).
        */
       settings: settingsServiceFor(bootOptions(args), process.env, (ns, config) => app.ctx.loader.update(ns, { config: config as never })),
+      browser: process.env['HEDDLE_WEB_BROWSER'] === '1',
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),

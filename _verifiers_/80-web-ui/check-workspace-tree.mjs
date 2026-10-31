@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdirSync, realpathSync, renameSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The left column is a **workspace tree** after DSH's workspace browser (owner goal G2, 2026-10-28).
@@ -14,8 +14,14 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  * inside another nests under it (`Workspace Tree`) with its row **before** the parent's own sessions; a session no
  * registered workspace owns trails under **Ungrouped**; an open workspace shows five sessions and a `Show {n} more
  * sessions` control (the open New session on top of the five, not in one of their places); the
- * selected session's workspace tints its folder; a workspace's `+` starts a session there; and the `Workspace` grouping
- * draws every workspace as a sibling section.
+ * selected session's workspace tints its folder; a workspace's `+` starts a session there; the `Workspace` grouping
+ * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
+ * child; a first visit opens a fresh New session, never the newest session someone else is in, on a blank row that
+ * offers no actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
+ * with the composer disabled, not to a blank page that takes a message (#56); first use's Default workspace stays the
+ * new conversation's place across a reload, named so by the hero and the note, and a message with no workspace to go
+ * to is refused rather than run in the server's start folder (#134); and Archived only with nothing archived
+ * says DSH's "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -211,10 +217,16 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     /** The nested workspace opens to its own session; its + starts another one there, selected. */
     await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > ul > li[data-kind="workspace"] > .row').click()`)
     await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]')].some((li) => li.textContent.includes('app session'))`, 10_000)
-    const before = await browser.evaluate(`document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]').length`)
+    /**
+     * Judged by a row that was not drawn before, not by a count: the first visit started its fresh New session in this
+     * workspace, the most recently active one (#17), and that blank stops being a row once another session is open
+     * (DSH's sessionVisible), which the page's next redraw may do while the + is being pressed.
+     */
+    const nestedRows = `[...document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]')]`
+    const before = JSON.parse(await browser.evaluate(`JSON.stringify(${nestedRows}.map((li) => li.dataset.sessionId))`))
     await browser.evaluate(`document.querySelector('#tree li[data-kind="workspace"] li[data-kind="workspace"] > .row button[aria-label="New session in ${appLabel}"]').click()`)
     assert.ok(
-      await browser.waitFor(`document.querySelectorAll('#tree li[data-kind="workspace"] li[data-kind="workspace"] li[data-kind="session"]').length > ${before}`, 15_000),
+      await browser.waitFor(`${nestedRows}.some((li) => !${JSON.stringify(before)}.includes(li.dataset.sessionId))`, 15_000),
       'the + starts a session in that workspace, drawn under it',
     )
     assert.ok(
@@ -446,7 +458,8 @@ test('the Session Intent hero picks the workspace for a blank session, by keyboa
     const alphaBlank = made.body.session
 
     browser = await openBrowser()
-    await browser.goto(server.url)
+    /** The page opens no session on its own (#17), so the blank it is about is named. */
+    await browser.gotoSession(server.url, alphaBlank)
     await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
     await browser.waitFor(`document.getElementById('session-branch').textContent === ${JSON.stringify(alpha.path)}`, 15_000)
     const appeared = await browser.waitFor(`document.getElementById('hero-workspace')?.hidden === false`, 10_000).catch(() => false)
@@ -529,6 +542,785 @@ test('the Session Intent hero picks the workspace for a blank session, by keyboa
   }
 })
 
+test('a new session reads New Session in the tree, shows no id in the header, and both follow its title once it has one (#24)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH: the open blank row reads `New Session` and a row without a stored title `Untitled`, "rather than a directory name"
+   * (dsh-client-ui-workspace lib/client.js:1801-1804, :4876-4877, README.md:32); the conversation header shows no title
+   * while the session is blank and then the session's title, read from the live list (dsh-client-ui-conversation
+   * lib/client.js:17897-17908, :17990-17994); the window title is `<title> — <product>`, else the product
+   * (dsh-client-ui-layout lib/client.js:57-68). Before the fix a New session row read its definition folder's
+   * `session-<yyyymmdd>-<hhmm>`, the header the raw `session-<uuid>`, and the header kept the id after the first prompt
+   * had titled the session, until a reload (#24).
+   */
+  const home = isolatedHome('tree-label')
+  const folder = fixtureDir('tree-label-work')
+  mkdirSync(folder, { recursive: true })
+  const { config } = scriptedConfig({ home, steps: [{ purpose: 'session-title', text: 'Why Rivers Meander' }, { text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: folder }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const workspace = added.body.record
+    const openId = `document.querySelector('#tree li[data-kind="session"][aria-selected="true"]')?.dataset.sessionId ?? null`
+    const reading = `JSON.stringify({
+      id: ${openId},
+      row: document.querySelector('#tree li[data-kind="session"][aria-selected="true"] > .row > .label')?.textContent ?? null,
+      header: document.getElementById('session-title').textContent,
+      headerShown: !document.getElementById('session-title').hidden,
+      window: document.title,
+    })`
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`document.querySelector('#tree > li[data-kind="workspace"] > .row button[aria-label="New session in ${workspace.title}"]') !== null`, 15_000)
+    await browser.evaluate(`document.querySelector('#tree > li[data-kind="workspace"] > .row button[aria-label="New session in ${workspace.title}"]').click()`)
+    assert.ok(await browser.waitFor(`${openId} !== null`, 15_000), 'the workspace\'s + opens a New session, selected')
+    /** The header is painted once the session's own answer is back; give it that moment before reading. */
+    await new Promise((done) => setTimeout(done, 1_000))
+    const blank = JSON.parse(await browser.evaluate(reading))
+    assert.equal(blank.row, 'New Session', `the blank row reads New Session, not its folder's name\nsaw: ${JSON.stringify(blank)}`)
+    assert.ok(!blank.header.includes(blank.id) && !/session-/.test(blank.header), `the header shows no session id\nsaw: ${JSON.stringify(blank)}`)
+    assert.equal(blank.headerShown, false, `and, as DSH's, no title at all while the session is blank\nsaw: ${JSON.stringify(blank)}`)
+    assert.equal(blank.window, 'Heddle', 'the window title is the product while the session has no title')
+
+    /**
+     * The first prompt, sent as another client would send it: the page hears of it only through its event stream and its
+     * own refresh, which is the path the header has to follow (the issue's header stayed on the id for 24 s and more).
+     */
+    await browser.evaluate(`(() => { window.__turn = fetch('/api/turn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: 'why do rivers meander?', session: ${JSON.stringify(blank.id)} }) }); return true })()`)
+    const titled = `(() => { const r = JSON.parse(${reading}); return r.row !== null && r.row !== 'New Session' && r.headerShown && r.header === r.row })()`
+    const followed = await browser.waitFor(titled, 20_000).catch(() => false)
+    const after = JSON.parse(await browser.evaluate(reading))
+    assert.ok(followed, `once titled, the header shows the title the row shows\nsaw: ${JSON.stringify(after)}`)
+    assert.equal(after.id, blank.id, 'in the same session')
+    assert.ok(!after.header.includes(after.id), 'and never the id')
+    assert.equal(after.window, `${after.row} — Heddle`, 'and the window title is the title, then the product')
+
+    /** A title written later — here by the row's own Rename — is followed too, without a reload. */
+    const renamedTo = 'Rivers, renamed'
+    const opened = await browser.evaluate(`(async () => {
+      const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+      const row = document.querySelector('#tree li[data-kind="session"][aria-selected="true"] > .row')
+      const menu = row === null ? undefined : [...row.querySelectorAll('button')].find((button) => button.textContent === '…')
+      if (menu === undefined) return 'the open row carries no menu'
+      menu.click(); await wait(250)
+      const item = [...document.querySelectorAll('#tree .menu:not([hidden]) button')].find((button) => button.textContent === 'Rename')
+      if (item === undefined) return 'the menu carries no Rename'
+      item.click(); await wait(250)
+      const input = document.getElementById('session-rename-input')
+      input.value = ${JSON.stringify(renamedTo)}
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      document.getElementById('session-rename-confirm').click()
+      return 'renamed'
+    })()`)
+    assert.equal(opened, 'renamed', 'the open row is renamed from its menu')
+    const follows = `(() => { const r = JSON.parse(${reading}); return r.row === ${JSON.stringify(renamedTo)} && r.header === ${JSON.stringify(renamedTo)} && r.window === ${JSON.stringify(`${renamedTo} — Heddle`)} })()`
+    assert.ok(
+      await browser.waitFor(follows, 10_000).catch(() => false),
+      `the row, the header and the window title all follow the new title\nsaw: ${await browser.evaluate(reading)}`,
+    )
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(folder)
+  }
+})
+
+test('a reload reopens the session that was open, never a hidden subagent child, and a saved one that is gone starts fresh (C28, C33)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH keeps the open session in localStorage (`dsh.sessions.current`, dsh-client-ui-workspace lib/client.js:1369,
+   * :1662-1665) and its restoreSelection reopens it on load (:1605-1616); a saved blank is reopened by its own id
+   * (:1451-1458, :1619); a saved session that is gone starts a fresh one in the most recently active workspace (:1620,
+   * :1626, :1694-1710). Phase A (C28, C33) measured both builds opening `/api/sessions`[0] on every load, there a
+   * subagent's child the tree hides: the session a person had open was gone after a reload, and a folded workspace no
+   * longer tinted its folder.
+   *
+   * The store is written before the server starts, by the TypeScript store (the log format's implementation, as the
+   * team-view check does), so the child is the newest session in both builds.
+   */
+  const home = isolatedHome('tree-restore')
+  const work = fixtureDir('tree-restore-work')
+  const root = join(home, 'sessions')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const { SessionStore } = await import('../../src/session/store.ts')
+  const store = new SessionStore(root)
+  const pause = () => new Promise((done) => setTimeout(done, 40))
+  const alpha = store.create({ cwd: work, title: 'alpha notes' })
+  await pause()
+  store.create({ cwd: work, title: 'beta notes' })
+  await pause()
+  const child = store.create({ cwd: work, title: 'child task', parentSession: alpha.id, origin: 'subagent', delegationDepth: 1 })
+  store.message(child, { role: 'user', content: [{ type: 'text', text: 'the delegated task' }] })
+  store.append(child, { type: 'assistant/completed', text: 'child done' })
+
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', root], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const record = added.body.record
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+    const first = await listed()
+    assert.equal(first[0]?.id, child.id, `the newest session is the subagent's child, the one a load used to open\nsaw: ${JSON.stringify(first.map((meta) => [meta.title, meta.origin ?? null]))}`)
+
+    const title = `(document.getElementById('session-title')?.textContent ?? null)`
+    /**
+     * A New session shows no title in the header, as DSH's does while a session is blank (#24, page-polish): that, with
+     * the saved id, is how a load is seen to have opened the fresh session rather than nothing ("No session").
+     */
+    const blankOpen = `(document.getElementById('session-title')?.hidden === true)`
+    const workspaceRow = `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(record.path)})`
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        title: ${title},
+        titleHidden: document.getElementById('session-title')?.hidden ?? null,
+        saved: localStorage.getItem('heddle.sessions.current'),
+        selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
+        workspace: (() => { const li = ${workspaceRow}?.closest('li'); return li === undefined || li === null ? null : { open: li.dataset.open ?? null, tinted: li.dataset.containsCurrent ?? null } })(),
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    const load = async () => {
+      await browser.goto(server.url)
+      await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    }
+
+    /**
+     * A first visit has nothing saved: a fresh New session opens, as DSH's does (#17), never the newest conversation nor the
+     * hidden child that is newer still.
+     */
+    const seeded = JSON.stringify(first.map((meta) => meta.id))
+    await load()
+    await until(
+      `(() => { const id = ${saved}; return typeof id === 'string' && !${seeded}.includes(id) && ${blankOpen} })()`,
+      'a first visit opens a fresh New session, not the newest conversation and not the hidden subagent child',
+    )
+
+    /** Open alpha from its row, reload: alpha is open again and its row is the selected one. */
+    await until(`document.querySelector('#tree li[data-session-id="${alpha.id}"] > .row') !== null`, 'alpha\'s row is drawn')
+    await browser.evaluate(`document.querySelector('#tree li[data-session-id="${alpha.id}"] > .row').click()`)
+    await until(`${title} === 'alpha notes'`, 'alpha opens from its row')
+    await load()
+    await until(`${title} === 'alpha notes'`, 'a reload reopens the session that was open, not the newest one')
+    await until(`document.querySelector('#tree li[data-session-id="${alpha.id}"][aria-selected="true"]') !== null`, 'and its row is the selected one')
+
+    /** C33: fold the workspace and reload: alpha is still open, the fold is remembered, and the folder is tinted. */
+    await browser.evaluate(`(() => { const row = ${workspaceRow}; if (row.closest('li').dataset.open === 'true') row.click() })()`)
+    await until(`${workspaceRow}.closest('li').dataset.open !== 'true'`, 'the workspace folds')
+    await load()
+    await until(`${title} === 'alpha notes'`, 'with its workspace folded, a reload still reopens the session that was open')
+    await until(
+      `(() => { const li = ${workspaceRow}?.closest('li'); return li !== undefined && li !== null && li.dataset.open !== 'true' && li.dataset.containsCurrent === 'true' })()`,
+      'the folded workspace stays folded and tints its folder as the one holding the open session',
+    )
+
+    /** A saved session that is gone: a fresh session starts in the most recently active workspace, and the fold stays. */
+    await browser.evaluate(`localStorage.setItem('heddle.sessions.current', JSON.stringify({ sessionId: 'session-00000000-0000-4000-8000-000000000000' }))`)
+    const before = (await listed()).map((meta) => meta.id)
+    await load()
+    await until(
+      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify(before)}.includes(id) && ${blankOpen} })()`,
+      'a saved session that is gone starts a fresh one, which is open and kept',
+    )
+    const fresh = await browser.evaluate(saved)
+    const after = await listed()
+    assert.equal(after.length, before.length + 1, 'exactly one session started')
+    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === record.id)
+    assert.ok(owner?.sessionIds?.includes(fresh), `in the most recently active workspace\nsaw: ${JSON.stringify(owner)}`)
+    assert.notEqual(await browser.evaluate(`${workspaceRow}.closest('li').dataset.open ?? null`), 'true', 'and the workspace the person folded stays folded')
+
+    /** That New session is saved like any other: the next reload reopens it rather than starting another. */
+    await load()
+    await until(`${saved} === ${JSON.stringify(fresh)} && ${blankOpen}`, 'a reload reopens the saved New session')
+    assert.equal((await listed()).length, after.length, 'and starts no other session')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('a first visit opens a fresh New session, never the newest session someone else is in, and the blank row offers no actions (#17, #79)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's restoreSelection with nothing saved starts a fresh Session in the most recently active workspace
+   * (dsh-client-ui-workspace lib/client.js:1611-1613, :1620, :1626 -> connectBlank :1406, recentWorkspace :1694-1710); it
+   * never opens an existing session on its own. #17: on a shared server this page opened the newest session in the store,
+   * another person's, showed their transcript, and a message typed without looking went into their conversation. A fresh
+   * browser profile is that first visit: nothing is saved. The open blank's row draws no row actions (SessionNodeItem,
+   * `!row.blank &&`, :2317-2323) and no double-click rename (:2311), and its fork chord is blocked with
+   * `shortcut.noCompletedTurn` (:161-164, :4881). #79: the row offered the full menu and the hover buttons, and Fork came
+   * back as the server's refusal with the raw session id in it.
+   */
+  const home = isolatedHome('tree-first-visit')
+  const mine = fixtureDir('tree-first-visit-mine')
+  const theirs = fixtureDir('tree-first-visit-theirs')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const records = []
+    for (const path of [mine, theirs]) {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      records.push(added.body.record)
+    }
+    const theirsRecord = records[1]
+    const mineMade = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: mine, title: 'my notes' }) })
+    assert.equal(mineMade.status, 200, `my own session (${JSON.stringify(mineMade.body)})`)
+    /** Another person's session, in their workspace, with a finished turn: the newest session on the server. */
+    const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'their own work', folder: theirs, new: true }) })
+    assert.equal(turn.status, 200, `their turn ran (${turn.status})`)
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+    const before = await listed()
+    const other = before[0]
+    assert.ok(
+      other !== undefined && other.id !== mineMade.body.session && (other.turns ?? 0) > 0,
+      `the newest session is the other person's, with a turn\nsaw: ${JSON.stringify(before.map((meta) => [meta.id, meta.title ?? null, meta.turns ?? 0]))}`,
+    )
+
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        saved: ${saved},
+        titleHidden: document.getElementById('session-title')?.hidden ?? null,
+        title: document.getElementById('session-title')?.textContent ?? null,
+        turns: document.querySelectorAll('#log .turn').length,
+        selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
+      })`)
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    const known = JSON.stringify(before.map((meta) => meta.id))
+    const opened = await browser
+      .waitFor(`(() => { const id = ${saved}; return typeof id === 'string' && !${known}.includes(id) && document.getElementById('session-title')?.hidden === true })()`, 15_000)
+      .catch(() => false)
+    const first = JSON.parse(await state())
+    assert.ok(opened, `a first visit opens a fresh New session, not the newest session on the server\nsaw: ${JSON.stringify(first)}\nnewest: ${other.id}`)
+    assert.notEqual(first.saved, other.id, "never the other person's session")
+    assert.equal(first.turns, 0, 'and none of their conversation is on screen')
+    const after = await listed()
+    assert.equal(after.length, before.length + 1, 'exactly one session started')
+    assert.equal(after.find((meta) => meta.id === first.saved)?.turns ?? 0, 0, 'and it is blank')
+    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === theirsRecord.id)
+    assert.ok(owner?.sessionIds?.includes(first.saved), `in the most recently active workspace, DSH's recentWorkspace\nsaw: ${JSON.stringify(owner)}`)
+
+    /** The blank's row, beside the other session's, in the workspace that holds both (opened only if it is folded). */
+    const rowOf = (id) => `document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]')`
+    await browser.evaluate(
+      `(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        for (let attempt = 0; attempt < 40 && (${rowOf(first.saved)} === null || ${rowOf(other.id)} === null); attempt += 1) {
+          const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(theirsRecord.path)})
+          if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+          await wait(250)
+        }
+        return true
+      })()`,
+      15_000,
+    )
+    assert.ok(await browser.waitFor(`${rowOf(first.saved)} !== null && ${rowOf(other.id)} !== null`, 10_000).catch(() => false), `both rows are drawn\nsaw: ${await state()}`)
+    const actions = (id) => `(() => {
+      const li = ${rowOf(id)}
+      li.querySelector(':scope > .row').focus()
+      const read = JSON.stringify({
+        label: li.querySelector(':scope > .row > .label')?.textContent ?? null,
+        selected: li.getAttribute('aria-selected'),
+        menu: li.querySelector(':scope > .row .menu-wrap') !== null,
+        quick: [...li.querySelectorAll(':scope > .row .session-actions button')].map((button) => button.getAttribute('aria-label')),
+        buttons: [...li.querySelectorAll(':scope > .row button')].map((button) => button.getAttribute('aria-label') ?? button.textContent),
+      })
+      li.querySelector(':scope > .row').blur()
+      return read
+    })()`
+    const blank = JSON.parse(await browser.evaluate(actions(first.saved)))
+    assert.deepEqual(
+      blank,
+      { label: 'New Session', selected: 'true', menu: false, quick: [], buttons: [] },
+      `the open blank's row offers no menu, no Archive and no Pin, as DSH's blank row (#79)\nsaw: ${JSON.stringify(blank)}`,
+    )
+    const theirsRow = JSON.parse(await browser.evaluate(actions(other.id)))
+    assert.equal(theirsRow.selected, 'false', `the other person's row is not the open one\nsaw: ${JSON.stringify(theirsRow)}`)
+    assert.equal(theirsRow.menu, true, 'while a session that ran a turn keeps its menu')
+    assert.deepEqual(theirsRow.quick, ['Archive session', 'Pin session'], 'and its Archive and Pin')
+
+    /** No rename by double-click on the blank's title. */
+    await browser.evaluate(`${rowOf(first.saved)}.querySelector(':scope > .row > .label').dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))`)
+    await new Promise((done) => setTimeout(done, 300))
+    assert.equal(await browser.evaluate(`document.getElementById('session-rename')?.open === true`), false, 'a double-click on its title opens no Rename')
+
+    /** The fork chord on the open blank is refused in DSH's words, with no session id, and forks nothing. */
+    await browser.evaluate(`(() => { const note = document.getElementById('tree-note'); note.textContent = ''; note.hidden = true; return true })()`)
+    await browser.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'F', code: 'KeyF', shiftKey: true, metaKey: true, bubbles: true, cancelable: true }))`)
+    const said = await browser.waitFor(`document.getElementById('tree-note').textContent === 'This session has no completed turn'`, 5_000).catch(() => false)
+    const note = await browser.evaluate(`document.getElementById('tree-note').textContent`)
+    assert.ok(said, `the fork chord on a blank says DSH's shortcut.noCompletedTurn\nsaw: ${JSON.stringify(note)}`)
+    assert.doesNotMatch(String(note), /session-/, 'and never shows a session id')
+    await new Promise((done) => setTimeout(done, 500))
+    assert.equal((await listed()).length, after.length, 'and nothing was forked')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, mine, theirs]) removeDir(dir)
+  }
+})
+
+test('after first use, a reload still aims the new conversation at Default workspace: the hero and the note name it, and the first message runs there and is in the tree (#134)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH: an empty install opens on its Default workspace with the composer aimed at it (`workspaces.initializeDefault`,
+   * dsh-client-ui-workspace README.md:80, lib/client.js:1620-1627), and the Session Intent hero's chip names the workspace
+   * the new session uses, by its display title (dsh-client-ui-conversation lib/client.js:17783-17784; the first-use title
+   * reads Default workspace in "the hero picker menu", dsh-client-ui-workspace README.md:82). #134 (developer-six, main
+   * 7bc2a4ab, both builds): after first use, a reload before the first message left the note empty and the chip reading
+   * "Choose workspace", and the message went out with no folder, so the server ran it in its own start folder — outside
+   * every workspace, missing from the tree, the header still "No session". The note also said "default-workspace" where
+   * the tree said "Default workspace" (P3).
+   *
+   * An empty home, a fresh browser profile: first load, then a reload before anything is sent, then one message.
+   */
+  const home = isolatedHome('tree-default-reload')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const chip = `(document.querySelector('#hero-workspace-chip .label')?.textContent ?? null)`
+    const note = `(document.getElementById('tree-note')?.hidden === false ? document.getElementById('tree-note').textContent : '')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        chip: ${chip},
+        heroShown: document.getElementById('hero-workspace')?.hidden === false,
+        note: ${note},
+        header: document.getElementById('session-title')?.hidden === false ? document.getElementById('session-title').textContent : null,
+        placeholder: document.querySelector('#prompt textarea')?.placeholder ?? null,
+        workspaces: [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].map((row) => [row.dataset.path, row.querySelector('.label')?.textContent ?? null]),
+        sessions: [...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId),
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    const load = async () => {
+      await browser.goto(server.url)
+      await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    }
+    const named = `${chip} === 'Default workspace' && ${note} === 'a new conversation in Default workspace'`
+
+    /** First load: first use registers <home>/default-workspace and aims the new conversation at it. */
+    await load()
+    let record = null
+    for (let attempt = 0; attempt < 60 && record === null; attempt += 1) {
+      record = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? [])[0] ?? null
+      if (record === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(record !== null, 'first use registered a workspace')
+    assert.equal(record.path, realpathSync(join(home, 'default-workspace')), 'the Default workspace, <home>/default-workspace')
+    await until(named, 'on the first load the hero chip and the note name Default workspace, as the tree does')
+
+    /** A reload before anything was sent: the page still knows where the new conversation goes. */
+    await load()
+    await until(
+      `${chip} === 'Default workspace'`,
+      'after a reload the hero chip still names Default workspace (it read "Choose workspace", #134)',
+    )
+    await until(`${note} === 'a new conversation in Default workspace'`, 'and so does the note (it was empty, #134)')
+
+    /** One message, sent the way a person sends it. */
+    await browser.evaluate(`(() => { const field = document.querySelector('#prompt textarea'); field.value = 'where does this run'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await until(`document.getElementById('send').disabled === false`, 'Send is offered for the draft')
+    await browser.evaluate(`document.getElementById('send').click()`)
+    let ran = null
+    for (let attempt = 0; attempt < 60 && ran === null; attempt += 1) {
+      const listed = await api(server.url, cookie, '/api/sessions')
+      ran = (Array.isArray(listed.body) ? listed.body : []).find((meta) => (meta.turns ?? 0) > 0) ?? null
+      if (ran === null) await new Promise((done) => setTimeout(done, 250))
+    }
+    assert.ok(ran !== null, `the message ran\nsaw: ${await state()}`)
+    assert.equal(ran.cwd, record.path, `in <home>/default-workspace, not in the server's start folder (${repoRoot})`)
+    const ranTurns = ((await api(server.url, cookie, '/api/sessions')).body ?? []).filter((meta) => (meta.turns ?? 0) > 0)
+    assert.equal(ranTurns.length, 1, 'one conversation ran')
+    const owner = ((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? []).find((entry) => entry.id === record.id)
+    assert.ok(owner?.sessionIds?.includes(ran.id), `the session is the Default workspace's\nsaw: ${JSON.stringify(owner)}`)
+
+    /** In the tree, under Default workspace (opened if it was folded), and the header names it. */
+    const rowOf = `document.querySelector('#tree li[data-kind="session"][data-session-id="${ran.id}"]')`
+    await browser.evaluate(
+      `(async () => {
+        const wait = (ms) => new Promise((done) => setTimeout(done, ms))
+        for (let attempt = 0; attempt < 40 && ${rowOf} === null; attempt += 1) {
+          const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(record.path)})
+          if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+          await wait(250)
+        }
+        return true
+      })()`,
+      15_000,
+    )
+    await until(
+      `(() => {
+        const li = ${rowOf}
+        const group = li?.parentElement?.closest('li[data-kind="workspace"]')?.querySelector(':scope > .row')
+        return group !== null && group !== undefined && group.dataset.path === ${JSON.stringify(record.path)} && group.querySelector('.label')?.textContent === 'Default workspace'
+      })()`,
+      'the conversation has a row under Default workspace in the tree (it had none, #134)',
+    )
+    await until(
+      `document.getElementById('session-title')?.hidden === false && document.getElementById('session-title').textContent.trim() !== '' && document.getElementById('session-title').textContent !== 'No session'`,
+      'and the header names the conversation, not "No session"',
+    )
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+  }
+})
+
+test('with no workspace to start in, the composer says Choose a workspace to start and a message is refused, never run in the server\'s start folder (#134)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's composer is inert with no Session and no workspace for one (`inert = sessionId === undefined || hero && chipTitle
+   * === undefined`, dsh-client-ui-conversation lib/client.js:17819): Send disabled, the placeholder "Choose a workspace to
+   * start" (placeholder.workspace, :16409), and Enter opens the workspace picker (onRequestWorkspace, :18941-18947); its
+   * notice for a draft with no workspace is "Choose a workspace first." (draft.workspaceRequired, dsh-client-ui-workspace
+   * lib/client.js:4873, :1509-1515). #134: a message with nowhere named went out with no folder and ran in the server's
+   * start folder. The Default workspace is made and deleted first, so first use never gives it back (DSH's rule, 70's
+   * first-use check) and the page has no workspace at all. `HOME` is the fixture's own, because the picker opens there.
+   */
+  const home = isolatedHome('tree-no-workspace')
+  const account = fixtureDir('tree-no-workspace-account')
+  mkdirSync(account, { recursive: true })
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config, HOME: account },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const made = await api(server.url, cookie, '/api/workspaces/default', { method: 'POST' })
+    assert.equal(made.status, 200, `first use made the Default workspace (${JSON.stringify(made.body)})`)
+    const deleted = await api(server.url, cookie, `/api/workspaces/${encodeURIComponent(made.body.workspace.id)}`, { method: 'DELETE' })
+    assert.equal(deleted.status, 200, 'and it was deleted')
+    assert.deepEqual((await api(server.url, cookie, '/api/workspaces')).body.workspaces ?? [], [], 'no workspace is left')
+
+    const field = `document.querySelector('#prompt textarea')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        placeholder: ${field}?.placeholder ?? null,
+        send: document.getElementById('send')?.disabled ?? null,
+        chip: document.querySelector('#hero-workspace-chip .label')?.textContent ?? null,
+        note: document.getElementById('tree-note')?.textContent ?? null,
+        draft: ${field}?.value ?? null,
+        picker: document.getElementById('workspace-picker')?.open ?? null,
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`${field}.placeholder === 'Choose a workspace to start'`, "the composer says DSH's placeholder.workspace")
+    assert.equal(await browser.evaluate(`document.querySelector('#hero-workspace-chip .label')?.textContent`), 'Choose workspace', 'the hero chip is the call to action')
+
+    await browser.evaluate(`(() => { const box = ${field}; box.value = 'where does this run'; box.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    assert.equal(await browser.evaluate(`document.getElementById('send').disabled`), true, `Send stays disabled with a draft\nsaw: ${await state()}`)
+    await browser.evaluate(`${field}.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`)
+    await until(`document.getElementById('tree-note').textContent === 'Choose a workspace first.'`, "Enter is refused in DSH's words")
+    await until(`document.getElementById('workspace-picker')?.open === true`, 'and opens the way to a workspace: with none to list, Add workspace')
+    assert.equal(await browser.evaluate(`${field}.value`), 'where does this run', 'the draft stays in the composer')
+    await new Promise((done) => setTimeout(done, 1_000))
+    assert.deepEqual((await api(server.url, cookie, '/api/sessions')).body, [], `nothing ran, in the server's start folder (${repoRoot}) or anywhere\nsaw: ${await state()}`)
+    await browser.evaluate(`document.getElementById('workspace-picker').close()`)
+  } finally {
+    browser.close()
+    server.kill()
+    removeDir(home)
+    removeDir(account)
+  }
+})
+
+test('a session row whose session can no longer be read opens to DSH\'s failure line, the composer disabled, and nothing is sent (#56)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's Chat shows "Failed to load history: {message} ({code})" for a session it cannot open (dsh-client-ui-chat
+   * lib/client.js:2893-2898, :5991), and its composer is disabled and reads "Session unavailable" (dsh-client-ui-conversation
+   * lib/client.js:18819-18824, :18948, :18972, :16406). #56: both builds opened such a row to "No session" and an empty
+   * conversation with the composer enabled, and a message sent from there was answered 500. Ported from developer-six's
+   * 4cd4cafb (R-developer-six-4).
+   *
+   * The page opens the kept session by name (gotoSession), so no first-visit blank is involved. The doomed session's log
+   * and metadata are then moved out of this server's store behind its back while the page still draws its row, and the row
+   * is opened. A reload afterwards is a boot restore, not an open: the saved selection was emptied, so a fresh New session
+   * starts (#17), and no failure line is shown.
+   */
+  const home = isolatedHome('tree-unavailable')
+  const work = fixtureDir('tree-unavailable-work')
+  const root = join(home, 'sessions')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', root], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const made = async (title) => {
+      const answer = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: work, title }) })
+      assert.equal(answer.status, 200, `created ${title} (${JSON.stringify(answer.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+      return answer.body.session
+    }
+    const kept = await made('kept notes')
+    const doomed = await made('doomed notes')
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+
+    const saved = `(() => { try { return JSON.parse(localStorage.getItem('heddle.sessions.current') ?? '{}').sessionId ?? null } catch { return null } })()`
+    const rowOf = (id) => `document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        title: document.getElementById('session-title')?.textContent ?? null,
+        titleHidden: document.getElementById('session-title')?.hidden ?? null,
+        lines: [...document.querySelectorAll('#log > *')].map((node) => node.textContent),
+        emptyState: (() => { const empty = document.getElementById('empty-state'); return empty !== null && !empty.hidden })(),
+        placeholder: document.querySelector('#prompt textarea')?.placeholder ?? null,
+        disabled: document.querySelector('#prompt textarea')?.disabled ?? null,
+        send: document.getElementById('send')?.disabled ?? null,
+        doomedRow: ${rowOf(doomed)} !== null,
+        selected: [...document.querySelectorAll('#tree li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.textContent.trim()),
+        saved: ${saved},
+        writes: window.__writes ?? null,
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+
+    await browser.gotoSession(server.url, kept)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`document.getElementById('session-title')?.textContent === 'kept notes'`, 'the page opens the kept session it was given by name')
+    await browser.evaluate(
+      `(async () => {
+        for (let attempt = 0; attempt < 40 && ${rowOf(doomed)} === null; attempt += 1) {
+          const row = [...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((entry) => entry.dataset.path === ${JSON.stringify(added.body.record.path)})
+          if (row !== undefined && row.closest('li').dataset.open !== 'true') row.click()
+          await new Promise((done) => setTimeout(done, 250))
+        }
+        return true
+      })()`,
+      15_000,
+    )
+    await until(`${rowOf(doomed)} !== null`, 'the doomed session\'s row is drawn')
+
+    /** The session leaves this server's store behind its back: its log and its metadata are moved away. */
+    const files = listFiles(root).filter((file) => basename(file).startsWith(doomed))
+    assert.ok(files.some((file) => file.endsWith(`${doomed}.json`)), `the store holds the doomed session's metadata\nsaw: ${JSON.stringify(files)}`)
+    const gone = join(home, 'gone')
+    mkdirSync(gone, { recursive: true })
+    for (const file of files) renameSync(join(root, file), join(gone, basename(file)))
+    assert.equal((await api(server.url, cookie, `/api/sessions/${doomed}`)).status, 404, 'the server can no longer read it')
+    const before = (await listed()).map((meta) => meta.id)
+
+    /** Every write the page makes from here on is recorded, so a send that slipped through is seen. */
+    await browser.evaluate(`(() => {
+      window.__writes = []
+      const original = window.fetch
+      window.fetch = (input, init) => {
+        const method = String(init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+        if (method !== 'GET') window.__writes.push(method + ' ' + String(input instanceof Request ? input.url : input))
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${rowOf(doomed)}.querySelector(':scope > .row').click()`)
+    const failed = await browser.waitFor(`document.getElementById('log').textContent.includes('Failed to load history')`, 15_000).catch(() => false)
+    /** The tree is read again after the line is written; give that redraw its moment before the page is read. */
+    if (failed) await browser.waitFor(`${rowOf(doomed)} === null`, 5_000).catch(() => false)
+    await new Promise((done) => setTimeout(done, 300))
+    const seen = JSON.parse(await state())
+    assert.ok(failed, `opening the row says the history could not be loaded, as DSH's Chat does\nsaw: ${JSON.stringify(seen)}`)
+    assert.deepEqual(seen.lines, [`Failed to load history: no session ${doomed} (404)`], `one line, with the server's reason and the status\nsaw: ${JSON.stringify(seen)}`)
+    assert.equal(seen.emptyState, false, 'the failure line wins over the blank start page')
+    assert.equal(seen.title, 'Session unavailable', `the header does not say "No session"\nsaw: ${JSON.stringify(seen)}`)
+    assert.equal(seen.placeholder, 'Session unavailable', `the composer reads DSH's placeholder.unavailable\nsaw: ${JSON.stringify(seen)}`)
+    assert.equal(seen.disabled, true, 'and its editor is disabled')
+    assert.equal(seen.send, true, 'and Send is disabled')
+    assert.equal(seen.doomedRow, false, `the tree is read again and the row that has no session goes\nsaw: ${JSON.stringify(seen)}`)
+    assert.deepEqual(seen.selected.filter((id) => id === doomed), [], 'and is not left selected')
+    assert.equal(seen.saved, null, 'nor kept as the session a reload reopens')
+
+    /** A send from there is impossible: a typed draft, Enter, a form submit and a click on Send reach no route. */
+    await browser.evaluate(`(() => {
+      const form = document.getElementById('prompt')
+      const field = form.querySelector('textarea')
+      field.value = 'a message into a session that is gone'
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+      field.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+      form.requestSubmit()
+      document.getElementById('send').click()
+      return true
+    })()`)
+    await new Promise((done) => setTimeout(done, 1500))
+    const tried = JSON.parse(await state())
+    assert.deepEqual(tried.writes, [], `nothing was sent\nsaw: ${JSON.stringify(tried)}`)
+    assert.equal(tried.send, true, 'Send stays disabled with a draft in the field')
+    assert.deepEqual(tried.lines, seen.lines, 'and the conversation still shows only the failure line')
+    assert.deepEqual((await listed()).map((meta) => meta.id), before, 'and no session was started or written')
+
+    /** A reload is a boot restore, not an open: nothing is saved, so a fresh New session starts and nothing says it failed. */
+    await browser.goto(server.url)
+    await until('document.body.dataset.ready === "true"', 'the page reloads')
+    await until(
+      `(() => { const id = ${saved}; return typeof id === 'string' && !${JSON.stringify([...before, doomed])}.includes(id) && document.getElementById('session-title')?.hidden === true })()`,
+      'a reload starts a fresh New session, as a first visit does',
+    )
+    const fresh = JSON.parse(await state())
+    assert.equal(fresh.lines.some((line) => line.includes('Failed to load history')), false, `no failure line on the fresh session\nsaw: ${JSON.stringify(fresh)}`)
+    assert.equal(fresh.disabled, false, 'its composer takes a message')
+    assert.notEqual(fresh.placeholder, 'Session unavailable')
+    assert.equal(fresh.doomedRow, false, 'and the gone session is not drawn')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('Archived only with nothing archived says "No archived sessions yet", and View other sessions goes back to Hide archived (#107)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's empty list (EmptySessions, dsh-client-ui-workspace lib/client.js:3005-3021, drawn at :3344 for the tree and :3384
+   * for the flat list): under Archived only it names its own emptiness, "No archived sessions yet", and adds a "View other
+   * sessions" text action (words at :4900-4901) that sets the filter back to its default (leaveArchivedOnly, :3539-3541);
+   * README.md:58 says the same. #107: with a workspace registered and nothing archived, the tree said "no workspace root yet
+   * — register one with the + above" and the flat list "no sessions to list", with no way back but View options.
+   */
+  const home = isolatedHome('tree-archived-empty')
+  const work = fixtureDir('tree-archived-empty-work')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  const browser = await openBrowser()
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: work, title: 'plain notes' }) })
+    assert.equal(made.status, 200, `created a session (${JSON.stringify(made.body)})`)
+    const session = made.body.session
+
+    const sessionRow = `document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]')`
+    const workspaceRow = `[...document.querySelectorAll('#tree li[data-kind="workspace"] > .row')].find((row) => row.dataset.path === ${JSON.stringify(added.body.record.path)})`
+    const action = `[...document.querySelectorAll('#tree button')].find((button) => button.textContent.trim() === 'View other sessions')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        tree: document.getElementById('tree').textContent.trim(),
+        note: document.getElementById('tree-note').hidden ? '' : document.getElementById('tree-note').textContent,
+        action: ${action} !== undefined,
+        workspaceRow: ${workspaceRow} !== undefined,
+        sessionRow: ${sessionRow} !== null,
+        filter: localStorage.getItem('heddle.tree.archived.v1'),
+      })`)
+    const chooseView = async (label) => {
+      await browser.evaluate(`document.querySelector('#view-options button').click()`)
+      await browser.waitFor(`[...document.querySelectorAll('#view-options [role^=menuitem]')].some((entry) => entry.textContent.trim() === ${JSON.stringify(label)})`, 5_000)
+      await browser.evaluate(`[...document.querySelectorAll('#view-options [role^=menuitem]')].find((entry) => entry.textContent.trim() === ${JSON.stringify(label)}).click()`)
+    }
+    const until = async (expression, what, timeoutMs = 10_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    const archivedEmpty = async (where) => {
+      const said = await browser.waitFor(`document.getElementById('tree').textContent.includes('No archived sessions yet')`, 10_000).catch(() => false)
+      const seen = JSON.parse(await state())
+      assert.ok(said, `${where}: Archived only with nothing archived says DSH's "No archived sessions yet"\nsaw: ${JSON.stringify(seen)}`)
+      assert.equal(seen.tree, 'No archived sessions yetView other sessions', `${where}: the list holds the placeholder and its action, and no row\nsaw: ${JSON.stringify(seen)}`)
+      assert.equal(seen.action, true, `${where}: with DSH's View other sessions action`)
+      assert.doesNotMatch(seen.note, /no workspace root yet|no sessions to list/, `${where}: not a note that sends the person to register a folder they registered`)
+      assert.equal(seen.filter, 'only')
+    }
+
+    /** The page opens the session by name, so no first-visit blank is drawn beside it. */
+    await browser.gotoSession(server.url, session)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await until(`document.getElementById('session-title')?.textContent === 'plain notes'`, 'the page opens the session it was given by name')
+    await until(`${sessionRow} !== null`, 'the session\'s row is drawn under its workspace')
+
+    /** Workspace Tree + Archived only: the placeholder, and its action goes back to Hide archived with the rows. */
+    await chooseView('Archived only')
+    await archivedEmpty('Workspace Tree')
+    await browser.evaluate(`${action}.click()`)
+    await until(`${workspaceRow} !== undefined && ${sessionRow} !== null`, 'View other sessions draws the workspace and its session again')
+    const back = JSON.parse(await state())
+    assert.equal(back.filter, 'hide', `the filter is Hide archived again, and kept\nsaw: ${JSON.stringify(back)}`)
+    assert.equal(back.action, false, 'and the placeholder is gone')
+    assert.doesNotMatch(back.tree, /No archived sessions yet/)
+
+    /** In one list + Archived only: the same placeholder and the same way back. */
+    await chooseView('In one list')
+    await until(`${sessionRow} !== null`, 'the flat list draws the session')
+    await chooseView('Archived only')
+    await archivedEmpty('In one list')
+    await browser.evaluate(`${action}.click()`)
+    await until(`${sessionRow} !== null`, 'View other sessions draws the session in the flat list again')
+    assert.equal(JSON.parse(await state()).filter, 'hide', 'with Hide archived kept')
+  } finally {
+    browser.close()
+    server.kill()
+    for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
 test('a session dragged above another switches the order to Manual, and the order is kept across a reload', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
@@ -562,7 +1354,11 @@ test('a session dragged above another switches the order to Manual, and the orde
       document.dispatchEvent(new MouseEvent('click', { bubbles: true }))
       return JSON.stringify(checked)
     })()`
-    await browser.goto(fixture.url)
+    /**
+     * Opened on one of the sessions by name: a plain first visit starts a fresh New session (#17) in the workspace these
+     * rows are in, and the open blank leads its group, ahead of the rows this check orders. Opening writes nothing.
+     */
+    await browser.gotoSession(fixture.url, fixture.created[0])
     await ready()
     const before = JSON.parse(await browser.evaluate(labels))
     assert.deepEqual(before.slice(0, 3), ['repo session 3', 'repo session 2', 'repo session 1'], `Last updated: the latest prompt first\nsaw: ${JSON.stringify(before)}`)
