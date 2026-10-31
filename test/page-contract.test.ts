@@ -573,8 +573,9 @@ test('a tree redraw gives the keyboard its place back: the same row and the same
    * that check; this detects a redraw that stops asking where focus was or stops giving it back.
    */
   const render = pageFunction('async function renderTree() {')
-  assert.match(render, /^async function renderTree\(\) \{\s*\/\*\*[^]*?\*\/\s*const focus = treeFocus\(\)/, 'renderTree reads the keyboard\'s place before it reads anything else')
-  assert.match(render, /heldTreeFocus = focus\s*treeList\.replaceChildren\(/, 'and holds it while it replaces the rows')
+  assert.match(render, /^async function renderTree\(\) \{\s*\/\*\*[^]*?\*\/\s*let focus = treeFocus\(\)/, 'renderTree reads the keyboard\'s place before it reads anything else')
+  /** And again just before the rows are replaced: focus may have moved while the two reads were in flight (developer-ten). */
+  assert.match(render, /focus = treeFocus\(\)\s*heldTreeFocus = focus\s*treeList\.replaceChildren\(/, 'reads it again and holds it while it replaces the rows')
   assert.match(render, /markSelection\(\)\s*restoreTreeFocus\(focus, true\)\s*$/, 'and gives it back once the rows are drawn')
   const flat = pageFunction('async function renderFlatList() {')
   assert.match(flat, /const focus = treeFocus\(\)\s*heldTreeFocus = focus\s*treeList\.replaceChildren\(\)/, 'the flat list does the same')

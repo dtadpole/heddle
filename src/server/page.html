@@ -16116,7 +16116,7 @@ async function renderFlatList() {
 
 async function renderTree() {
   /** The redraw replaces every row; the keyboard's place in the tree is given back once it is drawn (#92). */
-  const focus = treeFocus()
+  let focus = treeFocus()
   if (groupingMode === 'list') {
     await renderFlatList()
     return
@@ -16178,6 +16178,11 @@ async function renderTree() {
     expanded.add(treeTops[0].path)
     rememberExpanded()
   }
+  /**
+   * Read again now, after the two reads above: the keyboard may have moved to another row, or out of the tree, while they
+   * were in flight, and the place given back is where it is when the rows are replaced.
+   */
+  focus = treeFocus()
   heldTreeFocus = focus
   treeList.replaceChildren(...treeGroups.map((group) => groupRow(group)))
   /**
