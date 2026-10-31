@@ -74,6 +74,10 @@ a display or a window.
   shell), read-only keeps the shell but denies its writes, danger-full-access is the only bypass, `/dev/null`
   stays writable, a command that merely prints the denial sentence is not misclassified, and a missing backend
   fails closed instead of running the command unconfined.
+- [`check-stop-kills-group.mjs`](check-stop-kills-group.mjs) — a **Stop** or the bash **wall time** ends the whole
+  command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
+  started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
+  API, no browser.
 
 ## Running it
 
@@ -104,6 +108,10 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
   shell), read-only keeps the shell but denies its writes, danger-full-access is the only bypass, `/dev/null`
   stays writable, a command that merely prints the denial sentence is not misclassified, and a missing backend
   fails closed instead of running the command unconfined.
+- [`check-stop-kills-group.mjs`](check-stop-kills-group.mjs) — a **Stop** or the bash **wall time** ends the whole
+  command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
+  started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
+  API, no browser.
 
 ## Running it
 
