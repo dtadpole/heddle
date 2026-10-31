@@ -429,6 +429,7 @@ mod tests {
             tools: Arc::new(tools),
             hooks: Arc::new(NoTurnHooks),
             turns: Some(TurnRegistry::new()),
+            presets: None,
         };
         Harness {
             work,

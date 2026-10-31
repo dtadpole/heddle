@@ -21,6 +21,7 @@ import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
 import { renderMarkdown } from './markdown.ts'
+import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
@@ -745,6 +746,23 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       const message = refused ? error.message : `session search failed: ${String(error)}`
       respond(response, refused ? 400 : 500, 'application/json', `${JSON.stringify({ error: message })}\n`)
     }
+    return
+  }
+
+  /**
+   * The agent presets (inventory A96): DSH's `agentPresets/list`, the roster and its default, for the new-session
+   * picker and the Settings roster. Each preset says what it narrows: the tools its sessions are offered (absent means
+   * every tool) and its persona. A profile without the `presets` row answers its one implicit preset, marked so.
+   */
+  if (url.pathname === '/api/presets' && request.method === 'GET') {
+    const presets = ctx.get('presets') as PresetRegistry | undefined
+    const roster = presets === undefined ? presetRoster() : { default: presets.defaultId(), presets: presets.list() }
+    respond(
+      response,
+      200,
+      'application/json',
+      `${JSON.stringify({ default: roster.default, presets: roster.presets, ...(presets === undefined ? { implicit: true } : {}) }, null, 2)}\n`,
+    )
     return
   }
 
@@ -1689,8 +1707,15 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${wanted} is not under any workspace root` })}\n`)
       return
     }
+    const named = requestedPreset(ctx, body.preset)
+    if ('refusal' in named) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: named.refusal })}\n`)
+      return
+    }
+    const preset = newSessionPreset(ctx, named.preset)
     const { handle, definition } = ctx.session.createAt(wanted, {
       ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+      ...(preset !== undefined ? { preset } : {}),
     })
     respond(
       response,
@@ -1833,6 +1858,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * come back to what the server recorded rather than to the endpoint's default.
            */
           reasoningEffort: meta?.reasoningEffort ?? null,
+          /** The agent preset the session runs under (inventory A96); `null` until a turn records one. */
+          preset: meta?.preset ?? null,
           /**
            * The name the session is read under, and the folder it belongs to — the two things DSH prints above a
            * conversation's tabs. The page had them only in the sidebar, so a reader had to look away to know which
@@ -2254,6 +2281,38 @@ export function resolveTurnEffort(sources: {
   return undefined
 }
 
+/** The `presets` service as the server reads it: optional, so a profile without the row offers the implicit roster. */
+interface PresetRegistry {
+  list(): readonly PresetDefinition[]
+  defaultId(): string
+  resolve(id: string | undefined): PresetResolution
+}
+
+/**
+ * The agent preset a request names (inventory A96), checked before anything is written: `{}` when it names none, the
+ * declared id, or the sentence a `400` answers. A profile without the `presets` row declares only `standard`.
+ */
+export function requestedPreset(ctx: Context, value: unknown): { readonly preset?: string } | { readonly refusal: string } {
+  if (typeof value !== 'string' || value.trim().length === 0) return {}
+  const wanted = value.trim()
+  const presets = ctx.get('presets') as PresetRegistry | undefined
+  const declared = presets === undefined ? presetRoster().presets.map((preset) => preset.id) : presets.list().map((preset) => preset.id)
+  /** DSH's sentence for an undeclared preset (dsh-agent-preset-registry: `Unknown agent preset: <id>`), with what is declared. */
+  if (!declared.includes(wanted)) return { refusal: `Unknown agent preset: ${wanted}; declared: ${declared.join(', ')}` }
+  return { preset: wanted }
+}
+
+/** The `409` body for another preset named for a session that recorded one: a session keeps the preset it was created with. */
+function presetFixedBody(recordedPreset: string): string {
+  return `${JSON.stringify({ error: `the session runs the preset '${recordedPreset}'; a session keeps the preset it was created with`, code: 'session/preset-fixed' })}\n`
+}
+
+/** The preset a new session is created under: the one the request named, else the registry's default. */
+function newSessionPreset(ctx: Context, named: string | undefined): string | undefined {
+  if (named !== undefined) return named
+  return (ctx.get('presets') as PresetRegistry | undefined)?.defaultId()
+}
+
 /**
  * The selection a session's own record carries, as fields a model request may be given.
  *
@@ -2291,6 +2350,8 @@ export function sessionRequestSelection(
     reasoningEffort?: string
     folder?: string
     new?: boolean
+    /** The agent preset a session this turn creates runs under (inventory A96). */
+    preset?: string
   }
   try {
     body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
@@ -2349,10 +2410,18 @@ export function sessionRequestSelection(
   const model = typeof body.model === 'string' && body.model.length > 0 ? body.model : undefined
   const requestedEffort =
     typeof body.reasoningEffort === 'string' && body.reasoningEffort.length > 0 ? body.reasoningEffort : undefined
+  /** The agent preset the request names (inventory A96), checked before a session exists, as the endpoint is. */
+  const namedPreset = requestedPreset(ctx, body.preset)
+  if ('refusal' in namedPreset) {
+    respond(response, 400, 'text/plain', `${namedPreset.refusal}\n`)
+    return
+  }
+  const bornPreset = newSessionPreset(ctx, namedPreset.preset)
   const born = {
     ...(requested !== undefined ? { endpoint: requested } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(requestedEffort !== undefined ? { reasoningEffort: requestedEffort } : {}),
+    ...(bornPreset !== undefined ? { preset: bornPreset } : {}),
   }
   /**
    * A one-shot subagent's session takes no turn from here (`subagentTurnRefusal`), and the refusal comes before the session
@@ -2360,9 +2429,16 @@ export function sessionRequestSelection(
    */
   if (typeof body.session === 'string' && body.session.length > 0) {
     const resumeId = body.session
-    const refusal = subagentTurnRefusal(ctx.session.list().find((entry) => entry.id === resumeId))
+    const resumed = ctx.session.list().find((entry) => entry.id === resumeId)
+    const refusal = subagentTurnRefusal(resumed)
     if (refusal !== null) {
       respond(response, refusal.status, 'application/json', `${JSON.stringify(refusal.body)}\n`)
+      return
+    }
+    /** A session keeps the preset it was created with (DSH): another one named for it is refused before it is opened. */
+    const recordedPreset = resumed?.preset
+    if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
+      respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
       return
     }
   }
@@ -2378,6 +2454,16 @@ export function sessionRequestSelection(
         ? ctx.session.openAt(folder, { ...(body.new === true ? { fresh: true } : {}), ...born })
         : ctx.session.start({ cwd: process.cwd(), ...born })
   if (folder !== null) ctx.workspace?.ensureOwner(folder)
+  /**
+   * The same rule for a folder's existing session, which is only known once it is opened: another preset named for it
+   * is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
+   * once the endpoint checks below have passed, so a refused turn records nothing.
+   */
+  const recordedPreset = ctx.session.list().find((entry) => entry.id === handle.id)?.preset
+  if (namedPreset.preset !== undefined && recordedPreset !== undefined && recordedPreset !== namedPreset.preset) {
+    respond(response, 409, 'application/json', presetFixedBody(recordedPreset))
+    return
+  }
   /**
    * Which endpoint answers: the request, then the session's own record, then the server's default, then the
    * configuration's. The session's record sits above the server's because a session switched from the panel
@@ -2445,6 +2531,8 @@ export function sessionRequestSelection(
       ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
     })
   }
+  /** The preset the request named, for a session that recorded none: now that nothing above refused the turn. */
+  if (namedPreset.preset !== undefined && recordedPreset === undefined) ctx.session.store.recordPreset(handle.id, namedPreset.preset)
 
   /**
    * The session is marked running **before** the stream opens, and unmarked in the `finally` below.
