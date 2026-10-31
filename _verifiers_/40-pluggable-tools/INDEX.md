@@ -20,6 +20,8 @@ a display or a window.
 ## What decides it
 
 `check-tools.mjs` lists and calls the built-in tools, and `check-plugins.mjs` adds a fixture tool through a layer file.
+`check-failed-output.mjs` holds a failed bash call to keeping what it printed: the error line first, then its stdout
+and stderr, as DSH's renderResult keeps the body of a non-zero exit (live-testing issue #82).
 
 ## Under `HEDDLE_BIN`
 
