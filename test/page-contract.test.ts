@@ -217,7 +217,8 @@ test('the panel ends with a Settings entry, and the Settings surface never rende
   assert.match(page, /settingsDialog\.showModal\(\)/, 'shown modally, so Escape and focus containment are the platform\'s')
   assert.match(page, /if \(clickEvent\.target === settingsDialog\) settingsDialog\.close\(\)/, 'and the backdrop dismisses it')
   assert.match(page, /\{ key: ',', alt: true, action: 'settings' \}/, 'with the reference\'s chord in the table')
-  assert.match(page, /endpoint\.credential === 'set' \? 'credential set' : 'no credential'/, 'the credential is reported as set or not, never printed')
+  assert.match(page, /endpoint\.credential === 'set' \? t\('settings\.credentialSet'\) : t\('settings\.noCredential'\)/, 'the credential is reported as set or not, never printed')
+  assert.match(page, /'settings\.credentialSet': 'credential set'/, 'in words that name only its presence')
 })
 
 test('the workspaces region spans the panel and carries the reference\'s scrollbar and end padding', () => {
