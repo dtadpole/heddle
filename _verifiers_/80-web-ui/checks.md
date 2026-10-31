@@ -90,8 +90,11 @@ grounded_in:
   workspace to start*, Send disabled, Enter refused with *Choose a workspace first.* and opening Add workspace, and no
   session started; and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
   placeholder *No archived sessions yet* with its *View other sessions* action (not the no-roots note), the action
-  setting *Hide archived* back and drawing the rows again (#107). The page opens no session on its own, so a check that reads a seeded session opens it by name
-  (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
+  setting *Hide archived* back and drawing the rows again (#107); and a folder the server may not read (`chmod 000`)
+  opening to DSH's one line *Read failed: cannot list "locked": permission denied* with no rows, never *nothing
+  inside*, a readable sibling still listing its file, and a workspace whose own folder it may not read keeping its
+  session and its *Files* heading over the same line (#106). The page opens no session on its own, so a check that
+  reads a seeded session opens it by name (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
