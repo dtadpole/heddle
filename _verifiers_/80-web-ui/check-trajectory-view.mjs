@@ -915,3 +915,64 @@ test('the overview zooms with the wheel, pans with a right-button drag, and a ri
     await server.close()
   }
 })
+
+test("a user record counts its images and files, and its inspector lists them with a thumbnail that loads, as DSH's does", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH's trajectory row shows a user record's nonzero image and file counts beside its text,
+   * and its inspector lists each attachment after the message (a contained thumbnail that opens the lightbox, or a file
+   * icon, with name, size and type). The ledger dropped every non-text part, so the row and the inspector showed text only.
+   */
+  const server = await startServer('ledger-attachments')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const upload = async (name, body) => {
+      const answer = await fetch(new URL(`/api/uploads?name=${encodeURIComponent(name)}`, server.url), { method: 'POST', headers: { cookie, origin }, body })
+      assert.equal(answer.status, 200, `the upload of ${name} was stored (${answer.status})`)
+      return String((await answer.json()).path ?? '')
+    }
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+    const image = await upload('pixel.png', pixel)
+    const notes = await upload('notes.txt', 'a few notes\n')
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what are these', folder: server.work, session, attachments: [image, notes] }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const prompt = (view.body.rows ?? []).find((row) => row.kind === 'user')
+    assert.deepEqual(
+      (prompt?.record.attachments ?? []).map((item) => [item.kind, item.name]),
+      [['image', 'pixel.png'], ['file', 'notes.txt']],
+      `the ledger's user record carries both attachments in order (${JSON.stringify(prompt?.record)})`,
+    )
+
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelector("#tr-table tbody .tr-attach-count") !== null', 20_000), 'the user row shows its attachment counts')
+    assert.equal(await browser.evaluate('document.querySelector("#tr-table tbody .tr-attach-count").textContent'), '1 image · 1 file')
+    await browser.evaluate('document.querySelector("#tr-table tbody .tr-attach-count").closest("tr").click()')
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-details .tr-attachments li").length === 2', 10_000), 'the inspector lists both attachments')
+    assert.ok(await browser.waitFor('(document.querySelector("#tr-details .tr-attach-thumb img")?.naturalWidth ?? 0) > 0', 10_000), 'the image thumbnail loads from the session-scoped upload address')
+    const listed = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tr-details .tr-attachments li')].map((li) => [li.dataset.kind, li.querySelector('.tr-attach-name').textContent, li.querySelector('.tr-attach-detail').textContent]))`))
+    assert.deepEqual(listed.map(([kind, name]) => [kind, name]), [['image', 'pixel.png'], ['file', 'notes.txt']], `in content order (${JSON.stringify(listed)})`)
+    assert.match(listed[0][2], /^\d+ B · image\/png$/, 'the image row says its size and type')
+    assert.match(listed[1][2], /^\d+ B/, 'and the file row its size')
+    await browser.evaluate('document.querySelector("#tr-details .tr-attach-thumb").click()')
+    assert.ok(await browser.waitFor('document.querySelector("dialog.image-lightbox")?.open === true', 5_000), 'the thumbnail opens the lightbox')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
