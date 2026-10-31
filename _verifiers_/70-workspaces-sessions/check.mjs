@@ -1591,6 +1591,15 @@ test('a turn into an archived session is accepted and blocked before any model r
     const after = await meta()
     assert.equal(after?.turns, turnsBefore, 'the session records the same number of turns')
     assert.equal(after?.archived, true, 'and stays archived')
+    /**
+     * #139: read back, the blocked turn is no failure. DSH's chat shows a failure only for an error, a sign-out abort or
+     * an interrupted end (endFailure, dsh-client-ui-chat lib/client.js:10475-10487). Both builds hung "the turn failed:
+     * unknown error" on the previous, finished answer, because the blocked turn's record carries no message.
+     */
+    const view = await (await fetch(origin + `/api/sessions/${id}`, { headers: { cookie } })).json()
+    const endedLines = (view.turns ?? []).flatMap((turn) => turn.ended ?? [])
+    assert.deepEqual(endedLines.filter((line) => /turn failed/i.test(String(line))), [], `the transcript marks no answer as failed\nsaw: ${JSON.stringify(view.turns)}`)
+    assert.equal((view.turns ?? []).filter((turn) => turn.kind === 'assistant').at(-1)?.text, 'the endpoint answered', 'and its last answer is the one before the archive')
 
     /** The command line's --resume --turn into the same session meets the same gate. */
     live.kill()

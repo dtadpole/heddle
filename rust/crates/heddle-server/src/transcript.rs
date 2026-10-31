@@ -508,8 +508,15 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                 last.fork_seq = Some(seq);
             }
             // A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the
-            // notice row a stopped turn uses — web.ts's transcriptTurns does the same.
-            if event_type == "turn/failed" {
+            // notice row a stopped turn uses — web.ts's transcriptTurns does the same. A turn the archived-session
+            // gate blocked (`reason: {"kind": "blocked"}`) is no failure and adds nothing: DSH's chat shows no
+            // failure for a `blocked` end (`endFailure`, dsh-client-ui-chat lib/client.js:10475-10487) (#139).
+            let blocked = event
+                .get("reason")
+                .and_then(|reason| reason.get("kind"))
+                .and_then(Value::as_str)
+                == Some("blocked");
+            if event_type == "turn/failed" && !blocked {
                 let message = event
                     .get("message")
                     .and_then(Value::as_str)
@@ -673,6 +680,30 @@ mod tests {
             alone[0].ended.as_deref(),
             Some(&["the turn failed: unknown error".to_owned()][..])
         );
+    }
+
+    /// #139: a turn the archived-session gate blocked ends `turn/failed {"reason": {"kind": "blocked"}}` with no
+    /// message. It read as "the turn failed: unknown error" on the previous, finished answer; DSH's chat shows no
+    /// failure for a `blocked` end (`endFailure`, dsh-client-ui-chat lib/client.js:10475-10487).
+    #[test]
+    fn a_blocked_turn_adds_no_failure_to_the_previous_answer() {
+        let answered = vec![
+            serde_json::json!({"seq": 0, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "code word?"}]}}),
+            serde_json::json!({"seq": 1, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "HERON-58"}}),
+            serde_json::json!({"seq": 2, "type": "assistant/completed", "text": "HERON-58", "finishReason": "stop", "rounds": 1}),
+            serde_json::json!({"seq": 3, "type": "turn/completed"}),
+        ];
+        let mut blocked = answered.clone();
+        blocked.push(serde_json::json!({"seq": 4, "type": "turn/failed", "reason": {"kind": "blocked"}}));
+        let turns = transcript_turns(&blocked);
+        assert_eq!(turns.len(), transcript_turns(&answered).len(), "no row of its own");
+        let last = turns.last().expect("the answer row");
+        assert_eq!(last.text, "HERON-58");
+        assert_eq!(last.ended, None, "and nothing on the previous answer");
+        let alone = transcript_turns(&[
+            serde_json::json!({"seq": 0, "type": "turn/failed", "reason": {"kind": "blocked"}}),
+        ]);
+        assert!(alone.is_empty(), "a blocked turn alone draws nothing");
     }
     use serde_json::json;
 

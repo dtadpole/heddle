@@ -7089,6 +7089,15 @@ const TurnFailure = {
   text(message) {
     return typeof message === 'string' && message.length > 0 ? message : 'the turn failed'
   },
+  /**
+   * Whether a recorded turn end is a failure to draw (#139). DSH's chat draws one only for an `error` end, a sign-out
+   * `aborted` and an `interrupted` one (`endFailure`, `dsh-client-ui-chat` lib/client.js:10475-10487); a `blocked` end,
+   * a turn whose step the archived-session gate rejected (`dsh-agent-loop` lib/index.js:960-962), shows nothing: its
+   * input was discarded, and nothing ran. Heddle records that end as `turn/failed { reason: { kind: 'blocked' } }`.
+   */
+  shows(event) {
+    return !(event !== null && typeof event === 'object' && event.reason !== null && typeof event.reason === 'object' && event.reason.kind === 'blocked')
+  },
 }
 /* turn-failure:end */
 let lastTurnFailure = null
@@ -7212,7 +7221,7 @@ events.addEventListener('session', (message) => {
     paintRunningMarks()
     scheduleTreeRefresh()
     if (shown === null || payload.session === shown) {
-      drawTurnFailure(payload.session, event.message)
+      if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
       settleChat()
     }
     if (payload.session === composerKey) void pumpQueue()

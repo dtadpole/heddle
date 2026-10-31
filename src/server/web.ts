@@ -3361,9 +3361,13 @@ export function transcriptTurns(
       }
       /**
        * A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the same notice row
-       * a stopped turn uses, so a reload says what the live page said.
+       * a stopped turn uses, so a reload says what the live page said. A turn the archived-session gate blocked
+       * (`reason: { kind: 'blocked' }`) is no failure and adds nothing, not even to the previous answer: DSH's chat shows
+       * no failure for a `blocked` end (`endFailure`, dsh-client-ui-chat lib/client.js:10475-10487), and its input was
+       * discarded (#139).
        */
-      if (event.type === 'turn/failed') {
+      const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
+      if (event.type === 'turn/failed' && !blocked) {
         const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
         const last = turns[turns.length - 1]
         if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
