@@ -551,6 +551,18 @@ impl ComponentCatalog for BuiltinCatalog {
             }
         }
     }
+
+    /// A built-in's form projection: the one generated from its TypeScript `Config`, so the settings view answers
+    /// the same descriptor as the TypeScript build (#123). An outside component keeps its manifest's plain schema.
+    fn form(&self, row: &EntryRow, anchor: Option<&Path>) -> Option<serde_json::Value> {
+        let resolved_against = anchor.unwrap_or(Path::new("."));
+        match resolve_component(&row.component(resolved_against)) {
+            ComponentRef::Builtin(builtin) => {
+                heddle_config::builtin_form(builtin.spec().module, &self.env)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Lexically normalise a path: drop `.` and fold `..` into its parent, without touching the disk.
