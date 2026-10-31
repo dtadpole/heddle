@@ -982,21 +982,29 @@ mod tests {
         let pid_file = root.path().join("child.pid");
         let bash = tool("bash", sandbox(root.path()));
         let command = format!("sleep 41 & echo $! > '{}'; wait", pid_file.display());
-        let running = tokio::spawn(bash.run(
-            args(json!({ "command": command })),
-            context_in(root.path(), SandboxMode::DangerFullAccess),
-        ));
+        let call_args = args(json!({ "command": command }));
+        let call_context = context_in(root.path(), SandboxMode::DangerFullAccess);
+        let running = tokio::spawn(async move { bash.run(call_args, call_context).await });
         let started = std::time::Instant::now();
         let child: i32 = loop {
-            if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                if let Ok(pid) = text.trim().parse() {
-                    break pid;
-                }
+            if let Some(pid) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
             }
-            assert!(started.elapsed() < Duration::from_secs(5), "the command wrote its child pid");
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the command wrote its child pid"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
-        let alive = |pid: i32| std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|status| status.success());
+        let alive = |pid: i32| {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .is_ok_and(|status| status.success())
+        };
         assert!(alive(child), "the background command runs");
         running.abort();
         let _ = running.await;

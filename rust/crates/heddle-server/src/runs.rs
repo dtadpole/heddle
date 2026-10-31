@@ -351,8 +351,15 @@ mod tests {
         assert!(registry.any_running());
         assert_eq!(registry.abort_all(), 2);
         assert!(one.is_cancelled() && two.is_cancelled());
-        assert_eq!(registry.abort_all(), 0, "a second shutdown finds nothing to stop");
-        assert!(registry.any_running(), "stopped turns still run until they settle");
+        assert_eq!(
+            registry.abort_all(),
+            0,
+            "a second shutdown finds nothing to stop"
+        );
+        assert!(
+            registry.any_running(),
+            "stopped turns still run until they settle"
+        );
         drop(one);
         assert!(registry.any_running());
         drop(two);
