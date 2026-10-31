@@ -525,6 +525,14 @@ test('Enter or Space opens a tree row only when pressed on the row itself, never
   assert.equal(tree.rowKeyOpens({ key: ' ', target: row }, row), true, 'and so does Space')
   for (const key of ['a', 'Tab', 'ArrowDown', 'Escape']) assert.equal(tree.rowKeyOpens({ key, target: row }, row), false, `${key} does not open a row`)
   assert.equal(tree.rowKeyOpens(null, row), false)
+  /**
+   * The page asks it of the tree item, the row's one Tab stop (F4), and a workspace's item holds its child rows' items:
+   * Enter on a child bubbles through the parent's item and is the child's alone.
+   */
+  const parent = { role: 'treeitem', label: 'workspace' }
+  const child = { role: 'treeitem', label: 'session' }
+  assert.equal(tree.rowKeyOpens({ key: 'Enter', target: child }, parent), false, "Enter on a child item does not open its parent's row")
+  assert.equal(tree.rowKeyOpens({ key: 'Enter', target: child }, child), true, 'it opens the child')
 })
 
 test('the header hides its title while the session is blank and then follows its title; the window title is DSH\'s (#24)', () => {

@@ -602,15 +602,21 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
       await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 })
       await new Promise((done) => setTimeout(done, 150))
       return JSON.parse(await browser.evaluate(`(() => {
-        const row = document.querySelector('#tree li[data-kind] > .row')
+        /**
+         * The tree item is the row's one Tab stop (#92, developer-ten's F4 on stack-2): it is what takes focus, and its
+         * ring is drawn on its row. The item itself draws none, because its box also holds its child rows.
+         */
+        const item = document.querySelector('#tree li[role="treeitem"]')
+        const row = item?.querySelector(':scope > .row') ?? null
         if (row === null) return JSON.stringify({ error: 'no row' })
-        row.focus()
+        item.focus()
         const style = getComputedStyle(row)
         const box = row.getBoundingClientRect()
         const width = parseFloat(style.outlineWidth) || 0
         const offset = parseFloat(style.outlineOffset) || 0
         return JSON.stringify({
-          focusVisible: row.matches(':focus-visible'),
+          focusVisible: item.matches(':focus-visible'),
+          itemOutline: getComputedStyle(item).outlineStyle,
           box: [Math.round(box.left), Math.round(box.right)],
           style: style.outlineStyle,
           width: style.outlineWidth,
@@ -622,6 +628,7 @@ test('the sidebar is resizable by pointer and by keyboard, and the width is reme
     })()
     assert.equal(focused.error, undefined, `the tree has a row to focus\nsaw: ${JSON.stringify(focused)}`)
     assert.equal(focused.focusVisible, true, 'a row focused from the keyboard is visibly focused')
+    assert.equal(focused.itemOutline, 'none', 'its tree item draws no ring around itself and its child rows')
     assert.equal(focused.style, 'solid', 'the ring is drawn rather than the platform\'s auto style')
     assert.equal(focused.width, '2px', 'at 2px')
     assert.equal(focused.offset, '-2px', 'offset inward, so it cannot paint into the inset')

@@ -849,7 +849,8 @@ test('a first visit opens a fresh New session, never the newest session someone 
     assert.ok(await browser.waitFor(`${rowOf(first.saved)} !== null && ${rowOf(other.id)} !== null`, 10_000).catch(() => false), `both rows are drawn\nsaw: ${await state()}`)
     const actions = (id) => `(() => {
       const li = ${rowOf(id)}
-      li.querySelector(':scope > .row').focus()
+      /** The tree item is the row's one Tab stop (#92, F4); its focus draws the row's controls. */
+      li.focus()
       const read = JSON.stringify({
         label: li.querySelector(':scope > .row > .label')?.textContent ?? null,
         selected: li.getAttribute('aria-selected'),
@@ -857,7 +858,7 @@ test('a first visit opens a fresh New session, never the newest session someone 
         quick: [...li.querySelectorAll(':scope > .row .session-actions button')].map((button) => button.getAttribute('aria-label')),
         buttons: [...li.querySelectorAll(':scope > .row button')].map((button) => button.getAttribute('aria-label') ?? button.textContent),
       })
-      li.querySelector(':scope > .row').blur()
+      li.blur()
       return read
     })()`
     const blank = JSON.parse(await browser.evaluate(actions(first.saved)))

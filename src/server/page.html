@@ -1479,10 +1479,16 @@
    * was the only one painting into the 12-pixel gutter, in a colour unrelated to the panel. A negative offset puts the
    * 2px ring inside the row's own 12px radius; the mix is the same 45% ink the other focusable controls use.
    */
-  #tree .row:focus-visible {
+  #tree .row:focus-visible,
+  #tree li[role='treeitem']:focus-visible > .row {
     outline: 2px solid color-mix(in oklab, var(--text) 45%, transparent);
     outline-offset: -2px;
   }
+  /**
+   * The tree item is the row's Tab stop (#92, F4): it carries the role and the states a screen reader reads. Its own box
+   * holds its child rows too, so the ring is drawn on its `.row` (above) and never around the item.
+   */
+  #tree li[role='treeitem']:focus-visible { outline: none; }
   /**
    * The selected row, and it has to be visible *while* the pointer is elsewhere: a tint alone is what
    * hover already draws, so the selection carries a left accent bar and a bolder name as well.
@@ -14027,7 +14033,8 @@ const WorkspaceTree = (() => {
   }
 
   /**
-   * Whether a key pressed in a tree row opens the row (#98): Enter or Space whose target is the row itself. A key on a
+   * Whether a key pressed in a tree row opens the row (#98): Enter or Space whose target is the row's own stop, its tree
+   * item (F4), itself; a key on a child row bubbles through its parent's item and is the child's. A key on a
    * control inside the row (the `…`, Archive, Pin, New session in, an item of the row's menu) belongs to that control,
    * which the browser activates as the button it is. DSH's row controls are plain `<button>`s with no key handler above
    * them: its rows carry an `onClick` only (`dsh-client-ui-workspace` lib/client.js:1965-1970, :2273-2282), and each
@@ -14416,7 +14423,7 @@ let heldTreeFocus = null
 
 /**
  * Where the keyboard is in the tree, so a redraw can give it back (#92): `{ row, control }`, the key of the row that holds
- * focus and which of its stops — `row` for the row itself, `more` for its group's Show more, `tool:<n>` for its n-th
+ * focus and which of its stops — `row` for the row itself (its tree item), `more` for its group's Show more, `tool:<n>` for its n-th
  * control (an item of its menu counts as the menu's `…`, because a redraw closes the menu). `null` when focus is outside
  * the tree, or is not the keyboard's (`:focus-visible`): a pointer's focus left on a control would keep the row's controls
  * drawn, which a pointer does not expect. DSH's tree is React, which keeps the focused element through a refresh
@@ -14436,8 +14443,9 @@ function treeFocus() {
   const li = active.closest('li[role="treeitem"]')
   const row = keyOf(li)
   if (row === undefined) return null
+  /** The tree item is the row's one Tab stop (F4), so focus on the item is the row's own place. */
+  if (active === li) return { row, control: 'row' }
   const own = li.querySelector(':scope > .row')
-  if (active === own) return { row, control: 'row' }
   const index = treeTools(own).indexOf(active.closest('.menu-wrap')?.querySelector(':scope > button') ?? active)
   return { row, control: index === -1 ? 'row' : 'tool:' + index }
 }
@@ -14466,11 +14474,11 @@ function restoreTreeFocus(focus, done = false) {
   if (row === null) return
   if (heldTreeFocus === focus) heldTreeFocus = null
   if (focus.control === 'more') {
-    ;(li.querySelector(':scope > ul > li[data-slot="more"] > button') ?? row).focus({ preventScroll: true })
+    ;(li.querySelector(':scope > ul > li[data-slot="more"] > button') ?? li).focus({ preventScroll: true })
     return
   }
-  /** The row first: its focus draws its controls (`:focus-within`), so the control can take focus next. */
-  row.focus({ preventScroll: true })
+  /** The tree item first, the row's one Tab stop (F4): its focus draws its controls (`:focus-within`), so the control can take focus next. */
+  li.focus({ preventScroll: true })
   if (focus.control.startsWith('tool:')) treeTools(row)[Number(focus.control.slice('tool:'.length))]?.focus({ preventScroll: true })
 }
 
@@ -14719,11 +14727,15 @@ function nodeRow(node, depth = 0) {
    * row is focused, so the row itself has to be the thing a keyboard can land on. Without this, `:focus-within` could only fire
    * from a control that is never rendered — a keyboard reader had no way to reach a row's actions at all.
    *
-   * **One** Tab stop per row, the `.row` below, which takes Enter and Space. The list item was a second stop in front of it
-   * that ignored Enter, so a session row cost five Tab presses (#92). DSH's rows are no Tab stop at all (no `tabIndex`, no key
-   * handler: `dsh-client-ui-workspace` lib/client.js:1965-1970, :2273-2282) and its tree has no arrow keys (:2526-2537), so
-   * there is no roving focus to copy; the stop is heddle's, because it is what reaches the row's controls.
+   * **One** Tab stop per row, the list item itself, which takes Enter and Space. The item and its `.row` were two stops, the
+   * item ignoring Enter, so a session row cost five Tab presses (#92); the `.row` alone then held focus, a `div` with no role,
+   * so a screen reader on the focused row heard none of the item's `treeitem` role, `aria-expanded`, `aria-selected` or
+   * archived `aria-description` (developer-ten's F4). DSH puts the role, the states and the click on one element, its
+   * treeitem (`dsh-client-ui-workspace` lib/client.js:1965-1970 for a workspace row, :2273-2282 for a session row); that
+   * element is a list item here. DSH's rows are no Tab stop at all and its tree has no arrow keys (:2526-2537), so there is
+   * no roving focus to copy; the stop is heddle's, because it is what reaches the row's controls.
    */
+  li.tabIndex = 0
   li.dataset.kind = node.kind
   /** The key the movement animation matches a previous position to: a session by its id, anything else by its path. */
   li.dataset.rowKey = node.kind === 'session' && node.session !== undefined && node.session !== null ? 'session:' + node.session.id : 'node:' + node.path
@@ -14743,7 +14755,6 @@ function nodeRow(node, depth = 0) {
   const row = document.createElement('div')
   row.className = 'row'
   row.dataset.path = node.path
-  row.tabIndex = 0
   /** The chosen row is marked on the tree item, where a screen reader reads it; the row keeps no second attribute. */
 
   /** The left of the row is what it **is**: its kind, a type's badge, and its name. */
@@ -14958,9 +14969,12 @@ function nodeRow(node, depth = 0) {
     }
     await toggle(node, li)
   }
-  /** Enter and Space open the row only when the row itself has focus; a control inside it keeps its own keys (#98). */
-  row.onkeydown = (event) => {
-    if (!WorkspaceTree.rowKeyOpens(event, row)) return
+  /**
+   * Enter and Space open the row only when the tree item itself has focus (`event.target === li`): a control inside it keeps
+   * its own keys (#98), and a key on a child row, which bubbles through its parent's item, is that child's.
+   */
+  li.onkeydown = (event) => {
+    if (!WorkspaceTree.rowKeyOpens(event, li)) return
     event.preventDefault()
     row.onclick()
   }
@@ -16010,6 +16024,8 @@ async function renderFlatList() {
     ...visible.map((meta) => {
       const li = document.createElement('li')
       li.setAttribute('role', 'treeitem')
+      /** The item is the row's one Tab stop, as a tree row's is (F4): the role and the states a screen reader reads are here. */
+      li.tabIndex = 0
       li.dataset.kind = 'session'
       li.dataset.sessionId = meta.id
       li.setAttribute('aria-selected', meta.id === current ? 'true' : 'false')
@@ -16027,7 +16043,6 @@ async function renderFlatList() {
       const row = document.createElement('div')
       row.className = 'row'
       row.dataset.path = meta.cwd
-      row.tabIndex = 0
       const icon = document.createElement('span')
       icon.className = 'icon'
       icon.append(kindIcon('session', false))
@@ -16058,9 +16073,9 @@ async function renderFlatList() {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }
       }
-      /** The row is a Tab stop, so it opens on Enter and Space as the tree's rows do (#92). */
-      row.onkeydown = (event) => {
-        if (!WorkspaceTree.rowKeyOpens(event, row)) return
+      /** The item is a Tab stop, so it opens on Enter and Space as the tree's rows do (#92), only when the key is its own. */
+      li.onkeydown = (event) => {
+        if (!WorkspaceTree.rowKeyOpens(event, li)) return
         event.preventDefault()
         row.onclick()
       }

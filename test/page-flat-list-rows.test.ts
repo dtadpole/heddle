@@ -143,3 +143,36 @@ test("an archived row in the flat list says it will not open, and a click raises
   assert.deepEqual(drawn.opened, ['session-00000000-0000-0000-0000-00000000000a'], 'its click opens it')
   assert.equal(drawn.notified, 1, 'without the notice')
 })
+
+test('a flat row is one Tab stop on its tree item, which takes Enter and Space only when the key is its own (F4, #92)', async () => {
+  /**
+   * The item carries role=treeitem and aria-selected (and, archived, aria-description); the focus was on the inner
+   * `.row`, a div with no role, so a screen reader on it heard none of them. DSH puts the role, the states and the click
+   * on one element (`dsh-client-ui-workspace` lib/client.js:2273-2282).
+   */
+  const drawn = await draw(sessions)
+  const kept = item(drawn, 'session-00000000-0000-0000-0000-00000000000a')
+  const row = rowOf(kept)
+  assert.equal(kept.tabIndex, 0, 'the item is the Tab stop')
+  assert.equal(row.tabIndex, -1, 'and the row inside it is none')
+  assert.equal(row.onkeydown, null, 'and takes no keys of its own')
+  let prevented = 0
+  const key = (key: string, target: unknown) => kept.onkeydown?.({ key, target, preventDefault: () => (prevented += 1) })
+  key('Enter', row)
+  key(' ', { tagName: 'BUTTON' })
+  key('a', kept)
+  await Promise.resolve()
+  assert.deepEqual(drawn.opened, [], 'a key whose target is not the item, or that is not Enter or Space, opens nothing')
+  key('Enter', kept)
+  await Promise.resolve()
+  assert.deepEqual(drawn.opened, ['session-00000000-0000-0000-0000-00000000000a'], 'Enter on the item opens it')
+  key(' ', kept)
+  await Promise.resolve()
+  assert.equal(drawn.opened.length, 2, 'and so does Space')
+  assert.equal(prevented, 2, "and the page's own scroll on Space does not happen")
+  const archived = item(drawn, 'session-00000000-0000-0000-0000-00000000000b')
+  archived.onkeydown?.({ key: 'Enter', target: archived, preventDefault: () => {} })
+  await Promise.resolve()
+  assert.equal(drawn.opened.length, 2, 'Enter on an archived item opens nothing')
+  assert.equal(drawn.notified, 1, 'and raises the notice, as its click does')
+})

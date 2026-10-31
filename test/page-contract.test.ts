@@ -313,7 +313,13 @@ test('the workspaces region spans the panel and carries the reference\'s scrollb
   assert.match(page, /#tree \{ padding-inline: 12px calc\(12px - 5px\); \}/, 'the rows are inset inside the pane, which keeps the scrollbar at the panel edge')
   assert.match(page, /#search-results \{ padding-inline: 12px calc\(12px - 5px\); \}/, 'and the search results take the same inset, so a search does not shift the list edges')
   assert.match(page, /#search-results \.hit \{[^}]*padding: \.3rem \.5rem;[^}]*border-radius: 12px;/s, 'with each hit using the row padding and rounding')
-  assert.match(page, /#tree \.row:focus-visible \{[^}]*outline: 2px solid color-mix\(in oklab, var\(--text\) 45%, transparent\);[^}]*outline-offset: -2px;/s, 'and a focused row draws its ring inside its own box, in the panel ink')
+  /** The tree item is the row's Tab stop (F4): the ring goes on its `.row`, never around the item and its child rows. */
+  assert.match(
+    page,
+    /#tree \.row:focus-visible,\s*#tree li\[role='treeitem'\]:focus-visible > \.row \{[^}]*outline: 2px solid color-mix\(in oklab, var\(--text\) 45%, transparent\);[^}]*outline-offset: -2px;/s,
+    'and a focused row draws its ring inside its own box, in the panel ink',
+  )
+  assert.match(page, /#tree li\[role='treeitem'\]:focus-visible \{ outline: none; \}/, 'and the focused tree item draws none of its own')
 
   /**
    * **The hover surface names its lists.** `li:hover` unscoped also matched tree items, and a tree `li` holds its whole
@@ -506,7 +512,7 @@ test('a key on a tree row\'s control is the control\'s: the row opens only on a 
    * test/workspace-tree.test.ts and the keys in 80's check-tree-keyboard.mjs; this detects the row taking them back.
    */
   const build = pageFunction('function nodeRow(node, depth = 0) {')
-  assert.match(build, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'the row asks the rule before it takes a key')
+  assert.match(build, /li\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, li\)\) return/, 'the tree item asks the rule before it takes a key')
   assert.doesNotMatch(build, /onkeydown = \(event\) => \{\s*if \(event\.key === 'Enter'/, 'and no handler in the row takes Enter whatever its target')
 })
 
@@ -517,15 +523,29 @@ test('a tree row is one Tab stop that opens on Enter, and Show more is a button 
    * arrow keys (dsh-client-ui-workspace lib/client.js:1965-1970, :2273-2282, :2526-2537); its Show more is a `<button>`
    * with `aria-expanded` (:3309-3326). The stops are judged in 80's check-tree-keyboard.mjs; this detects their return.
    */
+  /**
+   * The one stop is the **tree item** (developer-ten's F4): role=treeitem, aria-expanded, aria-selected and the archived
+   * aria-description live there, and focus on the inner `.row`, a div with no role, gave a screen reader none of them.
+   * DSH's treeitem is the element with the states and the click (lib/client.js:1965-1970, :2273-2282).
+   */
   const build = pageFunction('function nodeRow(node, depth = 0) {')
-  assert.doesNotMatch(build, /\bli\.tabIndex\b|li\.setAttribute\('tabindex'/, 'the list item is no Tab stop')
-  assert.match(build, /row\.tabIndex = 0/, 'the row is the one stop')
+  assert.match(build, /li\.setAttribute\('role', 'treeitem'\)[^]*?li\.tabIndex = 0/, 'the tree item is the one stop')
+  assert.doesNotMatch(build, /\brow\.tabIndex\b|row\.setAttribute\('tabindex'/, 'and the row inside it is none')
+  assert.doesNotMatch(build, /\brow\.onkeydown\b/, 'nor does the row take keys')
   const more = pageFunction('function paintSessionRows(list, group, depth) {')
   assert.match(more, /const row = document\.createElement\('button'\)\s*row\.type = 'button'/, 'Show more is a button')
   assert.match(more, /row\.setAttribute\('aria-expanded', String\(mode === 'less'\)\)/, 'whose aria-expanded says the group shows every session')
   assert.doesNotMatch(more, /setAttribute\('role', 'button'\)|row\.onkeydown/, 'with no stand-in role and no key handler of its own')
   const flat = pageFunction('async function renderFlatList() {')
-  assert.match(flat, /row\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, row\)\) return/, 'a flat list row opens on Enter too')
+  assert.match(flat, /li\.tabIndex = 0/, 'a flat list item is the stop too')
+  assert.doesNotMatch(flat, /\brow\.tabIndex\b/, 'and its row is none')
+  assert.match(flat, /li\.onkeydown = \(event\) => \{\s*if \(!WorkspaceTree\.rowKeyOpens\(event, li\)\) return/, 'and it opens on Enter, asked of the item')
+  /** Focus is read and given back on the item, the stop. */
+  const read = pageFunction('function treeFocus() {')
+  assert.match(read, /if \(active === li\) return \{ row, control: 'row' \}/, "treeFocus reads focus on the item as the row's own place")
+  const back = pageFunction('function restoreTreeFocus(focus, done = false) {')
+  assert.match(back, /\bli\.focus\(\{ preventScroll: true \}\)/, 'restoreTreeFocus gives it back to the item')
+  assert.doesNotMatch(back, /\brow\.focus\(/, 'never to the row inside it')
 })
 
 test('every menu menuButton makes has DSH\'s menu keyboard: arrows, Home and End, Tab, and Escape back to the trigger (#95)', () => {
