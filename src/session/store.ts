@@ -19,6 +19,7 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
+import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame } from './transcript.ts'
 
 /**
@@ -334,7 +335,17 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
   return { nodes, contentGeneration, replaceGeneration, replacements }
 }
 
-/** The message one node derives to, or null when it produces none. */
+/**
+ * The message one node derives to, or null when it produces none.
+ *
+ * A chunk run derives **one part per block, not one per delta**: consecutive `text-delta`s join into one `text` part
+ * and consecutive `reasoning-delta`s into one `reasoning` part, while a `tool-call` (or a switch between text and
+ * reasoning) starts the next part. That is DSH's assembly — `BlockAssembler.push` appends every delta of a block to one
+ * partial (`partial.text += chunk.text`, dsh-llm `lib/types/assembler.js:46-52`) — and it matters on the wire: the chat
+ * adapter keeps separate text blocks apart with a newline, so a part per delta handed the model its own earlier answer
+ * broken at every point where the stream split it (live-testing draft developer-five-2). The log itself still holds
+ * one event per chunk; only the derivation coalesces. The Rust twin is `derive_message` in heddle-session `surface.rs`.
+ */
 export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: number): Message | null {
   const event = bySeq.get(seq)
   if (event === undefined) return null
@@ -345,13 +356,19 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
   }
   if (event.type !== 'assistant/chunk') return null
   const content: ContentPart[] = []
+  /** Append a delta to the part it continues — the last one, when it is the same kind — or start a new part. */
+  const delta = (type: 'text' | 'reasoning', text: string): void => {
+    const last = content.at(-1)
+    if (last !== undefined && last.type === type) content[content.length - 1] = { type, text: last.text + text }
+    else content.push({ type, text })
+  }
   for (let index = seq; ; index += 1) {
     const next = bySeq.get(index)
     if (next === undefined || next.type !== 'assistant/chunk') break
     const chunk = next.chunk as Chunk | undefined
     if (chunk === undefined) continue
-    if (chunk.type === 'text-delta') content.push({ type: 'text', text: chunk.text })
-    else if (chunk.type === 'reasoning-delta') content.push({ type: 'reasoning', text: chunk.text })
+    if (chunk.type === 'text-delta') delta('text', chunk.text)
+    else if (chunk.type === 'reasoning-delta') delta('reasoning', chunk.text)
     else if (chunk.type === 'tool-call') content.push({ type: 'tool-call', id: chunk.id, name: chunk.name, arguments: chunk.arguments })
     else if (chunk.type === 'done') break
   }
@@ -637,6 +654,13 @@ export class SessionStore {
    * surface once per round, which is exactly where re-folding a long log on every call would show.
    */
   private readonly surfaceCache = new Map<string, { readonly count: number; readonly state: SurfaceState }>()
+
+  /**
+   * The automatic titles of this store's sessions (`./title.ts`, DSH's first-prompt title). Idle until a model is
+   * attached, which the session plugin does; it lives on the store so every service over this store shares one record
+   * of which call may still land.
+   */
+  readonly titles: SessionTitles = new SessionTitles(this)
 
   constructor(
     root: string = defaultSessionRoot(),
@@ -1015,6 +1039,8 @@ export class SessionStore {
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
+    /** A first prompt waits for a title, and the turn's `model/request` starts it (`./title.ts`); never throws. */
+    this.titles.observe(handle, record)
     return record
   }
 

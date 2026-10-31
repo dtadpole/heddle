@@ -241,6 +241,15 @@ impl ArchivedFilter {
     }
 }
 
+/// DSH's refusal of a workspace the registry does not hold (dsh-api-workspace-controller lib/index.js:358-360):
+/// code `workspace/not-found`, sentence `Workspace "<id>" not found`.
+pub fn workspace_not_found(id: &str) -> ServiceError {
+    ServiceError::with_code(
+        format!("Workspace \"{id}\" not found"),
+        "workspace/not-found",
+    )
+}
+
 /// The workspace registry and the tree, as the routes use them. Paths are canonical when they arrive.
 pub trait WorkspaceService: Send + Sync {
     /// Whether some registered root owns `path` (is it under a workspace root).
@@ -277,6 +286,16 @@ pub trait WorkspaceService: Send + Sync {
     fn views(&self, sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
         let _ = sessions;
         Ok(Value::Array(Vec::new()))
+    }
+
+    /// Move a workspace in the stored order, before `before` or last without it (ids or paths) — DSH's
+    /// `workspace/insertBefore`, `POST /api/workspaces/insertBefore` (`WorkspaceService.insertBefore` in
+    /// `src/workspace/service.ts`). Answers the complete order; `Err` with code `workspace/not-found` and
+    /// DSH's sentence, `Workspace "<id>" not found` (the workspace or the anchor is not in the order), is
+    /// answered `404`. The default knows no workspace, for doubles that do not model the registry.
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        let _ = before;
+        Err(workspace_not_found(id))
     }
 }
 

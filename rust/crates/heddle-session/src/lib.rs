@@ -45,6 +45,7 @@ pub mod mode;
 pub mod service;
 pub mod store;
 pub mod surface;
+pub mod title;
 pub mod transcript;
 
 pub use definition::{
@@ -78,6 +79,10 @@ pub use store::{
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
     derive_node_message, fold_surface, index_by_seq, inherits_answer, is_surface_eligible,
+};
+pub use title::{
+    LlmTitles, SESSION_TITLE_PURPOSE, SessionTitles, TitleAnswer, TitleDone, TitleModel,
+    TitleSpawn, TitleTask, normalize_session_title, title_from_answer,
 };
 pub use transcript::{
     DecodedTranscript, FRAME_MAGIC, Frame, TranscriptFormat, decode_transcript, encode_frame,

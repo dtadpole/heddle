@@ -828,6 +828,17 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         // The booted store's own records, as `tree` and `remove` read them.
         serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
     }
+
+    fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.service
+            .insert_before(id, before)
+            .map_err(|error| match error {
+                heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
+                    heddle_server::services::workspace_not_found(&missing)
+                }
+                other => refusal(other),
+            })
+    }
 }
 
 /// The attachment reader a turn uses: the paths the page uploaded (`POST /api/uploads`, under

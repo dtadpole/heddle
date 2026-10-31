@@ -18,11 +18,19 @@ import { resolve, sep } from 'node:path'
  * macOS, and a trailing slash is not a different folder. `resolve` is the fallback because a
  * workspace may be registered before the directory exists, and recording nothing would lose the
  * registration rather than postpone it.
+ *
+ * The **native** `realpath`, not Node's JavaScript one, because only the native call returns the
+ * spelling the disk stores: on a case-insensitive volume (macOS by default) `~/Proj` and `~/proj` are one
+ * folder, and the JavaScript walk hands back whatever case was typed, so each spelling became a workspace
+ * of its own. DSH canonicalises with `fs/promises` `realpath`, which is the native call
+ * (`dsh-workspace/lib/index.js:36-51`: symlinks, `..` and trailing slashes resolved, and a symlink to a
+ * registered folder collides with it — `dsh-workspace/README.md:93`), and the Rust port's
+ * `std::fs::canonicalize` is `realpath(3)` too, so all three now store the same string.
  */
 export function canonicalPath(path: string): string {
   const absolute = resolve(path)
   try {
-    return realpathSync(absolute)
+    return realpathSync.native(absolute)
   } catch {
     return absolute
   }

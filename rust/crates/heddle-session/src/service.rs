@@ -468,8 +468,22 @@ impl SessionService {
     }
 
     /// Retitle a session; the log is untouched.
+    ///
+    /// A rename is a person naming the session, so it pins the name: an automatic title still being generated lands
+    /// nowhere (DSH's `rename()` supersedes in-flight generation, dsh-session-title lib/index.js:295-311), including when
+    /// the person confirms the automatic title unchanged.
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
+        self.store.titles().supersede(id);
         self.store.rename(id, title)
+    }
+
+    /// Give this store's automatic titles their model ([`crate::title`]): from now on a session's first prompt is
+    /// titled by the model the turn's own request names. The composition root calls it once, where it builds the turn
+    /// runtime; without it a session keeps its plain first-message name.
+    pub fn attach_titles(&self, model: Arc<dyn crate::title::TitleModel>) {
+        self.store
+            .titles()
+            .attach(Arc::downgrade(&self.store), model);
     }
 
     /// Pin, unpin, archive or unarchive.
