@@ -976,7 +976,7 @@ test('a recorded model the catalogue no longer lists shows DSH’s placeholder a
    * is the seat: DSH "shows 'Select model' in regular weight and hides the reasoning effort caption" for a saved
    * selection absent from the catalogue (dsh-client-ui-model-selection), while the page showed the stale raw id as if
    * it were a choice. A turn that names an unlisted model is the shortest way to such a session: the turn route
-   * passes the id through and records it, as DSH does, and the page opens the newest session.
+   * passes the id through and records it, as DSH does, and the page opens that session by name.
    */
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
@@ -991,10 +991,12 @@ test('a recorded model the catalogue no longer lists shows DSH’s placeholder a
     })
     assert.equal(turn.status, 200, 'the turn runs')
     await turn.text()
-    assert.equal((await sessionsOf(server))[0]?.model, 'model-gone', 'the session records the model the catalogue does not list')
+    const recorded = (await sessionsOf(server))[0]
+    assert.equal(recorded?.model, 'model-gone', 'the session records the model the catalogue does not list')
 
     await watchErrors(browser)
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, recorded.id)
     assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
     assert.ok(
       await browser.waitFor(`${SEAT}.getAttribute('aria-label') === 'Select model'`, 10_000),
