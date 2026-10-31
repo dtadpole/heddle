@@ -49,6 +49,10 @@ grounded_in:
   folder chooser's `/api/directories` routes, and a browser driving the *Select Workspace Directory*, *Rename
   workspace* and *Delete workspace* dialogs end to end; with the server gone, *Add workspace* and *New session* say
   that they failed (the dialog's alert line, `New session failed: …`) instead of leaving an unhandled rejection.
+- [`check-subagents.mjs`](check-subagents.mjs) — a subagent's session at DSH parity (R-developer-eight-26, -1, -28,
+  -2): a delegated one-shot child, the newest session in the store, is never what a first start opens, the search and
+  the one-column list leave it out as the tree does, a reload reopens the session that was open, and the child, opened,
+  shows DSH's read-only record (*One-shot subagent record*) in place of the composer, which an ordinary session gets back.
 - [`check-workspace-tree.mjs`](check-workspace-tree.mjs) — the left column as DSH's workspace tree: `GET
   /api/workspaces` naming each workspace's parent and the sessions whose nearest root it is, then a browser seeing a
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show

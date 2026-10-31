@@ -1650,6 +1650,19 @@
     background: var(--composer); border-radius: 28px; padding: 8px 0 0;
     box-shadow: 0 0 0 .5px color-mix(in oklab, var(--text) 12%, transparent), 0 4px 16px rgba(0, 0, 0, .03), 0 0 24px rgba(0, 0, 0, .03);
   }
+  /**
+   * DSH's read-only composer for a one-shot subagent's record (`SubagentReadOnlyComposer.module.css`, dsh-client-ui-subagent
+   * `lib/client.js:661`): a half-pixel border, the large radius, the layer surface, 54px tall at least, tertiary 13/20 text
+   * centred with an 8px gap, and the title in the primary ink at weight 510.
+   */
+  #subagent-readonly {
+    display: flex; justify-content: center; align-items: center; gap: 8px; flex-wrap: wrap;
+    width: 100%; max-width: min(calc(100% - 8px), calc(var(--chat-column) + 32px)); margin: 0 auto; box-sizing: border-box;
+    min-height: 54px; padding: 10px 16px; border: .5px solid var(--line); border-radius: 16px; background: var(--surface);
+    color: var(--text-3); font-size: 13px; line-height: 20px;
+  }
+  #subagent-readonly[hidden], #prompt[hidden] { display: none; }
+  #subagent-readonly strong { color: var(--text); font-weight: 510; }
   #prompt textarea {
     display: block; width: 100%; box-sizing: border-box;
     border: 0; outline: none; background: transparent; color: var(--text);
@@ -2977,6 +2990,12 @@
       </div>
     </div>
   </form>
+  <!--
+    DSH's read-only composer (dsh-client-ui-subagent `SubagentReadOnlyComposer`, `lib/client.js:678`): an open one-shot
+    subagent's record takes the composer's place, because a one-shot task accepts no follow-up. The words are DSH's
+    (`readonly.oneShot.title`, `readonly.oneShot.body`, `lib/client.js:928-930`).
+  -->
+  <div id="subagent-readonly" role="status" hidden><strong>One-shot subagent record</strong><span>One-shot tasks do not accept follow-ups; review the full execution record here.</span></div>
   <div id="composer-status" aria-live="polite" hidden>
     <span class="stat-pill" data-stat-pill="time">
       <svg class="stat-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true" stroke-width="1"><path d="M3.4041 13.096C2.49514 12.187 1.87614 11.0288 1.62537 9.76798C1.37459 8.50716 1.50331 7.20028 1.99525 6.01261C2.48719 4.82494 3.32025 3.80981 4.3891 3.09557C5.45795 2.38134 6.71458 2.00008 8.0001 2C9.28563 2.00008 10.5423 2.38134 11.6111 3.09557C12.68 3.80981 13.513 4.82494 14.005 6.01261C14.4969 7.20028 14.6256 8.50716 14.3748 9.76798C14.1241 11.0288 13.5051 12.187 12.5961 13.096" stroke="currentColor"/><path d="M8 8.49994L11.6114 4.88855" stroke="currentColor"/><path d="M8 9.75C8.69036 9.75 9.25 9.19036 9.25 8.5C9.25 7.80964 8.69036 7.25 8 7.25C7.30964 7.25 6.75 7.80964 6.75 8.5C6.75 9.19036 7.30964 9.75 8 9.75Z" fill="currentColor"/></svg>
@@ -5478,6 +5497,9 @@ async function showSession(id) {
   if (current !== id) chooseWorkspace(null)
   current = id
   paintEmptyState()
+  /** A reload comes back here (`SessionRules.startupSession`), and a one-shot child's composer is a record. */
+  rememberCurrent(id)
+  paintComposerAccess()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
   applySessionAccess(null)
   /** The composer follows the conversation: its own queue, and the model that session is run with. */
@@ -5509,6 +5531,9 @@ async function showSession(id) {
       if (branch !== null) branch.textContent = ''
       paintEmptyState()
       applySessionAccess(null)
+      /** Nothing to come back to on a reload, and nothing open to lock. */
+      rememberCurrent(null)
+      paintComposerAccess()
       return
     }
     const body = await response.json()
@@ -5557,12 +5582,59 @@ async function showSession(id) {
   await refreshTodo()
 }
 
+/**
+ * The open session, remembered across a reload — DSH keeps its selection in a persisted store (`dsh.sessions.current`,
+ * dsh-client-ui-workspace `lib/client.js:1369`). Storage that refuses (a private window, a full quota) leaves the page
+ * starting the way it did before: on the newest session the sidebar shows.
+ */
+function savedCurrent() {
+  try {
+    return localStorage.getItem(SessionRules.CURRENT_KEY)
+  } catch (error) {
+    return null
+  }
+}
+function rememberCurrent(id) {
+  try {
+    if (typeof id === 'string' && id.length > 0) localStorage.setItem(SessionRules.CURRENT_KEY, id)
+    else localStorage.removeItem(SessionRules.CURRENT_KEY)
+  } catch (error) {
+    // nothing to remember into; the next start falls back to the newest session
+  }
+}
+
+/** Each session's record as `/api/sessions` last listed it — what tells the composer that the open one is a one-shot child. */
+const listedMetas = new Map()
+
+/**
+ * The composer, or DSH's read-only record in its place.
+ *
+ * A one-shot subagent's session takes no follow-up, so DSH replaces its composer with one status line
+ * (`SubagentReadOnlyComposer`, dsh-client-ui-subagent `lib/client.js:678`, chosen by `selectReadOnlySubagent`, `:944`).
+ * The form is hidden and its field disabled as well, so neither Enter nor a script can send into it; any other session
+ * gets the composer back. Phase A measured the version before it: the child's composer was writable and a turn sent from
+ * it was run (R-developer-eight-26).
+ */
+function paintComposerAccess() {
+  const readOnly = current !== null && SessionRules.composerReadOnly(listedMetas.get(current))
+  composer.hidden = readOnly
+  field.disabled = readOnly
+  field.readOnly = readOnly
+  document.getElementById('subagent-readonly').hidden = !readOnly
+  document.body.dataset.composer = readOnly ? 'read-only' : 'writable'
+}
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
   const response = await fetch('/api/sessions')
   if (!response.ok) return
   const sessions = await response.json()
+  listedMetas.clear()
+  for (const meta of Array.isArray(sessions) ? sessions : []) {
+    if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string') listedMetas.set(meta.id, meta)
+  }
+  paintComposerAccess()
   /**
    * The server's `running` flag is the authority: a turn whose end this page never saw — a failed turn, a reload
    * mid-turn, a dropped stream — must not leave a session looking active, and a turn already running when the page
@@ -5628,9 +5700,14 @@ async function refreshSessions() {
    * The list itself is drawn from the tree — this walk only needs to know which session is newest, and it
    * deliberately asks for **every** session rather than only the ad-hoc ones: a page that started with no
    * selection because all its sessions happened to be registered would be the same bug again.
+   *
+   * A reload comes back to the session that was open — DSH's startup restoration (`restoreSelection`,
+   * dsh-client-ui-workspace `lib/client.js:1605`), which `SessionRules.startupSession` states. Phase A measured the
+   * version before it opening `sessions[0]` on every reload: the newest session, which was a subagent's child the
+   * sidebar hides, while the session a person had open was gone (R-developer-eight-26, -28 and -2).
    */
   if (current !== null) return
-  const select = sessions[0]?.id ?? null
+  const select = SessionRules.startupSession(Array.isArray(sessions) ? sessions : [], savedCurrent())
   if (select !== null) {
     current = select
     await showSession(select)
@@ -6314,6 +6391,8 @@ function queuePreview(text) {
 
 /** Submit the draft, or steer what is waiting when there is nothing to submit. */
 function submitDraft(gesture) {
+  /** A one-shot subagent's record takes no follow-up (`paintComposerAccess`); nothing is sent into it. */
+  if (document.body.dataset.composer === 'read-only') return
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
@@ -6830,6 +6909,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          */
         if (target === null) {
           current = payload.session
+          rememberCurrent(payload.session)
           chooseWorkspace(null)
           adoptSession(payload.session)
           /** The pending send belongs to the session it just created; the row follows it. */
@@ -10892,6 +10972,66 @@ document.addEventListener('click', closeMenus)
  */
 Object.assign(globalThis, { showSession, showFile, paintRunningMarks, runningSessions })
 
+/* session-rules:begin */
+/**
+ * Which sessions the sidebar lists, which one a page opens at startup, and which open session may be written to — DSH's
+ * rules for subagent children and for the startup selection, kept pure (no DOM, no fetch, no page state) so
+ * `test/session-rules.test.ts` loads this block out of the page and judges it in Node, as the workspace tree's is.
+ */
+const SessionRules = (() => {
+  /** Where the page remembers the open session across a reload — DSH persists its selection as `dsh.sessions.current`. */
+  const CURRENT_KEY = 'heddle.session.current.v1'
+
+  /**
+   * A subagent child's mode, DSH's `address.mode` (dsh-client-ui-subagent `selectReadOnlySubagent`, `lib/client.js:944`):
+   * `'one-shot'` for a delegated child, because heddle's `delegate` runs it for one task and settles it, so no follow-up
+   * can reach it; `'continuable'` for a teammate, whose `teamId` names its Lead, because DSH's teammates are continuable
+   * children (`_context_/dsh-mechanisms/dsh-agent-teams.md`); `null` for a session that is no subagent's.
+   */
+  function subagentMode(meta) {
+    if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent') return null
+    return typeof meta.teamId === 'string' && meta.teamId.length > 0 ? 'continuable' : 'one-shot'
+  }
+
+  /**
+   * The sessions the sidebar may list, out of `/api/sessions`: every one that is not a subagent's child. DSH's
+   * `sessionVisible` drops `origin: 'subagent'` before any other rule (dsh-client-ui-workspace `lib/client.js:964-965`),
+   * and its tree, its flat list (`deriveFlat`, `:1146`) and its search (`deriveSearchResults`, `:1185`, `:1200`) all ask
+   * it — a child is reached from its parent, not from the sidebar.
+   */
+  function sidebarSessions(sessions) {
+    return (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && meta.origin !== 'subagent')
+  }
+
+  /**
+   * The session a page opens when it starts — DSH's `restoreSelection` (`lib/client.js:1605-1628`): the saved selection
+   * when the store still lists it, a subagent child included, because DSH restores a saved child's address too
+   * (`:1607`); not when it is archived, because DSH clears an archived current (`clearArchivedCurrent`, `:1638`).
+   * Without a usable saved one it is the first session `/api/sessions` lists that the sidebar shows and the archive does
+   * not hold — heddle's newest-session start, which never lands on a hidden child. `null` when there is none.
+   */
+  function startupSession(sessions, saved) {
+    const metas = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta !== null && typeof meta === 'object' && typeof meta.id === 'string')
+    if (typeof saved === 'string' && saved.length > 0) {
+      const remembered = metas.find((meta) => meta.id === saved)
+      if (remembered !== undefined && remembered.archived !== true) return remembered.id
+    }
+    const newest = sidebarSessions(metas).find((meta) => meta.archived !== true)
+    return newest === undefined ? null : newest.id
+  }
+
+  /**
+   * Whether the composer is DSH's read-only record for this session: a one-shot child only. A continuable child keeps
+   * Send and Stop (`selectReadOnlySubagent` answers `null` for it while its parent is available, `lib/client.js:949`).
+   */
+  function composerReadOnly(meta) {
+    return subagentMode(meta) === 'one-shot'
+  }
+
+  return { CURRENT_KEY, subagentMode, sidebarSessions, startupSession, composerReadOnly }
+})()
+/* session-rules:end */
+
 /* workspace-tree:begin */
 /**
  * The label a workspace is shown with — DSH's workspaceDisplayTitle (dsh-api-workspace-controller
@@ -12589,7 +12729,12 @@ async function loadSearchIndex() {
     fetch('/api/tree').then((response) => (response.ok ? response.json() : { children: [] })).catch(() => ({ children: [] })),
   ])
   searchIndex = {
-    sessions: Array.isArray(sessions) ? sessions : [],
+    /**
+     * Only the sessions the sidebar lists: the search and the one-column list both read this, and DSH hides a subagent's
+     * child from both, as from the tree (`SessionRules.sidebarSessions`). Phase A measured the two listing a delegated
+     * child the tree hides (R-developer-eight-1, -26).
+     */
+    sessions: SessionRules.sidebarSessions(sessions),
     roots: (treeBody.children ?? []).map((node) => ({ path: node.path, title: node.label })),
   }
   return searchIndex
