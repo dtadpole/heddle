@@ -592,3 +592,45 @@ test('the Trajectory area reads like DSH: one row per event, one row per call, a
     await server.close()
   }
 })
+
+test('an overview tick shows its clock and duration after a 500 ms hover, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Parity S151 (R-developer-eleven-21): DSH's timing overview reveals a span's exact clock and duration after a
+   * 500 ms hover. The page's ticks had only a native title (turn and kinds, no time, on the browser's own delay).
+   */
+  const server = await startServer('tick-tip')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-tick").length > 0', 20_000), 'the overview drew its ticks')
+    const tipState = `JSON.stringify({ shown: document.getElementById('timeline-tip')?.hidden === false, text: document.getElementById('timeline-tip')?.textContent ?? '' })`
+    await browser.evaluate(`document.querySelector('#timeline .tr-tick').dispatchEvent(new PointerEvent('pointerenter'))`)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.equal(JSON.parse(await browser.evaluate(tipState)).shown, false, 'nothing shows before the 500 ms hover')
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const shown = JSON.parse(await browser.evaluate(tipState))
+    assert.ok(shown.shown, 'the tip shows once the hover has lasted 500 ms')
+    assert.match(shown.text, /turn \d+/, `it names the turn (${shown.text})`)
+    assert.match(shown.text, /\d{2}:\d{2}:\d{2}\.\d{3} · (\d+(\.\d+)? (ms|s)|\d+m \d+s|running)/, `then the clock and the duration (${shown.text})`)
+    await browser.evaluate(`document.querySelector('#timeline .tr-tick').dispatchEvent(new PointerEvent('pointerleave'))`)
+    assert.equal(JSON.parse(await browser.evaluate(tipState)).shown, false, 'and leaving the tick hides it')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
