@@ -388,3 +388,27 @@ test('an old HTML response cannot replace the latest file under its newer title'
     assert.equal(displayed.htmlHidden, true, 'stale HTML cannot take over the pane')
   } finally { browser.close(); await server.close() }
 })
+
+
+test('an invalid file refusal is visible after a settled HTML preview', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('preview-refusal-visible')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'old.html'), '<!doctype html><html><head></head><body><h1>OLD PREVIEW</h1></body></html>')
+    writeFileSync(join(server.work, 'invalid.txt'), Buffer.from([0xff, 0xfe, 0x41]))
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('old.html')} !== undefined && ${row('invalid.txt')} !== undefined`, 15000)
+    await browser.evaluate(`${row('old.html')}.click()`)
+    await browser.waitFor(`!document.getElementById('file-html').hidden && document.getElementById('html-view').srcdoc.includes('OLD PREVIEW')`, 15000)
+    await browser.evaluate(`${row('invalid.txt')}.click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('not UTF-8')`, 10000)
+    assert.equal(await browser.evaluate(`document.getElementById('file-body').hidden`), false, 'Refs #113: refusal is visible')
+    assert.equal(await browser.evaluate(`document.getElementById('file-html').hidden`), true, 'old preview is hidden under failed filename')
+  } finally { browser.close(); await server.close() }
+})
