@@ -39,6 +39,11 @@ interface Tree {
   overflowLabel: (mode: 'more' | 'less', hidden: number) => string
   sessionOrder: (left: unknown, right: unknown) => number
   hiddenBlank: (meta: unknown, current: unknown) => boolean
+  SELECTION_KEY: string
+  selectionRecord: (id: string | null) => string
+  savedSelection: (raw: unknown) => string | null
+  recentWorkspace: (workspaces: unknown[], sessions: unknown[]) => { id: string; path: string } | undefined
+  restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'newest' | 'none'; id?: string; path?: string; forget?: boolean }
 }
 
 const tree = new Function(`${page.slice(begin, end)}\nreturn WorkspaceTree`)() as Tree
@@ -232,4 +237,109 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.equal(tree.containsSession(root, 's-in-root', false), true)
   assert.equal(tree.containsSession(root, null), false)
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
+})
+
+test('the open session is kept the way DSH keeps it, and only an entry this page wrote is read back', () => {
+  /**
+   * DSH persists its main-view selection as `{ sessionId }` in one localStorage entry and empties it to `{}` when the
+   * view is cleared (dsh-client-ui-workspace lib/client.js:1369, :1644-1650, :1662-1665). C28: the page kept nothing.
+   */
+  assert.equal(tree.SELECTION_KEY, 'heddle.sessions.current')
+  assert.equal(tree.selectionRecord('session-a'), '{"sessionId":"session-a"}')
+  assert.equal(tree.selectionRecord(null), '{}', 'nothing open is an empty record, not a missing one')
+  assert.equal(tree.savedSelection(tree.selectionRecord('session-a')), 'session-a')
+  assert.equal(tree.savedSelection('{}'), null)
+  assert.equal(tree.savedSelection(null), null, 'a first visit has no entry')
+  assert.equal(tree.savedSelection('not json'), null, 'a damaged entry is no selection rather than an error')
+  assert.equal(tree.savedSelection('{"sessionId":7}'), null)
+  assert.equal(tree.savedSelection('"session-a"'), null)
+})
+
+test('a reload reopens the saved session, and with nothing saved never opens a hidden subagent child (C28)', () => {
+  /**
+   * DSH's restoreSelection (lib/client.js:1605-1628) reopens the saved session. C28 measured a reload opening
+   * `/api/sessions`[0] instead — the newest session, there a subagent's child the tree hides.
+   */
+  const workspaces = [workspace('w', '/w', { sessionIds: ['s-child', 's-archived', 's-beta', 's-alpha'] })]
+  const sessions = [
+    session('s-child', 9, { origin: 'subagent', parentSession: 's-alpha', title: 'child task' }),
+    session('s-archived', 8, { archived: true }),
+    session('s-beta', 5, { title: 'beta notes' }),
+    session('s-alpha', 3, { title: 'alpha notes' }),
+  ]
+  assert.deepEqual(tree.restoreChoice('s-alpha', workspaces, sessions), { kind: 'saved', id: 's-alpha' }, 'the saved session, though three are newer')
+  assert.deepEqual(
+    tree.restoreChoice(null, workspaces, sessions),
+    { kind: 'newest', id: 's-beta' },
+    'with nothing saved, the newest row: not the hidden child, not the archived session',
+  )
+  assert.deepEqual(tree.restoreChoice('s-child', workspaces, sessions), { kind: 'saved', id: 's-child' }, 'a child the person opened is theirs to come back to (DSH restores a saved subagent view, :1607-1609)')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, [sessions[0]]), { kind: 'none' }, 'a store holding only a child opens nothing')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, []), { kind: 'none' })
+})
+
+test('a saved New session placeholder is reopened by its own id, never replaced by a fresh one', () => {
+  /** DSH's restoreBlank reloads the saved blank's projections and reconnects the same id (lib/client.js:1451-1458, :1619). */
+  const workspaces = [workspace('w', '/w', { sessionIds: ['s-blank', 's-talked'] })]
+  const sessions = [session('s-talked', 5), session('s-blank', 3, { turns: 0 })]
+  assert.deepEqual(tree.restoreChoice('s-blank', workspaces, sessions), { kind: 'saved', id: 's-blank' })
+})
+
+test('a saved session that is gone starts a fresh one in the most recently active workspace; an archived one is not reopened', () => {
+  /**
+   * DSH: no listed summary, so no workspace of its own; the target is recentWorkspace and connectWorkspace creates a
+   * session there (lib/client.js:1620, :1626, :1406). An archived current is cleared at once (:1578, :1638-1650), which
+   * leaves the load with nothing saved.
+   */
+  const workspaces = [
+    workspace('w-old', '/old', { sessionIds: ['s-old'] }),
+    workspace('w-recent', '/recent', { sessionIds: ['s-recent'] }),
+    workspace('w-empty', '/empty'),
+  ]
+  const sessions = [session('s-recent', 30, { title: 'recent' }), session('s-old', 10, { title: 'old', archived: true })]
+  assert.deepEqual(tree.restoreChoice('session-gone', workspaces, sessions), { kind: 'start', path: '/recent', forget: true })
+  assert.deepEqual(tree.restoreChoice('s-old', workspaces, sessions), { kind: 'newest', id: 's-recent', forget: true }, 'archived: forgotten, then as a load with nothing saved')
+  assert.deepEqual(tree.restoreChoice('session-gone', [], sessions), { kind: 'newest', id: 's-recent', forget: true }, 'no registered workspace to start in')
+  assert.deepEqual(
+    tree.restoreChoice('session-gone', [workspace('w-auto', '/auto', { origin: 'auto', sessionIds: ['s-recent'] })], sessions),
+    { kind: 'newest', id: 's-recent', forget: true },
+    'an adopted root is not a place a session starts',
+  )
+})
+
+test('the most recently active workspace is DSH\'s recentWorkspace', () => {
+  /** lib/client.js:1694-1710: the latest session update, else the workspace's creation, a tie kept in registry order. */
+  const made = (id: string, path: string, createdAt: string, options: Parameters<typeof workspace>[2] = {}) => ({ ...workspace(id, path, options), createdAt })
+  const sessions = [session('s-a', 20), session('s-b', 40), session('s-in-auto', 50)]
+  assert.equal(
+    tree.recentWorkspace([made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] }), made('w-b', '/b', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-b'] })], sessions)?.id,
+    'w-b',
+    'the workspace written last',
+  )
+  assert.equal(
+    tree.recentWorkspace(
+      [made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] }), made('w-new', '/new', '2026-10-28T11:00:00.000Z')],
+      sessions,
+    )?.id,
+    'w-new',
+    'a workspace with no session counts from its creation',
+  )
+  assert.equal(
+    tree.recentWorkspace(
+      [
+        made('w-b', '/b', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-b'] }),
+        made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] }),
+        made('w-auto', '/a/scratch', '2026-10-28T00:00:00.000Z', { origin: 'auto', parent: 'w-a', sessionIds: ['s-in-auto'] }),
+      ],
+      sessions,
+    )?.id,
+    'w-a',
+    'an adopted root\'s session counts for the registered workspace above it',
+  )
+  assert.equal(
+    tree.recentWorkspace([made('w-1', '/1', '2026-10-28T00:00:00.000Z'), made('w-2', '/2', '2026-10-28T00:00:00.000Z')], [])?.id,
+    'w-1',
+    'a tie keeps registry order',
+  )
+  assert.equal(tree.recentWorkspace([], sessions), undefined)
 })
