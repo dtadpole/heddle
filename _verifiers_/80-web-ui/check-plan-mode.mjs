@@ -35,8 +35,13 @@ async function providerDouble(replies) {
       } catch {
         body = { raw }
       }
-      bodies.push(body)
-      const reply = replies.shift() ?? { text: 'noted' }
+      /**
+       * A session's first prompt also asks the model for the session's title (C6, DSH's dsh-session-title, merged on
+       * main as 038ebf99). That call is answered here and kept out of `bodies`, which hold the turns' own requests.
+       */
+      const titleCall = JSON.stringify(body.messages ?? []).includes('Create a concise title for an AI coding-assistant session')
+      if (!titleCall) bodies.push(body)
+      const reply = titleCall ? { text: 'A plan-mode session' } : (replies.shift() ?? { text: 'noted' })
       const frames = []
       if (reply.toolCall !== undefined) {
         frames.push({
