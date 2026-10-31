@@ -91,6 +91,7 @@ async function startServer(label, options = {}) {
             },
           },
           { id: 'model-two-lite', name: 'Model Two Lite' },
+          ...(options.extraModels ?? []),
         ],
       },
     ],
@@ -805,6 +806,55 @@ test('the menu is keyboard-operable and a selection restores focus without a rin
     await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: 40, y: 40, button: 'left', clickCount: 1 })
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
     assert.equal(await browser.evaluate(`document.getElementById('model-menu').hidden`), true, 'a click outside dismisses the menu')
+    assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('the model search matches characters in order, prefix first, and opening highlights the current model', async (context) => {
+  /**
+   * DSH's search (issue #51), dsh-client-ui-model-selection: names match case-insensitively "including nonconsecutive
+   * characters in order"; "within each provider, prefix matches come first, followed by alignment score and then
+   * catalog order"; and "opening highlights the current model or the first available row". The page matched only
+   * contiguous text over the name, id and endpoint, in catalogue order, and opened with nothing highlighted.
+   * `Lite Two` is listed **after** `Model Two Lite`, so a prefix-first order is told apart from catalogue order.
+   */
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), CAPABILITY)) return
+  const server = await startServer('search', { extraModels: [{ id: 'lite-two', name: 'Lite Two' }] })
+  const browser = await openBrowser({ width: 1280, height: 1000 })
+  const shown = `JSON.parse(JSON.stringify([...document.querySelectorAll('#model-menu [role="menuitemradio"]')].map((option) => option.innerText)))`
+  const highlighted = `(() => { const row = document.querySelector('#model-menu [role="menuitemradio"][data-highlighted]'); return row === null ? null : row.innerText })()`
+  try {
+    await watchErrors(browser)
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor(`${SEAT} !== null`, 20_000), 'the composer is up')
+    assert.ok(await browser.waitFor(`${SEAT}.getAttribute('aria-label').includes('Model One')`, 10_000), 'the catalogue arrived')
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    assert.equal(await browser.evaluate(`document.activeElement.getAttribute('role')`), 'searchbox', 'the model pane focuses its search')
+    assert.equal(await browser.evaluate(highlighted), 'Model One', 'opening highlights the current model')
+
+    await typeText(browser, 'mtl')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    const ordered = await browser.evaluate(shown)
+    assert.ok(ordered.includes('Model Two Lite'), `characters in order match across words (mtl: ${ordered.join(', ')})`)
+    assert.ok(!ordered.includes('Model One'), 'and a name without them in order does not')
+
+    await browser.evaluate(`(() => { const field = document.querySelector('#model-menu input[role="searchbox"]'); field.value = ''; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await typeText(browser, 'lite')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250))
+    assert.deepEqual(await browser.evaluate(shown), ['Lite Two', 'Model Two Lite'], 'a prefix match comes before an earlier catalogue entry')
+    assert.equal(await browser.evaluate(highlighted), 'Lite Two', 'editing the query highlights the first result')
+    await press(browser, 'Enter')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 400))
+    assert.equal(await browser.evaluate(`${SEAT}.getAttribute('aria-label')`), 'Select model, current Lite Two', 'Enter selects it')
+
+    await openMenu(browser)
+    await drill(browser, 'Model')
+    assert.equal(await browser.evaluate(highlighted), 'Lite Two', 'reopening highlights the model just chosen')
     assert.deepEqual(await pageErrors(browser), [], 'the page raised no errors')
   } finally {
     browser.close()
