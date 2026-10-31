@@ -200,6 +200,23 @@ folder is a filing decision rather than something to navigate — and the branch
 for, not the drawer the session is kept in.
 ";
 
+/// Refuse a folder that is not an existing directory, naming it ([`SessionError::MissingFolder`]); it
+/// never creates one (#56).
+///
+/// DSH validates a session's working directory before every step's prompt and, when the session's original
+/// directory is gone as well, fails with `working-directory: directory does not exist` rather than bringing it
+/// back (dsh-working-directory lib/index.js:87-102, :123-131). A heddle session's recorded folder is its original
+/// directory, so this is that check, with heddle's sentence (`requireFolder` in the TypeScript build).
+pub fn require_folder(folder: impl AsRef<Path>) -> Result<(), SessionError> {
+    let folder = folder.as_ref();
+    match std::fs::metadata(folder) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        _ => Err(SessionError::MissingFolder {
+            path: folder.to_string_lossy().into_owned(),
+        }),
+    }
+}
+
 /// Create a branch's `_sessions_` folder and its `INDEX.md` when they are not there yet; answers with
 /// the folder.
 pub fn ensure_sessions_folder(branch: &str) -> Result<String, SessionError> {

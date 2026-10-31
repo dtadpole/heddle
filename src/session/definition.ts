@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { canonicalPath } from '../paths.ts'
@@ -24,6 +24,40 @@ export const SESSIONS_FOLDER = '_sessions_'
 
 /** The machine-readable half of a definition. */
 export const DEFINITION_FILE = 'session.json'
+
+/**
+ * A session's folder that is no longer there: deleted or moved outside heddle, or replaced by a file (issue #56).
+ *
+ * Recognised by **class or name**, as `SessionFlagError` is, because a route that misses it answers a refusal as a 500.
+ * The sentence is the Rust build's `SessionError::MissingFolder`, word for word.
+ */
+export class MissingFolderError extends Error {
+  readonly path: string
+
+  constructor(path: string) {
+    super(`This workspace's folder no longer exists: ${path}`)
+    this.name = 'MissingFolderError'
+    this.path = path
+  }
+}
+
+/**
+ * Refuse a folder that is not an existing directory, naming it; it never creates one.
+ *
+ * DSH validates a session's working directory before every step's prompt and, when the session's original directory is
+ * gone as well, fails with `working-directory: directory does not exist` rather than bringing it back
+ * (dsh-working-directory lib/index.js:87-102, :123-131). A heddle session's recorded folder is its original directory,
+ * so this is that check, with heddle's sentence.
+ */
+export function requireFolder(folder: string): void {
+  let directory = false
+  try {
+    directory = statSync(folder).isDirectory()
+  } catch {
+    directory = false
+  }
+  if (!directory) throw new MissingFolderError(folder)
+}
 
 /** What a definition says, as the harness reads it back. */
 export interface SessionDefinition {

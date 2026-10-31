@@ -19,7 +19,8 @@ use serde_json::Value;
 
 use crate::clock::iso_now;
 use crate::definition::{
-    CreatedDefinition, DefinitionOptions, existing_session_names, write_session_definition,
+    CreatedDefinition, DefinitionOptions, existing_session_names, require_folder,
+    write_session_definition,
 };
 use crate::error::SessionError;
 use crate::event::{Events, NewEvent, SessionEvent, SessionHandle};
@@ -298,6 +299,12 @@ impl SessionService {
         if !inherits_answer(self.store.read(&source_handle)?.as_slice())? {
             return Ok(ForkOutcome::Unavailable);
         }
+        // The child's definition goes into the source's folder, so a folder that is gone refuses the fork
+        // ([`SessionError::MissingFolder`]) before anything is written, instead of being recreated with a
+        // `_sessions_` drawer in it (#56). DSH's fork creates no directory either: its workspace attach refuses a
+        // cwd that does not resolve (dsh-api-session-controller lib/index.js:902-909, dsh-workspace
+        // lib/index.js:111-122). Checked before the store forks, so no child is left.
+        require_folder(source.cwd())?;
         let Some(handle) = self.store.fork(
             id,
             ForkAttribution {
@@ -896,6 +903,65 @@ mod tests {
                 .title(),
             Some("Source (1)")
         );
+    }
+
+    /// A session with one completed turn in `folder`, so a fork has something to cut at.
+    fn answered_session(service: &SessionService, folder: &str) -> SessionHandle {
+        let handle = service.open_at(folder, OpenAtOptions::default()).unwrap();
+        service
+            .user(&handle, "a conversation worth continuing", None)
+            .unwrap();
+        service
+            .store()
+            .message(
+                &handle,
+                Message {
+                    role: Role::Assistant,
+                    tool_call_id: None,
+                    content: vec![ContentPart::Text {
+                        text: "the answer".to_string(),
+                    }],
+                    source: None,
+                },
+            )
+            .unwrap();
+        service
+            .store()
+            .append(&handle, NewEvent::new("turn/completed"), Default::default())
+            .unwrap();
+        handle
+    }
+
+    /// #56: a fork of a session whose folder was deleted answered with a child and recreated the folder with a
+    /// `_sessions_` drawer in it. DSH's fork creates no directory; its workspace attach refuses a cwd that does
+    /// not resolve. The fork is refused naming the folder, the folder stays gone, and no child is left.
+    #[test]
+    fn a_fork_in_a_folder_that_is_gone_is_refused_and_nothing_comes_back() {
+        let (_dir, service) = service();
+        let parent = branch();
+        let folder = parent.path().join("w");
+        std::fs::create_dir(&folder).unwrap();
+        let canonical = canonical_path(&folder).to_str().unwrap().to_string();
+        let source = answered_session(&service, &canonical);
+        let before = service.list().len();
+        std::fs::remove_dir_all(&folder).unwrap();
+
+        let error = service.fork(&source.id).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("This workspace's folder no longer exists: {canonical}")
+        );
+        assert!(!folder.exists(), "the deleted folder is not recreated");
+        assert_eq!(service.list().len(), before, "and no child is left");
+
+        // A file standing where the folder was is refused the same way, and nothing is made inside it.
+        std::fs::write(&folder, "not a folder any more\n").unwrap();
+        let error = service.fork(&source.id).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("This workspace's folder no longer exists: {canonical}")
+        );
+        assert!(folder.is_file());
     }
 
     #[test]

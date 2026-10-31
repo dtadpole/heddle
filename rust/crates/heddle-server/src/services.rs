@@ -140,6 +140,9 @@ pub enum ForkOutcome {
     Unavailable {
         code: String,
     },
+    /// Refused with the store's own sentence — the source's folder is gone (#56). Answered `400 { error }`, as
+    /// Add workspace answers a missing folder.
+    Refused(ServiceError),
     Forked(CreatedSession),
 }
 

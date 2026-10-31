@@ -1077,6 +1077,7 @@ async fn fork_session(State(state): State<AppState>, SessionPath(id): SessionPat
             format!("session {id} has no completed turn to fork from"),
             code,
         ),
+        ForkOutcome::Refused(error) => service_refusal(error, StatusCode::BAD_REQUEST),
         ForkOutcome::Forked(created) => respond::json(
             StatusCode::OK,
             &json!({

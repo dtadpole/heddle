@@ -23,7 +23,7 @@ import { renderMarkdown } from './markdown.ts'
 import { expandHome } from '../config/schema.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
+import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
@@ -1379,7 +1379,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id)
+    let forked
+    try {
+      forked = ctx.session.fork(id)
+    } catch (error) {
+      if (!isMissingFolder(error)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
+      return
+    }
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
@@ -2524,6 +2531,14 @@ function subscribeSessionEvent(ctx: Context, forward: (payload: { session: strin
   return () => {
     if (typeof dispose === 'function') dispose()
   }
+}
+
+/**
+ * A session's folder that is gone (#56): a refusal with its sentence, answered `400 { error }` as Add workspace answers a
+ * missing folder. Recognised by class or name, as `SessionFlagError` is, so a second copy of the module still matches.
+ */
+function isMissingFolder(error: unknown): boolean {
+  return error instanceof MissingFolderError || (error instanceof Error && error.name === 'MissingFolderError')
 }
 
 function respondSse(response: ServerResponse): void {

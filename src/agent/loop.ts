@@ -8,6 +8,7 @@ import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
 import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
+import { requireFolder } from '../session/definition.ts'
 import { recordTimeContext } from '../schedule/time-context.ts'
 
 /**
@@ -277,6 +278,13 @@ async function runTurnBody(ctx: Context, options: RunTurnOptions, signal: AbortS
      */
     claimSteered()
     rounds += 1
+    /**
+     * The session's folder must still be there before the step is assembled (#56). DSH validates the working directory at
+     * every step's prompt assembly and, when the session's original directory is gone, fails the turn with `working-directory:
+     * directory does not exist` (dsh-working-directory lib/index.js:48-50, :87-102, :123-131). A heddle session's folder is
+     * its original directory, so the turn fails here, naming it, before a tool can recreate it with a relative write.
+     */
+    if (folder !== undefined) requireFolder(folder)
 
     /**
      * What the person had already said when this round started.

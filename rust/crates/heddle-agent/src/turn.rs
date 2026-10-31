@@ -354,7 +354,9 @@ async fn run_turn_body(
         .rooted_at(&cwd)
         .unwrap_or_else(|| Arc::clone(sandbox));
     // Instructions belong to the conversation, even when the operator pinned the tools' root elsewhere.
-    let instruction_cwd = folder.unwrap_or_else(|| sandbox.workspace_root().to_path_buf());
+    let instruction_cwd = folder
+        .clone()
+        .unwrap_or_else(|| sandbox.workspace_root().to_path_buf());
 
     let tools = runtime.tools.describe();
     let mut denials: Vec<Denial> = Vec::new();
@@ -378,6 +380,15 @@ async fn run_turn_body(
         // them is written now, after them. A stop is checked first, so a stopped turn leaves its steer pending.
         runtime.session.claim_pending_input(session)?;
         rounds += 1;
+        // The session's folder must still be there before the step is assembled (#56). DSH validates the
+        // working directory at every step's prompt assembly and, when the session's original directory is gone,
+        // fails the turn with `working-directory: directory does not exist` (dsh-working-directory
+        // lib/index.js:48-50, :87-102, :123-131). A heddle session's folder is its original directory, so the
+        // turn fails here, naming it, before a tool can recreate it with a relative write.
+        if let Some(folder) = &folder {
+            heddle_session::require_folder(folder)
+                .map_err(|error| TurnError::Port(PortError(error.to_string())))?;
+        }
 
         // Keep the runtime-context snapshot current before the round measures what the person has said, so
         // the harness's own snapshot is never mistaken for a steered message.
@@ -1576,7 +1587,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_turns_tools_run_in_the_sessions_folder() {
         let session = RecordingSession::new();
-        session.open_in("/workspaces/b");
+        // A folder that exists: a turn refuses a session whose folder is gone (#56), see below.
+        let folder = scratch_folder("tools-cwd");
+        session.open_in(folder.to_str().unwrap());
         let model = ScriptedModel::new(vec![
             Step::Chunks(vec![
                 call_chunk("c1", "where", serde_json::json!({})),
@@ -1617,9 +1630,83 @@ pub(crate) mod tests {
         assert_eq!(result.text, "done");
         assert_eq!(
             seen.lock().unwrap().clone(),
-            Some(PathBuf::from("/workspaces/b")),
+            Some(folder.clone()),
             "the tool ran in the session's folder, not the sandbox's root (/w)"
         );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A folder of its own under the system temp directory, created and canonical (the crate has no
+    /// `tempfile`), for the tests that need a session folder that exists.
+    fn scratch_folder(label: &str) -> PathBuf {
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-agent-turn-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::canonicalize(&folder).unwrap()
+    }
+
+    /// #56: a turn in a session whose folder was deleted ran on, and a relative write put the folder back on
+    /// disk. DSH validates the working directory at every step's prompt assembly and fails the turn when the
+    /// session's original directory is gone (`working-directory: directory does not exist`). The turn fails
+    /// here naming the folder, before any model call or tool, and the folder stays gone.
+    #[tokio::test]
+    async fn a_turn_in_a_session_whose_folder_is_gone_fails_naming_it() {
+        let session = RecordingSession::new();
+        let folder = scratch_folder("gone");
+        session.open_in(folder.to_str().unwrap());
+        std::fs::remove_dir_all(&folder).unwrap();
+        let model = ScriptedModel::new(vec![
+            Step::Chunks(vec![
+                call_chunk("c1", "where", serde_json::json!({})),
+                done("tool_calls"),
+            ]),
+            Step::Chunks(vec![
+                Chunk::TextDelta {
+                    text: "done".into(),
+                },
+                done("stop"),
+            ]),
+        ]);
+        let ran = Arc::new(Mutex::new(false));
+        let record = Arc::clone(&ran);
+        let probe = tool_fn(
+            ToolSpec {
+                name: "where".into(),
+                description: "a call that must not run".into(),
+                parameters: serde_json::json!({}),
+            },
+            move |_args, _context| {
+                *record.lock().unwrap() = true;
+                Box::pin(async move { Ok(ToolResult::ok("ran")) })
+            },
+        );
+        let runtime = runtime(
+            Arc::clone(&model),
+            Arc::clone(&session),
+            registry_with(vec![probe]),
+            Arc::new(crate::ports::NoTurnHooks),
+        );
+        let error = run_turn(
+            &runtime,
+            RunTurnOptions::new(session_handle(), "scripted", "write a note"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "This workspace's folder no longer exists: {}",
+                folder.display()
+            )
+        );
+        assert!(!*ran.lock().unwrap(), "no tool ran");
+        assert!(!folder.exists(), "and the folder stays gone");
     }
 
     #[tokio::test]

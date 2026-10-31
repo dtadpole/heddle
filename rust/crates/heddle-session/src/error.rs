@@ -108,6 +108,11 @@ pub enum SessionError {
     /// the lock names one. `session "<id>" is already owned by an active write handle (process <pid>)`
     #[error("session \"{id}\" is already owned by an active write handle{}", holder_suffix(.pid))]
     AlreadyOwned { id: String, pid: Option<u32> },
+    /// A session's folder that is no longer there — deleted or moved outside heddle, or now a file (#56), refused
+    /// rather than recreated: `This workspace's folder no longer exists: <path>` (`MissingFolderError` in the
+    /// TypeScript build).
+    #[error("This workspace's folder no longer exists: {path}")]
+    MissingFolder { path: String },
 }
 
 /// ` (process <pid>)` when the lock named its holder, nothing otherwise.

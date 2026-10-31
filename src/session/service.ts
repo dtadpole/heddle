@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 
 import { canonicalPath } from '../paths.ts'
 import { isSandboxMode, type SandboxMode } from '../sandbox/service.ts'
-import { existingSessionNames, writeSessionDefinition, type SessionDefinition } from './definition.ts'
+import { existingSessionNames, requireFolder, writeSessionDefinition, type SessionDefinition } from './definition.ts'
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 
@@ -174,6 +174,13 @@ export class SessionService extends Service {
     const sourceHandle = this.store.open(id)
     if (sourceHandle === null) return { error: 'unavailable' }
     if (!inheritsAnswer(this.store.read(sourceHandle))) return { error: 'unavailable' }
+    /**
+     * The child's definition goes into the source's folder, so a folder that is gone refuses the fork (`MissingFolderError`)
+     * before anything is written, instead of being recreated with a `_sessions_` drawer in it (#56). DSH's fork creates no
+     * directory either: its workspace attach refuses a cwd that does not resolve (dsh-api-session-controller
+     * lib/index.js:902-909, dsh-workspace lib/index.js:111-122). Checked here, before the store forks, so no child is left.
+     */
+    requireFolder(source.cwd)
     /** The child records its parent, which is the provenance DSH's header keeps (`parentSession`). */
     const handle = this.store.fork(id, { parentSession: id })
     if (handle === null) return null
