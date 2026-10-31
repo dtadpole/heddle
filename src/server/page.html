@@ -3479,6 +3479,14 @@ function followLedgerTail() {
  * above, or `heddle workspace add`) promotes it into the tree, sessions and all.
  */
 let current = null
+/**
+ * The session the reader opened whose history could not be loaded, or null.
+ *
+ * DSH's Chat shows "Failed to load history: {message} ({code})" for such a session and its composer reads "Session
+ * unavailable" (R-developer-six-4). While this is set the composer says so and does not send; opening any session
+ * clears it.
+ */
+let unavailableSession = null
 /** The goal bar's last read, declared here because a module is strict mode and assigning it was not. */
 let goalView = null
 /** The generation of the goal read: an older response must not paint over a newer goal. */
@@ -6077,6 +6085,18 @@ function renderTodo() {
   )
 }
 
+/**
+ * DSH's Chat line for a session whose history cannot be loaded: "Failed to load history: {message} ({code})". The message
+ * is the server's own reason (`{"error": "no session …"}`), else the status text.
+ */
+function historyFailureText(status, statusText, failure) {
+  const reason =
+    failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
+      ? failure.error
+      : statusText || 'no reason given'
+  return `Failed to load history: ${reason} (${status})`
+}
+
 async function showSession(id) {
   /** A conversation replaces the Automation tasks page, and another session's task drawer is not this one's. */
   closeSchedulesPage()
@@ -6091,6 +6111,11 @@ async function showSession(id) {
   liveDecodeTokens = 0
   liveRoundStartedAt = null
   updateStatusBar()
+  // Opening a session ends an unavailable one's state; the read below sets it again if this one cannot be loaded.
+  if (unavailableSession !== null) {
+    unavailableSession = null
+    renderComposerState()
+  }
   current = id
   paintEmptyState()
   /** The access chip follows the session too: unknown until this session's own record has been read. */
@@ -6116,15 +6141,32 @@ async function showSession(id) {
        * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
        * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
        * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+       *
+       * What it says follows DSH (R-developer-six-4): Chat's "Failed to load history: {message} ({code})" where the
+       * conversation would be, and the composer's "Session unavailable". The earlier version painted the blank start
+       * page instead, which invited a new conversation and showed the server's answer nowhere, and it left the row
+       * selected — measured with a session removed after the tree was drawn and then clicked in that stale tree. The
+       * tree is therefore read again, so the row that no longer has a session goes, and the selection with it.
        */
+      const failure = await response.json().catch(() => ({}))
+      unavailableSession = id
       current = null
       const title = document.getElementById('session-title')
-      if (title !== null) title.textContent = 'No session'
+      if (title !== null) title.textContent = 'Session unavailable'
       const branch = document.getElementById('session-branch')
       if (branch !== null) branch.textContent = ''
+      const note = document.createElement('div')
+      note.className = 'turn denied load-error'
+      note.setAttribute('role', 'alert')
+      note.textContent = historyFailureText(response.status, response.statusText, failure)
+      log.append(note)
       paintEmptyState()
       applySessionAccess(null)
       paintScheduleHeader()
+      renderComposerState()
+      selectedPath = null
+      await renderTree()
+      markSelection()
       return
     }
     const body = await response.json()
@@ -7013,6 +7055,8 @@ function queuePreview(text) {
 
 /** Submit the draft, or steer what is waiting when there is nothing to submit. */
 function submitDraft(gesture) {
+  // An unavailable session takes no message, as DSH's composer for it does not; Enter reaches here past the button.
+  if (unavailableSession !== null) return
   const text = field.value.trim()
   if (text === '') {
     if (gesture === 'accelerated') void steerQueue()
@@ -7656,7 +7700,7 @@ function growComposer() {
 }
 function updateSendDisabled() {
   /** While a turn runs the button in that place is Stop, so the disabled state only concerns an idle send. */
-  sendButton.disabled = !anyRunning() && field.value.trim().length === 0
+  sendButton.disabled = unavailableSession !== null || (!anyRunning() && field.value.trim().length === 0)
 }
 field.addEventListener('input', () => {
   growComposer()
@@ -7705,9 +7749,11 @@ function renderComposerState() {
    * chord would do — "Cmd/Ctrl+Enter steers all queued messages". That is `canSteerQueue` in its own words.
    */
   const canSteerQueue = running && field.value.trim() === '' && queueOf().length > 0
-  field.placeholder = canSteerQueue
-    ? 'Cmd/Ctrl+Enter steers all queued messages'
-    : 'Message or run a task, / commands, @ files or sessions'
+  field.placeholder = unavailableSession !== null
+    ? 'Session unavailable'
+    : canSteerQueue
+      ? 'Cmd/Ctrl+Enter steers all queued messages'
+      : 'Message or run a task, / commands, @ files or sessions'
   updateSendDisabled()
   refreshRunningStatus()
   updateStatusBar()
