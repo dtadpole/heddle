@@ -17,14 +17,14 @@ import { describeContent, reasoningLevelFor } from '../llm/types.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
-import { renderSource } from './code.ts'
+import { renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
-import { renderMarkdown } from './markdown.ts'
+import { renderMarkdownOffThread } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
@@ -1002,7 +1002,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         response,
         200,
         'application/json',
-        `${JSON.stringify({ ...reading, ...renderSource(reading.path, reading.text) }, null, 2)}\n`,
+        `${JSON.stringify({ ...reading, ...(await renderSourceOffThread(reading.path, reading.text)) }, null, 2)}\n`,
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -2024,6 +2024,34 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** The session's own record, which is where a switch from the panel was written. */
     const meta = ctx.session.list().find((entry) => entry.id === id)
+    /** The statistics read the same events as the turns, before any await lets the log move on. */
+    const stats = (() => {
+      const projected = projectSessionStats(events)
+      let measured: { systemTokens: number; toolsTokens: number; messageTokens: number } | undefined
+      if (projected.contextBreakdown === undefined) {
+        try {
+          measured = ctx.context.measure(handle, { tools: ctx.tools.describe() })
+        } catch {
+          measured = undefined
+        }
+      }
+      const { contextBreakdown, contextBreakdownSource } = contextBreakdownWithFallback(projected.contextBreakdown, measured)
+      return {
+        ...projected,
+        ...(contextBreakdown !== undefined ? { contextBreakdown } : {}),
+        ...(contextBreakdownSource !== undefined ? { contextBreakdownSource } : {}),
+      }
+    })()
+    /**
+     * Every answer is rendered **off the event loop**, one after another (issue #19): a page opens this route on every
+     * load and every turn's end, and rendering a session's answers here on the server's only thread stood every other
+     * request still — measured, 7 s for one 30,000-item list answer, long enough for `/healthz` to miss the probes that
+     * make the supervisor kill the process.
+     */
+    const turns: (ChatTurn & { readonly html?: string })[] = []
+    for (const turn of scopeAttachmentUrls(transcriptTurns(events), id)) {
+      turns.push(turn.kind === 'assistant' ? { ...turn, html: await renderMarkdownOffThread(turn.text) } : turn)
+    }
     respond(
       response,
       200,
@@ -2068,34 +2096,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * DSH renders an assistant row's markdown once the row is **settled**, and this is the same decision
            * made on the server: the transcript is read once, so rendering here costs one pass and the page
            * never has to ask per turn. The live path (a turn that just ended) asks `/api/markdown` for the one
-           * answer it has, and both go through `renderMarkdown`, so there is one renderer and one allow-list.
+           * answer it has, and both go through `renderMarkdown` (off the event loop), so there is one renderer and one
+           * allow-list.
            */
-          turns: scopeAttachmentUrls(transcriptTurns(events), id).map((turn) =>
-            turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
-          ),
+          turns,
           /**
            * The composer's bottom statistics, from the same events as everything else in this answer.
            * The reference prints turns, steps, a token total with its cache-hit share, and a context share;
            * every one of those is a fact of this record, so they travel with it rather than being re-derived
            * by the page from whatever happened to be on screen.
            */
-          stats: (() => {
-            const projected = projectSessionStats(events)
-            let measured: { systemTokens: number; toolsTokens: number; messageTokens: number } | undefined
-            if (projected.contextBreakdown === undefined) {
-              try {
-                measured = ctx.context.measure(handle, { tools: ctx.tools.describe() })
-              } catch {
-                measured = undefined
-              }
-            }
-            const { contextBreakdown, contextBreakdownSource } = contextBreakdownWithFallback(projected.contextBreakdown, measured)
-            return {
-              ...projected,
-              ...(contextBreakdown !== undefined ? { contextBreakdown } : {}),
-              ...(contextBreakdownSource !== undefined ? { contextBreakdownSource } : {}),
-            }
-          })(),
+          stats,
         },
         null,
         2,
@@ -2192,7 +2203,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'text is required' })}\n`)
       return
     }
-    respond(response, 200, 'application/json', `${JSON.stringify({ html: renderMarkdown(body.text) })}\n`)
+    /** Off the event loop: one long answer must not stop every other request (issue #19). */
+    respond(response, 200, 'application/json', `${JSON.stringify({ html: await renderMarkdownOffThread(body.text) })}\n`)
     return
   }
 
