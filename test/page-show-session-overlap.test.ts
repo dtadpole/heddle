@@ -51,6 +51,9 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     let current = null, unavailableSession = null, selectedPath = null, view = 'chat';
     let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
     let showGeneration = 0;
+    // The running turns' rounds per session (the dock's guard): none is running here.
+    const runningSessions = new Set();
+    const turnRounds = new Map();
     const schedState = { drawer: null };
     const unreadSessions = new Set();
     const sessionMetas = new Map();

@@ -42,6 +42,8 @@ function harness(): Page {
     // The page keeps one queue per session; X holds one, so a recovery has something to pump.
     const queues = new Map([['X', []], ['Y', []]]);
     const runningSince = new Map();
+    // The running turns' rounds per session (the dock's guard, #142): a read that ends a turn forgets its rounds too.
+    const turnRounds = new Map();
     let runningTick = 0;
     const runningMarkedAt = new Map();
     const pumped = [];

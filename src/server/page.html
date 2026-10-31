@@ -7015,12 +7015,20 @@ async function showSession(id) {
   /** The header clock stops showing the previous session's reminders at once; this session's list is read below. */
   resetScheduleList(id)
   sessionStats = null
-  liveRounds = 0
+  /**
+   * The running turn's rounds are not in the fold the read below brings (it counts a turn's rounds when it ends,
+   * `turn/completed.rounds`), so a session whose turn is running keeps the rounds this page counted for it, and its open
+   * round's start (`turnRounds`, `noteRound`). Zeroing them dropped the dock to `0 steps` mid-turn whenever the page
+   * opened a running session: developer-ten's N1 open in `runTurn`'s `session` frame, a click on a running row, the
+   * stream's reset reopening the open one. Any other session opens with none.
+   */
+  const running = runningSessions.has(id) ? turnRounds.get(id) : undefined
+  liveRounds = running?.rounds ?? 0
+  liveRoundStartedAt = running?.startedAt ?? null
   liveUsage = undefined
   liveTurns = 0
   liveGenerationMs = 0
   liveDecodeTokens = 0
-  liveRoundStartedAt = null
   updateStatusBar()
   /**
    * Leaving an open New session placeholder takes its row away, as DSH's `sessionVisible` does the moment another session
@@ -7279,6 +7287,29 @@ function markRunning(id) {
   runningMarkedAt.set(id, ++runningTick)
 }
 
+/**
+ * Each running turn's rounds as this page has seen them, by session: `{ rounds, startedAt }`, counted from `model/request`
+ * for every session the stream names, and forgotten wherever the page ends the turn (beside each
+ * `runningSessions.delete`). The dock adds the open session's running rounds to the fold, which counts a turn's rounds
+ * only when it ends; `showSession` takes the opened session's from here, so opening a running session mid-turn does not
+ * drop the dock to `0 steps` (the guard asked for with #142, for developer-ten's N1 open in `runTurn`).
+ */
+const turnRounds = new Map()
+
+/**
+ * One `model/request` of `session`'s turn: another round of a turn that was running, else the first round of a new one.
+ * The open session's dock counts it at once (`liveRounds`) and times the round from here (`liveRoundStartedAt`).
+ */
+function noteRound(session, wasRunning) {
+  const before = wasRunning ? turnRounds.get(session) : undefined
+  const startedAt = performance.now()
+  turnRounds.set(session, { rounds: (before?.rounds ?? 0) + 1, startedAt })
+  if (session !== (current ?? composerKey)) return
+  liveRoundStartedAt = startedAt
+  liveRounds += 1
+  updateStatusBar()
+}
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale. */
   searchIndex = null
@@ -7325,6 +7356,7 @@ async function refreshSessions() {
         noteCompletion(id, true, false)
         runningSessions.delete(id)
         runningSince.delete(id)
+        turnRounds.delete(id)
         ended.push(id)
         changed = true
       }
@@ -7783,12 +7815,8 @@ events.addEventListener('session', (message) => {
      * the running row, so a goal-driven session showed no "Weaving" at all (the owner's "missing again").
      */
     refreshRunningStatus()
-    if (payload.session === (current ?? composerKey)) liveRoundStartedAt = performance.now()
     /** A round is one agent step: DSH's `steps` counts these, so the dock can count the running turn too. */
-    if (payload.session === (current ?? composerKey)) {
-      liveRounds += 1
-      updateStatusBar()
-    }
+    noteRound(payload.session, wasRunning)
   }
   else if (event.type === 'turn/failed') {
     /**
@@ -7797,6 +7825,7 @@ events.addEventListener('session', (message) => {
      */
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
+    turnRounds.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
     if (shown === null || payload.session === shown) {
@@ -7810,6 +7839,7 @@ events.addEventListener('session', (message) => {
     noteCompletion(payload.session, runningSessions.has(payload.session), false)
     runningSessions.delete(payload.session)
     runningSince.delete(payload.session)
+    turnRounds.delete(payload.session)
     /** A turn that ended waits on nobody; the approval poll would say so within two seconds, the end says it now. */
     pendingInteractions.delete(payload.session)
     paintRunningMarks()
@@ -9334,6 +9364,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
           noteCompletion(payload.session, runningSessions.has(payload.session), false)
           runningSessions.delete(payload.session)
           runningSince.delete(payload.session)
+          turnRounds.delete(payload.session)
           pendingInteractions.delete(payload.session)
           paintRunningMarks()
         }
@@ -9347,6 +9378,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
           noteCompletion(payload.session, runningSessions.has(payload.session), false)
           runningSessions.delete(payload.session)
           runningSince.delete(payload.session)
+          turnRounds.delete(payload.session)
           pendingInteractions.delete(payload.session)
           paintRunningMarks()
         }
