@@ -2602,9 +2602,15 @@ test('only a turn that edited files shows the Edited files card, under its own a
    * was added under each new answer, because the live path pinned every edited turn's card to the last answers counted
    * from the end. DSH's ChangedFiles card belongs to the turn that changed the files. The first turn writes a file;
    * the script is then rewritten (both builds read it per round) so the next two turns only answer.
+   *
+   * The write names a path relative to the folder its turn runs in. This page sends its first message from an empty
+   * install, which now opens on its Default workspace with the composer aimed at it (DSH's startup,
+   * dsh-client-ui-workspace lib/client.js:1620-1631, initializeDefaultWorkspace), so the turn runs in
+   * <home>/default-workspace. Measured on both builds: a write to the server's own working folder is then outside the
+   * session's folder and fails, and a failed write rightly shows no card, so an absolute path there judged nothing.
    */
-  const server = await startServer('edits-live', (work) => [
-    { toolCall: { name: 'write_file', arguments: { path: join(work, 'a.txt'), content: 'one\n' } }, reasoning: 'writing a.txt' },
+  const server = await startServer('edits-live', () => [
+    { toolCall: { name: 'write_file', arguments: { path: 'a.txt', content: 'one\n' } }, reasoning: 'writing a.txt' },
     { text: 'wrote a.txt' },
   ])
   const browser = await openBrowser()
