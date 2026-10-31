@@ -53,6 +53,8 @@ function harness(): Page {
     async function renderSettledAnswers() {}
     async function pumpQueue(key) { pumped.push(key) }
     async function showSession() {}
+    // The detached turns' waits (#128) are judged in page-feed-share.test.ts; this read only has to reach them.
+    const turnVerdicts = { endIdle() {} };
     const fetch = () => new Promise((resolve) => queue((sessions) => resolve({ ok: true, json: async () => sessions })));
     ${source('markRunning')}
     ${source('refreshSessions')}
