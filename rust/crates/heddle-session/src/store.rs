@@ -43,6 +43,7 @@ use crate::event::{AppendOptions, Events, NewEvent, SessionEvent, SessionHandle,
 use crate::layout::workspace_key;
 use crate::message::{Chunk, Message, RecordedMessage, Role};
 use crate::meta::{CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta};
+use crate::repair::interrupted_turn_closers;
 use crate::surface::{
     SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface, fork_seed,
     index_by_seq, is_surface_eligible,
@@ -197,13 +198,17 @@ fn remove_own_lock(path: &Path) {
 /// gives for free is supplied by hand: a holder that died without letting go leaves a file naming a pid that no
 /// longer exists, and that lock is removed and taken rather than blocking the session forever. A live holder is
 /// never expropriated: there is no expiry that could let a stalled writer's resumed appends tear the log.
-fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
+///
+/// Answers whether this process **took** the lock now (`true`) or already held it through another store
+/// (`false`): only a fresh take is a write-open after whatever wrote the session before, which is when an
+/// unfinished turn is closed ([`crate::repair`]).
+fn acquire_writer_lock(path: &Path, id: &str) -> Result<bool, SessionError> {
     let mut held = HELD_BY_PROCESS
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if let Some(count) = held.get_mut(path) {
         *count += 1;
-        return Ok(());
+        return Ok(false);
     }
     let own = std::process::id();
     let shown = path.to_string_lossy().into_owned();
@@ -224,7 +229,7 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
                     return Err(SessionError::io(shown, error));
                 }
                 held.insert(path.to_path_buf(), 1);
-                return Ok(());
+                return Ok(true);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(SessionError::io(shown, error)),
@@ -237,7 +242,7 @@ fn acquire_writer_lock(path: &Path, id: &str) -> Result<(), SessionError> {
         let holder = lock_holder(&text);
         if holder == Some(own) {
             held.insert(path.to_path_buf(), 1);
-            return Ok(());
+            return Ok(true);
         }
         if let Some(pid) = holder
             && process_alive(pid)
@@ -529,6 +534,9 @@ impl SessionStore {
         if let Some(team) = options.team_id.clone() {
             record.insert("teamId".to_string(), Value::String(team));
         }
+        if let Some(preset) = options.preset.clone() {
+            record.insert("preset".to_string(), Value::String(preset));
+        }
         record.insert("turns".to_string(), Value::from(0u64));
         let meta = SessionMeta::from_value(Value::Object(record)).expect("the record has an id");
         write_text(&handle.meta, &meta.to_file_text())?;
@@ -588,6 +596,34 @@ impl SessionStore {
         } else {
             next.set("title", Value::String(cleaned));
         }
+        let Some(meta_path) = self.meta_file(id) else {
+            return Ok(None);
+        };
+        write_text(&meta_path, &next.to_file_text())?;
+        Ok(Some(next))
+    }
+
+    /// Record the agent preset a session runs under, **only when it has none** (inventory A96).
+    ///
+    /// A session keeps its preset, so this never replaces one: it is how a session created before presets, or by a
+    /// path that named none, takes the current default once and then keeps it. The preset is trimmed, and a blank
+    /// one writes nothing. Answers the record as it now is; `Ok(None)` for an unknown session.
+    pub fn record_preset(
+        &self,
+        id: &str,
+        preset: &str,
+    ) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
+        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+            return Ok(None);
+        };
+        // `current.preset !== undefined`: a record that carries the key keeps it, whatever it holds.
+        let trimmed = preset.trim();
+        if current.as_map().contains_key("preset") || trimmed.is_empty() {
+            return Ok(Some(current));
+        }
+        let mut next = current;
+        next.set("preset", Value::String(trimmed.to_string()));
         let Some(meta_path) = self.meta_file(id) else {
             return Ok(None);
         };
@@ -670,6 +706,9 @@ impl SessionStore {
             origin: attribution.origin,
             delegation_depth: attribution.delegation_depth,
             team_id: attribution.team_id.clone(),
+            // The store's fork copies no preset, as the TypeScript one does not: the service's fork and a team's
+            // teammate record the source's with `record_preset` (inventory A96).
+            preset: None,
             id: attribution.id.clone(),
         })?;
 
@@ -949,6 +988,28 @@ impl SessionStore {
         }
     }
 
+    /// Whether a live writer holds the session: this process (through any store), or the live process its
+    /// lock names. A reader asks it before it shows a session's unfinished turn as closed
+    /// ([`crate::SessionService::events`]); a lock naming this process that this process does not hold is a
+    /// previous process's that had the same pid.
+    pub fn writer_held(&self, handle: &SessionHandle) -> bool {
+        let path = PathBuf::from(lock_path(handle));
+        if HELD_BY_PROCESS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&path)
+        {
+            return true;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        lock_holder(&text).is_some_and(|pid| pid != std::process::id() && process_alive(pid))
+    }
+
+    /// Taking the lock **fresh** is DSH's write-open, so a turn the previous writer left unfinished is closed
+    /// here, before the write that asked for the lock ([`crate::repair`], issue #5). A turn running in this
+    /// process holds the lock already and never reaches the closers.
     fn claim_locked(
         &self,
         state: &mut StoreState,
@@ -958,10 +1019,56 @@ impl SessionStore {
             return Ok(());
         }
         let path = PathBuf::from(lock_path(handle));
-        acquire_writer_lock(&path, &handle.id)?;
+        let fresh = acquire_writer_lock(&path, &handle.id)?;
         state.held.insert(handle.id.clone(), path);
         state.loaded.remove(&handle.id);
         state.surface_cache.remove(&handle.id);
+        if fresh {
+            self.load_locked(state, handle)?;
+            let events = state
+                .loaded
+                .get(&handle.id)
+                .expect("the log was just loaded")
+                .events
+                .clone();
+            self.record_locked(state, handle, interrupted_turn_closers(&events))?;
+        }
+        Ok(())
+    }
+
+    /// Append events whose seq and time are already assigned, in one write, and without the side effects of
+    /// `append`: no listener hears them and the meta's age does not move. The turn closers are the one caller —
+    /// a repair of what the log already holds, not activity — and DSH seeds them into a resumed session rather
+    /// than publishing them.
+    fn record_locked(
+        &self,
+        state: &mut StoreState,
+        handle: &SessionHandle,
+        records: Vec<SessionEvent>,
+    ) -> Result<(), SessionError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let loaded = state
+            .loaded
+            .get_mut(&handle.id)
+            .expect("the log is loaded before a record");
+        let mut bytes = Vec::new();
+        for record in &records {
+            let line = format!("{}\n", record.to_line());
+            if loaded.framed {
+                bytes.extend(encode_frame(&line));
+            } else {
+                bytes.extend(line.into_bytes());
+            }
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&handle.transcript)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(|error| SessionError::io(&handle.transcript, error))?;
+        Arc::make_mut(&mut loaded.events).extend(records.into_iter().map(Arc::new));
         Ok(())
     }
 
@@ -1804,6 +1911,65 @@ mod tests {
         let text = read_text(&handle.meta);
         assert!(!text.contains("\"model\""));
         assert!(!text.contains("reasoningEffort"));
+    }
+
+    /// Inventory A96: the preset is written at creation after `teamId` and before `turns`, the TypeScript literal's
+    /// order.
+    #[test]
+    fn a_created_session_records_its_preset_before_its_turns() {
+        let (_dir, store) = store();
+        let handle = store
+            .create(CreateOptions {
+                team_id: Some("session-lead".to_string()),
+                preset: Some("reader".to_string()),
+                ..CreateOptions::default()
+            })
+            .unwrap();
+        let meta = store.meta(&handle.id).unwrap();
+        assert_eq!(meta.preset(), Some("reader"));
+        let keys: Vec<&str> = meta.as_map().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["id", "created", "cwd", "teamId", "preset", "turns"]);
+    }
+
+    /// Inventory A96: `record_preset` writes a preset only when the session has none — trimmed, never replacing one,
+    /// and a blank one is a no-op — and answers the record as it now is.
+    #[test]
+    fn record_preset_writes_only_when_the_session_has_none_and_never_replaces() {
+        let (_dir, store) = store();
+        let handle = store.create(CreateOptions::default()).unwrap();
+        let unchanged = store.record_preset(&handle.id, "   ").unwrap().unwrap();
+        assert_eq!(unchanged.preset(), None, "a blank preset writes nothing");
+        assert!(!read_text(&handle.meta).contains("preset"));
+
+        let recorded = store
+            .record_preset(&handle.id, "  standard ")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.preset(), Some("standard"), "trimmed");
+        let keys: Vec<String> = store
+            .meta(&handle.id)
+            .unwrap()
+            .as_map()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys.last().map(String::as_str),
+            Some("preset"),
+            "a new key is appended, as the spread appends it"
+        );
+
+        let kept = store.record_preset(&handle.id, "reader").unwrap().unwrap();
+        assert_eq!(
+            kept.preset(),
+            Some("standard"),
+            "a session keeps its preset"
+        );
+        assert_eq!(store.meta(&handle.id).unwrap().preset(), Some("standard"));
+        assert_eq!(
+            store.record_preset("session-nobody", "reader").unwrap(),
+            None
+        );
     }
 
     fn note(role: &str, text: &str) -> NewEvent {

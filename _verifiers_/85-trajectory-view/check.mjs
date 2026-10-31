@@ -308,7 +308,14 @@ test('a browser renders the ledger, its timeline, and switches back to the conve
       })()`),
     )
     assert.ok(picked.scrollable, 'the ledger is long enough to scroll, so the position means something')
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 900))
+    /**
+     * The pick scrolls with `behavior: 'smooth'`, so the position moves over several frames; a fixed 900 ms read raced it
+     * under load (one gate run saw 0 -> 0, its re-run passed). Wait for the movement itself, up to 5 s, then judge it.
+     */
+    await browser
+      .waitFor(`Math.round(document.querySelector('.tr-pane').scrollTop) !== ${picked.before}`, 5000)
+      .catch(() => false)
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 300))
     const afterPick = await browser.evaluate(`Math.round(document.querySelector('.tr-pane').scrollTop)`)
     assert.notEqual(afterPick, picked.before, `picking the last tick moves the ledger (${picked.before} -> ${afterPick})`)
     assert.ok(afterPick > 0, 'the last-turn tick navigates away from the explicitly chosen top')

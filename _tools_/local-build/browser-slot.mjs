@@ -42,11 +42,12 @@ const VERSION_FILE = path.join(ROOT, 'browser-slot.version')
 // A free slot the first waiter has not taken for this long may go to the next waiter whose gate passes.
 const HEAD_GRACE_S = number('BROWSER_SLOT_HEAD_GRACE_SECONDS', 60)
 const freeSince = (n) => path.join(ROOT, `browser.free-since${n}`)
-// D-064: a new holder needs memory_pressure free >= 25% and disk free >= 20 GiB on the volume of the slot folder.
+// D-064: a new holder needs memory_pressure free >= 25%, and (D-067) disk free >= 16 GiB on the volume of the slot
+// folder; between 16 and 20 GiB the coordinator sweeps every pass instead of stopping the team.
 // Swap is no gate (macOS keeps stale pages there and grows it on demand); browser-cap's old swap keys are ignored.
-// browser-cap may move the lines ("min-free=25 disk-min=20"); the environment overrides both (tests).
+// browser-cap may move the lines ("min-free=25 disk-min=16"); the environment overrides both (tests).
 const MIN_FREE_PCT = 25
-const MIN_DISK_GB = 20
+const MIN_DISK_GB = 16
 
 export const lockDir = (n) => path.join(ROOT, n === 1 ? 'browser.lock' : `browser.lock${n}`)
 
@@ -89,7 +90,7 @@ function slotNumbers(cfg) {
   return [...Array.from({ length: cfg.count }, (_, i) => i + 1), ...extra.sort((a, b) => a - b)]
 }
 
-/** D-064: no new holder while memory_pressure reports under 25% free, or the slot folder's volume has under 20 GiB. */
+/** D-064: no new holder while memory_pressure reports under 25% free; D-067: or the slot folder's volume has under 16 GiB. */
 export function memoryGate(cfg = config()) {
   const fake = (name) => (env[name] !== undefined && env[name] !== '' ? Number(env[name]) : undefined)
   let free = fake('BROWSER_SLOT_FAKE_FREE_PCT')
@@ -107,7 +108,7 @@ export function memoryGate(cfg = config()) {
   const reading = `memory free ${free ?? '?'}%, disk ${disk === null ? '?' : disk.toFixed(1)} GiB free`
   if (free !== null && free < cfg.minFree) return { ok: false, reading, why: `memory free ${free}% < ${cfg.minFree}% (D-064)` }
   if (disk !== null && disk < cfg.minDisk)
-    return { ok: false, reading, why: `disk free ${disk.toFixed(1)} GiB < ${cfg.minDisk} GiB (D-064)` }
+    return { ok: false, reading, why: `disk free ${disk.toFixed(1)} GiB < ${cfg.minDisk} GiB (D-067)` }
   return { ok: true, reading, why: '' }
 }
 
