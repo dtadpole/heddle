@@ -7353,7 +7353,7 @@ window.heddlePage = {
     document.getElementById('model-trigger').click()
     if (!modelMenu.hidden && modelPane !== 'model') drillModelPane('model')
   },
-  /** DSH offers `/model` only where the model can be chosen: not in an addressed subagent's session. */
+  /** DSH offers `/model` only where the model can be chosen: not in an addressed subagent's session (a fork is not one). */
   modelSelectable: () => current === null || !subagentSessions.has(current),
   openFilePicker: () => document.getElementById('attach-file').click(),
   openAccessMenu: () => document.getElementById('access').click(),
@@ -12872,14 +12872,15 @@ const watermarks = new Map()
 const definitionOf = new Map()
 /** The ids `/api/sessions` last listed: a definition naming one of them is drawn as its session row, not as a folder row. */
 let listedSessions = new Set()
-/** The sessions a subagent runs (origin `subagent`, or a parent session), as the last session list named them (A103). */
+/**
+ * The sessions a subagent runs, as the last session list named them (A103): `origin: 'subagent'` only. A fork also
+ * names its source as `parentSession`, but it is a conversation of its own, where DSH offers /model.
+ */
 const subagentSessions = new Set()
 function noteSubagentSessions(metas) {
   subagentSessions.clear()
   for (const meta of Array.isArray(metas) ? metas : []) {
-    if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && (meta.origin === 'subagent' || typeof meta.parentSession === 'string')) {
-      subagentSessions.add(meta.id)
-    }
+    if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string' && meta.origin === 'subagent') subagentSessions.add(meta.id)
   }
 }
 

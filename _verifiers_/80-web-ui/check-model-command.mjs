@@ -142,6 +142,29 @@ test('/model opens the model list, the choice is the next turn\'s model, and the
     assert.ok(!JSON.stringify(bodies).includes('/model'), 'the /model line never reached the model')
     assert.equal(await browser.evaluate(`document.querySelectorAll('#log .hc-command, #log [data-kind="command"]').length`), 0, 'and drew no command row')
 
+    // A fork names its source as its parent session but is a conversation of its own: /model is offered there too.
+    const sessionsNow = await browser.evaluate(`fetch('/api/sessions').then((response) => response.json())`)
+    const source = sessionsNow[0].id
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree li[data-row-key="session:${source}"]')
+      const fork = [...row.querySelectorAll('.menu [role="menuitem"]')].find((item) => item.textContent.trim() === 'Fork session')
+      fork.click()
+      return true
+    })()`)
+    assert.ok(await browser.waitFor(`(async () => (await (await fetch('/api/sessions')).json()).length === 2)()`, 10_000), 'the session is forked')
+    const forked = (await browser.evaluate(`fetch('/api/sessions').then((response) => response.json())`)).find((meta) => meta.id !== source)
+    assert.equal(forked.parentSession, source, 'the fork names its source as its parent session')
+    assert.notEqual(forked.origin, 'subagent', 'and is not a subagent\'s')
+    assert.ok(await browser.waitFor(`document.querySelector('#tree li[data-row-key="session:${forked.id}"]') !== null`, 10_000), 'the fork is listed')
+    await browser.evaluate(`(() => { const li = document.querySelector('#tree li[data-row-key="session:${forked.id}"]'); (li.querySelector(':scope > .row') ?? li.firstElementChild).click(); return true })()`)
+    const forkHeading = typeof forked.title === 'string' && forked.title.length > 0 ? forked.title : forked.id
+    assert.ok(
+      await browser.waitFor(`document.getElementById('session-title').textContent === ${JSON.stringify(forkHeading)}`, 10_000).catch(() => false),
+      `the fork is open (${JSON.stringify(await browser.evaluate(`document.getElementById('session-title').textContent`))} vs ${JSON.stringify(forkHeading)})`,
+    )
+    await typeInto(browser, '/mod')
+    assert.ok(await browser.waitFor(`${MODEL_ROW} !== null`, 10_000).catch(() => false), 'the fork offers /model')
+
     // In Chinese, DSH's words.
     await chooseLanguage(browser, 'zh')
     await typeInto(browser, '/mod')
