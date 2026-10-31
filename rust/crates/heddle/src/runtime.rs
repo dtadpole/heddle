@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(roster.default, "standard");
         assert_eq!(
             roster.presets[0].tools, None,
-            "a preset that names no tools keeps none, not an empty list"
+            "a preset that names no tools is unrestricted (None), not narrowed to an empty list"
         );
         assert_eq!(roster.presets[1].tools, Some(vec!["read_file".to_owned()]));
 
