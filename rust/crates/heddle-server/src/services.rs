@@ -506,6 +506,14 @@ pub trait TodoService: Send + Sync {
     fn get(&self, session: &str) -> Option<Value>;
 }
 
+/// The turns a session runs besides the server's own, which a Stop must reach as well (#93): a goal round, a
+/// reminder's turn and a background job's notice turn are started by their rows through the agent runtime, which
+/// registers each with its live-turn registry. The binary supplies it from that registry.
+pub trait TurnInterrupter: Send + Sync {
+    /// Stop every turn in flight for `session`; whether there was one to stop.
+    fn interrupt(&self, session: &str) -> bool;
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -567,6 +575,8 @@ pub struct Harness {
     /// session a request creates runs under the one it names or the default. `None` — a profile without the row —
     /// answers the implicit roster (`heddle_config::preset_roster(None)`) and creates sessions with no preset.
     pub presets: Option<Arc<heddle_config::PresetRoster>>,
+    /// The live-turn registry a Stop also asks; `None`: the server's own runs are the only turns it stops.
+    pub interrupter: Option<Arc<dyn TurnInterrupter>>,
     /// The server process's working directory: where a turn with no folder starts its session, and where
     /// `POST /api/sessions` creates one when no branch is named.
     pub cwd: PathBuf,
@@ -595,6 +605,7 @@ impl Harness {
             markdown: None,
             stats: None,
             presets: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -640,6 +651,7 @@ impl Harness {
             markdown: None,
             stats: None,
             presets: None,
+            interrupter: None,
             cwd,
         }
     }
@@ -839,6 +851,11 @@ impl HarnessBuilder {
     /// The profile's agent presets (inventory A96).
     pub fn presets(mut self, roster: Arc<heddle_config::PresetRoster>) -> Self {
         self.harness.presets = Some(roster);
+        self
+    }
+
+    pub fn interrupter(mut self, service: Arc<dyn TurnInterrupter>) -> Self {
+        self.harness.interrupter = Some(service);
         self
     }
 
