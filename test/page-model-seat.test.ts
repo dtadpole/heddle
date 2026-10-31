@@ -237,6 +237,7 @@ test('#46: a message sent while the seat’s record is in flight waits for it', 
 
 test('#46: a turn into a session with no recorded selection carries the seat; one with a record carries none', { timeout: 5000 }, async () => {
   const { page } = harness()
+  page.setCurrent('BLANK')
   await page.turn('first in a blank session', 'BLANK')
   assert.equal(page.sends[0]?.endpoint, 'double-one', 'the blank session’s first turn carries the seat')
   assert.equal(page.sends[0]?.model, 'model-one')

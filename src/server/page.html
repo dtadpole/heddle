@@ -6376,7 +6376,11 @@ async function showSession(id) {
       return
     }
     const body = await response.json()
-    if (superseded()) return
+    if (superseded()) {
+      // An away session may retain its own model record, never publish over the current view.
+      if (current !== id) adoptViewSelection(id, body, selectionAt)
+      return
+    }
     /**
      * The session's own model choice, when it has one. A session that has never recorded one leaves the
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
@@ -8081,11 +8085,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   /** The folder and the seat as they were when the person sent, not as they are after the waits below. */
   const folder = activeFolder
   const seatAtSend = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  const shownAtSend = current
   // Every record in flight, including one chosen while this turn waited, reaches the server before the turn does.
   while (pendingSaves.size > 0) await Promise.all([...pendingSaves])
-  const carrySeat = target === null || !recordedSelections.has(target)
-  /** The target's own seat, as its records settled (a refusal restores it), else the seat shown at the send. */
-  const seat = (target !== null ? heldSeats.get(target) : undefined) ?? seatAtSend
+  const held = target !== null ? heldSeats.get(target) : undefined
+  // An unknown queued session must not inherit another session's currently shown model.
+  const carrySeat = target === null || (!recordedSelections.has(target) && (held !== undefined || target === shownAtSend))
+  /** The target's own seat, as its records settled (a refusal restores it), else its seat shown at the send. */
+  const seat = held ?? seatAtSend
   const response = await sendTurn({
     /**
      * The folder is named when a tree node is selected, and the server continues **that folder's**

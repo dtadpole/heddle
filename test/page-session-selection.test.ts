@@ -11,6 +11,10 @@ const selectStart = page.indexOf('async function selectSession(node)')
 const selectSource = page.slice(selectStart, page.indexOf('\n}', selectStart) + 2)
 const adoptStart = page.indexOf('function adoptViewSelection(id, body, selectionAt)')
 const adoptSource = page.slice(adoptStart, page.indexOf('\n}', adoptStart) + 2)
+const turnStart = page.indexOf('async function runTurn(')
+const turnSource = page.slice(turnStart, page.indexOf('\n}', turnStart) + 2)
+const seatStart = page.indexOf('function selectionForSeat(')
+const seatSource = page.slice(seatStart, page.indexOf('\n}', seatStart) + 2)
 assert.ok(start >= 0 && selectStart >= 0 && adoptStart >= 0, 'the page defines both session entry points and the model publication guard')
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -49,6 +53,10 @@ function harness() {
     let seat = '', activeFolder = null, selected = null;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map(), recordedSelections = new Set();
+    const pendingSaves = new Set(), QUEUE_KEY_NONE = '', sends = [];
+    const performance = { now: () => 0 };
+    function selectionForTurn() { return { endpoint: chosenEndpoint, model: chosenModel } }
+    async function sendTurn(body) { sends.push(body); return { ok: false, status: 400, text: async () => 'stop here' } }
     function setNote() {}
     function renderRing() {}
     function chooseSelected(path) { selected = path }
@@ -61,10 +69,13 @@ function harness() {
     ${adoptSource}
     ${source}
     ${selectSource}
-    ({ showSession, selectSession,
+    ${seatSource}
+    ${turnSource}
+    ({ showSession, selectSession, sends, recorded: (id) => recordedSelections.has(id),
+      turn: (key) => runTurn('queued message', key).catch(() => {}),
       chooseModel(endpoint) { latestSelection.set(current, ++selectionSeq); applySessionModel(endpoint, null, null) },
       state: () => ({ current, composerKey, seat, selected }) })
-  `, context) as { chooseModel(endpoint: string): void; showSession(id: string): Promise<void>; selectSession(node: {path:string;cwd:string;session:{id:string}}):Promise<void>; state(): { current: string; composerKey: string; seat: string; selected:string } }
+  `, context) as { recorded(id: string): boolean; sends: Record<string, unknown>[]; turn(key: string): Promise<void>; chooseModel(endpoint: string): void; showSession(id: string): Promise<void>; selectSession(node: {path:string;cwd:string;session:{id:string}}):Promise<void>; state(): { current: string; composerKey: string; seat: string; selected:string } }
   return { ...api, a, nextA, started, title, rows }
 }
 
@@ -123,4 +134,33 @@ test('an earlier view of the same session cannot replace its newer generation', 
   assert.equal(h.state().seat, 'A current model')
   assert.equal(h.title.textContent, 'A current')
   assert.deepEqual(h.rows, ['A current message'])
+})
+
+test('a queued A turn after selecting B carries no B seat when no A view arrived', { timeout: 5000 }, async () => {
+  const h = harness()
+  await h.showSession('B')
+  await h.turn('A')
+  assert.equal(h.sends[0]?.session, 'A')
+  assert.equal(h.sends[0]?.endpoint, undefined)
+  assert.equal(h.sends[0]?.model, undefined)
+  assert.equal(h.state().seat, 'B model')
+})
+
+test('a late A JSON view records A model state without publishing over B', { timeout: 5000 }, async () => {
+  const h = harness()
+  const body = deferred<unknown>()
+  const reading = deferred<void>()
+  const old = h.showSession('A')
+  await h.started.promise
+  h.a.resolve({ ok: true, json: () => { reading.resolve(); return body.promise } })
+  await reading.promise
+  await h.showSession('B')
+  body.resolve({ title: 'A title', endpoint: 'A model', turns: [{ kind: 'user', text: 'A message' }] })
+  await old
+  assert.equal(h.recorded('A'), true, 'late JSON retains A’s own durable model record')
+  await h.turn('A')
+  assert.equal(h.sends[0]?.endpoint, undefined, 'A now has a recorded selection, so the server keeps it')
+  assert.equal(h.state().seat, 'B model')
+  assert.equal(h.title.textContent, 'B title')
+  assert.deepEqual(h.rows, ['B message'])
 })
