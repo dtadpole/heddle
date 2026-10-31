@@ -493,6 +493,14 @@ impl SessionStore {
                 .into_owned(),
         };
 
+        // A title is cleaned as DSH cleans an accepted one (`title_text`); one with nothing visible left
+        // is not written.
+        let title = options
+            .title
+            .as_deref()
+            .map(crate::title_text::clean_session_title)
+            .filter(|title| !title.is_empty());
+
         // The record's key order is the TypeScript literal's: an absent option is not written.
         let mut record = Map::new();
         record.insert("id".to_string(), Value::String(id.clone()));
@@ -502,7 +510,7 @@ impl SessionStore {
             ("endpoint", options.endpoint.clone()),
             ("model", options.model.clone()),
             ("reasoningEffort", options.reasoning_effort.clone()),
-            ("title", options.title.clone()),
+            ("title", title),
             ("parentSession", options.parent_session.clone()),
         ] {
             if let Some(value) = value {
@@ -541,6 +549,10 @@ impl SessionStore {
     }
 
     /// Retitle a session; a blank title deletes the key. `Ok(None)` when there is no such session.
+    ///
+    /// The title is cleaned as DSH cleans an accepted one first (`title_text`, `dsh-session-title`
+    /// `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80
+    /// UTF-8 bytes; one with nothing visible left clears, as a blank one does (the route refuses it).
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
         let _meta = self.meta_guard();
         self.rename_locked(id, title)
@@ -569,12 +581,12 @@ impl SessionStore {
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(None);
         };
-        let trimmed = title.trim();
+        let cleaned = crate::title_text::clean_session_title(title);
         let mut next = current;
-        if trimmed.is_empty() {
+        if cleaned.is_empty() {
             next.remove("title");
         } else {
-            next.set("title", Value::String(trimmed.to_string()));
+            next.set("title", Value::String(cleaned));
         }
         let Some(meta_path) = self.meta_file(id) else {
             return Ok(None);
