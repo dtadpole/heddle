@@ -322,6 +322,16 @@ impl ModelService {
         &self.model_lists
     }
 
+    /// The request a call would send after the `model/request` waterfall, without sending it.
+    ///
+    /// The turn loop records each model request before the call, and the record must name what the call sends:
+    /// a selection policy on this waterfall (the server's running-turn rule) may move a step to another endpoint,
+    /// model or level (issue #14). [`ModelService::stream`] applies the same waterfall again on the way to the
+    /// adapter, so a listener must leave a request it already rewrote as it is, which the selection rule does.
+    pub fn resolve(&self, request: &GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        self.request_through_hooks(request)
+    }
+
     /// Call one endpoint and stream the answer (`stream`). `NO_ENDPOINT` is returned before any stream exists.
     pub fn stream(&self, request: GenerateRequest) -> Result<ChunkStream, ModelError> {
         self.adapter_for(&request.endpoint)?;
