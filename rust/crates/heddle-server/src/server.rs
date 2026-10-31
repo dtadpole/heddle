@@ -1904,7 +1904,9 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
     let folder = body.non_empty("folder").map(canonical_path);
-    let title: String = prompt.chars().take(60).collect();
+    // A session this route opens is born untitled, as DSH's is (#68): its first message writes the fallback name and
+    // the session layer's title coordinator asks the model for the title (heddle_session::title). A title given here
+    // would read as a person's name, and no title would ever be generated.
     // A one-shot subagent's session takes no turn from here, refused before the session is opened so the child's log
     // gets nothing (web.ts asks `subagentTurnRefusal` at the same point).
     if let Some(resume) = resume {
@@ -1940,7 +1942,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             folder,
             OpenAt {
                 fresh: body.bool("new") == Some(true),
-                title: Some(title),
+                title: None,
                 selection: born.clone(),
                 preset: born_preset.clone(),
             },
@@ -1949,7 +1951,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         sessions.start(StartSession {
             resume: None,
             cwd: Some(state.harness().cwd.clone()),
-            title: Some(title),
+            title: None,
             selection: born.clone(),
             preset: born_preset.clone(),
         })
@@ -3567,6 +3569,99 @@ mod tests {
         let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
         assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
         assert!(body_text(&bytes).contains("event: done"));
+    }
+
+    /// A runner that writes what the agent loop writes first into a real store: the prompt as the user message.
+    struct RecordingTurns(heddle_session::SessionService);
+
+    impl TurnRunner for RecordingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let service = self.0.clone();
+            Box::pin(async move {
+                let handle = service
+                    .open(&request.session)
+                    .expect("the session the route opened");
+                service
+                    .user(&handle, &request.prompt, None)
+                    .expect("the user message");
+                Ok(TurnOutcome::default())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_the_turn_route_opens_is_born_untitled_so_its_first_prompt_names_it() {
+        // #68: DSH writes no title when a session is created. dsh-session-title writes the fallback from the first
+        // eligible human message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session
+        // with no title yet (:387). The turn route opened its session titled with the prompt's first sixty characters,
+        // so the first message wrote no fallback and the title coordinator asked nothing (heddle_session::title).
+        use crate::adapters::StoreSessions;
+        const PROMPT: &str = "Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.";
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-turn-route-title-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(scratch.join("ws")).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let inner = heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        );
+        let harness = Harness::new(
+            Arc::new(StoreSessions::new(inner.clone())),
+            Arc::new(Models),
+            Arc::new(RecordingTurns(inner.clone())),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-route-title")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let fallback = heddle_session::title_from(PROMPT);
+        let cut: String = PROMPT.chars().take(60).collect();
+        for body in [
+            json!({"prompt": PROMPT, "folder": scratch.join("ws"), "new": true}),
+            json!({"prompt": PROMPT}),
+        ] {
+            let before: Vec<String> = inner
+                .list()
+                .iter()
+                .map(|meta| meta.id().to_owned())
+                .collect();
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+            let made: Vec<Option<String>> = inner
+                .list()
+                .iter()
+                .filter(|meta| !before.iter().any(|id| id == meta.id()))
+                .map(|meta| meta.title().map(str::to_owned))
+                .collect();
+            assert_eq!(made.len(), 1, "{body}: the turn opened one new session");
+            assert_eq!(
+                made[0].as_deref(),
+                Some(fallback.as_str()),
+                "{body}: the first message wrote the fallback, cut at a word, which a generated title may replace"
+            );
+            assert_ne!(made[0].as_deref(), Some(cut.as_str()), "{body}");
+        }
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     /// A runner that counts the turns it is asked to run.
