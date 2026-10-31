@@ -322,7 +322,10 @@ fn record_unfinished(
     };
     let mut completed = serde_json::Map::from_iter([
         ("text".to_owned(), serde_json::json!(progress.text)),
-        ("reasoning".to_owned(), serde_json::json!(progress.reasoning)),
+        (
+            "reasoning".to_owned(),
+            serde_json::json!(progress.reasoning),
+        ),
         (
             "finishReason".to_owned(),
             serde_json::json!(if stopped { "aborted" } else { "error" }),
@@ -331,10 +334,8 @@ fn record_unfinished(
         ("denials".to_owned(), serde_json::json!(progress.denials)),
         ("ended".to_owned(), serde_json::json!([reason])),
     ]);
-    let mut closed = serde_json::Map::from_iter([(
-        "rounds".to_owned(),
-        serde_json::json!(progress.rounds),
-    )]);
+    let mut closed =
+        serde_json::Map::from_iter([("rounds".to_owned(), serde_json::json!(progress.rounds))]);
     if stopped {
         closed.insert("stopped".to_owned(), serde_json::json!(true));
     } else {
