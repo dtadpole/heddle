@@ -987,8 +987,16 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
-    // After the write, as with `onEvent`: a listener never announces a title the record does not hold.
-    this.onRenamed?.(id, next.title ?? '')
+    /**
+     * After the write, as with `onEvent`: a listener never announces a title the record does not hold. A listener that
+     * throws is logged and swallowed: the rename has landed, and the first-message fallback that renames inside
+     * userContent must not fail because an announcement did (developer-eight's review of #33).
+     */
+    try {
+      this.onRenamed?.(id, next.title ?? '')
+    } catch (error) {
+      this.warn(`heddle: a rename listener failed for ${id}: ${error instanceof Error ? error.message : String(error)}`)
+    }
     return next
   }
 

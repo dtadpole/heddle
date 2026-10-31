@@ -524,14 +524,15 @@ impl SessionStore {
     }
 
     /// Announce every title this store writes from now on to `listener` ([`RenameListener`]). A second call replaces
-    /// the first.
+    /// the first, so a store announces to one server: a second router over the same store takes the announcements
+    /// from the first (no in-tree path builds two).
     pub fn on_renamed(&self, listener: RenameListener) {
         *self.renamed.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
     }
 
     /// Tell the rename listener, if any, about a title just written. Called with the meta lock released, as the event
-    /// listener is, so a listener may read the store.
-    fn announce_title(&self, meta: &SessionMeta) {
+    /// listener is, so a listener may read the store; the title service calls it once its own lock is released too.
+    pub(crate) fn announce_title(&self, meta: &SessionMeta) {
         let listener = self
             .renamed
             .lock()
@@ -725,27 +726,23 @@ impl SessionStore {
     }
 
     /// Write a generated title only while the session still carries `expected` — the name the call started from.
-    /// Answers whether it wrote.
+    /// Answers the record it wrote, if it wrote. It does **not** announce: the caller holds its own lock across this
+    /// write and calls [`Self::announce_title`] once that lock is released, so a listener that calls back into the
+    /// session service cannot deadlock (developer-eight's review of #33).
     pub(crate) fn rename_if_title(
         &self,
         id: &str,
         expected: &str,
         title: &str,
-    ) -> Result<bool, SessionError> {
-        let renamed = {
-            let _meta = self.meta_guard();
-            let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
-                return Ok(false);
-            };
-            if current.title().unwrap_or("") != expected {
-                return Ok(false);
-            }
-            self.rename_locked(id, title)?
+    ) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
+        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+            return Ok(None);
         };
-        if let Some(meta) = &renamed {
-            self.announce_title(meta);
+        if current.title().unwrap_or("") != expected {
+            return Ok(None);
         }
-        Ok(renamed.is_some())
+        self.rename_locked(id, title)
     }
 
     /// `rename` with the meta lock already held.
