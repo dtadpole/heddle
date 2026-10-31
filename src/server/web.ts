@@ -24,6 +24,7 @@ import { renderMarkdown } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
+import { type InventoryLoader, readPluginInventory } from '../config/plugin-inventory.ts'
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
@@ -123,6 +124,12 @@ export interface WebServerOptions {
    * `double` was configured.
    */
   readonly defaultEndpoint?: string
+  /**
+   * The module name each configured row declared, by loader entry id, for `GET /api/plugin-inventory`
+   * (`declaredModuleNames` in `../config/plugin-inventory.ts`). Without it an entry shows the name the loader
+   * holds, which for a relative row is the `file://` URL `boot` resolved it to.
+   */
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
   /**
    * The active profile's patch as a writable surface (`GET /api/settings`, `GET` and `POST
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
@@ -294,6 +301,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
       ...(options.defaultEndpoint !== undefined ? { defaultEndpoint: options.defaultEndpoint } : {}),
+      ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
       ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
       if (!response.writableEnded && !response.destroyed) {
@@ -357,22 +365,46 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
-        clearInterval(heartbeat)
-        detachApprovals?.()
-        for (const client of subscribers) {
-          try {
-            client.end()
-          } catch {
-            // the client is already gone
-          }
-        }
-        subscribers.clear()
-        server.close(() => resolvePromise())
-        server.closeAllConnections?.()
-        for (const socket of sockets) socket.destroy()
+        void stopRunningTurns().finally(() => closeNow(resolvePromise))
       }),
   }
+
+  /**
+   * A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each running
+   * command's process group is ended and its call is recorded as interrupted before the process goes. Without it the
+   * server waited for the command to finish on its own and wrote nothing (live-testing issue #6); DSH cancels its
+   * agents at teardown (`dsh-bash-local` graceMs 3000).
+   */
+  async function stopRunningTurns(): Promise<void> {
+    let stopping = 0
+    for (const id of [...controllers.keys()]) stopping += abortSession(controllers, id)
+    if (stopping === 0) return
+    const deadline = Date.now() + SHUTDOWN_GRACE_MS
+    while ([...running.values()].some((count) => count > 0) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  /** End the subscribers, stop accepting and destroy the sockets that remain (see `close` above). */
+  function closeNow(resolvePromise: () => void): void {
+    clearInterval(heartbeat)
+    detachApprovals?.()
+    for (const client of subscribers) {
+      try {
+        client.end()
+      } catch {
+        // the client is already gone
+      }
+    }
+    subscribers.clear()
+    server.close(() => resolvePromise())
+    server.closeAllConnections?.()
+    for (const socket of sockets) socket.destroy()
+  }
 }
+
+/** How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results. */
+const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
   /** The settings surface, when the server was started with one. */
@@ -422,6 +454,7 @@ interface RequestState {
   readonly maxRounds: number
   readonly quiet?: boolean
   readonly defaultEndpoint?: string
+  readonly pluginModuleNames?: ReadonlyMap<string, string>
 }
 
 /** One request, routed and fenced. */
@@ -849,6 +882,17 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return window === undefined ? entry : { ...entry, contextWindow: window, contextWindowSource: 'provider-models' }
     })
     respond(response, 200, 'application/json', `${JSON.stringify({ ...described, endpoints: withWindows }, null, 2)}\n`)
+    return
+  }
+
+  /**
+   * The plugin inventory, DSH's read-only `pluginInventory/list`: every non-group loader entry, in loader order,
+   * with its declared module name, whether it is enabled and its fiber's phase, read from the loader now. No
+   * `managementAvailable`, because nothing here can change the profile.
+   */
+  if (url.pathname === '/api/plugin-inventory' && request.method === 'GET') {
+    const loader = (ctx as unknown as { readonly loader?: InventoryLoader }).loader
+    respond(response, 200, 'application/json', `${JSON.stringify(readPluginInventory(loader, state.pluginModuleNames), null, 2)}\n`)
     return
   }
 
@@ -2288,7 +2332,13 @@ async function readJson(request: IncomingMessage, response: ServerResponse): Pro
     }
   }
   try {
-    return JSON.parse(raw.length === 0 ? '{}' : raw) as Record<string, unknown>
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    // null is the helper's already-answered sentinel, never an admitted request body (Refs #71).
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return null
+    }
+    return parsed as Record<string, unknown>
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return null
@@ -2432,6 +2482,26 @@ export function sessionRequestSelection(
   }
 }
 
+/**
+ * The refusal for a turn that names a session this server does not hold, or `null` when it holds it (or when the
+ * turn names none and so starts one).
+ *
+ * The answer is DSH's (`session/not-found`, `dsh-api-session-controller`) in this server's shape for the other
+ * session routes (`404`, `{"error": "no session <id>"}`), and the Rust server answers the same. The route used to
+ * reach the resume, which threw and came back as a `500 internal error` naming the session root on disk (DSH parity
+ * R-developer-seven-2). A string that is not a session id names no session either: it is not echoed back, and it is
+ * never used as a path (`open` is asked only about a well-formed id, the same shape as the Rust `SessionId`).
+ */
+export function unknownTurnSession(
+  session: unknown,
+  open: (id: string) => unknown,
+): { error: string; code: 'session/not-found' } | null {
+  if (typeof session !== 'string' || session.length === 0) return null
+  const wellFormed = /^session-[0-9a-fA-F-]{36}$/.test(session)
+  if (wellFormed && open(session) !== null) return null
+  return { error: wellFormed ? `no session ${session}` : 'no session with that id', code: 'session/not-found' }
+}
+
 /** Run one turn and stream its session events back as they are written. */async function handleTurn(ctx: Context, request: IncomingMessage, response: ServerResponse, state: RequestState): Promise<void> {
   let raw = ''
   for await (const chunk of request) {
@@ -2454,7 +2524,12 @@ export function sessionRequestSelection(
     preset?: string
   }
   try {
-    body = JSON.parse(raw.length === 0 ? '{}' : raw) as typeof body
+    const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      respond(response, 400, 'text/plain', 'the body must be a JSON object\n')
+      return
+    }
+    body = parsed as typeof body
   } catch {
     respond(response, 400, 'text/plain', 'the body must be JSON\n')
     return
@@ -2524,9 +2599,16 @@ export function sessionRequestSelection(
     ...(bornPreset !== undefined ? { preset: bornPreset } : {}),
   }
   /**
-   * A one-shot subagent's session takes no turn from here (`subagentTurnRefusal`), and the refusal comes before the session
-   * is opened, so a refused request writes nothing into the child's log.
+   * A turn for a session that does not exist is the client's mistake: `404` with DSH's `session/not-found`
+   * ([`unknownTurnSession`]), before anything is opened or written. A one-shot subagent's session takes no turn from
+   * here (`subagentTurnRefusal`), and that refusal also comes before the session is opened, so a refused request writes
+   * nothing into the child's log. The existence check goes first: a subagent refusal is about a session that is there.
    */
+  const unknown = unknownTurnSession(body.session, (id) => ctx.session.store.open(id))
+  if (unknown !== null) {
+    respond(response, 404, 'application/json', `${JSON.stringify(unknown)}\n`)
+    return
+  }
   if (typeof body.session === 'string' && body.session.length > 0) {
     const resumeId = body.session
     const resumed = ctx.session.list().find((entry) => entry.id === resumeId)

@@ -2037,8 +2037,11 @@ test('the running clock survives navigating away and back', async (context) => {
      * because the row must leave the moment the panel shows a session that is not running.
      */
     await browser.evaluate(`fetch('/api/workspaces', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: ${JSON.stringify(server.work)} }) })`)
-    const other = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)} }) }).then((r) => r.json()).then((body) => body.session?.id ?? body.id ?? null)`)
+    const other = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)}, new: true }) }).then((r) => r.json()).then((body) => body.session?.id ?? body.id ?? null)`)
     assert.ok(typeof other === 'string' && other.startsWith('session-'), `a second session exists (${other})`)
+    assert.notEqual(other, session, 'idle destination must differ from the running session')
+    const idle = await browser.evaluate(`fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.id === ${JSON.stringify(other)})?.running ?? null)`)
+    assert.equal(idle, false, 'the navigation destination is idle')
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(other)})`)
     assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") === null', 15_000), 'the row leaves with the view')
     /**
@@ -2452,5 +2455,30 @@ test('over-budget inline markdown is escaped promptly and the server keeps answe
       assert.ok(Date.now() - start < 5000, 'rendering stays within the response budget')
       assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2000) })).status, 200)
     }
+  } finally { await server.close() }
+})
+
+
+test('markdown null or primitive JSON is answered with validation, never left hanging', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('markdown-json-shape')
+  try {
+    const cookie = await cookieFor(server.url)
+    for (const path of ['/api/markdown', '/api/turn']) {
+    for (const body of ['null', '[]', 'true', '42', '"text"']) {
+      const response = await fetch(new URL(path, server.url), {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body,
+        signal: AbortSignal.timeout(2500),
+      })
+      assert.equal(response.status, 400, `Refs #71: ${path} ${body} gets a validation response`)
+      assert.ok((await response.text()).length > 0, 'validation has a reason')
+    }
+    }
+    const good = await fetch(new URL('/api/markdown', server.url), {
+      method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ text: '**valid**' }), signal: AbortSignal.timeout(2500),
+    })
+    assert.equal(good.status, 200, 'valid object still renders')
+    assert.match((await good.json()).html, /<strong>valid<\/strong>/)
+    assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2500) })).status, 200)
   } finally { await server.close() }
 })

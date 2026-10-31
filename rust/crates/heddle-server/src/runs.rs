@@ -149,6 +149,31 @@ impl RunRegistry {
         }
         stopped
     }
+
+    /// Shutdown: stop every session's turns, as [`Self::abort`] stops one session's. A restart must end the
+    /// commands its turns started and close their calls as interrupted, as DSH's teardown cancels its agents
+    /// (live-testing issue #6: the command ran on orphaned and the log recorded nothing).
+    pub fn abort_all(&self) -> usize {
+        let sessions: Vec<String> = self
+            .inner
+            .lock()
+            .expect("the run registry lock")
+            .controllers
+            .keys()
+            .cloned()
+            .collect();
+        sessions.iter().map(|session| self.abort(session)).sum()
+    }
+
+    /// Whether any session still has a turn in flight; shutdown waits on it after [`Self::abort_all`].
+    pub fn any_running(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("the run registry lock")
+            .running
+            .values()
+            .any(|count| *count > 0)
+    }
 }
 
 /// A running turn's hold on the registry. Dropping it removes its handle, decrements the count, and on the
@@ -313,6 +338,32 @@ mod tests {
         drop(first);
         drop(second);
         assert_eq!(registry.running("s"), 0);
+    }
+
+    #[test]
+    fn abort_all_stops_every_sessions_turns_and_any_running_follows_the_guards() {
+        // Issue #6: a shutdown stops every running turn, then waits for them to settle.
+        let (clock, _) = stepped_clock(1);
+        let registry = RunRegistry::with_clock(clock);
+        assert!(!registry.any_running());
+        let one = registry.begin("a");
+        let two = registry.begin("b");
+        assert!(registry.any_running());
+        assert_eq!(registry.abort_all(), 2);
+        assert!(one.is_cancelled() && two.is_cancelled());
+        assert_eq!(
+            registry.abort_all(),
+            0,
+            "a second shutdown finds nothing to stop"
+        );
+        assert!(
+            registry.any_running(),
+            "stopped turns still run until they settle"
+        );
+        drop(one);
+        assert!(registry.any_running());
+        drop(two);
+        assert!(!registry.any_running());
     }
 
     #[test]

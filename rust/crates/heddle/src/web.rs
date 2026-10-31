@@ -19,7 +19,7 @@ use heddle_server::services::{
 };
 use serde_json::Value;
 
-use crate::boot::Boot;
+use crate::boot::{Boot, FiberState};
 use crate::cli::Args;
 use crate::output::Output;
 use crate::{Exit, Invocation};
@@ -328,13 +328,16 @@ fn page_routers(
     env: &heddle_config::Env,
     nominated: Option<&str>,
 ) -> Vec<axum::Router> {
+    // The plugin inventory describes the tree itself, so it answers whether or not a session store loaded.
+    let mut routers = vec![plugin_inventory_router(boot)];
     let Some(host) = page_host(boot, env) else {
-        return Vec::new();
+        return routers;
     };
-    let mut routers = vec![
-        heddle_web_files::routes::mount(axum::Router::new(), host.clone()),
-        heddle_web_trajectory::routes::router(host.clone()),
-    ];
+    routers.push(heddle_web_files::routes::mount(
+        axum::Router::new(),
+        host.clone(),
+    ));
+    routers.push(heddle_web_trajectory::routes::router(host.clone()));
     if let Some(composer) = composer_host(boot, &host, nominated) {
         routers.push(heddle_web_composer::router(composer));
     }
@@ -351,6 +354,48 @@ fn page_routers(
             .map(|jobs| jobs.registry.clone()),
     ));
     routers
+}
+
+/// `GET /api/plugin-inventory`: DSH's read-only `pluginInventory/list` over the booted tree, built by
+/// `heddle_config::plugin_inventory` from the composed rows and the loader's entries.
+///
+/// Read once, when the server is composed, and that is the live answer: this loader starts every row
+/// synchronously and reloads none, and `web` refuses a tree with an entry still pending, so the phases
+/// [`crate::boot::load`] left are the phases for the server's whole life. They change only at
+/// [`Boot::dispose`], after the server has stopped. (The TypeScript build reads its Cordis loader on every
+/// request, because a Cordis fiber can change phase while the server runs.)
+fn plugin_inventory_router(boot: &Boot) -> axum::Router {
+    let snapshot = Arc::new(plugin_inventory_of(boot));
+    axum::Router::new().route(
+        "/api/plugin-inventory",
+        axum::routing::get(move || {
+            let snapshot = Arc::clone(&snapshot);
+            async move { heddle_server::respond::json(axum::http::StatusCode::OK, &*snapshot) }
+        }),
+    )
+}
+
+/// The inventory of a booted tree: its composed rows, paired with the loader's entries and their states.
+fn plugin_inventory_of(boot: &Boot) -> heddle_config::PluginInventorySnapshot {
+    let loaded: Vec<_> = boot
+        .entries
+        .iter()
+        .map(|entry| (entry.id.clone(), fiber_phase(entry.state)))
+        .collect();
+    heddle_config::plugin_inventory(&boot.rows, &loaded)
+}
+
+/// A loader state as the inventory spells it: DSH's `FIBER_PHASE`, where a disposed entry has no phase.
+fn fiber_phase(state: FiberState) -> Option<heddle_config::PluginFiberPhase> {
+    use heddle_config::PluginFiberPhase as Phase;
+    match state {
+        FiberState::Pending => Some(Phase::Pending),
+        FiberState::Loading => Some(Phase::Loading),
+        FiberState::Active => Some(Phase::Active),
+        FiberState::Failed => Some(Phase::Failed),
+        FiberState::Disposed => None,
+        FiberState::Unloading => Some(Phase::Unloading),
+    }
 }
 
 /// `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`: the active profile's patch
@@ -1316,8 +1361,8 @@ mod tests {
         assert_eq!(meta["endpoint"], "scripted");
         assert_eq!(
             page_routers(&boot, &heddle_config::Env::default(), None).len(),
-            5,
-            "files, trajectory, the composer, the reminder routes and the job routes (each 503 without its row)"
+            6,
+            "the plugin inventory, files, trajectory, the composer, the reminder routes and the job routes (each 503 without its row)"
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -1571,6 +1616,67 @@ mod tests {
         // A nominated default that exists wins.
         service.nominate_default("second");
         assert_eq!(models.default_endpoint().as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn the_plugin_inventory_lists_each_row_with_the_state_the_loader_left_it_in() {
+        use crate::builtins::ComponentRef;
+        let composed = |id: &str, name: &str, disabled: bool| heddle_config::ComposedRow {
+            row: heddle_config::EntryRow {
+                id: Some(id.to_owned()),
+                name: name.to_owned(),
+                disabled: disabled.then_some(true),
+                ..heddle_config::EntryRow::default()
+            },
+            position: 0,
+            fields: Vec::new(),
+        };
+        let entry = |id: &str, name: &str, state: FiberState| crate::boot::Entry {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            component: ComponentRef::Unresolved(name.to_owned()),
+            requires: Vec::new(),
+            state,
+            error: None,
+        };
+        let mut boot = empty_boot();
+        boot.rows = vec![
+            composed("session", "./src/plugins/session.ts", false),
+            composed("goal-tool", "./src/plugins/goal-tool.ts", true),
+            composed("todo-tool", "./src/plugins/todo-tool.ts", false),
+            composed("gone", "./gone.ts", false),
+        ];
+        boot.entries = vec![
+            entry("session", "./src/plugins/session.ts", FiberState::Active),
+            entry(
+                "todo-tool",
+                "./src/plugins/todo-tool.ts",
+                FiberState::Failed,
+            ),
+            entry("gone", "./gone.ts", FiberState::Disposed),
+        ];
+        assert_eq!(
+            serde_json::to_value(plugin_inventory_of(&boot)).unwrap(),
+            json!({"entries": [
+                {"entryId": "session", "moduleName": "./src/plugins/session.ts", "enabled": true, "fiberPhase": "active"},
+                {"entryId": "goal-tool", "moduleName": "./src/plugins/goal-tool.ts", "enabled": false, "fiberPhase": null},
+                {"entryId": "todo-tool", "moduleName": "./src/plugins/todo-tool.ts", "enabled": true, "fiberPhase": "failed"},
+                {"entryId": "gone", "moduleName": "./gone.ts", "enabled": true, "fiberPhase": null},
+            ]}),
+            "the disabled row the loader gave no entry is listed disabled, and a disposed entry has no phase"
+        );
+        assert_eq!(
+            fiber_phase(FiberState::Pending),
+            Some(heddle_config::PluginFiberPhase::Pending)
+        );
+        assert_eq!(
+            fiber_phase(FiberState::Loading),
+            Some(heddle_config::PluginFiberPhase::Loading)
+        );
+        assert_eq!(
+            fiber_phase(FiberState::Unloading),
+            Some(heddle_config::PluginFiberPhase::Unloading)
+        );
     }
 
     fn empty_boot() -> Boot {

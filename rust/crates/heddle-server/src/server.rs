@@ -533,6 +533,9 @@ pub struct WebServer {
     heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl WebServer {
     /// `http://<host>:<port>/?token=<token>`.
     pub fn url(&self) -> &str {
@@ -584,6 +587,16 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        // A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each
+        // running command's process group is ended and its call is recorded as interrupted before the process
+        // goes (live-testing issue #6; DSH cancels its agents at teardown, dsh-bash-local graceMs 3000).
+        let runs = self.state.runs().clone();
+        if runs.abort_all() > 0 {
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+            while runs.any_running() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
@@ -1952,6 +1965,22 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
+    // A turn for a session that does not exist is the client's mistake, answered the way DSH answers it
+    // (`session/not-found`, dsh-api-session-controller) and the way the other session routes do (`404`,
+    // `no session <id>`), with the same shape as web.ts. It used to reach the resume and come back as a
+    // `400` naming the session root on disk (DSH parity R-developer-seven-2). A string that is not a
+    // session id names no session either, and is not echoed back or used as a path.
+    if let Some(resume) = resume {
+        let well_formed = SessionId::parse(resume).is_some();
+        if !well_formed || !sessions.exists(resume) {
+            let message = if well_formed {
+                format!("no session {resume}")
+            } else {
+                "no session with that id".to_owned()
+            };
+            return respond::error_with_code(StatusCode::NOT_FOUND, message, "session/not-found");
+        }
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     // A session this route opens is born untitled, as DSH's is (#68): its first message writes the fallback name and
     // the session layer's title coordinator asks the model for the title (heddle_session::title). A title given here
@@ -3761,8 +3790,10 @@ mod tests {
         // DSH parity C23 (R-developer-eight-26): dsh-api-session-controller refuses a prompt into a subagent's child
         // with `session/agent-busy` (`lib/index.js:128-142`); phase A measured `/api/turn` answering 200 and running it.
         // A teammate is a continuable child and still takes the turn.
-        let child = "session-one-shot-child";
-        let mate = "session-continuable-teammate";
+        // Well-formed session ids: /api/turn answers an id that is not one with `session/not-found` before it
+        // looks for a subagent (R-developer-seven-2), so the refusal under test needs ids a store could hold.
+        let child = "session-33333333-3333-3333-3333-333333333333";
+        let mate = "session-44444444-4444-4444-4444-444444444444";
         let meta = |id: &str, rest: Value| SessionMeta {
             id: id.into(),
             cwd: Some("/work".into()),
@@ -3833,6 +3864,65 @@ mod tests {
             subagent_turn_refusal(Some(&meta("session-plain", json!({})))),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn a_turn_for_an_unknown_session_is_session_not_found_and_a_held_one_continues() {
+        // DSH answers a session it does not hold with `session/not-found`; web.ts and this route answer
+        // `404 {"error": "no session <id>", "code": "session/not-found"}`. Before, this route reached the
+        // resume and answered `400` naming the session root on disk, and web.ts a `500` (R-developer-seven-2).
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::clone(&hub),
+            text: "hello".into(),
+        });
+        let (router, _) = app_with_runner("turn-unknown-session", runner);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let unknown = "session-22222222-2222-2222-2222-222222222222";
+        let body = serde_json::json!({"prompt": "hi", "session": unknown});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!("{{\"error\":\"no session {unknown}\",\"code\":\"session/not-found\"}}\n")
+        );
+
+        for raw in ["session-does-not-exist", "../../etc/passwd"] {
+            let body = serde_json::json!({"prompt": "hi", "session": raw});
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{raw}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                "{\"error\":\"no session with that id\",\"code\":\"session/not-found\"}\n",
+                "{raw} is not echoed back"
+            );
+        }
+
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, r#"{"prompt":"first"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let (_, _, listed) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        let listed: Value = serde_json::from_str(&body_text(&listed)).expect("the list is JSON");
+        let held = listed[0]["id"]
+            .as_str()
+            .expect("the first turn made a session")
+            .to_owned();
+        let body = serde_json::json!({"prompt": "again", "session": held});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a held session continues: {}",
+            body_text(&bytes)
+        );
+        assert!(body_text(&bytes).contains("event: done"));
     }
 
     #[tokio::test]
