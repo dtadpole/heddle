@@ -174,6 +174,8 @@ pub fn anthropic_messages_call(
         }
     }
 
+    crate::anthropic::with_prompt_cache(&mut body, endpoint.prompt_cache != Some(false));
+
     Ok(PreparedCall {
         url: format!(
             "{}/messages",
@@ -361,6 +363,7 @@ mod tests {
             input_modalities: None,
             proxy: None,
             timeout_ms: None,
+            prompt_cache: None,
         }
     }
 
@@ -479,7 +482,11 @@ mod tests {
     #[test]
     fn the_conversation_is_translated_as_anthropic_reads_it_and_reasoning_is_not_replayed() {
         let call = anthropic_messages_call(&endpoint(), &request()).expect("builds");
-        assert_eq!(call.body["system"], serde_json::json!("be brief"));
+        assert_eq!(
+            call.body["system"],
+            serde_json::json!([{ "type": "text", "text": "be brief", "cache_control": { "type": "ephemeral" } }]),
+            "the system prompt is one block, marked for caching (#70)"
+        );
         assert_eq!(
             call.body["messages"],
             serde_json::json!([
@@ -489,9 +496,10 @@ mod tests {
                     { "type": "tool_use", "id": "call-1", "name": "list_dir", "input": { "path": "." } }
                 ] },
                 { "role": "user", "content": [
-                    { "type": "tool_result", "tool_use_id": "call-1", "content": "AGENTS.md" }
+                    { "type": "tool_result", "tool_use_id": "call-1", "content": "AGENTS.md", "cache_control": { "type": "ephemeral" } }
                 ] }
-            ])
+            ]),
+            "the last user block carries the conversation's cache breakpoint (#70)"
         );
         assert!(!call.body.to_string().contains("the user wants a listing"));
     }
@@ -510,8 +518,10 @@ mod tests {
             serde_json::json!([{
                 "name": "bash",
                 "description": "run a command",
-                "input_schema": { "type": "object", "properties": {} }
-            }])
+                "input_schema": { "type": "object", "properties": {} },
+                "cache_control": { "type": "ephemeral" }
+            }]),
+            "the last tool carries the cache breakpoint (#70)"
         );
     }
 

@@ -809,11 +809,76 @@ mod tests {
             ordinary,
             "ordinary nesting is untouched"
         );
-        let fenced = format!("```\n{}\n```", ">".repeat(300));
         assert_eq!(
-            bound_nesting(&fenced),
-            fenced,
-            "a line inside a code fence is left alone"
+            bound_nesting(&format!("```\n{}\n```", ">".repeat(102))),
+            format!("```\n{}\\>>\n```", ">".repeat(100)),
+            "a line inside a code fence is bounded too, so no fence test can switch the bound off"
+        );
+    }
+
+    #[test]
+    fn a_line_that_only_looks_like_a_fence_does_not_switch_the_bound_off() {
+        // developer-three's review: four spaces make an indented code block, and a backtick fence's info string has
+        // no backtick.
+        for opener in ["    ```", "``` a`b", "```", "~~~"] {
+            let bounded = bound_nesting(&format!("{opener}\n\n{} x", ">".repeat(200)));
+            assert!(
+                !bounded.contains(&">".repeat(MAX_NESTING + 1)),
+                "{opener:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_keeps_at_most_max_indent_columns_of_indentation() {
+        assert_eq!(MAX_INDENT, 200);
+        assert_eq!(
+            bound_nesting(&format!("{}- x", " ".repeat(300))),
+            format!("{}- x", " ".repeat(200))
+        );
+        assert_eq!(
+            bound_nesting(&format!("{}- x", "\t".repeat(60))),
+            format!("{}- x", " ".repeat(200)),
+            "a tab reaches the next multiple of four"
+        );
+        let edge = format!("{}- x", " ".repeat(200));
+        assert_eq!(
+            bound_nesting(&edge),
+            edge,
+            "up to the bound a line is untouched"
+        );
+    }
+
+    #[test]
+    fn deep_inline_nesting_mixed_containers_and_a_deeply_indented_list_all_render() {
+        // developer-three's test material: none of these is bounded by counting markers, so the guards must hold.
+        let indented: Vec<String> = (0..3000)
+            .map(|level| format!("{}- {level}", "  ".repeat(level)))
+            .collect();
+        let cases = [
+            (
+                "stars",
+                format!("{}x{}", "*".repeat(20_000), "*".repeat(20_000)),
+            ),
+            (
+                "brackets",
+                format!("{}x{}", "[".repeat(20_000), "]".repeat(20_000)),
+            ),
+            (
+                "underscores",
+                format!("{}x{}", "_".repeat(20_000), "_".repeat(20_000)),
+            ),
+            ("mixed", format!("{}x", "> - 1. ".repeat(20_000))),
+            ("indented", indented.join("\n")),
+        ];
+        for (name, source) in &cases {
+            let html = render_markdown(source, MarkdownOptions::default());
+            assert!(!html.is_empty(), "{name}");
+        }
+        let html = render_markdown(&cases[4].1, MarkdownOptions::default());
+        assert!(
+            html.matches("<ul>").count() <= MAX_NESTING + 1,
+            "an indented list nests at a bounded depth"
         );
     }
 
@@ -835,7 +900,7 @@ mod tests {
         );
         // comrak caps list nesting at 99 of its own (the TypeScript build draws 100); either way it is bounded.
         let lists = bullets.matches("<ul>").count();
-        assert!((99..=MAX_NESTING).contains(&lists), "{lists} nested lists");
+        assert!(lists <= MAX_NESTING, "{lists} nested lists");
         assert!(
             !render_inline(&">".repeat(50_000)).is_empty(),
             "an inline span renders too"
@@ -876,7 +941,25 @@ pub struct MarkdownOptions<'a> {
 /// parsed as GFM (tables, task lists, strikethrough, autolinks; a single newline is a space) and the whole output
 /// passes through [`crate::sanitize::sanitize_html`] with a URL policy that applies [`safe_url`] and resolves
 /// relative references against `options.base` — for raw HTML tags as well as for markdown links and images.
+pub const MAX_PARSE_BYTES: usize = 64 * 1024;
+pub const MAX_INLINE_MARKERS: usize = 512;
+
+/// Conservative parser work budget shared with TypeScript. Over-budget input is shown escaped without parsing.
+/// Count syntax even inside code: recognizing code would itself require parsing untrusted input first.
+pub fn within_parse_budget(text: &str) -> bool {
+    text.len() <= MAX_PARSE_BYTES
+        && text
+            .bytes()
+            .filter(|byte| matches!(byte, b'*' | b'_' | b'[' | b']' | b'`' | b'~'))
+            .take(MAX_INLINE_MARKERS + 1)
+            .count()
+            <= MAX_INLINE_MARKERS
+}
+
 pub fn render_markdown(source: &str, options: MarkdownOptions<'_>) -> String {
+    if !within_parse_budget(source) {
+        return unrendered(&source.replace("\r\n", "\n").replace('\r', "\n"));
+    }
     on_render_stack(|| render_markdown_here(source, options))
         .unwrap_or_else(|| unrendered(&source.replace("\r\n", "\n").replace('\r', "\n")))
 }
@@ -920,6 +1003,9 @@ fn render_markdown_here(source: &str, options: MarkdownOptions<'_>) -> String {
 
 /// Render inline spans only — a title, a table cell, a label — through the same parser and the same allow-list.
 pub fn render_inline(text: &str) -> String {
+    if !within_parse_budget(text) {
+        return escape_html(text);
+    }
     on_render_stack(|| render_inline_here(text)).unwrap_or_else(|| escape_html(text))
 }
 
@@ -1211,32 +1297,47 @@ pub const MAX_NESTING: usize = 100;
 /// reserved, not memory used, until a text actually nests that deep.
 const RENDER_STACK_BYTES: usize = 256 * 1024 * 1024;
 
-/// Each line opens at most [`MAX_NESTING`] containers (block quotes and list items); a marker past that is escaped, so
-/// it reads as its own character. Lines inside a code fence are left alone. The TypeScript `boundNesting` writes the
-/// same.
+/// Each line opens at most [`MAX_NESTING`] containers (block quotes and list items) and keeps at most [`MAX_INDENT`]
+/// columns of indentation; a marker past the bound is escaped, so it reads as its own character. **Every** line is
+/// bounded, code included, as the TypeScript `boundNesting` is.
+///
+/// A first version skipped the lines of a code fence by its own fence test, which was looser than CommonMark's: `    ```
+/// ` (four spaces, an indented code block) and `` ``` a`b `` (a backtick in a backtick fence's info string, a
+/// paragraph) opened a "fence" for it but not for comrak, so every later line reached the parser unbounded, with the
+/// render stack as the only guard (developer-three's review, 2026-10-30). Bounding code too fails safe; a line of real
+/// code with more than a hundred nested markers, or indented past two hundred columns, is drawn bounded.
 pub fn bound_nesting(markdown: &str) -> String {
     let mut out = String::with_capacity(markdown.len() + 4);
-    let mut fence: Option<&str> = None;
     for (index, line) in markdown.split('\n').enumerate() {
         if index > 0 {
             out.push('\n');
         }
-        if let Some(marker) = fence_marker(line) {
-            match fence {
-                None => fence = Some(marker),
-                Some(open) if open == marker => fence = None,
-                Some(_) => {}
-            }
-            out.push_str(line);
-            continue;
-        }
-        if fence.is_some() {
-            out.push_str(line);
-            continue;
-        }
-        bound_line(line, &mut out);
+        bound_line(&bound_indent(line), &mut out);
     }
     out
+}
+
+/// The widest indentation a line keeps, in columns (a tab reaching the next multiple of four): two for each level of
+/// [`MAX_NESTING`], the least a nested list item indents by. Lists also nest by indentation, one marker per line,
+/// which counting markers does not see; in the TypeScript build an indented list of 1,500 levels ran out of heap.
+pub const MAX_INDENT: usize = 2 * MAX_NESTING;
+
+fn bound_indent(line: &str) -> std::borrow::Cow<'_, str> {
+    let mut column = 0usize;
+    let mut at = 0usize;
+    for byte in line.bytes() {
+        match byte {
+            b' ' => column += 1,
+            b'\t' => column += 4 - column % 4,
+            _ => break,
+        }
+        at += 1;
+    }
+    if column > MAX_INDENT {
+        std::borrow::Cow::Owned(format!("{}{}", " ".repeat(MAX_INDENT), &line[at..]))
+    } else {
+        std::borrow::Cow::Borrowed(line)
+    }
 }
 
 fn bound_line(line: &str, out: &mut String) {
@@ -1571,4 +1672,34 @@ fn unwrap_paragraph(rendered: &str) -> String {
         return rendered[start..rendered.len() - 5].to_string();
     }
     rendered.to_string()
+}
+
+#[cfg(test)]
+mod parse_budget_tests {
+    use super::*;
+    #[test]
+    fn over_budget_inline_input_is_escaped_without_invoking_the_parser() {
+        let huge = format!("{}x{}", "*a ".repeat(800_000), " a*".repeat(800_000));
+        let compact = format!(
+            "{}<script>x</script>{}",
+            "*a ".repeat(2_000),
+            " a*".repeat(2_000)
+        );
+        for text in [huge, compact, "x".repeat(MAX_PARSE_BYTES + 1)] {
+            assert!(!within_parse_budget(&text));
+            assert_eq!(
+                render_markdown(&text, MarkdownOptions::default()),
+                unrendered(&text)
+            );
+            assert_eq!(render_inline(&text), escape_html(&text));
+        }
+        assert!(within_parse_budget("ordinary **bold** and *emphasis*"));
+    }
+    #[test]
+    fn budget_edges_and_unicode_use_bytes_not_characters() {
+        assert!(within_parse_budget(&"*".repeat(MAX_INLINE_MARKERS)));
+        assert!(!within_parse_budget(&"*".repeat(MAX_INLINE_MARKERS + 1)));
+        assert!(within_parse_budget(&"x".repeat(MAX_PARSE_BYTES)));
+        assert!(!within_parse_budget(&"界".repeat(MAX_PARSE_BYTES / 3 + 1)));
+    }
 }

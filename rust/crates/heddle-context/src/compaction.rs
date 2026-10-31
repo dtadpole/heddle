@@ -30,11 +30,12 @@ use crate::store::{AppendOptions, ContextStore, SeqRange, SurfaceNode};
 use crate::text::js_trim;
 use crate::types::{ContentPart, Message, Role, text_message};
 
-/// What the summariser is asked: the final user message of the auxiliary call.
-pub const COMPACTION_INSTRUCTION: &str = "Summarise the conversation above so it can continue without the original messages. \
-Keep every decision, constraint, file path, command and result that still matters. \
-Keep unresolved questions and what was tried. Drop greetings and repetition. \
-Write it as a briefing to yourself, not as a reply to the user.";
+/// What the summariser is asked: the final user message of the auxiliary call, DSH's directive verbatim
+/// (dsh-compaction-basic `COMPACTION_INSTRUCTION`). It replaced a four-sentence request that the DeepSeek reasoning
+/// model read as one more turn: with a pending user request last in the span, it answered the request and wrote an
+/// essay as the "summary" (#77). DSH's directive names the role, fixes a structure with every section kept and
+/// forbids any other action.
+pub const COMPACTION_INSTRUCTION: &str = "You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.\n\nOutput EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write \"(none)\" for an empty section — never drop a section.\n\n## Primary Request and Intent\n- [the user's original and evolving goals; quote verbatim where the exact wording matters]\n\n## Key Technical Concepts\n- [technologies, frameworks, patterns, and conventions in play]\n\n## Files and Code\n- [exact path: why it matters, key changes or snippets]\n\n## Errors and Fixes\n- [error: how it was resolved, plus any related user feedback]\n\n## Pending Jobs\n- [explicitly requested work not yet completed]\n\n## Current Work\n- [precisely what was in progress at this checkpoint]\n\n## Next Step\n- [the single next action, directly in line with the most recent request, or \"(none)\"]\n\n## Critical Context\n- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]\n\nRules:\n- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.\n- Capture user feedback and explicit instructions faithfully, especially corrections.\n- Do NOT mention this summarization request or that the context was compacted.\n- Output only the checkpoint text: do not call any tool or take any other action.\n- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.";
 
 /// Opens a checkpoint's text, so a reader can tell it from something a person said.
 pub const SUMMARY_OPEN_TAG: &str = "<compacted-summary>";
@@ -1046,8 +1047,9 @@ mod tests {
 
     #[test]
     fn the_instruction_the_summariser_is_asked_is_the_typescript_one() {
-        assert!(COMPACTION_INSTRUCTION.starts_with("Summarise the conversation above"));
-        assert!(COMPACTION_INSTRUCTION.contains("file path"));
+        assert!(COMPACTION_INSTRUCTION.starts_with("You are now acting as a compaction engine"));
+        assert!(COMPACTION_INSTRUCTION.contains("## Primary Request and Intent"));
+        assert!(COMPACTION_INSTRUCTION.contains("exact file paths"));
         assert_eq!(SUMMARY_OPEN_TAG, "<compacted-summary>");
         assert_eq!(SUMMARY_CLOSE_TAG, "</compacted-summary>");
     }

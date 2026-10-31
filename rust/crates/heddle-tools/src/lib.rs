@@ -44,7 +44,7 @@ pub use outside::{OutsideComponent, OutsideComponentSpec, OutsideError, ProcessT
 pub use registry::{CommandSummary, RegistrationError, ToolRegistry};
 pub use tool::{
     Command, LogSink, Tool, ToolArgs, ToolContext, ToolError, ToolFailure, ToolFuture, ToolResult,
-    ToolRunContext, codes, tool_fn,
+    ToolRunContext, codes, parallel_safe, tool_fn,
 };
 pub use upstream::{
     ApprovalDecision, ApprovalMode, ConfinedArgv, EscalationRefusal, EscalationRefusalCode,

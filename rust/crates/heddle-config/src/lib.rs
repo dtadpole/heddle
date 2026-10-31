@@ -57,20 +57,23 @@ mod layer;
 mod local;
 mod model_row;
 pub mod paths;
+mod presets;
 mod profile;
 mod references;
 mod retry;
 mod schema;
 mod settings;
+mod template;
 mod validate;
 mod value;
 
 pub use compose::{ComponentName, ComposedRow, EntryRow, Provenance, compose, origin_of};
 pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,
-    ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths, default_endpoints,
-    describe_endpoint, describe_endpoints, environment_override, materialize_key, merge_endpoint,
-    read_key_file, resolve_endpoints, selection_problem,
+    PAGE_ENDPOINT_FIELDS, ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths,
+    default_endpoints, describe_endpoint, describe_endpoints, describe_page_endpoint,
+    environment_override, is_shipped_fixture, materialize_key, merge_endpoint, read_key_file,
+    resolve_endpoints, selection_problem, unscripted_fixture_message,
 };
 pub use env::Env;
 pub use error::ConfigError;
@@ -79,6 +82,10 @@ pub use layer::{INLINE_FILE, Layer, NamedLayer, anchor_dir, read_layer};
 pub use local::{LocalConfig, LocalConfigLocation, local_config_candidates, read_local_config};
 pub use model_row::{ModelRowEndpoints, ModelRowSource, model_row_endpoints, nominated_default};
 pub use paths::{canonical_path, depth_of, is_under};
+pub use presets::{
+    PresetDefinition, PresetResolution, PresetRoster, missing_preset_message, preset_roster,
+    standard_preset,
+};
 pub use profile::{
     LAYER_FILES, LayerOptions, PROJECT_BASE, PROJECT_PATCH, ProfileInfo, default_layers,
     list_profiles, profile_argument, resolve_profile,
@@ -96,6 +103,7 @@ pub use settings::{
     SettingsView, SettingsWrite, commit_settings_write, describe_settings, handle_settings_request,
     is_secret_key, plan_settings_write, settings_target,
 };
+pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{
     ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
     ValidationResult, read_component_manifest, validate_rows,

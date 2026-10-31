@@ -15,8 +15,8 @@ function sandbox(t) {
 }
 
 function envFor(root, extra = {}) {
-  // healthy memory by default, so the suite never depends on this Mac's swap
-  const env = { ...process.env, LOCAL_BUILD_SLOT_ROOT: root, BROWSER_SLOT_POLL_MS: '50', BROWSER_SLOT_FAKE_FREE_PCT: '50', BROWSER_SLOT_FAKE_SWAP_MB: '1000', ...extra }
+  // healthy memory and disk by default, so the suite never depends on this Mac's readings
+  const env = { ...process.env, LOCAL_BUILD_SLOT_ROOT: root, BROWSER_SLOT_POLL_MS: '50', BROWSER_SLOT_FAKE_FREE_PCT: '50', BROWSER_SLOT_FAKE_DISK_GB: '100', ...extra }
   delete env.HD_SEAT
   return env
 }
@@ -194,7 +194,7 @@ test('status names the holder, browser.next and the queue in serving order', (t)
   writeFileSync(join(root, 'browser.next'), 'developer-five (coordinator)\n')
   const r = bs(root, ['status'])
   assert.equal(r.status, 0)
-  assert.match(r.out, /cap {5}1 slot\(s\); memory free 50%, swap 1000M: new holders allowed/)
+  assert.match(r.out, /cap {5}1 slot\(s\); memory free 50%, disk 100\.0 GiB free: new holders allowed/)
   assert.match(r.out, /slot 1  developer-nine ui gate 05:00:00 {2}\(16m\d\ds, pid \d+ gone; over 10 minutes; stale, cleared on the next take\)/)
   assert.match(r.out, /next {4}developer-five \(browser\.next\)/)
   assert.match(r.out, /queue {3}1\. developer-five .*\n {8}2\. developer-two/)
@@ -214,54 +214,79 @@ test('browser-cap 2 gives two slots; the third seat queues', (t) => {
   assert.equal(take(root, 'developer-three').status, 75)
 })
 
-test('a reserved slot serves only its role, and the other slots only the rest', (t) => {
+test('a reserved slot serves only its role; that role takes its own slot first, then any free shared slot', (t) => {
+  // The coordinator's report of 2026-10-30 23:47: with "4 reserve=integrator", integrator-one waited for
+  // browser.lock4 (held by integrator-two) while slots 2 and 3 sat free.
   const root = sandbox(t)
-  cap(root, '2 reserve=integrator')
+  cap(root, '4 reserve=integrator')
+  const first = take(root, 'integrator-two')
+  assert.equal(first.status, 0, first.out)
+  assert.match(first.out, /took slot 4 \(browser\.lock4\)/, 'with every slot free, an integrator takes the reserved one first')
+  const incident = take(root, 'integrator-one')
+  assert.equal(incident.status, 0, `an integrator takes a free shared slot while the reserved one is held: ${incident.out}`)
+  assert.match(incident.out, /took slot 1 \(browser\.lock\)/)
   assert.equal(take(root, 'developer-one').status, 0)
-  const dev = take(root, 'developer-two')
-  assert.equal(dev.status, 75, 'browser.lock2 is free but reserved')
-  assert.match(dev.out, /position 1 of 1; slot 1 held by developer-one/)
-  const integ = take(root, 'integrator-one')
-  assert.equal(integ.status, 0, 'the integrator does not queue behind developers')
-  assert.match(integ.out, /took slot 2 \(browser\.lock2\)/)
-  assert.equal(take(root, 'integrator-two').status, 75)
-  bs(root, ['release', '--seat', 'developer-one'])
-  assert.equal(take(root, 'integrator-two').status, 75, 'an integrator does not take a developer slot')
   assert.equal(take(root, 'developer-two').status, 0)
-  assert.equal(take(root, 'developer-five', '0').status, 75)
-  const role = bs(root, ['take', '--seat', 'release-captain', '--role', 'integrator', '--wait', '0'])
-  assert.equal(role.status, 75, '--role puts a seat in the integrator line: it waits behind integrator-two')
-  assert.match(role.out, /position 2 of 2/)
+  const captain = () => bs(root, ['take', '--seat', 'release-captain', '--role', 'integrator', '--wait', '0'])
+  const queued = captain()
+  assert.equal(queued.status, 75)
+  assert.match(queued.out, /position 1 of 1;/, '--role integrator counts only integrators ahead of it')
+  const dev = take(root, 'developer-three')
+  assert.equal(dev.status, 75)
+  assert.match(dev.out, /position 2 of 2;/, 'a developer counts the integrator ahead of it, which may take a shared slot')
+  bs(root, ['release', '--seat', 'developer-one'])
+  const behind = take(root, 'developer-three')
+  assert.equal(behind.status, 75, 'the shared slots keep one first-come line across roles')
+  assert.match(behind.out, /slot 2 free, release-captain is first/)
+  const shared = captain()
+  assert.equal(shared.status, 0, shared.out)
+  assert.match(shared.out, /took slot 2 \(browser\.lock2\)/)
+  bs(root, ['release', '--seat', 'integrator-two'])
+  const fenced = take(root, 'developer-three')
+  assert.equal(fenced.status, 75, 'browser.lock4 is free but reserved')
+  assert.match(fenced.out, /position 1 of 1; slot 1 held by integrator-one .*slot 3 held by developer-two/)
+  assert.doesNotMatch(fenced.out, /slot 4/, 'a developer is not shown the slot it may not take')
+  const reserved = take(root, 'integrator-two')
+  assert.equal(reserved.status, 0, 'the reserved slot goes to its role ahead of an earlier developer')
+  assert.match(reserved.out, /took slot 4 \(browser\.lock4\)/)
+  bs(root, ['release', '--seat', 'developer-two'])
+  const last = take(root, 'developer-three')
+  assert.equal(last.status, 0, last.out)
+  assert.match(last.out, /took slot 3 \(browser\.lock3\)/)
 })
 
-test('a hand-made browser.lock2 holds the integrator slot', (t) => {
+test('a hand-made browser.lock2 holds the integrator slot; the integrator takes the free shared slot instead', (t) => {
   const root = sandbox(t)
   cap(root, '2 reserve=integrator')
   holder(root, { line: 'integrator-two ui gate uploads2 2f49622c 06:00:21', dir: lock2(root) })
-  assert.equal(take(root, 'integrator-one').status, 75)
+  const integ = take(root, 'integrator-one')
+  assert.equal(integ.status, 0, integ.out)
+  assert.match(integ.out, /took slot 1 \(browser\.lock\)/)
+  assert.match(readFileSync(join(lock2(root), 'owner'), 'utf8'), /^integrator-two ui gate/, 'the hand-made lock is untouched')
+  assert.equal(take(root, 'developer-one').status, 75)
 })
 
-test('no new holder while memory is short: free under 25%, or swap at or over the 7680M backstop (D-061)', (t) => {
+test('no new holder while memory free is under 25% (D-064) or disk free under 16 GiB (D-067); swap is no gate', (t) => {
   const root = sandbox(t)
   const low = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '24' })
   assert.equal(low.status, 75)
-  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-061\)/)
-  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_SWAP_MB: '7680' })
-  assert.equal(swap.status, 75)
-  assert.match(swap.out, /no new holder: swap 7680M >= 7680M \(D-061 backstop\)/)
-  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_SWAP_MB: '7700' }).out, /no new holder, swap 7700M >= 7680M/)
-  const sticky = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_SWAP_MB: '7679' })
-  assert.equal(sticky.status, 0, 'sticky swap under the backstop with enough free memory admits: the old 7168M line is gone')
+  assert.match(low.out, /no new holder: memory free 24% < 25% \(D-064\)/)
+  const full = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_DISK_GB: '15.9' })
+  assert.equal(full.status, 75)
+  assert.match(full.out, /no new holder: disk free 15\.9 GiB < 16 GiB \(D-067\)/)
+  assert.match(bs(root, ['status'], { BROWSER_SLOT_FAKE_DISK_GB: '12' }).out, /disk 12\.0 GiB free: no new holder, disk free 12\.0 GiB < 16 GiB/)
+  const edge = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '25', BROWSER_SLOT_FAKE_DISK_GB: '16' })
+  assert.equal(edge.status, 0, 'exactly 25% memory and 16 GiB disk admit, so the 16-20 GiB sweep band still admits; swap is not read at all')
 })
 
 test('browser-cap can move the memory lines without a code change', (t) => {
   const root = sandbox(t)
-  cap(root, '1 min-free=50 swap-stop=7000')
+  cap(root, '1 min-free=50 disk-min=30 swap-stop=7000') // an old swap key is ignored (D-064)
   const free = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '44' })
   assert.match(free.out, /memory free 44% < 50%/)
-  const swap = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_SWAP_MB: '7100' })
-  assert.match(swap.out, /swap 7100M >= 7000M/)
-  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_SWAP_MB: '6999' }).status, 0)
+  const disk = take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_DISK_GB: '25' })
+  assert.match(disk.out, /disk free 25\.0 GiB < 30 GiB/)
+  assert.equal(take(root, 'developer-one', '0', { BROWSER_SLOT_FAKE_FREE_PCT: '60', BROWSER_SLOT_FAKE_DISK_GB: '30' }).status, 0)
 })
 
 test('forcing a release with two holders names the slot; a holder over a lowered cap is shown and released', (t) => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { boundNesting, escapeHtml, MAX_NESTING, renderInline, renderMarkdown } from '../src/server/markdown.ts'
+import { boundNesting, escapeHtml, MAX_INDENT, MAX_NESTING, renderInline, renderMarkdown } from '../src/server/markdown.ts'
 import { decodeCharacterReferences } from '../src/server/sanitize.ts'
 
 /**
@@ -330,8 +330,43 @@ test('a line opens at most MAX_NESTING containers, and the rest reads as text', 
   assert.equal(boundNesting(`${'- '.repeat(101)}x`), `${'- '.repeat(100)}\\- x`, 'and the 101st bullet')
   assert.equal(boundNesting(`${'1. '.repeat(101)}x`), `${'1. '.repeat(100)}1\\. x`, 'and the 101st number keeps its digits')
   assert.equal(boundNesting('> quote\n> > nested\n- a\n  - b'), '> quote\n> > nested\n- a\n  - b', 'ordinary nesting is untouched')
-  const fenced = `\`\`\`\n${'>'.repeat(300)}\n\`\`\``
-  assert.equal(boundNesting(fenced), fenced, 'a line inside a code fence is left alone')
+  assert.equal(
+    boundNesting(`\`\`\`\n${'>'.repeat(102)}\n\`\`\``),
+    `\`\`\`\n${'>'.repeat(100)}\\>>\n\`\`\``,
+    'a line inside a code fence is bounded too, so no fence test can switch the bound off',
+  )
+})
+
+test('a line that only looks like a fence does not switch the bound off', () => {
+  /** developer-three's review: four spaces make an indented code block, and a backtick fence's info string has no backtick. */
+  for (const opener of ['    ```', '``` a`b', '```', '~~~']) {
+    const bounded = boundNesting(`${opener}\n\n${'>'.repeat(200)} x`)
+    assert.ok(!bounded.includes('>'.repeat(MAX_NESTING + 1)), JSON.stringify(opener))
+  }
+})
+
+test('deep inline nesting, mixed containers and a deeply indented list all render', () => {
+  /** developer-three's test material: none of these is bounded line by line, so the guard behind the bound must hold. */
+  const cases = {
+    stars: `${'*'.repeat(20000)}x${'*'.repeat(20000)}`,
+    brackets: `${'['.repeat(20000)}x${']'.repeat(20000)}`,
+    underscores: `${'_'.repeat(20000)}x${'_'.repeat(20000)}`,
+    mixed: `${'> - 1. '.repeat(20000)}x`,
+    indented: Array.from({ length: 3000 }, (_, level) => `${'  '.repeat(level)}- ${level}`).join('\n'),
+  }
+  for (const [name, source] of Object.entries(cases)) {
+    const html = renderMarkdown(source)
+    assert.ok(html.length > 0, name)
+  }
+  const indented = renderMarkdown(cases.indented)
+  assert.ok((indented.match(/<ul>/g) ?? []).length <= MAX_NESTING + 1, 'an indented list nests at a bounded depth')
+})
+
+test('a line keeps at most MAX_INDENT columns of indentation', () => {
+  assert.equal(MAX_INDENT, 200)
+  assert.equal(boundNesting(`${' '.repeat(300)}- x`), `${' '.repeat(200)}- x`)
+  assert.equal(boundNesting(`${'\t'.repeat(60)}- x`), `${' '.repeat(200)}- x`, 'a tab reaches the next multiple of four')
+  assert.equal(boundNesting(`${' '.repeat(200)}- x`), `${' '.repeat(200)}- x`, 'up to the bound a line is untouched')
 })
 
 test('fifty thousand nested quotes or list items render, at a bounded depth', () => {
@@ -347,4 +382,15 @@ test('a text the parser cannot render is shown as its own escaped words, not as 
   const html = renderMarkdown(`${'*a '.repeat(5000)}<b>x</b>${' a*'.repeat(5000)}`)
   assert.ok(html.startsWith('<pre class="unrendered"><code>'), 'the words are kept in a plain block')
   assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && !html.includes('<b>'), 'escaped, so nothing in them runs')
+})
+
+
+test('parser work budget preserves hostile inline input as escaped text without recursion', () => {
+  const huge = '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)
+  const compact = '*a '.repeat(2000) + '<script>x</script>' + ' a*'.repeat(2000)
+  for (const text of [huge, compact, 'x'.repeat(65537)]) {
+    assert.equal(renderMarkdown(text), `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`)
+    assert.equal(renderInline(text), escapeHtml(text))
+  }
+  assert.match(renderMarkdown('ordinary **bold** and *emphasis*'), /<strong>bold<\/strong>/)
 })

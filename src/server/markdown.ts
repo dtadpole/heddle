@@ -175,24 +175,37 @@ function imageSource(target: string): string | null {
 export const MAX_NESTING = 100
 
 /**
- * Each line opens at most `MAX_NESTING` containers (block quotes and list items); a marker past that is escaped, so
- * it reads as its own character. Lines inside a code fence are left alone. The Rust `bound_nesting` writes the same.
+ * Each line opens at most `MAX_NESTING` containers (block quotes and list items); a marker past that is escaped, so it
+ * reads as its own character. **Every** line is bounded, code included, and the Rust `bound_nesting` writes the same.
+ *
+ * Indentation is bounded too (`boundIndent`). A first version skipped the lines of a code fence by its own fence test, which was looser than CommonMark's: `    ```
+ * ` (four spaces, an indented code block) and `` ``` a`b `` (a backtick in a backtick fence's info string, a paragraph)
+ * opened a "fence" for it but not for the parser, so every later line reached the parser unbounded (developer-three's
+ * review, 2026-10-30). Bounding code too fails safe; a line of real code with more than a hundred nested markers, which
+ * nobody writes, shows one backslash.
  */
 export function boundNesting(markdown: string): string {
-  const lines = markdown.split('\n')
-  let fence: string | null = null
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? ''
-    const marker = /^\s*(```|~~~)/.exec(line)
-    if (marker !== null) {
-      const character = marker[1] ?? '```'
-      if (fence === null) fence = character
-      else if (fence === character) fence = null
-      continue
-    }
-    if (fence === null) lines[index] = boundLine(line)
+  return markdown.split('\n').map((line) => boundLine(boundIndent(line))).join('\n')
+}
+
+/**
+ * The widest indentation a line keeps, in columns (a tab reaching the next multiple of four): two for each level of
+ * `MAX_NESTING`, the least a nested list item indents by.
+ *
+ * Lists also nest by indentation, one marker per line, which counting markers does not see (developer-three's review
+ * material): an indented list of 1,000 levels, about 1 MB, took 2 s and 386 MB in `marked`, and 1,500 levels ran this
+ * build out of heap, which no catch survives. A line indented past this is drawn at this indentation.
+ */
+export const MAX_INDENT = 2 * MAX_NESTING
+
+function boundIndent(line: string): string {
+  let at = 0
+  let column = 0
+  while (line[at] === ' ' || line[at] === '\t') {
+    column = line[at] === '\t' ? column + 4 - (column % 4) : column + 1
+    at += 1
   }
-  return lines.join('\n')
+  return column > MAX_INDENT ? `${' '.repeat(MAX_INDENT)}${line.slice(at)}` : line
 }
 
 /** A list item's marker at a given index: a bullet, or a number of up to nine digits and its `.` or `)`. */
@@ -229,6 +242,22 @@ function boundLine(line: string): string {
  * parser's stack, and in JavaScript that is a `RangeError` this build can catch, where it used to fail the whole
  * session view (live issue developer-two-16).
  */
+/**
+ * Conservative parser work budget, shared with Rust. Recursive inline parsing can exhaust a stack or heap before
+ * an exception is recoverable. Over-budget documents remain readable as escaped original text, without parsing.
+ * Count syntax even in code: recognizing code first would itself require trusting a parser on hostile input.
+ */
+export const MAX_PARSE_BYTES = 64 * 1024
+export const MAX_INLINE_MARKERS = 512
+export function withinParseBudget(text: string): boolean {
+  if (text.length > MAX_PARSE_BYTES || Buffer.byteLength(text, 'utf8') > MAX_PARSE_BYTES) return false
+  let markers = 0
+  for (const character of text) {
+    if ('*_[]`~'.includes(character) && ++markers > MAX_INLINE_MARKERS) return false
+  }
+  return true
+}
+
 function unrendered(text: string): string {
   return `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`
 }
@@ -349,6 +378,7 @@ export function renderInline(text: string): string {
   /** An inline span is never a document's preview: its images follow an answer's rule, whatever parsed last. */
   imageBase = undefined
   remoteImagesAllowed = false
+  if (!withinParseBudget(String(text ?? ''))) return escapeHtml(String(text ?? ''))
   try {
     return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(boundNesting(String(text ?? '')))) as string, {
       url: (value, at) => {
@@ -372,6 +402,7 @@ export function renderMarkdown(source: string, options: { readonly base?: string
   /** Only a document's preview asks for remote images; an answer, which has no `base`, never does. */
   remoteImagesAllowed = options.remoteImages === true
   const text = String(source ?? '').replace(/\r\n?/g, '\n')
+  if (!withinParseBudget(text)) return unrendered(text)
   const front = /^---\n([\s\S]*?)\n---\n?/.exec(text)
   const body = front === null ? text : text.slice(front[0].length)
   const frontHtml =

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
@@ -1442,6 +1442,88 @@ test('a finished turn shows the edited files as one summary: single name, or a f
   }
 })
 
+test('a write the sandbox refused is not shown as an edited file, whether by write_file or by bash', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH derives its changed-files card from the files' actual state, so a write that did not happen is not on it.
+   * Heddle derives the card from its log, and measured 2026-10-29 (DSH parity R-developer-twelve-11) it named every
+   * `write_file` the model *asked* for: with each write refused by the sandbox, the card still showed three files
+   * and their added lines while the disk was unchanged. Here the sandbox root is the work folder, so a write to a
+   * folder outside it is refused — once through `write_file`, once through `bash` — and one write inside succeeds.
+   *
+   * The refused target is under `/etc`, not beside the work folder. `workspace-write` also lets both builds write
+   * to `/tmp` and the OS temp directory (src/sandbox/policy.ts `writableRoots`), so a sibling of the work folder
+   * is writable whenever the checkout itself sits under a temp directory, as a gate's scratch checkout does: the
+   * precondition then failed on an integrator's TypeScript run (2026-10-29) though nothing in heddle had changed.
+   * `/etc` is outside every writable root on any machine, and not writable by an ordinary user either.
+   */
+  const outside = join('/etc', `heddle-check-refused-${process.pid}`)
+  const refusedPath = join(outside, 'refused.txt')
+  const shellPath = `${outside}-shell.txt`
+  const mixed = await startServer('edits-refused', (work) => [
+    { toolCall: { name: 'write_file', arguments: { path: refusedPath, content: 'one\ntwo\n' } }, reasoning: 'writing outside the root' },
+    { toolCall: { name: 'bash', arguments: { command: `printf 'x\\n' > '${shellPath}'` } }, reasoning: 'writing outside the root through the shell' },
+    { toolCall: { name: 'write_file', arguments: { path: join(work, 'kept.txt'), content: 'kept\n' } }, reasoning: 'writing inside the root' },
+    { text: 'one of three writes landed' },
+  ], { sandboxRoot: true })
+  const refused = await startServer('edits-all-refused', () => [
+    { toolCall: { name: 'write_file', arguments: { path: refusedPath, content: 'x\n' } }, reasoning: 'writing outside the root' },
+    { text: 'nothing landed' },
+  ], { sandboxRoot: true })
+  const browser = await openBrowser()
+  /** One turn through the API, then the page that draws it; answers the session's transcript. */
+  const runTurn = async (server, prompt) => {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt, folder: server.work, session }),
+    })
+    assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
+    await turn.text()
+    await browser.goto(server.url)
+    await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return (await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)).body
+  }
+  const answerOf = (transcript) => (transcript.turns ?? []).filter((turn) => turn.kind === 'assistant').at(-1)
+  const card = async () => JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+    const answer = Array.from(document.querySelectorAll('#log .turn.assistant')).at(-1)
+    const panel = answer ? answer.querySelector('[data-changed-files]') : null
+    return { hasCard: panel !== null, title: panel ? panel.querySelector('.changed-title').textContent : null, text: panel ? panel.textContent : '' }
+  })())`))
+  try {
+    const transcript = await runTurn(mixed, 'write three files')
+    assert.equal(existsSync(refusedPath), false, 'the sandbox really refused the write_file outside the root')
+    assert.equal(existsSync(shellPath), false, 'and the bash write outside the root')
+    const tools = (transcript.turns ?? []).filter((turn) => turn.kind === 'tool')
+    assert.deepEqual(tools.map((turn) => turn.state), ['error', 'error', 'ok'], 'the two refused calls read as errors, the third as done')
+    assert.deepEqual(
+      answerOf(transcript)?.files,
+      [{ path: join(mixed.work, 'kept.txt'), added: 1 }],
+      'the transcript lists only the write that landed',
+    )
+    const mixedCard = await card()
+    assert.equal(mixedCard.hasCard, true, 'the turn that wrote one file shows the card')
+    assert.equal(mixedCard.title, 'Edited kept.txt', `titled by the one file that changed (${mixedCard.title})`)
+    assert.ok(!/refused\.txt|shell\.txt/.test(mixedCard.text), `no refused file is on the card (${mixedCard.text})`)
+
+    const none = await runTurn(refused, 'write outside the root')
+    assert.equal(answerOf(none)?.files, undefined, 'a turn whose every write was refused lists no files')
+    assert.equal((await card()).hasCard, false, 'and shows no card')
+  } finally {
+    browser.close()
+    await mixed.close()
+    await refused.close()
+    // Nothing was created under /etc to remove: the writes were refused, which is what the test asserts.
+  }
+})
+
 test('a long turn is not cut at eight rounds, and a turn the loop does stop says why', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
@@ -2274,9 +2356,48 @@ test('a deeply nested answer, file or text renders, and the server keeps answeri
     assert.ok((String(posted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth')
     const file = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'deep.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
     assert.equal(file.status, 200, `the file previews (${file.status})`)
+    /**
+     * developer-three's review (2026-10-30): a line that only looks like a fence ("    ```", four spaces, is an indented
+     * code block) switched the first version's bound off for every later line, leaving Rust with the render stack as
+     * its only guard, through a workspace file and no model at all. And lists nest by indentation too: in this build an
+     * indented list of 1,500 levels ran out of heap.
+     */
+    const lookalike = `    \`\`\`\n\n${deep}`
+    writeFileSync(join(server.work, 'lookalike.md'), `${lookalike}\n`)
+    const lookalikePosted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: lookalike }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(lookalikePosted.status, 200, `a text opened by a fence lookalike renders (${lookalikePosted.status})`)
+    assert.ok((String(lookalikePosted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth too')
+    const lookalikeFile = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'lookalike.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+    assert.equal(lookalikeFile.status, 200, `and so does the file (${lookalikeFile.status})`)
+    const indented = Array.from({ length: 1200 }, (_, level) => `${'  '.repeat(level)}- ${level}`).join('\n')
+    const indentedPosted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: indented }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(indentedPosted.status, 200, `an indented list of 1,200 levels renders (${indentedPosted.status})`)
+    const lists = (String(indentedPosted.body.html ?? '').match(/<ul>/g) ?? []).length
+    assert.ok(lists <= 101, `at a bounded depth (${lists} nested lists)`)
     const alive = await fetch(new URL('/healthz', server.url)).then((response) => response.status).catch((error) => `no answer: ${error.message}`)
     assert.equal(alive, 200, 'and the server is still up')
   } finally {
     await server.close()
   }
+})
+
+
+test('over-budget inline markdown is escaped promptly and the server keeps answering', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('inline-budget')
+  try {
+    const cookie = await cookieFor(server.url)
+    for (const text of ['*a '.repeat(2000) + 'x' + ' a*'.repeat(2000), '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)]) {
+      const start = Date.now()
+      const response = await fetch(new URL('/api/markdown', server.url), {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ text }), signal: AbortSignal.timeout(5000),
+      })
+      assert.equal(response.status, 200)
+      const rendered = await response.json()
+      assert.ok(String(rendered.html).startsWith('<pre class="unrendered"><code>'), 'over-budget text is not parsed')
+      assert.ok(Date.now() - start < 5000, 'rendering stays within the response budget')
+      assert.equal((await fetch(new URL('/healthz', server.url), { signal: AbortSignal.timeout(2000) })).status, 200)
+    }
+  } finally { await server.close() }
 })

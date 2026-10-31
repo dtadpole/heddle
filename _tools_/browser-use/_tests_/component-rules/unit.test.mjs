@@ -7,6 +7,7 @@ import { keyDescription, parseKey } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
   formatConsoleList,
+  formatNetworkList,
   formatNetworkRequest,
   formatPages,
   groupConsoleMessages,
@@ -16,6 +17,7 @@ import {
   networkStatus,
 } from '../../format.mjs'
 import { attributesOf, formatSnapshot } from '../../snapshot.mjs'
+import { Page } from '../../page.mjs'
 import { TOOL_NAMES } from '../../tools.mjs'
 
 /**
@@ -104,6 +106,14 @@ test('key descriptions carry the protocol codes for named, letter, digit and pun
   assert.deepEqual(keyDescription('/'), { key: '/', code: 'Slash', keyCode: 191, text: '/' })
   assert.deepEqual(keyDescription('F5'), { key: 'F5', code: 'F5', keyCode: 116 })
   assert.throws(() => keyDescription('NonsenseKey'), /does not know the key/)
+})
+
+/** A key's name is not always its DOM value: a button answers the space bar only for `key: ' '`. */
+test('the named Space key sends the DOM value a literal space, the same as pressing " "', () => {
+  assert.deepEqual(keyDescription('Space'), { key: ' ', code: 'Space', keyCode: 32, text: ' ' })
+  assert.deepEqual(keyDescription('Space'), keyDescription(' '), 'the name and the character are one key')
+  assert.deepEqual(parseKey('Shift+Space'), { key: 'Space', modifiers: 8 })
+  assert.equal(keyDescription(parseKey('Shift+Space').key).key, ' ', 'a chord keeps the DOM value')
 })
 
 /** The snapshot's text form: indentation, uid first, role rules, quoted values, collapsed text. */
@@ -195,7 +205,7 @@ test('console messages group only when they are consecutive and identical', () =
 /** A console list is a header, the message lines, and nothing parsed from the page's own text. */
 test('the console listing formats a message and says when there are none', () => {
   const page = {
-    browser: { navigationEpoch: 1 },
+    navigationEpoch: 1,
     console: [
       { msgid: 1, type: 'log', text: 'hello', args: ['hello'], navigation: 1 },
       { msgid: 2, type: 'error', text: 'broken', args: [], navigation: 1 },
@@ -210,7 +220,7 @@ test('the console listing formats a message and says when there are none', () =>
   assert.doesNotMatch(listed.text, /old page/, 'a previous document is not in the reading')
   const preserved = formatConsoleList(page, { includePreservedMessages: true })
   assert.match(preserved.text, /old page/, 'unless the caller asks for preserved messages')
-  const empty = formatConsoleList({ browser: { navigationEpoch: 1 }, console: [], network: [] })
+  const empty = formatConsoleList({ navigationEpoch: 1, console: [], network: [] })
   assert.match(empty.text, /<no console messages found>/)
 })
 
@@ -313,4 +323,39 @@ test('closing a stopped Chrome releases only its owned output streams', () => {
   assert.deepEqual(calls, ['stdout', 'stderr'])
   releaseChromeOutput(undefined)
   releaseChromeOutput({ stdout: null, stderr: null })
+})
+
+/**
+ * Each page counts its own navigations. With one counter for the browser, a navigation in a background tab
+ * made the selected page's live entries look like an earlier document's, and four of them hid even the
+ * preserved ones (developer-two, 2026-10-31).
+ */
+test('a navigation in another tab never hides this page\'s console messages or requests', () => {
+  const handlers = []
+  const browser = { navigationEpoch: 0, connection: { on: (method, handler) => handlers.push({ method, handler }) } } // the counter the browser once kept
+  const fire = (sessionId, method, params) => {
+    for (const h of handlers) if (h.method === method) h.handler(params, { sessionId })
+  }
+  const navigate = (sessionId, url) => fire(sessionId, 'Page.frameNavigated', { frame: { id: `top-${sessionId}`, url } })
+  const log = (sessionId, text) => fire(sessionId, 'Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value: text }], timestamp: 1 })
+  const request = (sessionId, url) =>
+    fire(sessionId, 'Network.requestWillBeSent', { requestId: url, type: 'Image', timestamp: 1, request: { url, method: 'GET', headers: {} } })
+  const selected = new Page(browser, { targetId: 'a', sessionId: 'A', pageId: 1 })
+  const background = new Page(browser, { targetId: 'b', sessionId: 'B', pageId: 2 })
+
+  navigate('A', 'http://x/a')
+  log('A', 'selected page says hi')
+  request('A', 'http://x/a.png')
+  for (let i = 0; i < 5; i++) navigate('B', `http://x/b${i}`)
+  assert.equal(background.navigationEpoch, 5)
+  assert.equal(selected.navigationEpoch, 1, 'a navigation counts on its own page only')
+  assert.match(formatConsoleList(selected).text, /selected page says hi/)
+  assert.match(formatConsoleList(selected, { includePreservedMessages: true }).text, /selected page says hi/)
+  assert.match(formatNetworkList(selected).text, /http:\/\/x\/a\.png/)
+  assert.match(formatNetworkList(selected, { includePreservedRequests: true }).text, /http:\/\/x\/a\.png/)
+
+  navigate('A', 'http://x/a2')
+  assert.doesNotMatch(formatConsoleList(selected).text, /selected page says hi/, 'its own navigation still starts a fresh reading')
+  assert.doesNotMatch(formatNetworkList(selected).text, /a\.png/)
+  assert.match(formatNetworkList(selected, { includePreservedRequests: true }).text, /a\.png/, 'and the old document stays preserved')
 })

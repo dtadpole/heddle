@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { createApp } from './app.ts'
 import { boot, failedEntries, settle } from './boot.ts'
@@ -13,7 +14,8 @@ import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
-import { heddleHome } from './config/schema.ts'
+import { resetProfileFromTemplate } from './config/profile-template.ts'
+import { ConfigError, heddleHome, profilesDir } from './config/schema.ts'
 
 /**
  * `FiberState` is a `const enum`, so it has no runtime object to read names from.
@@ -28,6 +30,8 @@ interface Args {
   help: boolean
   config?: string
   profile?: string
+  /** `--from-default-profile <template>`: replace the `--profile` with a fresh copy of a shipped template first. */
+  fromDefaultProfile?: string
   patch: string[]
   turn?: string
   resume?: string
@@ -67,6 +71,8 @@ usage: heddle [options] [command]
 options:
   -c, --config <path>        boot from this configuration layer instead of the default profile
       --profile <name>       boot a named profile from $HEDDLE_HOME/profiles
+      --from-default-profile <template>
+                             replace that profile with a fresh copy of a shipped template (default), then boot it
       --patch <path>         apply an extra layer after it (repeatable)
       --dry-run              report what a run would do and stop before doing it
       --sandbox-root <path>  confine file effects to this directory instead of the working one
@@ -147,6 +153,9 @@ function parseArgs(argv: readonly string[]): Args {
         args.profile = looksLikePath ? resolve(value) : value
         break
       }
+      case '--from-default-profile':
+        args.fromDefaultProfile = next() ?? ''
+        break
       case '--patch':
         args.patch.push(next() ?? '')
         break
@@ -925,6 +934,42 @@ async function runCommand(command: string, target: string | undefined, json: boo
   }
 }
 
+/**
+ * The profile a run boots when it names none (issue #74).
+ *
+ * A run that boots — `web`, a command, or a `--turn` — and names no profile, no `--config` and no `--patch`, from a
+ * folder with no project tree (`cordis.yml`), used to boot **nothing**: on a fresh home the page loaded with no
+ * session, model or workspace service, and the first message failed with an internal TypeError. DSH auto-initializes
+ * its shipped profiles from their templates on first use; heddle does the same for `default`: such a run boots
+ * `$HEDDLE_HOME/profiles/default`, created from the shipped template the first time, and says so on stderr. A profile a
+ * person already keeps under that name is booted as it is. `profiles` lists what exists and creates nothing. Answers
+ * false when the template could not be written (the reason is on stderr and the exit code is 1).
+ */
+function useDefaultProfile(args: Args): boolean {
+  if (args.profile !== undefined || args.config !== undefined || args.patch.length > 0) return true
+  /**
+   * `--from-default-profile` replaces a profile, so it must name one: the check below refuses it without `--profile`.
+   * Choosing `default` here first would turn that refusal into a reset of the default profile (developer-two's review).
+   */
+  if (args.fromDefaultProfile !== undefined) return true
+  if (args.command === undefined && args.turn === undefined) return true
+  if (args.command === 'profiles') return true
+  if (existsSync(resolve(process.cwd(), 'cordis.yml'))) return true
+  const dir = join(profilesDir(), 'default')
+  if (!existsSync(dir)) {
+    try {
+      resetProfileFromTemplate('default', 'default', { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return false
+    }
+    process.stderr.write(`heddle: created profile 'default' from the shipped template at ${dir}\n`)
+  }
+  args.profile = 'default'
+  return true
+}
+
 function hasProfileArgs(args: Args): boolean {
   return hasProfile(args)
 }
@@ -954,6 +999,29 @@ async function main(): Promise<void> {
   if (args.help) {
     process.stdout.write(USAGE)
     return
+  }
+
+  if (!useDefaultProfile(args)) return
+
+  /**
+   * DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of a
+   * shipped template, then the command boots it as usual. A profile named by a directory is not a profile this can
+   * replace, so the flag needs a plain name.
+   */
+  if (args.fromDefaultProfile !== undefined) {
+    if (args.profile === undefined || args.profile.startsWith('/')) {
+      process.stderr.write('heddle: --from-default-profile needs --profile <name>, a profile under $HEDDLE_HOME/profiles\n')
+      process.exitCode = 1
+      return
+    }
+    try {
+      resetProfileFromTemplate(args.profile, args.fromDefaultProfile, { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return
+    }
+    process.stderr.write(`heddle: profile '${args.profile}' replaced by a fresh copy of the '${args.fromDefaultProfile}' template\n`)
   }
 
   if (args.command === 'web') {
