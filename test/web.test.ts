@@ -65,6 +65,35 @@ test('a goal round is a user turn that names its trigger, and a person\'s messag
   assert.equal('trigger' in (turns[2] ?? {}), false, 'a source without a kind names no trigger')
 })
 
+test('a notice\'s text blocks read as paragraphs, and a person\'s message reads as written', () => {
+  /**
+   * Live-testing draft developer-five-10: a settled subagent's notice is three text blocks (DSH's
+   * `createSettlementMessage`), and the fold joined them with nothing, so the page read one run-on line.
+   */
+  const source = { kind: 'subagent-settled', form: 'notice', summary: 'Background subagent s-1 finished.' }
+  const turns = transcriptTurns([
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'one line\nand a second' }] } },
+    {
+      type: 'message',
+      message: {
+        role: 'user',
+        source,
+        content: [
+          { type: 'text', text: 'Background subagent s-1 finished. It cannot receive follow-up messages.' },
+          { type: 'text', text: 'Its closing message:' },
+          { type: 'text', text: 'pong' },
+        ],
+      },
+    },
+    { type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'see the picture' }, { type: 'image', mimeType: 'image/png', path: '/work/a.png' }] } },
+    { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] } },
+  ])
+  assert.equal(turns[0]?.text, 'one line\nand a second', 'a person\'s message reads as written')
+  assert.equal(turns[1]?.text, 'Background subagent s-1 finished. It cannot receive follow-up messages.\n\nIts closing message:\n\npong', 'each block of a notice is its own paragraph')
+  assert.equal(turns[2]?.text, 'see the picture', 'an attachment adds no text')
+  assert.equal(turns[3]?.text, 'ab', 'an answer\'s text is joined as it streamed')
+})
+
 test('a completed exchange carries its token usage on its answer, only when every round reported it', () => {
   /**
    * DSH's per-Turn usage row: a completed Turn shows its usage only when every started model attempt reported exact
