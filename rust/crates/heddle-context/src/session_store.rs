@@ -407,10 +407,10 @@ mod tests {
             [
                 "User:run long",
                 "Assistant:call(call-bash)",
-                "User:queued steer",
-                "Tool:error (EXIT): the command exited null"
+                "Tool:error (EXIT): the command exited null",
+                "User:queued steer"
             ],
-            "the log keeps the bad order"
+            "the fold places the steer at the step boundary, after the result (#30); the log keeps its order"
         );
 
         let store = Arc::new(store);
