@@ -78,7 +78,8 @@ test('a session that cannot be loaded shows the failure line, is not kept, and l
   assert.match(refused, /selectedPath = null[\s\S]*await renderTree\(\)[\s\S]*markSelection\(\)/, 'the tree is read again and the selection dropped')
   assert.match(refused, /return false/, 'and the caller is told the session did not open')
   assert.match(show, /if \(unavailableSession !== null\) \{\n\s+unavailableSession = null/, 'opening any session clears the state')
-  assert.match(show, /\n {2}return true\n}\n$/, 'a session whose history was read resolves true')
+  /** True when the session asked for is the one shown at the end, which a later open of another session changes (N3). */
+  assert.match(show, /\n {2}return current === id\n}\n$/, 'a session whose history was read resolves true while it is the one shown')
 })
 
 test('the header names a session that could not be loaded, not "No session"', () => {
@@ -245,4 +246,25 @@ test('with no session and no workspace to start one in, the composer is inert in
   assert.equal(picker, 1, "and the hero's workspace picker opens, as DSH's inert composer opens it on Enter")
   submit(false)
   assert.deepEqual(sent, ['where does this go'], 'with a workspace to start in, the message goes')
+})
+
+test('after a failed load the live stream draws only that session, and a reset reads it again (#56)', () => {
+  /**
+   * developer-ten's review of stack-2: while a session's history cannot be loaded `current` is null, and the stream
+   * handler read null as "show every session", so another session's live turn drew under "Failed to load history"
+   * (its failure line, its settled answer, its deltas). And the stream's `reset` (a server restart) re-read `current`
+   * only, so the composer stayed at "Session unavailable" even when the session could now be read. Both now read the
+   * shown session as `current ?? unavailableSession`.
+   */
+  const handlerAt = page.indexOf("events.addEventListener('session', (message) => {")
+  assert.ok(handlerAt > 0, 'the page follows the session stream')
+  const handler = page.slice(handlerAt, page.indexOf('\n})\n', handlerAt))
+  assert.match(handler, /const shown = current \?\? unavailableSession/, 'the handler reads the shown session, a failed one included')
+  assert.equal([...handler.matchAll(/if \(shown === null \|\| payload\.session === shown\) \{/g)].length, 2, 'a turn failure and a turn end draw only for it')
+  assert.match(handler, /if \(shown && payload\.session !== shown\) return/, 'and every other event of another session stops there')
+  assert.doesNotMatch(handler, /current === null \|\| payload\.session === current|if \(current && payload\.session !== current\)/, 'no filter is left on current alone')
+  const resetAt = page.indexOf("events.addEventListener('reset', () => {")
+  assert.ok(resetAt > 0, 'the page follows the stream reset')
+  const reset = page.slice(resetAt, page.indexOf('\n})\n', resetAt))
+  assert.match(reset, /const reopen = current \?\? unavailableSession\s*if \(reopen !== null\) await showSession\(reopen\)/, 'a reset reads the failed session again too')
 })
