@@ -47,6 +47,7 @@ use crate::surface::{
     SurfaceState, completed_prefix, derive_message, derive_node_message, fold_surface,
     index_by_seq, is_surface_eligible,
 };
+use crate::title::SessionTitles;
 use crate::transcript::{TranscriptFormat, decode_transcript, encode_frame};
 
 /// The transcript file name inside an **old-layout** session directory, current format.
@@ -330,6 +331,11 @@ pub struct SessionStore {
     root: String,
     listener: Option<EventListener>,
     state: Mutex<StoreState>,
+    /// Held by every read-modify-write of a meta record (`rename`, `flags`, `set_model`, `touch`, a generated title),
+    /// because a generated title is written from the model's thread while the turn touches the same file.
+    meta_lock: Mutex<()>,
+    /// The automatic titles of this store's sessions ([`crate::title`]); idle until a model is attached.
+    titles: Arc<SessionTitles>,
 }
 
 /// One session's fold: its events, and whether its transcript is stored as frames.
@@ -420,6 +426,8 @@ impl SessionStore {
             root: resolve_root(root, env),
             listener: None,
             state: Mutex::new(StoreState::default()),
+            meta_lock: Mutex::new(()),
+            titles: Arc::new(SessionTitles::default()),
         }
     }
 
@@ -429,12 +437,26 @@ impl SessionStore {
             root: resolve_root(root, env),
             listener: Some(listener),
             state: Mutex::new(StoreState::default()),
+            meta_lock: Mutex::new(()),
+            titles: Arc::new(SessionTitles::default()),
         }
     }
 
     /// The absolute root every session is filed under.
     pub fn root(&self) -> &str {
         &self.root
+    }
+
+    /// The automatic-title coordinator every service over this store shares ([`crate::title`]).
+    pub fn titles(&self) -> &Arc<SessionTitles> {
+        &self.titles
+    }
+
+    /// The meta-record lock; a poisoned one is still a lock, since the guarded data is the file.
+    fn meta_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.meta_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Create a session filed under its workspace folder: write `<id>.json`, create the empty log, and
@@ -520,6 +542,30 @@ impl SessionStore {
 
     /// Retitle a session; a blank title deletes the key. `Ok(None)` when there is no such session.
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
+        self.rename_locked(id, title)
+    }
+
+    /// Write a generated title only while the session still carries `expected` — the name the call started from.
+    /// Answers whether it wrote.
+    pub(crate) fn rename_if_title(
+        &self,
+        id: &str,
+        expected: &str,
+        title: &str,
+    ) -> Result<bool, SessionError> {
+        let _meta = self.meta_guard();
+        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+            return Ok(false);
+        };
+        if current.title().unwrap_or("") != expected {
+            return Ok(false);
+        }
+        Ok(self.rename_locked(id, title)?.is_some())
+    }
+
+    /// `rename` with the meta lock already held.
+    fn rename_locked(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(None);
         };
@@ -540,6 +586,7 @@ impl SessionStore {
     /// Set or clear pinned and archived in one write, answering with the record as it now is.
     /// `Ok(None)` for an unknown session; [`SessionError::Flag`] for a refused pin.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(None);
         };
@@ -648,6 +695,7 @@ impl SessionStore {
         id: &str,
         selection: ModelSelection,
     ) -> Result<Option<SessionMeta>, SessionError> {
+        let _meta = self.meta_guard();
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
             return Ok(None);
         };
@@ -804,6 +852,8 @@ impl SessionStore {
         if let Some(listener) = &self.listener {
             listener(handle, &written);
         }
+        // A first prompt waits for a title, and the turn's `model/request` starts it ([`crate::title`]).
+        self.titles.observe(self, handle, &written);
         Ok(written)
     }
 
@@ -1277,6 +1327,7 @@ impl SessionStore {
     /// write. A meta file that cannot be read or written is ignored: losing the count must never lose
     /// the event that was just appended.
     pub fn touch(&self, handle: &SessionHandle, bump_turns: bool) {
+        let _meta = self.meta_guard();
         let Ok(text) = std::fs::read_to_string(&handle.meta) else {
             return;
         };
