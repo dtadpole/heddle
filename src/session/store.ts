@@ -596,6 +596,30 @@ export class SessionFlagError extends Error {
 }
 
 /**
+ * Whether a session, or a session above it in its **subagent** lineage, is archived — the question DSH's archived-session
+ * gate asks before every model step (`underArchivedSession`, dsh-api-session-controller lib/index.js:2528-2541).
+ *
+ * The walk follows `parentSession` only through `origin: 'subagent'` records, as DSH's follows its durable header: a
+ * delegated child of an archived session runs no step either, while a fork (a `parentSession` with no origin) is an
+ * independent conversation. A parent whose record cannot be read ends the walk unarchived, and a cycle ends it too.
+ * Pure over a lookup so a caller can judge it without a store.
+ */
+export function underArchivedSession(
+  lookup: (id: SessionId) => Pick<SessionMeta, 'id' | 'archived' | 'origin' | 'parentSession'> | null | undefined,
+  id: SessionId,
+): boolean {
+  let meta = lookup(id)
+  const visited = new Set<string>()
+  while (meta !== null && meta !== undefined && !visited.has(meta.id)) {
+    if (meta.archived === true) return true
+    visited.add(meta.id)
+    if (meta.origin !== 'subagent' || meta.parentSession === undefined) return false
+    meta = lookup(meta.parentSession)
+  }
+  return false
+}
+
+/**
  * A write refused because another process holds the session's writer lock.
  *
  * The sentence is DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and the
@@ -934,6 +958,26 @@ export class SessionStore {
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
     return next
+  }
+
+  /** One session's record, read from its own file; `null` for an unknown id or an unreadable record. */
+  meta(id: SessionId): SessionMeta | null {
+    const file = this.metaFile(id)
+    if (file === null) return null
+    try {
+      const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta
+      return typeof meta?.id === 'string' ? meta : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Whether the session or a subagent ancestor is archived (`underArchivedSession`), read from the records **now**: the
+   * agent loop asks before every step, so an archive written by another process stops the next step too.
+   */
+  underArchived(id: SessionId): boolean {
+    return underArchivedSession((one) => this.meta(one), id)
   }
 
   /**

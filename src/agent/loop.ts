@@ -9,7 +9,7 @@ import type { SessionHandle } from '../session/store.ts'
 import type { TurnRegistry } from './turns.ts'
 import type { ToolResult } from '../tools/service.ts'
 import { sandboxPolicyStatement } from '../sandbox/policy.ts'
-import { claimNextStep, hasPendingStep } from '../session/inbox.ts'
+import { claimNextStep, claimRejected, hasPendingStep, queueTurn } from '../session/inbox.ts'
 import { recordTimeContext } from '../schedule/time-context.ts'
 
 /**
@@ -233,6 +233,31 @@ export async function runTurn(ctx: Context, options: RunTurnOptions): Promise<Tu
   }
 }
 
+/** Why a turn the archived-session gate rejected ended, in the loop's words (`TurnResult.ended`). */
+export const ARCHIVED_BLOCKED = 'blocked: an archived session runs no model step until it is unarchived'
+
+/**
+ * DSH's turn-end record for a rejected step, `{ kind: 'blocked' }` (dsh-agent-loop lib/index.js:960-962).
+ *
+ * It is written as heddle's non-completed turn end, `turn/failed`, which every reader of a turn's end already knows
+ * (the time context, the goal tool, the schedule driver, and the goal driver, which ends the session's busy span on it),
+ * and **not** as `turn/completed`: that event is the goal driver's edge to start another round, and a blocked turn that
+ * wrote it would re-trigger a blocked round forever.
+ */
+const BLOCKED_TURN_END = { type: 'turn/failed', reason: { kind: 'blocked' } } as const
+
+/**
+ * DSH's archived-session gate: whether this session's next step must be rejected.
+ *
+ * `ArchivedSessionGate` (dsh-api-session-controller lib/index.js:2508-2541) answers `agent/pre-step` with `reject` while
+ * the agent's session, or a session above it in its subagent lineage, is archived. Asked of the records at every step,
+ * so an archive written by another process, or a parent archived while its child runs, stops the next step too. A
+ * profile whose session service has no such question runs every step, as before.
+ */
+function archivedGate(ctx: Context, session: SessionHandle): boolean {
+  return ctx.session.underArchived?.(session.id) === true
+}
+
 /** The `presets` service as the loop reads it: optional, so a profile without the row runs every tool. */
 interface PresetRegistry {
   defaultId(): string
@@ -320,6 +345,31 @@ async function runTurnBody(
   preset: PresetDefinition | undefined,
 ): Promise<TurnResult> {
   const started = ctx.session.store.count(options.session)
+  /**
+   * A turn into an archived session is **accepted and blocked**, as DSH's is: the prompt is queued (DSH's `followup`), the
+   * turn's first step claims it with any pending steer, the gate rejects the step before a model request is made, and
+   * the turn ends `blocked`. The claimed input is dropped, never written as a message, so the session's turns, its
+   * conversation and its answer stay as they were; the splices keep a record of what was dropped. This covers every
+   * caller: the page's turn route, the command line's `--resume --turn`, a subagent's settlement notice, a goal round, a
+   * reminder and a teammate's mail all start their turns here.
+   */
+  if (archivedGate(ctx, options.session)) {
+    if (options.answerPending !== true) {
+      queueTurn(ctx.session.store, options.session, [{ type: 'text', text: options.prompt }, ...(options.attachments ?? [])], options.source)
+    }
+    claimRejected(ctx.session.store, options.session, 'next-turn')
+    ctx.session.store.append(options.session, BLOCKED_TURN_END)
+    return {
+      text: '',
+      reasoning: '',
+      toolCalls: [],
+      denials: [],
+      finishReason: 'blocked',
+      events: ctx.session.store.count(options.session) - started,
+      rounds: 0,
+      ended: [ARCHIVED_BLOCKED],
+    }
+  }
   const maxRounds = options.maxRounds ?? 8
   const maxOverflowRetries = options.maxOverflowRetries ?? 1
   const maximumTokens = options.maxOutputTokens
@@ -371,6 +421,8 @@ async function runTurnBody(
   let rounds = 0
   let lastContext: { estimatedTokens: number; thresholdTokens: number; pruned: number; compacted: boolean } | undefined
   const ended: string[] = []
+  /** Whether the archived-session gate rejected a later step of this turn. */
+  let blocked = false
   /** Read at the moment asked: TypeScript narrows a checked field to `false` for the rest of the scope, and an
    *  abort arrives asynchronously while a tool is running. */
   const stoppedByCaller = (): boolean => signal !== undefined && signal.aborted
@@ -383,6 +435,23 @@ async function runTurnBody(
      */
     if (stoppedByCaller()) {
       ended.push('stopped by the caller')
+      break
+    }
+    /**
+     * The archived-session gate at a later step: a session archived while its turn ran (by another process, or a parent
+     * archived under a running child) runs no further step. The step's claim of pending steers is recorded and dropped,
+     * as DSH's rejected claim is, and the turn ends `blocked` below.
+     */
+    if (round > 0 && archivedGate(ctx, options.session)) {
+      claimRejected(ctx.session.store, options.session, 'next-step')
+      ended.push(ARCHIVED_BLOCKED)
+      blocked = true
+      /**
+       * The turn's finish reason is `blocked`, not the previous step's (`tool_calls`, as a rule): DSH's loop sets
+       * `turnEnds = { kind: 'blocked' }` at a rejected step whatever the earlier steps proposed (dsh-agent-loop
+       * lib/index.js:956-963), so the answer record and the result say why the turn ended, as the first-step gate does.
+       */
+      finishReason = 'blocked'
       break
     }
     /**
@@ -734,7 +803,8 @@ async function runTurnBody(
     ...(ended.length > 0 ? { ended } : {}),
   })
   progress.completed = true
-  ctx.session.store.append(options.session, { type: 'turn/completed', rounds })
+  /** A turn whose later step the gate rejected ends with DSH's `blocked` record, not as a completed turn. */
+  ctx.session.store.append(options.session, blocked ? BLOCKED_TURN_END : { type: 'turn/completed', rounds })
 
   return {
     text,
