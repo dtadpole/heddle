@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { defaultEndpoints, describeEndpoints, resolveEndpoints } from '../src/endpoints.ts'
+import { defaultEndpoints, describeEndpoint, describeEndpoints, resolveEndpoints } from '../src/endpoints.ts'
 import { SessionStore, type SessionMeta } from '../src/session/store.ts'
 import { resolveTurnEffort, resolveTurnEndpoint, sessionRequestSelection } from '../src/server/web.ts'
 
@@ -92,13 +92,13 @@ test('the page is told every endpoint, and never a credential', () => {
   assert.doesNotMatch(text, /also-a-secret/, 'nor is a header value')
   assert.match(text, /"credential":"set"/, 'only that a credential exists')
   /**
-   * The **path** a key is read from is reported, and that is the existing contract rather than a leak:
-   * `describeEndpoint` says "presence, never the value", the CLI's `models` command prints the same
-   * summary, and the whole reason this route reuses it is so there is one answer to what is safe to say.
-   * A second, stricter shape here would be the drift the reuse prevents — and a file name is what a
-   * person needs to fix a missing key.
+   * Nor the **path** a key is read from, nor the gateway's address: a key file's path names the account that holds
+   * it, and the page needs neither to list and pick models. DSH lets only declared credential metadata cross
+   * (live-testing issue developer-two-4). The page listing is `describePageEndpoint`, `describeEndpoint` cut to the
+   * fields a page reads.
    */
-  assert.match(text, /"credentialFile":"\/home\/someone\/\.keys\/provider\.key"/, 'the file it is read from, as presence')
+  assert.doesNotMatch(text, /keys\/provider\.key|credentialFile/, 'the key file is presence only')
+  assert.equal(described.endpoints.some((endpoint) => 'baseUrl' in endpoint), false, 'no gateway address reaches the page')
 })
 
 test('the list points at something real, or at nothing', () => {
@@ -307,4 +307,27 @@ test('the session’s recorded selection is what every model call of its turn is
     {},
     'a record without an endpoint cannot name a selection, so it changes nothing',
   )
+})
+
+test('the page listing keeps only what a page reads; the CLI summary keeps the gateway but never a key path', () => {
+  const endpoint = {
+    name: 'gateway',
+    kind: 'openai-chat',
+    baseUrl: 'http://gw.internal:8443/v1',
+    model: 'm',
+    apiKeyFile: '/home/someone/.keys/gw',
+    proxy: 'http://proxy.internal:3128',
+    project: 'acct-project',
+    headers: { 'X-Tenant': 't' },
+    contextWindow: 1000,
+  } as const
+  const page = describeEndpoints([endpoint as never], 'gateway').endpoints[0]!
+  assert.deepEqual(Object.keys(page).sort(), ['contextWindow', 'contextWindowSource', 'credential', 'kind', 'model', 'models', 'name'])
+  for (const secret of ['gw.internal', '/home/someone', 'proxy.internal', 'acct-project', 'X-Tenant']) {
+    assert.doesNotMatch(JSON.stringify(page), new RegExp(secret.replace('.', '\\.')), `${secret} does not reach a page`)
+  }
+  const cli = describeEndpoint(endpoint as never)
+  assert.equal(cli.baseUrl, 'http://gw.internal:8443/v1', 'the operator’s own listing still names the gateway')
+  assert.equal(cli.credential, 'set')
+  assert.doesNotMatch(JSON.stringify(cli), /\/home\/someone/, 'but never the key file’s path')
 })

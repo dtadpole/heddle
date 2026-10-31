@@ -200,7 +200,10 @@ pub fn render_source(path: &Path, text: &str) -> Rendered {
                     "<div class=\"markdown\">{}</div>",
                     crate::markdown::render_markdown(
                         text,
-                        crate::markdown::MarkdownOptions { base }
+                        crate::markdown::MarkdownOptions {
+                            base,
+                            remote_images: true,
+                        }
                     )
                 )),
             }
