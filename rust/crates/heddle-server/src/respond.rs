@@ -168,24 +168,55 @@ impl JsonBody {
     }
 }
 
+/// The request body parsed as JSON, `None` when it is empty: `413 request too large` over
+/// [`MAX_JSON_BODY`], `400 the body must be JSON` when it does not parse (both `text/plain`).
+async fn json_value(request: Request) -> Result<Option<Value>, Response> {
+    let bytes = match to_bytes(request.into_body(), MAX_JSON_BODY).await {
+        Ok(bytes) => bytes,
+        Err(_) => return Err(text(StatusCode::PAYLOAD_TOO_LARGE, "request too large\n")),
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_slice::<Value>(&bytes)
+        .map(Some)
+        .map_err(|_| text(StatusCode::BAD_REQUEST, "the body must be JSON\n"))
+}
+
 impl<S: Send + Sync> FromRequest<S> for JsonBody {
     type Rejection = Response;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
         let _ = state;
-        let bytes = match to_bytes(request.into_body(), MAX_JSON_BODY).await {
-            Ok(bytes) => bytes,
-            Err(_) => return Err(text(StatusCode::PAYLOAD_TOO_LARGE, "request too large\n")),
-        };
-        if bytes.is_empty() {
-            return Ok(JsonBody(Map::new()));
-        }
-        match serde_json::from_slice::<Value>(&bytes) {
-            Ok(Value::Object(map)) => Ok(JsonBody(map)),
+        match json_value(request).await? {
+            Some(Value::Object(map)) => Ok(JsonBody(map)),
             // A non-object reads as `{}`: property reads on an array, a number or `null` gave the
             // TypeScript routes nothing to read.
-            Ok(_) => Ok(JsonBody(Map::new())),
-            Err(_) => Err(text(StatusCode::BAD_REQUEST, "the body must be JSON\n")),
+            _ => Ok(JsonBody(Map::new())),
+        }
+    }
+}
+
+/// A JSON request body that must be an object, as `readJson` in `src/server/web.ts` requires: an empty body
+/// is `{}`, and JSON that is not an object (`null`, an array, a number, a string) answers
+/// `400 the body must be a JSON object` in `text/plain`, before the route reads a field. DSH's gateway
+/// refuses such args the same way (`args must be a plain object`, dsh-api-gateway lib/index.js:1746).
+/// Used where a route's two builds would otherwise disagree on such a body, such as the fork's `atSeq`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JsonObject(pub JsonBody);
+
+impl<S: Send + Sync> FromRequest<S> for JsonObject {
+    type Rejection = Response;
+
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let _ = state;
+        match json_value(request).await? {
+            None => Ok(JsonObject(JsonBody(Map::new()))),
+            Some(Value::Object(map)) => Ok(JsonObject(JsonBody(map))),
+            Some(_) => Err(text(
+                StatusCode::BAD_REQUEST,
+                "the body must be a JSON object\n",
+            )),
         }
     }
 }

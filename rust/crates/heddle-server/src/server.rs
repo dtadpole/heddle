@@ -58,7 +58,7 @@ use tokio::sync::mpsc;
 use crate::fence;
 use crate::page;
 use crate::preview;
-use crate::respond::{self, JsonBody, SessionId, SessionPath, canonical_path};
+use crate::respond::{self, JsonBody, JsonObject, SessionId, SessionPath, canonical_path};
 use crate::runs::{RunRegistry, iso_time};
 use crate::selection::{SessionSelection, session_request_selection, turn_selection};
 use crate::services::{
@@ -1272,7 +1272,9 @@ fn fork_cut(body: &JsonBody) -> Result<Option<u64>, ()> {
 async fn fork_session(
     State(state): State<AppState>,
     SessionPath(id): SessionPath,
-    body: JsonBody,
+    // A body that is not a JSON object is refused before anything is cut, as `readJson` refuses it for the
+    // TypeScript route (`400 the body must be a JSON object`); `JsonBody` would read it as `{}` and fork.
+    JsonObject(body): JsonObject,
 ) -> Response {
     // An optional `atSeq` is DSH's inclusive cut: the chat's Branch action sends the seq that ended its turn.
     let Ok(at_seq) = fork_cut(&body) else {
@@ -4620,6 +4622,35 @@ mod tests {
             *runner.interrupted.lock().unwrap(),
             vec![parent.to_owned(), child.to_owned()]
         );
+    }
+
+    /// The fork reads a body (its `atSeq`), and the TypeScript route's `readJson` refuses JSON that is not an
+    /// object: `400 the body must be a JSON object`. This route read `null`, `[]`, `5` and `"x"` as `{}` and
+    /// forked; DSH's gateway refuses such args too (dsh-api-gateway lib/index.js:1746).
+    #[tokio::test]
+    async fn a_fork_body_that_is_not_a_json_object_is_refused_before_anything_is_cut() {
+        let (router, _) = app("fork-body");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = "/api/sessions/session-00000000-0000-0000-0000-000000000001/fork";
+        for body in ["null", "[]", "5", r#""x""#] {
+            let (status, bytes) = post_json(&router, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                body_text(&bytes),
+                "the body must be a JSON object\n",
+                "{body}"
+            );
+        }
+        // An object, or no body at all, reaches the fork; the double has no such session to cut.
+        for body in ["{}", ""] {
+            let (status, _) = post_json(&router, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+        }
+        // A body that is not JSON keeps its own sentence.
+        let (status, bytes) = post_json(&router, uri, &cookie, "{").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(&bytes), "the body must be JSON\n");
     }
 
     /// DSH's `archiveSession` with `stopActivity` writes the archive set and only then asks the

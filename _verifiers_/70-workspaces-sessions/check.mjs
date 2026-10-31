@@ -5837,6 +5837,20 @@ test('pin, archive and fork refuse what the reference refuses, and record their 
     assert.equal(noTurn.status, 409, 'a session with no completed turn cannot be forked')
     assert.equal((await noTurn.json()).code, 'unavailable', 'and says why')
 
+    /**
+     * The fork reads a body (its optional atSeq), and a body that is not a JSON object is refused before anything is
+     * cut: TypeScript's readJson answers 400 "the body must be a JSON object", as DSH's gateway refuses args that are not
+     * a plain object (dsh-api-gateway lib/index.js:1746). The Rust build read null, [], 5 and "x" as {} and forked.
+     */
+    const before = (await metas()).length
+    for (const body of [null, [], 5, 'x']) {
+      const wrong = await call(`/api/sessions/${withTurn}/fork`, body)
+      const text = await wrong.text()
+      assert.equal(wrong.status, 400, `a fork body of ${JSON.stringify(body)} is refused\n${text}`)
+      assert.equal(text.trim(), 'the body must be a JSON object', `in the TypeScript build's words\n${text}`)
+    }
+    assert.equal((await metas()).length, before, 'and no refused body forked anything')
+
     /** A session with a turn forks, and the child records its parent — the provenance the reference keeps. */
     const forked = await call(`/api/sessions/${withTurn}/fork`, {})
     assert.equal(forked.status, 200, `a session with a completed turn forks\n${await forked.clone().text()}`)
