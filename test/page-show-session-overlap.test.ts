@@ -50,7 +50,8 @@ function harness(): Page {
     `
     let current = null, unavailableSession = null, selectedPath = null, view = 'chat';
     let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
-    let showGeneration = 0;
+    let historyLoadGeneration = 0;
+    const transcriptLoads = new Map(), transcriptWatermarks = new Map();
     const schedState = { drawer: null };
     const unreadSessions = new Set();
     const sessionMetas = new Map();
@@ -106,7 +107,7 @@ function harness(): Page {
       current: () => current,
     })
   `,
-    { hold: (what: string) => new Promise((resolve) => pending.push({ what, resolve })) },
+    { hold: (what: string) => new Promise((resolve) => pending.push({ what, resolve })), AbortController, console, setTimeout },
   ) as Opened
   return {
     show: (id) => opened.show(id),
@@ -135,7 +136,7 @@ function history(id: string): unknown {
     { kind: 'command', commandId: `${id}-run-1`, name: 'goal', args: 'ship the release', state: 'done', text: 'Goal created' },
     { kind: 'command', commandId: `${id}-run-2`, name: 'goal', args: 'pause', state: 'done', text: 'Goal paused' },
   ]
-  return { ok: true, status: 200, json: async () => ({ id, turns }) }
+  return { ok: true, status: 200, json: async () => ({ id, turns, eventSeq: 0 }) }
 }
 
 function drawn(id: string): string[] {

@@ -14,7 +14,7 @@ function extract(name: string) {
   return page.slice(start, end + 2)
 }
 interface Row { className: string; textContent: string }
-interface Response { ok: boolean; json(): Promise<unknown> }
+interface Response { ok: boolean; status?: number; statusText?: string; json(): Promise<unknown> }
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason: Error) => void
@@ -31,7 +31,7 @@ function harness(previousTranscript = true) {
   // These explicit dependencies do not reimplement loading, replay, filtering, or retry.
   const context = {
     AbortController, performance, console,
-    document: { getElementById: (id: string) => headers.get(id) ?? null, createElement: () => ({ className: '', textContent: '' }) },
+    document: { getElementById: (id: string) => headers.get(id) ?? null, createElement: () => ({ className: '', textContent: '', dataset: {}, setAttribute: noop }) },
     log: { replaceChildren: () => { rows.length = 0; calls.push('clear') }, append: (row: Row) => rows.push(row) },
     add: (kind: string, text: string) => { rows.push({ className: `turn ${kind}`, textContent: text }) },
     fetch: (url: string, options: { signal: AbortSignal }) => {
@@ -47,6 +47,8 @@ function harness(previousTranscript = true) {
     closeSchedulesPage: noop, closeScheduleDrawer: noop, resetScheduleList: noop,
     placeholderDrawn: () => false, chooseWorkspace: noop, jobsSessionChanged: noop,
     slashReady: Promise.resolve(null), markRunning: noop, drawTurnFailure: noop,
+    rememberCurrent: noop, paintComposerAccess: noop, paintSessionHeading: noop,
+    renderTree: async () => {}, markSelection: noop, noteCompletion: noop, markBranchable: noop,
     paintEmptyState: noop, applySessionAccess: noop, applySessionModel: noop,
     adoptSession: noop, refreshSessions: async () => {}, syncSelectionToSession: noop,
     showLedger: async () => {}, followChatTail: noop, updateStatusBar: noop,
@@ -68,13 +70,18 @@ function harness(previousTranscript = true) {
     const schedState = { drawer: null }, runningSessions = new Set(), runningSince = new Map(), queues = new Map();
     let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0;
     let liveRoundStartedAt = null, accessMode = null, followTail = true, ledgerRefetchTimer = null;
+    let unavailableSession = null, selectedPath = null;
+    const unreadSessions = new Set(), sessionMetas = new Map(), pendingInteractions = new Map();
+    ${page.includes('function historyFailureText(') ? extract('historyFailureText') : ''}
     ${extract('showSession')}
     ${extract('handleSessionPayload')}
     ({ show: showSession, handle: handleSessionPayload,
        loading: () => transcriptLoads.has('S'), watermark: () => transcriptWatermarks.get('S'),
-       buffered: () => transcriptLoads.get('S')?.events.length ?? 0 })
+       buffered: () => transcriptLoads.get('S')?.events.length ?? 0,
+       unavailable: () => unavailableSession })
   `, context, { timeout: 1000 }) as {
-    show(id: string): Promise<void>
+    show(id: string): Promise<boolean | undefined>
+    unavailable(): string | null
     handle(payload: unknown): void
     loading(): boolean
     watermark(): number | undefined
@@ -106,6 +113,20 @@ test('showSession clears the previous transcript before starting the snapshot fe
   await loading
   assert.deepEqual(callsAtFetch, ['clear', 'fetch'])
   assert.deepEqual(rowsAtFetch, [], 'No transcript from the previous session remains during the fetch')
+})
+
+test('showSession reports an HTTP snapshot failure as unavailable with the server reason and false result', { timeout: 5000 }, async () => {
+  const state = harness()
+  const loading = state.show('S')
+  const request = await snapshotStarted(state, 1)
+  request.resolve({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'no session S' }) })
+  assert.equal(await loading, false, 'An HTTP failure must not claim that history loaded')
+  assert.equal(state.unavailable(), 'S')
+  assert.equal(state.loading(), false)
+  assert.equal(state.watermark(), undefined)
+  assert.deepEqual(assistantTexts(state), [])
+  assert.ok(state.rows.some((row) => row.className === 'turn denied load-error' && row.textContent === 'Failed to load history: no session S (404)'), 'The actual page formatter exposes the server reason and HTTP status')
+  assert.equal(state.timers.length, 0)
 })
 
 for (const failure of ['fetch rejection', 'JSON rejection'] as const) {

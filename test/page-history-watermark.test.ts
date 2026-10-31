@@ -12,10 +12,11 @@ function state() {
     paintRunningMarks() {}, renderComposerState() {}, refreshRunningStatus() {}, updateStatusBar() {},
     refreshSessionStats() {}, settleChat() {}, renderSettledAnswers() {}, renderScheduleCards() {},
     pumpQueue: (id: string) => calls.push(`pump:${id}`), add: (kind: string, text: string) => calls.push(`${kind}:${text}`),
-    settleReasoning() {}, messageContentText: () => 'user', contentAttachments: () => [],
+    settleReasoning() {}, noteCompletion() {}, markBranchable() {},
+    messageContentText: () => 'user', contentAttachments: () => [],
   }
   return runInNewContext(`
-    const transcriptLoads = new Map(), transcriptWatermarks = new Map([['S', 10]]);
+    const transcriptLoads = new Map(), transcriptWatermarks = new Map([['S', 10]]), pendingInteractions = new Map();
     const current = 'S', composerKey = 'S', view = 'chat';
     const runningSessions = new Set(['S']), runningSince = new Map(), queues = new Map([['S', []]]);
     let liveRounds=0,liveRoundStartedAt=null;
@@ -23,13 +24,13 @@ function state() {
     ({ handle: handleSessionPayload, running: () => runningSessions.has('S'), calls })
   `, context) as { handle(value: unknown): void; running(): boolean; calls: string[] }
 }
-test('snapshot-covered completion still clears running state and pumps the queue', () => {
+test('snapshot-covered completion still clears running state and pumps the queue', { timeout: 5000 }, () => {
   const h = state()
   h.handle({ session: 'S', event: { seq: 10, type: 'turn/completed' } })
   assert.equal(h.running(), false)
   assert.ok(h.calls.includes('pump:S'))
 })
-test('snapshot-covered text is not drawn twice, later text still arrives', () => {
+test('snapshot-covered text is not drawn twice, later text still arrives', { timeout: 5000 }, () => {
   const h = state()
   h.handle({ session: 'S', event: { seq: 9, type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'old' } } })
   assert.equal(h.calls.length, 0)

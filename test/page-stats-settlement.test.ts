@@ -68,7 +68,7 @@ function harness(): Harness {
     let stopRequested = true;
     const stopButton = { disabled: true }, QUEUE_KEY_NONE = 'none', activeFolder = null;
     const runningSessions = new Set(['S']), runningSince = new Map([['S', 0]]), queues = new Map();
-    const transcriptLoads = new Map(), transcriptWatermarks = new Map();
+    const transcriptLoads = new Map(), transcriptWatermarks = new Map(), pendingInteractions = new Map();
     const endpointOptions = [], chosenEndpoint = null, endpointDefault = null;
     const windowFor = () => undefined;
     const cells = new Map();
@@ -81,7 +81,7 @@ function harness(): Harness {
     const settleReasoning = noop, settleChat = noop, refreshRunningStatus = noop,
       renderScheduleCards = noop, scheduleTreeRefresh = noop, scheduleGoalRefresh = noop,
       scheduleTodoRefresh = noop, paintRunningMarks = noop, renderComposerState = noop,
-      add = noop, paintDock = noop;
+      add = noop, paintDock = noop, noteCompletion = noop, markBranchable = noop;
     const renderSettledAnswers = async () => {}, renderTree = async () => {}, refreshSessions = async () => {};
     const sendTurn = async () => {
       let delivered = false;

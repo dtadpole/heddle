@@ -7229,7 +7229,6 @@ function handleSessionPayload(payload, replay = false) {
       pendingInteractions.delete(payload.session)
       paintRunningMarks()
       if (payload.session === (current ?? composerKey)) {
-        liveRounds = 0
         void refreshSessionStats()
       }
       /**
