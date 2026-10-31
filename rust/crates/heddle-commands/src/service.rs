@@ -144,6 +144,17 @@ impl Commands {
         self.sessions.open(id)
     }
 
+    /// Record one session remark from the feedback dialog (`POST /api/sessions/{id}/feedback`): DSH's
+    /// `feedback/record {text?, category?}` ([`crate::builtins::record_feedback`]).
+    pub fn record_feedback(
+        &self,
+        session: &SessionHandle,
+        text: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<(), String> {
+        crate::builtins::record_feedback(&**self.sessions.store(), session, text, category)
+    }
+
     /// The `attachments` a request carries, read as message parts by the reader a turn uses
     /// (`heddle_web_files::attachments::read_attachments` over the upload directory): absent or `null` is none,
     /// anything else must be a list of stored paths, and one that cannot be read refuses the whole list.
