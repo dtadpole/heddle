@@ -1560,7 +1560,8 @@ test('a write the sandbox refused is not shown as an edited file, whether by wri
     })
     assert.equal(turn.status, 200, `the ${prompt} turn ran (${turn.status})`)
     await turn.text()
-    await browser.goto(server.url)
+    /** Opened by name: a first visit opens no one's newest session, it starts a fresh one (#17). */
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelector("#log .turn.assistant") !== null', 25_000)
     await new Promise((resolve) => setTimeout(resolve, 400))
     return (await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}`)).body

@@ -6029,7 +6029,11 @@ test('the later pin leads, and the tree and the flat list put the same sessions 
     const expected = [second, third, first, fourth]
 
     browser = await openBrowser()
-    await browser.goto(live.url)
+    /**
+     * Opened on one of the four by name: a plain first visit starts a fresh New session (#17), whose open blank row
+     * would stand among the four this check orders. Opening a session writes nothing, so the order is unchanged.
+     */
+    await browser.gotoSession(live.url, fourth)
     await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
     const reading = JSON.parse(
       await browser.evaluate(`(async () => {
