@@ -1323,6 +1323,81 @@ test('a turn into an archived session is accepted and blocked before any model r
   }
 })
 
+test('a goal round into an archived session blocks its goal as DSH does (prompt-rejected), and a resume after the unarchive runs it', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()) && (await supportsTurn()), CAPABILITY)) return
+  /**
+   * Issue #26, the goal half. A goal round is a turn, so the archived-session gate refuses its first step before any
+   * model request. DSH's goal-round driver then blocks the goal with "prompt-rejected" and its own sentence
+   * (dsh-goal-round-driver lib/index.js:326-333), so the goal is not run again by itself, and after an unarchive a
+   * resume starts it. Measured before on both builds: the goal stayed active and armed, so the resume was refused as
+   * "already active and armed".
+   */
+  const home = isolatedHome('archived-goal')
+  const work = fixtureDir('archived-goal-work')
+  const root = join(home, 'sessions')
+  const double = await chatDouble({ content: 'the goal round answered' })
+  const config = httpConfig({ home, baseUrl: double.baseUrl })
+  const env = { HEDDLE_HOME: home, HEDDLE_CONFIG: config }
+  const args = ['--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  let live
+  try {
+    const first = await runCli([...args, '--turn', 'before the archive', '--json'], { env, cwd: work })
+    assert.equal(first.code, 0, `a live session's turn ran\n${first.stdout}${first.stderr}`)
+    const id = parseJson(first.stdout).session
+    assert.equal(double.requests.length, 1)
+    const transcript = () => readTranscript(join(root, id))
+
+    live = await startServer(['web', '--host', '127.0.0.1', '--port', '0', ...args], env)
+    const origin = new URL(live.url).origin
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const post = (path, body) =>
+      fetch(origin + path, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const goal = async () => (await (await fetch(`${origin}/api/goal?session=${id}`, { headers: { cookie } })).json()).goal
+    const reasonOf = (view) => view?.blockedReason ?? view?.blocked_reason
+    const waitFor = async (condition, what) => {
+      for (const started = Date.now(); Date.now() - started < 15_000; ) {
+        const value = await condition()
+        if (value !== undefined) return value
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))
+      }
+      return assert.fail(`timed out waiting for ${what}; the goal is ${JSON.stringify(await goal())}`)
+    }
+    const goalRounds = () =>
+      transcript().filter((event) => event.type === 'message' && event.message?.source?.kind === 'goal').map((event) => event.message.source.round)
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: true })).status, 200, 'the session is archived')
+    const created = await post('/api/goal', { session: id, action: 'create', objective: 'finish the report', max_goal_rounds: 1 })
+    assert.equal(created.status, 200, `the goal is created\n${await created.text()}`)
+
+    const blocked = await waitFor(async () => {
+      const current = await goal()
+      return current !== undefined && current.phase !== 'active' ? current : undefined
+    }, 'the refused round to block its goal (without DSH\'s prompt-rejected it stays active and armed)')
+    assert.equal(blocked.phase, 'blocked')
+    assert.deepEqual(reasonOf(blocked), { code: 'prompt-rejected', message: 'Goal round was rejected before entering its step.' }, 'with DSH\'s code and sentence')
+    assert.equal(double.requests.length, 1, 'the refused round made no model request')
+    assert.deepEqual(goalRounds(), [], 'and admitted no message')
+    assert.deepEqual(transcript().filter((event) => event.type === 'turn/failed').map((event) => event.reason), [{ kind: 'blocked' }], 'one blocked turn, not started again')
+
+    assert.equal((await post(`/api/sessions/${id}/flags`, { archived: false })).status, 200, 'the session is unarchived')
+    const resumed = await post('/api/goal', { session: id, action: 'resume', goal_id: blocked.id, revision: blocked.revision })
+    assert.equal(resumed.status, 200, `the blocked goal resumes\n${await resumed.text()}`)
+    const settled = await waitFor(async () => {
+      const current = await goal()
+      return reasonOf(current)?.code === 'round-limit' ? current : undefined
+    }, 'the resumed round to run to its cap')
+    assert.equal(settled.phase, 'blocked')
+    assert.deepEqual(goalRounds(), [1], 'the resume ran round 1')
+    assert.equal(double.requests.length, 2, 'and asked the endpoint for it')
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
 /** Boot a server for the one browser check here, resolving once it prints its URL. */
 function startServer(args, env) {
   return new Promise((resolvePromise, reject) => {
