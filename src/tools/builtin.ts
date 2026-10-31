@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { readFile as readFileText, readdir, stat } from 'node:fs/promises'
+import { StringDecoder } from 'node:string_decoder'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { SandboxUnavailableError, classifyOutcome, type ConfinedArgv } from '../sandbox/backend.ts'
@@ -265,11 +266,15 @@ export function builtinTools(
           timedOut = true
           stop()
         }, limit)
+        // One decoder per stream holds a character's bytes until the rest arrive: a UTF-8 sequence split across two
+        // chunks used to decode as replacement characters (live-testing issue #96). DSH concatenates the bytes first.
+        const stdoutText = new StringDecoder('utf8')
+        const stderrText = new StringDecoder('utf8')
         child.stdout.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString()
+          stdout += stdoutText.write(chunk)
         })
         child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString()
+          stderr += stderrText.write(chunk)
         })
         context.signal?.addEventListener(
           'abort',
@@ -285,6 +290,8 @@ export function builtinTools(
         })
         child.on('close', (code) => {
           clearTimeout(timer)
+          stdout += stdoutText.end()
+          stderr += stderrText.end()
           const combined = stdout + stderr
           const trimmed = combined.length > outputLimit ? `${combined.slice(0, outputLimit)}\n… truncated` : combined
           /** The facts a reader (and the model) is told: which mode ran, and what the runner actually governed. */
