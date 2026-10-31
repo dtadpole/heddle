@@ -6142,7 +6142,9 @@ async function showSession(id, retry = true) {
    * This is the half that was missing: selecting a session used to leave the right side empty, because
    * the only thing that ever wrote to it was the live stream and those events had already happened.
    */
-  const load = { events: [], bytes: 0, controller: new AbortController(), abandoned: false }
+  log.replaceChildren()
+  transcriptWatermarks.delete(id)
+  const load = { events: [], bytes: 0, controller: new AbortController(), abandoned: false, retry }
   transcriptLoads.set(id, load)
   let snapshotSeq = null
   try {
@@ -6168,7 +6170,6 @@ async function showSession(id, retry = true) {
     }
     const body = await response.json()
     if (stale() || transcriptLoads.get(id) !== load) return
-    log.replaceChildren()
     snapshotSeq = Number.isSafeInteger(body.eventSeq) ? body.eventSeq : null
     if (snapshotSeq === null) {
       load.events.length = 0
@@ -6212,7 +6213,7 @@ async function showSession(id, retry = true) {
     followChatTail(true)
   } catch (error) {
     if (stale() || transcriptLoads.get(id) !== load) return
-    load.events.length = 0
+    // A failed snapshot establishes no watermark: replay the buffered live events below.
     // A history that cannot be read must not empty the live view as well; the stream keeps appending.
     const note = document.createElement('div')
     note.className = 'turn denied'
@@ -6346,67 +6347,67 @@ events.addEventListener('session', (message) => handleSessionPayload(JSON.parse(
 function handleSessionPayload(payload, replay = false) {
   const event = payload.event
   if (!replay) {
-  if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
-  /**
-   * Whether a turn is running, read before the session filter below and for **every** session.
-   *
-   * The composer needs it for the session it is attached to, and this stream is the only place a turn this
-   * page did not start becomes visible — another window's, or the CLI's. `model/request` is appended once
-   * per round and `turn/completed` once per turn, so the pair is a start and an end rather than a guess.
-   */
-  if ((event.type === 'goal/change' || event.type === 'turn/completed' || event.type === 'model/request') && payload.session === (current ?? composerKey)) {
-    scheduleGoalRefresh()
-  }
-  if (event.type === 'todo/write' && payload.session === (current ?? composerKey)) scheduleTodoRefresh()
-  if (event.type === 'model/request') {
+    if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
     /**
-     * A request from a session that was **not running** starts a new turn, so its clock starts here; a request from a
-     * session that was already running is another round of the same turn and keeps the origin. The reset also heals a
-     * stale start left by a missed end event.
+     * Whether a turn is running, read before the session filter below and for **every** session.
+     *
+     * The composer needs it for the session it is attached to, and this stream is the only place a turn this
+     * page did not start becomes visible — another window's, or the CLI's. `model/request` is appended once
+     * per round and `turn/completed` once per turn, so the pair is a start and an end rather than a guess.
      */
-    const wasRunning = runningSessions.has(payload.session)
-    runningSessions.add(payload.session)
-    if (!wasRunning || !runningSince.has(payload.session)) {
-      const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
-      runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
+    if ((event.type === 'goal/change' || event.type === 'turn/completed' || event.type === 'model/request') && payload.session === (current ?? composerKey)) {
+      scheduleGoalRefresh()
     }
-    paintRunningMarks()
-    /**
-     * The composer follows its session's running state: a turn that starts on the panel's session, however it was
-     * started (the queue, the CLI, a goal round), turns Send into Stop. This handler marked the session running but
-     * never redrew the composer, so a drained queued turn ran under an idle Send (live issue developer-ten-6).
-     */
-    if (!wasRunning && payload.session === composerKey) renderComposerState()
-    /**
-     * A turn this page did **not** start — a goal round continuing itself, the CLI, or another window — is a
-     * running turn all the same, and `model/request` is its start signal. Only the page's own send used to refresh
-     * the running row, so a goal-driven session showed no "Weaving" at all (the owner's "missing again").
-     */
-    refreshRunningStatus()
-    if (payload.session === (current ?? composerKey)) liveRoundStartedAt = performance.now()
-    /** A round is one agent step: DSH's `steps` counts these, so the dock can count the running turn too. */
-    if (payload.session === (current ?? composerKey)) {
-      liveRounds += 1
-      updateStatusBar()
+    if (event.type === 'todo/write' && payload.session === (current ?? composerKey)) scheduleTodoRefresh()
+    if (event.type === 'model/request') {
+      /**
+       * A request from a session that was **not running** starts a new turn, so its clock starts here; a request from a
+       * session that was already running is another round of the same turn and keeps the origin. The reset also heals a
+       * stale start left by a missed end event.
+       */
+      const wasRunning = runningSessions.has(payload.session)
+      runningSessions.add(payload.session)
+      if (!wasRunning || !runningSince.has(payload.session)) {
+        const at = typeof event.at === 'string' ? Date.parse(event.at) : Number.NaN
+        runningSince.set(payload.session, Number.isFinite(at) ? at : Date.now())
+      }
+      paintRunningMarks()
+      /**
+       * The composer follows its session's running state: a turn that starts on the panel's session, however it was
+       * started (the queue, the CLI, a goal round), turns Send into Stop. This handler marked the session running but
+       * never redrew the composer, so a drained queued turn ran under an idle Send (live issue developer-ten-6).
+       */
+      if (!wasRunning && payload.session === composerKey) renderComposerState()
+      /**
+       * A turn this page did **not** start — a goal round continuing itself, the CLI, or another window — is a
+       * running turn all the same, and `model/request` is its start signal. Only the page's own send used to refresh
+       * the running row, so a goal-driven session showed no "Weaving" at all (the owner's "missing again").
+       */
+      refreshRunningStatus()
+      if (payload.session === (current ?? composerKey)) liveRoundStartedAt = performance.now()
+      /** A round is one agent step: DSH's `steps` counts these, so the dock can count the running turn too. */
+      if (payload.session === (current ?? composerKey)) {
+        liveRounds += 1
+        updateStatusBar()
+      }
     }
-  }
-  else if (event.type === 'turn/completed') {
-    runningSessions.delete(payload.session)
-    runningSince.delete(payload.session)
-    paintRunningMarks()
-    if (payload.session === (current ?? composerKey)) {
-      liveRounds = 0
-      void refreshSessionStats()
-    }
-    /**
-     * A turn just ended, which is exactly when a queued message becomes sendable — including one that was
-     * waiting on a turn this page never started. The pump refuses to run twice for one queue, so this can
-     * never double-send.
-     */
-    if (queues.has(payload.session)) void pumpQueue(payload.session)
-    renderComposerState()
+    else if (event.type === 'turn/completed') {
+      runningSessions.delete(payload.session)
+      runningSince.delete(payload.session)
+      paintRunningMarks()
+      if (payload.session === (current ?? composerKey)) {
+        liveRounds = 0
+        void refreshSessionStats()
+      }
+      /**
+       * A turn just ended, which is exactly when a queued message becomes sendable — including one that was
+       * waiting on a turn this page never started. The pump refuses to run twice for one queue, so this can
+       * never double-send.
+       */
+      if (queues.has(payload.session)) void pumpQueue(payload.session)
+      renderComposerState()
 
-  }
+    }
 
   }
   const load = transcriptLoads.get(payload.session)
@@ -6419,10 +6420,10 @@ function handleSessionPayload(payload, replay = false) {
       load.controller.abort()
       transcriptLoads.delete(payload.session)
       transcriptWatermarks.delete(payload.session)
-      add('denied', 'History loading exceeded its event budget; the previous view and live updates are retained. Reopen the session to reload history.', false)
+      add('denied', 'History loading exceeded its event budget; live updates are retained. Reopen the session to reload history.', false)
       for (const buffered of load.events) handleSessionPayload(buffered, true)
       handleSessionPayload(payload, true)
-      setTimeout(() => { if (current === payload.session) void showSession(payload.session, false) }, 100)
+      if (load.retry) setTimeout(() => { if (current === payload.session) void showSession(payload.session, false) }, 100)
       return
     }
     load.bytes += bytes
