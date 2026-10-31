@@ -25,6 +25,9 @@ is refused and the command does not run, a larger one is cut to the tools row's 
 ten minutes by default; live-testing issue #13).
 `check-read-errors.mjs` holds a failed `read_file` to DSH's sentences: a missing file is `FS_NOT_FOUND` and a directory
 `FS_NOT_REGULAR_FILE`, each naming the path (live-testing issue #4).
+`check-stdin-eof.mjs` holds a bash command that reads stdin to end-of-file at once, as DSH's shell leaves stdin closed.
+It covers a harness started with its own stdin ignored and one started with an open pipe on stdin, which the command
+must not inherit (live-testing issue #97).
 
 ## Under `HEDDLE_BIN`
 
