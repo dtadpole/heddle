@@ -335,7 +335,6 @@
   #settings-server { display: grid; grid-template-columns: 8rem 1fr; gap: .3rem .6rem; margin: 0; font-size: .875rem; }
   #settings-server dt { color: var(--text-3); }
   #settings-server dd { margin: 0; overflow-wrap: anywhere; }
-  /** A setting a person changes: its label on the left, its control on the right, as DSH's General rows are laid out. */
   #settings-presets { list-style: none; margin: .3rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; }
   .settings-preset { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .45rem .6rem; border-radius: 8px; background: var(--surface); font-size: .875rem; }
   .settings-preset .what { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
@@ -343,6 +342,7 @@
   .settings-preset .badge { flex: none; padding: 0 .45rem; border-radius: 6px; background: var(--hover); color: var(--text-2); font-size: .75rem; line-height: 1.5rem; }
   .settings-preset button { flex: none; padding: .2rem .6rem; border: .5px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: .8rem; cursor: pointer; }
   .settings-preset button:hover { background: var(--hover); }
+  /** A setting a person changes: its label on the left, its control on the right, as DSH's General rows are laid out. */
   .settings-row { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .35rem 0; font-size: .875rem; }
   .settings-row select {
     height: 32px;
@@ -6591,6 +6591,8 @@ function paintPresetSettings() {
  */
 async function setDefaultPreset(id) {
   const note = document.getElementById('settings-presets-note')
+  // One write at a time: the buttons wait for the answer, so two quick choices cannot land out of order.
+  for (const button of document.querySelectorAll('#settings-presets button')) button.disabled = true
   note.hidden = true
   note.textContent = ''
   const say = (text) => {
@@ -6611,6 +6613,12 @@ async function setDefaultPreset(id) {
     say((error && error.message) || String(error))
   }
   await loadPresets()
+  // The repaint removed the pressed button; keep the keyboard on the row that is now the default.
+  const chosen = document.querySelector(`#settings-presets [data-preset="${CSS.escape(presetRoster?.default ?? id)}"]`)
+  if (chosen !== null) {
+    chosen.tabIndex = -1
+    chosen.focus()
+  }
 }
 
 function presetName(id) {

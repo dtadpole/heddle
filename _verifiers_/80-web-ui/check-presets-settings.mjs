@@ -150,6 +150,7 @@ test('Settings lists the agent presets and sets the default for new tasks withou
       `the badge moves to Reader (${JSON.stringify(await browser.evaluate(`document.getElementById('settings-presets-note').textContent`))})`,
     )
     assert.equal(await browser.evaluate(`document.getElementById('settings-presets-note').hidden`), true, 'applied at once, so nothing to say')
+    assert.equal(await browser.evaluate(`document.activeElement?.dataset?.preset ?? null`), 'reader', 'the keyboard stays on the row that is now the default')
     assert.equal(await browser.evaluate(`document.getElementById('preset-select').value`), 'reader', 'the new-session chooser starts on the new default')
     const listed = await browser.evaluate(`fetch('/api/presets').then((response) => response.json())`)
     assert.equal(listed.default, 'reader', 'the server holds the written default')
