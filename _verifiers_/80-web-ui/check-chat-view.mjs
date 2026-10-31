@@ -2274,6 +2274,24 @@ test('a deeply nested answer, file or text renders, and the server keeps answeri
     assert.ok((String(posted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth')
     const file = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'deep.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
     assert.equal(file.status, 200, `the file previews (${file.status})`)
+    /**
+     * developer-three's review (2026-10-30): a line that only looks like a fence ("    ```", four spaces, is an indented
+     * code block) switched the first version's bound off for every later line, leaving Rust with the render stack as
+     * its only guard, through a workspace file and no model at all. And lists nest by indentation too: in this build an
+     * indented list of 1,500 levels ran out of heap.
+     */
+    const lookalike = `    \`\`\`\n\n${deep}`
+    writeFileSync(join(server.work, 'lookalike.md'), `${lookalike}\n`)
+    const lookalikePosted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: lookalike }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(lookalikePosted.status, 200, `a text opened by a fence lookalike renders (${lookalikePosted.status})`)
+    assert.ok((String(lookalikePosted.body.html ?? '').match(/<blockquote>/g) ?? []).length <= 100, 'at a bounded depth too')
+    const lookalikeFile = await api(server.url, cookie, `/api/file?path=${encodeURIComponent(join(server.work, 'lookalike.md'))}`).catch((error) => ({ status: `no answer: ${error.message}` }))
+    assert.equal(lookalikeFile.status, 200, `and so does the file (${lookalikeFile.status})`)
+    const indented = Array.from({ length: 1200 }, (_, level) => `${'  '.repeat(level)}- ${level}`).join('\n')
+    const indentedPosted = await api(server.url, cookie, '/api/markdown', { method: 'POST', body: JSON.stringify({ text: indented }) }).catch((error) => ({ status: `no answer: ${error.message}`, body: {} }))
+    assert.equal(indentedPosted.status, 200, `an indented list of 1,200 levels renders (${indentedPosted.status})`)
+    const lists = (String(indentedPosted.body.html ?? '').match(/<ul>/g) ?? []).length
+    assert.ok(lists <= 101, `at a bounded depth (${lists} nested lists)`)
     const alive = await fetch(new URL('/healthz', server.url)).then((response) => response.status).catch((error) => `no answer: ${error.message}`)
     assert.equal(alive, 200, 'and the server is still up')
   } finally {
