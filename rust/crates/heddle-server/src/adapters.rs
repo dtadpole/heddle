@@ -80,11 +80,30 @@ fn failure(error: heddle_session::SessionError) -> ServiceError {
         heddle_session::SessionError::Flag(refusal) => {
             ServiceError::with_code(refusal.to_string(), refusal.code())
         }
+        // A branch heddle cannot write is a 400 the page reads by its code (#106).
+        unwritable @ heddle_session::SessionError::Unwritable { .. } => {
+            ServiceError::with_code(unwritable.to_string(), "session/unwritable")
+        }
         other => ServiceError::new(other.to_string()),
     }
 }
 
 impl SessionService for StoreSessions {
+    fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
+        let Some(handle) = self.service.open(id) else {
+            return Err(ServiceError::new(format!("no session {id}")));
+        };
+        let mut event = heddle_session::NewEvent::new(kind);
+        if let Value::Object(map) = fields {
+            event.fields = map;
+        }
+        self.service
+            .store()
+            .append(&handle, event, heddle_session::AppendOptions::default())
+            .map(|_| ())
+            .map_err(failure)
+    }
+
     fn list(&self) -> Vec<SessionMeta> {
         self.service.list().iter().map(meta_of).collect()
     }

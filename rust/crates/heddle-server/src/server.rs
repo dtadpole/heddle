@@ -102,6 +102,7 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/tree"),
     ("GET", "/api/workspaces"),
     ("POST", "/api/workspaces"),
+    ("POST", "/api/workspaces/default"),
     ("PATCH", "/api/workspaces/{id}"),
     ("DELETE", "/api/workspaces/{id}"),
     ("POST", "/api/workspaces/insertBefore"),
@@ -396,6 +397,10 @@ impl ServerBuilder {
             .route("/api/turn", post(turn))
             .route("/api/tree", get(tree))
             .route("/api/workspaces", get(list_workspaces).post(add_workspace))
+            .route(
+                "/api/workspaces/default",
+                post(initialize_default_workspace),
+            )
             .route("/api/workspaces/{id}", patch(rename_workspace))
             .route("/api/workspaces/{id}", delete(remove_workspace))
             .route(
@@ -901,13 +906,39 @@ fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
     heddle_config::document_language(locale)
 }
 
-async fn events_route(State(state): State<AppState>) -> Response {
-    // Subscribed before the body starts, so `ready` is followed by every frame published after it.
-    let subscription = state.events().subscribe();
-    sse_response(stream::events_frames(
-        subscription,
+async fn events_route(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // The follow cursor: `Last-Event-ID` from the browser's own retries, `?cursor=` from the page's reconnects
+    // (web.ts reads the header first). Subscribed and replayed under one lock, before the body starts.
+    let presented = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| query.get("cursor").cloned())
+        .filter(|cursor| !cursor.is_empty());
+    let mut follow = state.events().subscribe_from(presented.as_deref());
+    // A question answered while the client was away is not put back on its page: only waiting ones replay.
+    let waiting: std::collections::HashSet<String> = state
+        .harness()
+        .approvals
+        .as_ref()
+        .map(|approvals| approvals.pending_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    follow.replay = follow
+        .replay
+        .map(|frames| stream::without_settled_approvals(frames, &waiting));
+    sse_response(stream::follow_frames(
+        follow,
+        presented.is_some(),
         &stream::new_client_id(),
         &stream::host_home(),
+        stream::heartbeat_interval().as_millis() as u64,
     ))
 }
 
@@ -1242,18 +1273,43 @@ async fn flags_session(
     if pinned.is_none() && archived.is_none() {
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
-    if archived == Some(true) && state.runs().is_running(id.as_str()) {
-        if body.bool("stop") != Some(true) {
-            return respond::json(
-                StatusCode::CONFLICT,
-                &json!({
-                    "error": format!("session {id} is running; pass stop: true to stop it and archive"),
+    // A session's live background jobs are activity too (DSH's job archive admission): they block the archive the
+    // same way, are listed in the refusal, and with `stop: true` are stopped once the archive is written.
+    let activity = state.harness().activity.clone();
+    let stop = archived == Some(true) && body.bool("stop") == Some(true);
+    if archived == Some(true) {
+        let running = state.runs().is_running(id.as_str());
+        let jobs: Vec<Value> = activity
+            .as_ref()
+            .map(|activity| activity.active(id.as_str()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.kind == crate::services::ActivityKind::Job)
+            .map(|item| json!({ "id": item.id, "label": item.label }))
+            .collect();
+        if running || !jobs.is_empty() {
+            if !stop {
+                let error = if running {
+                    format!("session {id} is running; pass stop: true to stop it and archive")
+                } else {
+                    format!(
+                        "session {id} has running background jobs; pass stop: true to stop them and archive"
+                    )
+                };
+                let mut refusal = json!({
+                    "error": error,
                     "code": "active",
                     "running": state.runs().running(id.as_str()),
-                }),
-            );
+                });
+                if !jobs.is_empty() {
+                    refusal["jobs"] = Value::Array(jobs);
+                }
+                return respond::json(StatusCode::CONFLICT, &refusal);
+            }
+            if running {
+                state.runs().abort(id.as_str());
+            }
         }
-        state.runs().abort(id.as_str());
     }
     match state
         .harness()
@@ -1261,7 +1317,12 @@ async fn flags_session(
         .set_flags(id.as_str(), FlagPatch { pinned, archived })
     {
         Ok(None) => respond::no_session(id.as_str()),
-        Ok(Some(meta)) => respond::json(StatusCode::OK, &meta),
+        Ok(Some(meta)) => {
+            if let (true, Some(activity)) = (stop, activity.as_ref()) {
+                activity.stop(id.as_str());
+            }
+            respond::json(StatusCode::OK, &meta)
+        }
         Err(error) => {
             let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
@@ -1312,6 +1373,10 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
+            state.events().push(
+                "sessions",
+                &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
+            );
             respond::json(StatusCode::OK, &meta)
         }
     }
@@ -1499,11 +1564,40 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
         }
     }
     match workspaces.add(&path, name) {
-        Ok((record, created)) => respond::json(
-            StatusCode::OK,
-            &json!({"record": record, "created": created}),
-        ),
+        Ok((record, created)) => {
+            if created {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/added", "workspace": record}),
+                );
+            }
+            respond::json(
+                StatusCode::OK,
+                &json!({"record": record, "created": created}),
+            )
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// First use (web.ts's `POST /api/workspaces/default`, DSH's `workspace/initializeDefault`): `{workspace}`, the
+/// record or `null` when this install is not a first use; `500 {error, code: "workspace/default-failed"}` when
+/// the folder cannot be made; `503` without a workspace plugin.
+async fn initialize_default_workspace(State(state): State<AppState>) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let sessions = state.harness().sessions.list();
+    match workspaces.initialize_default(&sessions) {
+        Ok(record) => respond::json(
+            StatusCode::OK,
+            &json!({"workspace": record.unwrap_or(Value::Null)}),
+        ),
+        Err(error) => respond::error_with_code(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.message,
+            "workspace/default-failed",
+        ),
     }
 }
 
@@ -1519,7 +1613,13 @@ async fn rename_workspace(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     match workspaces.rename(&id, title) {
-        Ok(Some(record)) => respond::json(StatusCode::OK, &record),
+        Ok(Some(record)) => {
+            state.events().push(
+                "workspace",
+                &json!({"type": "workspace/renamed", "workspace": record}),
+            );
+            respond::json(StatusCode::OK, &record)
+        }
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
         Err(error) if error.code.as_deref() == Some("workspace/name-conflict") => {
             service_refusal(error, StatusCode::CONFLICT)
@@ -1540,7 +1640,12 @@ async fn remove_workspace(
     }
     let sessions = state.harness().sessions.list();
     match workspaces.remove(&id, &sessions) {
-        Ok(outcome) => respond::json(StatusCode::OK, &outcome),
+        Ok(outcome) => {
+            state
+                .events()
+                .push("workspace", &json!({"type": "workspace/removed", "id": id}));
+            respond::json(StatusCode::OK, &outcome)
+        }
         Err(error) => service_refusal(error, StatusCode::CONFLICT),
     }
 }
@@ -1626,6 +1731,10 @@ async fn answer_approval(
         return approval_not_waiting();
     };
     if service.answer(&id, outcome) {
+        state.events().push(
+            "approval-settled",
+            &json!({"type": "approval/settled", "id": id, "outcome": outcome}),
+        );
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
     } else {
         approval_not_waiting()
@@ -2075,6 +2184,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         reasoning_effort: selection.reasoning_effort.clone(),
     };
     let runner = state.harness().turns.clone();
+    let sessions = state.harness().sessions.clone();
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
@@ -2155,8 +2265,20 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
                 } else {
                     let _ = sender.send(SseFrame::new(
                         names::ERROR,
-                        &json!({"session": stream_session, "message": error.message}),
+                        &json!({"session": stream_session, "message": error.message.clone()}),
                     ));
+                    // Recorded as well, so the failure reaches every client and every later read
+                    // (R-developer-six-2, DSH's api-session/error); web.ts appends the same `turn/failed`.
+                    if let Err(failure) = sessions.record(
+                        &stream_session,
+                        "turn/failed",
+                        json!({"message": error.message}),
+                    ) {
+                        eprintln!(
+                            "heddle web: the failed turn could not be recorded: {}",
+                            failure.message
+                        );
+                    }
                 }
             }
         }
@@ -2184,6 +2306,8 @@ mod tests {
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
+        /// Every `record` call, as `(session, type, fields)`.
+        recorded: std::sync::Mutex<Vec<(String, String, Value)>>,
     }
 
     impl Sessions {
@@ -2198,11 +2322,19 @@ mod tests {
                     ..SessionMeta::default()
                 }],
                 events: HashMap::new(),
+                recorded: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
 
     impl SessionService for Sessions {
+        fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), kind.to_owned(), fields));
+            Ok(())
+        }
         fn list(&self) -> Vec<SessionMeta> {
             self.metas.clone()
         }
@@ -2414,10 +2546,59 @@ mod tests {
         harness
     }
 
+    /// A folder a test made under the system temp dir, removed when it is dropped.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// The temp folders of the test running on this thread. The harness runs each test on its own thread, and a
+        /// thread's locals are dropped when it ends, after a panic's unwinding too, so a failing test cleans up as a
+        /// passing one does. Before, every run left its `heddle-server-test-*` folders in TMPDIR (1,218 counted).
+        static TEMP_FOLDERS: std::cell::RefCell<Vec<TempFolder>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A secret path in a folder of its own, owned by the calling test: labels are unique per test, so no two
+    /// running tests share a folder, and the folder goes when the test's thread ends.
     fn temp_secret(label: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("heddle-server-test-{label}-{}", std::process::id()))
-            .join("web-secret")
+        let folder =
+            std::env::temp_dir().join(format!("heddle-server-test-{label}-{}", std::process::id()));
+        TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
+        folder.join("web-secret")
+    }
+
+    #[test]
+    fn a_tests_temp_folder_is_removed_when_its_thread_ends() {
+        let folder = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe");
+            let folder = secret.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(&secret, "s").unwrap();
+            assert!(folder.exists());
+            folder
+        })
+        .join()
+        .unwrap();
+        assert!(
+            !folder.exists(),
+            "the folder went with the thread that made it"
+        );
+        let panicked = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe-panic");
+            std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+            panic!("a failing test");
+        })
+        .join();
+        assert!(panicked.is_err());
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-server-test-cleanup-probe-panic-{}",
+            std::process::id()
+        ));
+        assert!(!folder.exists(), "and a panicking test cleans up too");
     }
 
     fn app(label: &str) -> (Router, AppState) {
@@ -2715,6 +2896,99 @@ mod tests {
                 "parent": null, "createdAt": "a", "updatedAt": "a", "sessionIds": ids}]),
             )
         }
+        fn initialize_default(
+            &self,
+            sessions: &[SessionMeta],
+        ) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(
+                json!({"id": "w-default", "title": "default-workspace", "seen": sessions.len()}),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn first_use_answers_the_registry_default_and_null_from_a_double_that_has_none() {
+        let (router, _) = app("workspaces-default-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, _) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin, no first use"
+        );
+
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-default")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["workspace"]["id"], "w-default", "{body}");
+        assert_eq!(
+            body["workspace"]["seen"], 1,
+            "the route hands the registry the store's sessions: {body}"
+        );
+        // The trait's own default — a registry that does not model first use — answers `null`.
+        let none = crate::services::WorkspaceService::initialize_default(&NoDefault, &[]).unwrap();
+        assert_eq!(none, None);
+    }
+
+    /// A registry double that keeps every trait default, so the default `initialize_default` is the one judged.
+    struct NoDefault;
+
+    impl crate::services::WorkspaceService for NoDefault {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            false
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
     }
 
     #[tokio::test]
@@ -3378,6 +3652,81 @@ mod tests {
         builder.into_router(3082).expect("the test router")
     }
 
+    /// The jobs row's archive admission, as a double: one live job until it is stopped.
+    #[derive(Default)]
+    struct OneJob {
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for OneJob {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                vec![crate::services::ActivityItem {
+                    kind: crate::services::ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }]
+            }
+        }
+        fn stop(&self, session: &str) {
+            self.stopped.lock().unwrap().push(session.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_background_job_blocks_the_archive_until_stop_and_stop_kills_it_after_the_write()
+    {
+        let activity = Arc::new(OneJob::default());
+        let mut with_jobs = harness();
+        with_jobs.activity = Some(activity.clone());
+        let (router, _) = ServerBuilder::new(
+            with_jobs,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-jobs")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let flags = "/api/sessions/session-00000000-0000-0000-0000-000000000001/flags";
+
+        let (status, bytes) = post_json(&router, flags, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refusal["code"], "active");
+        assert_eq!(
+            refusal["error"],
+            "session session-00000000-0000-0000-0000-000000000001 has running background jobs; pass stop: true to stop them and archive"
+        );
+        assert_eq!(refusal["running"], 0);
+        assert_eq!(
+            refusal["jobs"],
+            json!([{ "id": "bash-0123456789abcdef", "label": "sleep 30" }])
+        );
+        assert!(
+            activity.stopped.lock().unwrap().is_empty(),
+            "nothing stopped without stop: true"
+        );
+
+        let (status, _) =
+            post_json(&router, flags, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *activity.stopped.lock().unwrap(),
+            ["session-00000000-0000-0000-0000-000000000001"]
+        );
+
+        // Pinning is not archiving: it never consults the activity.
+        let (status, _) = post_json(&router, flags, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(activity.stopped.lock().unwrap().len(), 1);
+    }
+
     /// The agent runtime's live-turn registry, as a double: one turn this server did not start.
     #[derive(Default)]
     struct OneRowTurn {
@@ -3707,6 +4056,7 @@ mod tests {
                 ),
             ],
             events: HashMap::new(),
+            recorded: std::sync::Mutex::new(Vec::new()),
         };
         let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut harness = Harness::new(
@@ -4240,6 +4590,280 @@ mod tests {
         assert!(
             rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(),
             "{text}"
+        );
+    }
+
+    /// A reconnect with `Last-Event-ID` is given the frames it missed after `ready`; a cursor from another
+    /// server start is given `reset`.
+    #[tokio::test]
+    async fn the_event_stream_replays_after_a_cursor_and_resets_an_unknown_one() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-follow");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        let seen = state.events().cursor();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        async fn read_until(router: &Router, cookie: &str, cursor: &str, marker: &str) -> String {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri("/api/events")
+                        .header("cookie", cookie)
+                        .header("last-event-id", cursor)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut body = response.into_body();
+            let mut text = String::new();
+            while !text.contains(marker) {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                    .await
+                    .expect("a frame in time")
+                    .expect("the stream stays open")
+                    .expect("a body frame");
+                if let Ok(data) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            text
+        }
+        let text = read_until(&router, &cookie, &seen, "\"n\":2").await;
+        assert!(text.contains("\"resumed\":true"), "{text}");
+        assert!(
+            !text.contains("\"n\":1"),
+            "nothing before the cursor is repeated: {text}"
+        );
+        assert!(
+            text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(),
+            "{text}"
+        );
+        let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
+        assert!(text.contains("\"resumed\":false"), "{text}");
+    }
+
+    /// An approval double whose questions are always waiting, so an answer settles one.
+    struct AnsweringApprovals;
+
+    impl ApprovalService for AnsweringApprovals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            true
+        }
+    }
+
+    /// A workspace double whose add creates, whose rename finds and whose remove succeeds.
+    struct EditableWorkspaces;
+
+    impl crate::services::WorkspaceService for EditableWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({"id": "w-2", "path": path, "title": "added"}), true))
+        }
+        fn find(&self, _id: &str) -> bool {
+            true
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({"removed": true}))
+        }
+        fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(json!({"id": id, "title": title})))
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// The next frame a subscription holds, as `(event, data)`, within a second.
+    async fn next_pushed(
+        subscription: &mut crate::stream::Subscription,
+    ) -> (String, Value, Option<String>) {
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
+                .await
+                .expect("a frame in time")
+                .expect("the hub is open");
+        (
+            frame.event,
+            serde_json::from_str(&frame.data).unwrap(),
+            frame.id,
+        )
+    }
+
+    /// The changes that never reach a session's log are pushed to the stream, numbered like every frame:
+    /// a renamed session, an added, renamed and removed workspace, and a settled approval (phase B item 4).
+    #[tokio::test]
+    async fn renames_workspace_edits_and_settled_approvals_are_pushed() {
+        let mut with_services = harness();
+        with_services.workspaces = Some(Arc::new(EditableWorkspaces));
+        with_services.approvals = Some(Arc::new(AnsweringApprovals));
+        let (router, state) = ServerBuilder::new(
+            with_services,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("pushes")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{session}/title"),
+            &cookie,
+            r#"{"title":"renamed"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "sessions");
+        assert_eq!(
+            data,
+            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+        );
+        assert!(
+            id.is_some(),
+            "a push is numbered, so it is replayed to a reconnecting client"
+        );
+
+        let folder = std::env::temp_dir();
+        let body = json!({"path": folder}).to_string();
+        let (status, _) = post_json(&router, "/api/workspaces", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            (event.as_str(), data["type"].as_str()),
+            ("workspace", Some("workspace/added"))
+        );
+
+        for (method, expected) in [
+            (Method::PATCH, "workspace/renamed"),
+            (Method::DELETE, "workspace/removed"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/api/workspaces/w-2")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"title":"retitled"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            assert_eq!(
+                (event.as_str(), data["type"].as_str()),
+                ("workspace", Some(expected))
+            );
+        }
+
+        let (status, _) = post_json(
+            &router,
+            "/api/approvals/approval-00000000-0000-0000-0000-000000000000",
+            &cookie,
+            r#"{"outcome":"rejected"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "approval-settled");
+        assert_eq!(
+            data,
+            json!({"type": "approval/settled", "id": "approval-00000000-0000-0000-0000-000000000000", "outcome": "rejected"})
+        );
+    }
+
+    /// A runner whose turn fails, as a provider's 502 does.
+    struct FailingTurns;
+
+    impl TurnRunner for FailingTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Err(ServiceError::new("upstream answered 502")) })
+        }
+    }
+
+    /// A failed turn tells the client that started it and is recorded as `turn/failed`, so it reaches every
+    /// client and every later read (R-developer-six-2).
+    #[tokio::test]
+    async fn a_failed_turn_is_recorded_for_every_client_as_well_as_streamed_to_its_own() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, _) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(&bytes);
+        assert!(
+            text.contains("event: error\n") && text.contains("upstream answered 502"),
+            "{text}"
+        );
+        let recorded = sessions.recorded.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
         );
     }
 
