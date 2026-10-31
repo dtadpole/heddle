@@ -2445,6 +2445,8 @@ mod tests {
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
+        /// Answers for successive `effective_mode` reads, first to last; the fallback once it is empty.
+        modes: std::sync::Mutex<Vec<String>>,
     }
 
     impl Sessions {
@@ -2459,6 +2461,7 @@ mod tests {
                     ..SessionMeta::default()
                 }],
                 events: HashMap::new(),
+                modes: std::sync::Mutex::new(Vec::new()),
             }
         }
     }
@@ -2518,7 +2521,12 @@ mod tests {
             self.metas.first().cloned()
         }
         fn effective_mode(&self, _id: &str, fallback: &str) -> String {
-            fallback.to_owned()
+            let mut modes = self.modes.lock().unwrap();
+            if modes.is_empty() {
+                fallback.to_owned()
+            } else {
+                modes.remove(0)
+            }
         }
         fn set_mode(
             &self,
@@ -3356,6 +3364,60 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_terminal_whose_mode_changed_while_it_started_is_ended_and_refused() {
+        // #85 R1: create reads the mode, spawns (milliseconds of fork/exec), then inserts. A permission change in
+        // that window closes only inserted terminals, so create reads the mode again and refuses a mismatch. The
+        // first read answers the mode the spawn uses; the second, the mode a concurrent change wrote.
+        let folder = std::env::temp_dir().join(format!("heddle-r1-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let sessions = Sessions {
+            metas: vec![SessionMeta {
+                id: id.into(),
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                turns: 1,
+                ..SessionMeta::default()
+            }],
+            events: HashMap::new(),
+            modes: std::sync::Mutex::new(vec!["danger-full-access".into(), "read-only".into()]),
+        };
+        let harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        let (router, state) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("terminal-mode-changed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/terminals"),
+            &cookie,
+            "{}",
+        )
+        .await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(body["code"], "mode-changed", "{body}");
+        assert!(
+            state.terminals().list(id).is_empty(),
+            "the terminal that started under the old mode is gone"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
     #[tokio::test]
     async fn a_session_view_is_refused_when_it_does_not_exist_and_the_chat_view_has_its_record() {
         let (router, _) = app("chat");
@@ -3827,6 +3889,7 @@ mod tests {
                 ),
             ],
             events: HashMap::new(),
+            modes: std::sync::Mutex::new(Vec::new()),
         };
         let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut harness = Harness::new(

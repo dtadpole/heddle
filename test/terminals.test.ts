@@ -271,3 +271,12 @@ test('once every terminal is closed for shutdown, none can start', { skip }, asy
     s.done()
   }
 })
+
+test('the terminal registry never blocks the event loop on a child process (developer-ten’s review, S1)', async () => {
+  // The tty learner enumerates processes on every new terminal, unprompted; a synchronous `ps -A` there stalled every
+  // request and stream on the server for as long as `ps` took. Every child process here is asynchronous.
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'terminals.ts'), 'utf8')
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+  assert.deepEqual(code.match(/\b(execFileSync|execSync|spawnSync)\b/g) ?? [], [])
+})
