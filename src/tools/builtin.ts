@@ -256,7 +256,8 @@ export function builtinTools(
          * Stdin is `ignore` (`/dev/null`), so a command that reads it gets end-of-file at once. The tool has no
          * input to give, and DSH's shell leaves stdin closed when no input is supplied. Node's default, an open pipe
          * that nothing writes or ends, made `read` and any stdin reader wait until the wall time killed them (#97).
-         * The Rust build already gives EOF.
+         * The Rust build gave EOF only when the server's own stdin was /dev/null, as under a daemon; it now uses
+         * `Stdio::null()` too.
          */
         const child = spawn(argv[0] as string, argv.slice(1), {
           cwd,
