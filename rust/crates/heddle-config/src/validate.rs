@@ -247,10 +247,24 @@ pub fn validate_rows(
         if row.disabled == Some(true) {
             continue;
         }
+        let config = row
+            .config
+            .clone()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        // A built-in is first judged as the TypeScript build judges it, by its Config's form projection, in
+        // Schemastery's words (#125): its enums, limits and required fields, which the component's own schema may
+        // not spell. The component's schema then adds whatever it is stricter about.
+        let form_problem = catalog
+            .form(row, anchor.as_deref())
+            .and_then(|form| crate::builtin_forms::form_problem(&form, &config));
         match catalog.lookup(row, anchor.as_deref()) {
             // A component that declares no configuration is not a problem, and is not "checked":
             // counting it would claim a check that never happened.
-            SchemaLookup::NoSchema => {}
+            SchemaLookup::NoSchema => {
+                if let Some(problem) = form_problem {
+                    problems.push(format!("{}: {problem}", row.label()));
+                }
+            }
             SchemaLookup::Unresolvable(why) => problems.push(format!(
                 "{}: cannot resolve the component '{}' — {why}",
                 row.label(),
@@ -258,12 +272,12 @@ pub fn validate_rows(
             )),
             SchemaLookup::Schema(schema) => {
                 checked += 1;
-                let config = row
-                    .config
-                    .clone()
-                    .unwrap_or_else(|| Value::Object(Map::new()));
-                for problem in schema.check(&config) {
+                if let Some(problem) = form_problem {
                     problems.push(format!("{}: {problem}", row.label()));
+                } else {
+                    for problem in schema.check(&config) {
+                        problems.push(format!("{}: {problem}", row.label()));
+                    }
                 }
             }
         }

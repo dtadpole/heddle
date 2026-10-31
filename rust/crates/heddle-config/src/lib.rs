@@ -71,7 +71,9 @@ mod template;
 mod validate;
 mod value;
 
-pub use builtin_forms::{HEDDLE_HOME_PLACEHOLDER, builtin_form, builtin_form_modules};
+pub use builtin_forms::{
+    HEDDLE_HOME_PLACEHOLDER, builtin_form, builtin_form_modules, form_problem,
+};
 pub use component_schemas::{
     context_schema, goal_schema, jobs_schema, schedule_schema, subagent_tool_schema, team_schema,
 };
