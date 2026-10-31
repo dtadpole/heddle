@@ -32,6 +32,18 @@ sh verify.sh --json     # one parseable object
 Exit `0` when the claim holds, `1` when it fails, `3` when it could not be judged — a host without a browser is the
 `3` case.
 
+## Encoded Markdown image HTTP regression
+
+[`check-markdown-image-paths.mjs`](check-markdown-image-paths.mjs) needs **no browser**. It starts an isolated
+server on port zero, reads the Markdown preview's emitted image URLs, and verifies exact distinct PNG bytes for
+space, literal-percent and Unicode/ampersand filenames, plus cookie and workspace refusal. It does not judge
+standalone PNG preview, browser image rendering, or query-suffix semantics.
+
+```bash
+node --test check-markdown-image-paths.mjs
+HEDDLE_BIN=/path/to/heddle node --test check-markdown-image-paths.mjs
+```
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.
