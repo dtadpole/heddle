@@ -2598,8 +2598,9 @@
    * The right sidebar and its Browser tabs (#86), after DSH's `ui-sidebar-right` and `ui-sidebar-browser`.
    *
    * Opt-in, as DSH's Web profile ships it: nothing here is reachable unless `/api/status` says `browser: true`. The
-   * column sits beside the conversation at desktop widths and covers the window at phone widths, where a third column
-   * would squeeze the composer off the screen (#35).
+   * column sits beside the conversation while DSH's budget leaves room for it (`layoutRightSidebar`), covers the
+   * conversation column when it does not, and covers the window below 768 pixels, where a third column would squeeze
+   * the composer off the screen (#35).
    */
   #browser-open { width: 28px; height: 28px; padding: 0; display: inline-grid; place-items: center; flex: none; border-radius: var(--radius); background: none; border: 0; color: var(--text-3); }
   #browser-open:hover, #browser-open[aria-expanded='true'] { background: var(--hover); color: var(--text); }
@@ -2629,7 +2630,10 @@
   .browser-view { position: relative; flex: 1 1 auto; min-height: 0; background: var(--bg); }
   .browser-view iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
   .browser-start { margin: 0; padding: 24px 16px; color: var(--text-3); font-size: 13px; text-align: center; }
-  @media (max-width: 720px) {
+  /** No room for a track: the pane covers the conversation column and leaves the left sidebar and its gutter usable. */
+  #right-sidebar[data-presentation='cover'] { position: fixed; top: 0; right: 0; bottom: 0; left: var(--rs-cover-left, 0px); z-index: 40; width: auto; }
+  #right-sidebar[data-presentation='fullscreen'] { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
+  @media (max-width: 767px) {
     #right-sidebar { position: fixed; inset: 0; z-index: 40; width: auto; border-left: 0; }
   }
 
@@ -9030,10 +9034,56 @@ function selectSidebarTab(tab) {
   }
 }
 
+/**
+ * The column budget, DSH's `computeColumns` (`dsh-client-ui-layout`): beside a right track the conversation keeps 400
+ * pixels, and the track is the reader's preference — 45% of the window at the first opening, kept after that — held
+ * between 300 pixels and 70% of the window and shrunk to the room that is left. Below 768 pixels the pane covers the
+ * window, DSH's automatic fullscreen.
+ *
+ * One difference, stated: where the room is under 300 pixels DSH drops the track and hides its panel, which makes the
+ * opening gesture do nothing; here the pane covers the conversation column instead, and becomes a track again by
+ * itself once the left sidebar or the window makes room. The left sidebar's own bounds (12–48rem, 80% of the window)
+ * are its owner's and are not narrowed here.
+ */
+const RIGHTBAR_CENTER_MIN = 400
+const RIGHTBAR_MIN = 300
+const RIGHTBAR_MAX_RATIO = 0.7
+const RIGHTBAR_DEFAULT_RATIO = 0.45
+const RIGHTBAR_FULLSCREEN_BELOW = 768
+let rightbarPreference = null
+const conversationColumn = document.querySelector('main')
+
+/** Place the open pane: a track of the budget's width, or a cover where there is no room for one. */
+function layoutRightSidebar() {
+  if (rightSidebar.hidden) return
+  const viewport = document.documentElement.clientWidth
+  rightbarPreference ??= Math.max(RIGHTBAR_MIN, Math.round(viewport * RIGHTBAR_DEFAULT_RATIO))
+  // Everything left of the conversation is the left sidebar and its gutter, whichever width they have now.
+  const start = Math.round(conversationColumn.getBoundingClientRect().left)
+  const available = viewport - start - RIGHTBAR_CENTER_MIN
+  let presentation = 'push'
+  if (viewport < RIGHTBAR_FULLSCREEN_BELOW) presentation = 'fullscreen'
+  else if (available < RIGHTBAR_MIN) presentation = 'cover'
+  const track = Math.min(viewport * RIGHTBAR_MAX_RATIO, Math.max(RIGHTBAR_MIN, rightbarPreference))
+  rightSidebar.dataset.presentation = presentation
+  rightSidebar.style.width = presentation === 'push' ? `${Math.floor(Math.min(available, track))}px` : ''
+  rightSidebar.style.setProperty('--rs-cover-left', `${start}px`)
+}
+
 function showRightSidebar(open) {
+  // DSH's `openRightbar`: opening below 1024 pixels puts a narrow opening of the left sidebar back to its rail.
+  if (open && rightSidebar.hidden && sidebarNarrow() && sidebarNarrowExpanded) {
+    sidebarNarrowExpanded = false
+    paintSidebarCollapse()
+  }
   rightSidebar.hidden = !open
   browserOpen.setAttribute('aria-expanded', String(open))
+  layoutRightSidebar()
 }
+
+/** The left sidebar's drag, keys, collapse and stored width all move the conversation's left edge, and so does the window. */
+window.addEventListener('resize', layoutRightSidebar)
+new ResizeObserver(() => layoutRightSidebar()).observe(document.getElementById('workspace-sidebar'))
 
 function closeSidebarTab(tab) {
   const at = sidebarTabs.indexOf(tab)
