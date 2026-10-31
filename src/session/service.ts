@@ -326,7 +326,16 @@ export class SessionService extends Service {
     id: SessionId,
     selection: { readonly endpoint: string; readonly model?: string; readonly reasoningEffort?: string },
   ): SessionMeta | null {
-    const before = this.store.list().find((meta) => meta.id === id)
+    // The session's own meta file, read once (developer-eight's review: not a walk of every session's record).
+    const handle = this.store.open(id)
+    let before: SessionMeta | undefined
+    if (handle !== null) {
+      try {
+        before = JSON.parse(readFileSync(handle.meta, 'utf8')) as SessionMeta
+      } catch {
+        before = undefined
+      }
+    }
     const meta = this.store.setModel(id, selection)
     /**
      * A change of selection is also an event in the session's log, `model/selection` (DSH's durable selection event,
@@ -338,7 +347,6 @@ export class SessionService extends Service {
       meta !== null &&
       (before?.endpoint !== selection.endpoint || before?.model !== selection.model || before?.reasoningEffort !== selection.reasoningEffort)
     ) {
-      const handle = this.store.open(id)
       if (handle !== null) {
         this.store.append(handle, {
           type: 'model/selection',
