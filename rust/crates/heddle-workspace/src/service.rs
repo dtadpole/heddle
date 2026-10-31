@@ -857,4 +857,46 @@ mod tests {
         assert_eq!(views[0].origin, WorkspaceOrigin::Auto);
         assert_eq!(views[0].session_ids, vec!["session-a"]);
     }
+
+    /// One folder is one workspace however it is spelled: DSH's "one record per canonical path", with
+    /// `fs.realpath` as the canon (`dsh-workspace/README.md:93`, `lib/index.js:36-51`). A letter-case variant
+    /// on a case-insensitive volume and a symlink both reach the registered folder, so both report it
+    /// (`created: false`) and a session started at either lists under it. `canonical_path` is `realpath(3)`,
+    /// which answers with the stored spelling; the TypeScript build matches it through `realpathSync.native`.
+    #[cfg(unix)]
+    #[test]
+    fn a_letter_case_variant_or_a_symlink_of_a_registered_folder_is_that_workspace() {
+        let (dir, service) = service();
+        let proj = dir.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        let link = dir.path().join("proj-link");
+        std::os::unix::fs::symlink(&proj, &link).unwrap();
+        let first = service.add(proj.to_str().unwrap(), None).unwrap();
+        assert!(first.created);
+
+        let via_link = service.add(link.to_str().unwrap(), None).unwrap();
+        assert!(
+            !via_link.created,
+            "a symlink to a registered folder reports the workspace already there"
+        );
+        assert_eq!(via_link.record.id, first.record.id);
+
+        let variant = dir.path().join("PROJ");
+        if !variant.exists() {
+            // A case-sensitive volume: the two spellings really are two folders.
+            return;
+        }
+        let via_case = service.add(variant.to_str().unwrap(), None).unwrap();
+        assert!(
+            !via_case.created,
+            "a letter-case variant reports the workspace already there"
+        );
+        assert_eq!(via_case.record.id, first.record.id);
+        assert_eq!(service.list().len(), 1, "one folder, one workspace");
+        let views = service.views(&[
+            meta("session-upper", variant.to_str().unwrap()),
+            meta("session-link", link.to_str().unwrap()),
+        ]);
+        assert_eq!(views[0].session_ids, vec!["session-upper", "session-link"]);
+    }
 }
