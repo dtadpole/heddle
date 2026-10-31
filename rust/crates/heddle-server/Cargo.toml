@@ -10,6 +10,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The agent presets' roster (inventory A96): `GET /api/presets`, and the preset a new session is created under.
+heddle-config.workspace = true
 # The session store the SessionService adapter (`adapters::StoreSessions`) is written against.
 heddle-session.workspace = true
 axum.workspace = true
@@ -27,8 +29,6 @@ sha2 = "0.10"
 tokio-util = "0.7"
 
 [dev-dependencies]
-# The adapter tests build a real session store, which takes the boot's environment.
-heddle-config.workspace = true
 http-body-util = "0.1"
 # The lane builds the whole workspace, where heddle-llm enables serde_json's preserve_order, so
 # JSON objects keep insertion order. Running this crate's own tests with the same feature is what

@@ -414,6 +414,7 @@ impl SessionPort for SessionView {
                     model: options.model,
                     reasoning_effort: None,
                     title: Some(options.title),
+                    preset: None,
                 },
             )
             .map(handle_of)
@@ -434,6 +435,7 @@ impl SessionPort for SessionView {
                     endpoint: options.endpoint,
                     model: options.model,
                     reasoning_effort: None,
+                    preset: None,
                 },
             )
             .map_err(port_error)?;
@@ -1146,6 +1148,33 @@ impl Component for TurnsComponent {
 
     fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
         services.provide("turns", heddle_agent::TurnRegistry::new());
+        Ok(())
+    }
+}
+
+/// `src/plugins/presets.ts`: the agent preset registry (inventory A96, DSH's dsh-agent-preset-registry).
+///
+/// Optional, like the live-turn registry: the turn and the server read it when the profile loads the row, and a
+/// profile without it runs every session with every tool and its own system prompt. The roster is validated when
+/// the row starts (`heddle_config::preset_roster`), so a duplicate id or a default nothing declares fails the row,
+/// and the run, at startup instead of at someone's first turn. The row's config reaches the roster as the loader
+/// hands it over: nothing fills in defaults, so a preset that names no `tools` keeps every tool.
+pub struct PresetsComponent;
+
+impl Component for PresetsComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // The roster's own sentences already name the row (`presets: …`).
+        let roster =
+            heddle_config::preset_roster(Some(config)).map_err(|error| error.to_string())?;
+        services.provide("presets", Arc::new(roster));
         Ok(())
     }
 }

@@ -51,6 +51,10 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(service) = boot.services.get::<Arc<heddle_llm::ModelService>>("model") {
         harness.models = Arc::new(Models { service });
     }
+    // The agent presets (inventory A96): `GET /api/presets`, and the preset a session the page creates runs under.
+    harness.presets = boot
+        .services
+        .get::<Arc<heddle_config::PresetRoster>>("presets");
     if let Some(service) = boot
         .services
         .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")

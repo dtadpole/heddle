@@ -57,6 +57,8 @@ pub enum Builtin {
     TodoTool,
     /// `src/plugins/turns.ts`.
     Turns,
+    /// `src/plugins/presets.ts`: the agent presets (inventory A96).
+    Presets,
     /// `src/plugins/team.ts`.
     Team,
     /// `src/plugins/schedule.ts`.
@@ -233,6 +235,15 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         Some("turns"),
         &[],
         "heddle-agent",
+    ),
+    spec(
+        Builtin::Presets,
+        "plugins/presets",
+        "presets",
+        "presets",
+        Some("presets"),
+        &[],
+        "heddle-config",
     ),
     spec(
         Builtin::Team,
@@ -452,6 +463,9 @@ impl Catalog for BuiltinCatalog {
             }
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
+            }
+            ComponentRef::Builtin(Builtin::Presets) => {
+                Some(Box::new(crate::adapters::PresetsComponent))
             }
             ComponentRef::Builtin(Builtin::SubagentTool) => {
                 Some(Box::new(crate::adapters::SubagentToolComponent))
