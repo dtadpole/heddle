@@ -374,6 +374,49 @@
   .settings-workspace { display: flex; flex-direction: column; gap: .1rem; padding: .4rem .6rem; border-radius: 8px; background: var(--surface); font-size: .85rem; }
   .settings-workspace .path { color: var(--text-3); font-size: .8rem; overflow-wrap: anywhere; }
   /**
+   * Configuration: one form per profile entry, over `GET` and `POST /api/settings` (DSH's settings page). A row is a
+   * label, its control and a Reset for a value this profile overrides; the actions span the form.
+   */
+  #settings-config { display: flex; flex-direction: column; gap: .35rem; }
+  .settings-entry { border: 1px solid var(--line); border-radius: 10px; }
+  .settings-entry > summary { display: flex; gap: .6rem; align-items: baseline; padding: .5rem .6rem; font-size: .875rem; cursor: pointer; }
+  .settings-entry > summary .component { color: var(--text-3); font-size: .75rem; overflow-wrap: anywhere; }
+  .settings-form {
+    display: grid;
+    grid-template-columns: minmax(8rem, max-content) 1fr auto;
+    gap: .35rem .6rem;
+    align-items: center;
+    padding: 0 .6rem .6rem;
+    font-size: .875rem;
+  }
+  .settings-form label { color: var(--text-3); overflow-wrap: anywhere; }
+  .settings-form input[type='text'], .settings-form input[type='number'] {
+    box-sizing: border-box;
+    width: 100%;
+    padding: .25rem .4rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+  }
+  .settings-form .value { font-family: var(--mono); font-size: .8rem; overflow-wrap: anywhere; }
+  .settings-form button {
+    padding: .2rem .55rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: none;
+    color: var(--text);
+    font: inherit;
+    font-size: .8rem;
+    cursor: pointer;
+  }
+  .settings-form button:hover:not(:disabled), .settings-form button:focus-visible { background: var(--hover); }
+  .settings-form button:disabled, .settings-form input:disabled { opacity: .55; cursor: default; }
+  .settings-actions { display: flex; grid-column: 1 / -1; gap: .6rem; align-items: center; }
+  .settings-status { color: var(--text-3); font-size: .8rem; }
+  .settings-status[data-kind='error'] { color: #ff7b72; }
+  /**
    * The conversation column, shared by the transcript and the composer.
    *
    * DSH's own relation, measured at 127.0.0.1:8080 on 2026-10-17: the text column is 680px, the composer card
@@ -3586,9 +3629,9 @@
 </main>
 <!--
   The settings surface, as a **native dialog**: the reference's own shape (measured 2026-10-17: `role=dialog` 800x765,
-  radius 28, `rgb(44,44,46)`, sections and a `Close` action). This one is read-only, and it says so: the endpoint file
-  holds credentials and is never rendered, so what a reader gets is what this machine is configured with, not a way to
-  change it. Writing configuration from the page is recorded in SIDEBAR_PANEL.md as the next feature, not half-built.
+  radius 28, `rgb(44,44,46)`, sections and a `Close` action). Server, Models and Workspaces are read-only: the endpoint
+  file holds credentials and is never rendered. Configuration is writable as DSH's settings page is: each profile entry's
+  fields over `GET` and `POST /api/settings`, written to the active profile's patch, refused when stale or invalid.
 -->
 <dialog id="settings-dialog" aria-labelledby="settings-title">
   <header id="settings-head">
@@ -3611,6 +3654,11 @@
     <section>
       <h3 data-i18n="settings.models">Models</h3>
       <ul id="settings-models"></ul>
+    </section>
+    <section>
+      <h3 data-i18n="settings.configuration">Configuration</h3>
+      <p id="settings-config-note" class="meta"></p>
+      <div id="settings-config"></div>
     </section>
     <section>
       <h3 data-i18n="settings.workspaces">Workspaces</h3>
@@ -3754,6 +3802,7 @@ const MESSAGES = Object.freeze({
     'settings.server': 'Server',
     'settings.models': 'Models',
     'settings.workspaces': 'Workspaces',
+    'settings.configuration': 'Configuration',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
   }),
   zh: Object.freeze({
@@ -3765,6 +3814,7 @@ const MESSAGES = Object.freeze({
     'settings.server': '服务器',
     'settings.models': '模型',
     'settings.workspaces': '工作区',
+    'settings.configuration': '配置',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
   }),
 })
@@ -12974,12 +13024,19 @@ async function fillSettings() {
       const response = await fetch(path)
       if (response.ok) return { body: await response.json() }
       if (response.status === 404) return { missing: true }
-      return { failure: `the server answered ${response.status}` }
+      return { failure: `the server answered ${response.status}`, status: response.status }
     } catch (error) {
       return { failure: (error && error.message) || String(error) }
     }
   }
-  const [statusRead, endpointsRead, workspacesRead] = await Promise.all([read('/api/status'), read('/api/endpoints'), read('/api/workspaces')])
+  const [statusRead, endpointsRead, workspacesRead, settingsRead] = await Promise.all([
+    read('/api/status'),
+    read('/api/endpoints'),
+    read('/api/workspaces'),
+    read('/api/settings'),
+  ])
+  // A server started without a settings service answers 503: that is "no settings surface", like a 404, not a failed read.
+  renderSettingsConfig(settingsRead.body ?? null, settingsRead.status === 503 ? undefined : settingsRead.failure)
   server.replaceChildren()
   models.replaceChildren()
   workspaces.replaceChildren()
@@ -13051,6 +13108,201 @@ function settingsWorkspaceOrder(records) {
   for (const root of children.get(null) ?? []) visit(root, 0)
   for (const record of records) visit(record, 0)
   return ordered
+}
+
+/**
+ * Configuration: one form per profile entry, over `GET /api/settings` and `POST /api/settings/{ns}` (DSH's settings
+ * page over its config editor). A top-level text, number or switch field is edited in place; a list or a mapping is
+ * shown, not edited; a secret shows only whether it is set. Save sends the changed fields with the revision the form
+ * was read at, so a change made elsewhere in between is refused (409) rather than overwritten; Reset restores the value
+ * beneath this profile. Every string reaches the DOM as text.
+ */
+function renderSettingsConfig(view, failure) {
+  const host = document.getElementById('settings-config')
+  const note = document.getElementById('settings-config-note')
+  host.replaceChildren()
+  if (failure !== undefined) {
+    note.textContent = `could not read the settings: ${failure}`
+    return
+  }
+  if (view === null || !Array.isArray(view.namespaces)) {
+    note.textContent = 'this server offers no settings surface'
+    return
+  }
+  note.textContent = view.writable
+    ? 'Changes are written to this profile\u2019s patch.'
+    : 'This run has no profile patch to write (start it with --profile, or from a project without --patch); values are read-only.'
+  for (const entry of view.namespaces) host.append(settingsEntryForm(entry))
+}
+
+/**
+ * The scalar fields a schema declares, with their defaults where the schema says: the TypeScript build sends
+ * Schemastery's serialized graph (`{ uid, refs }`, the root at `refs[uid]` and each `dict` entry a ref), the Rust port
+ * a JSON Schema subset (`properties`, each with a `type`).
+ */
+function settingsSchemaFields(schema) {
+  const fields = new Map()
+  const kindOf = (type) => (type === 'number' || type === 'natural' || type === 'percent' ? 'number' : type === 'string' || type === 'boolean' ? type : 'other')
+  if (schema !== null && typeof schema === 'object' && schema.refs !== undefined && schema.uid !== undefined) {
+    const node = (ref) => (typeof ref === 'object' && ref !== null ? ref : schema.refs[String(ref)])
+    const root = node(schema.uid)
+    if (root?.type === 'object' && root.dict !== null && typeof root.dict === 'object') {
+      for (const [key, ref] of Object.entries(root.dict)) {
+        const child = node(ref)
+        fields.set(key, { type: kindOf(child?.type), default: child?.meta?.default })
+      }
+    }
+  } else if (schema !== null && typeof schema === 'object' && schema.properties !== null && typeof schema.properties === 'object') {
+    for (const [key, child] of Object.entries(schema.properties)) {
+      const type = Array.isArray(child?.type) ? child.type.find((entry) => entry !== 'null') : child?.type
+      fields.set(key, { type: kindOf(type === 'integer' ? 'number' : type), default: child?.default })
+    }
+  }
+  return fields
+}
+
+/** When a saved value takes effect, as the entry says. */
+function settingsApplies(entry) {
+  return entry.applies === 'live' ? 'applied' : 'applies when the server restarts'
+}
+
+function settingsEntryForm(entry) {
+  const details = document.createElement('details')
+  details.className = 'settings-entry'
+  details.dataset.ns = entry.ns
+  const summary = document.createElement('summary')
+  const name = document.createElement('span')
+  name.textContent = entry.ns
+  const component = document.createElement('span')
+  component.className = 'component'
+  component.textContent = entry.component
+  summary.append(name, component)
+  details.append(summary)
+
+  const form = document.createElement('form')
+  form.className = 'settings-form'
+  form.noValidate = true
+  const value = entry.value !== null && typeof entry.value === 'object' && !Array.isArray(entry.value) ? entry.value : {}
+  const user = entry.user !== null && typeof entry.user === 'object' ? entry.user : {}
+  const declared = settingsSchemaFields(entry.schema)
+  // Every field the entry holds, then every scalar field its schema declares and it does not set yet.
+  const keys = [...Object.keys(value), ...[...declared.keys()].filter((key) => !(key in value) && declared.get(key).type !== 'other')]
+  const secretPaths = new Set((Array.isArray(entry.secrets) ? entry.secrets : []).map((secret) => secret.path.join('.')))
+  const inputs = []
+  for (const key of keys) {
+    if (secretPaths.has(key)) continue
+    const present = key in value
+    const current = present ? value[key] : undefined
+    const kind = present ? typeof current : declared.get(key)?.type
+    const fallback = declared.get(key)?.default
+    const label = document.createElement('label')
+    label.textContent = key
+    let control
+    if (kind === 'boolean' || kind === 'number' || kind === 'string') {
+      control = document.createElement('input')
+      control.type = kind === 'boolean' ? 'checkbox' : kind === 'number' ? 'number' : 'text'
+      if (kind === 'number') control.step = 'any'
+      if (kind === 'boolean') control.checked = present ? current === true : fallback === true
+      else if (present) control.value = String(current)
+      else control.placeholder = fallback === undefined ? 'default' : String(fallback)
+      control.dataset.field = key
+      control.disabled = !entry.editable
+      control.id = `setting-${entry.ns}-${key}`.replace(/[^A-Za-z0-9_-]/g, '_')
+      label.htmlFor = control.id
+      inputs.push({ key, control, initial: control.type === 'checkbox' ? control.checked : control.value })
+    } else {
+      control = document.createElement('span')
+      control.className = 'value'
+      control.textContent = JSON.stringify(current)
+    }
+    const reset = document.createElement('button')
+    reset.type = 'button'
+    reset.textContent = 'Reset'
+    reset.title = 'restore the value beneath this profile'
+    reset.hidden = !entry.editable || !Object.prototype.hasOwnProperty.call(user, key)
+    reset.addEventListener('click', () => void saveSettings(details, entry, { ops: [{ op: 'unset', path: [key] }] }))
+    form.append(label, control, reset)
+  }
+  for (const secret of Array.isArray(entry.secrets) ? entry.secrets : []) {
+    const label = document.createElement('label')
+    label.textContent = secret.path.join('.')
+    const state = document.createElement('span')
+    state.className = 'value'
+    state.textContent = secret.set ? 'set' : 'not set'
+    state.title = 'a credential: kept in the environment or the machine file, never shown here'
+    form.append(label, state, document.createElement('span'))
+  }
+
+  const actions = document.createElement('div')
+  actions.className = 'settings-actions'
+  const save = document.createElement('button')
+  save.type = 'submit'
+  save.textContent = 'Save'
+  save.disabled = !entry.editable || inputs.length === 0
+  const status = document.createElement('span')
+  status.className = 'settings-status'
+  status.setAttribute('role', 'status')
+  if (!entry.editable && typeof entry.reason === 'string') status.textContent = entry.reason
+  actions.append(save, status)
+  form.append(actions)
+  form.addEventListener('submit', (submitEvent) => {
+    submitEvent.preventDefault()
+    const changed = {}
+    for (const { key, control, initial } of inputs) {
+      const shown = control.type === 'checkbox' ? control.checked : control.value
+      if (shown === initial) continue
+      /** An emptied number is not 0: say so, and leave unsetting to Reset (developer-ten's note 3). */
+      if (control.type === 'number' && control.value.trim() === '') {
+        status.dataset.kind = 'error'
+        status.textContent = `${key} needs a number; Reset restores the value beneath this profile`
+        return
+      }
+      changed[key] = control.type === 'number' ? Number(control.value) : shown
+    }
+    if (Object.keys(changed).length === 0) {
+      status.dataset.kind = ''
+      status.textContent = 'nothing changed'
+      return
+    }
+    void saveSettings(details, entry, { update: changed })
+  })
+  details.append(form)
+  return details
+}
+
+/** Post one write with the revision the form was read at; a saved entry is redrawn from the server's answer. */
+async function saveSettings(details, entry, body) {
+  const status = details.querySelector('.settings-status')
+  status.dataset.kind = ''
+  status.textContent = 'saving\u2026'
+  let response
+  let answer = {}
+  try {
+    response = await fetch(`/api/settings/${encodeURIComponent(entry.ns)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...body, expectedRevision: entry.revision }),
+    })
+    answer = await response.json().catch(() => ({}))
+  } catch (error) {
+    status.dataset.kind = 'error'
+    status.textContent = `could not reach the server: ${error.message}`
+    return
+  }
+  if (response.ok) {
+    const fresh = settingsEntryForm(answer)
+    fresh.open = true
+    details.replaceWith(fresh)
+    fresh.querySelector('.settings-status').textContent = `Saved; ${settingsApplies(answer)}.`
+    return
+  }
+  status.dataset.kind = 'error'
+  status.textContent =
+    response.status === 409
+      ? 'This entry changed since Settings opened; close and reopen it to see the current values.'
+      : typeof answer.error === 'string'
+        ? answer.error
+        : `the server refused the change (${response.status})`
 }
 
 async function showSettings() {
