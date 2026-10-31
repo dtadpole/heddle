@@ -1909,7 +1909,7 @@ test('the running clock survives navigating away and back', async (context) => {
     const other = await browser.evaluate(`fetch('/api/folders/session', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ folder: ${JSON.stringify(server.work)}, new: true }) }).then((r) => r.json()).then((body) => body.session?.id ?? body.id ?? null)`)
     assert.ok(typeof other === 'string' && other.startsWith('session-'), `a second session exists (${other})`)
     assert.notEqual(other, session, 'idle destination must differ from the running session')
-    const idle = await browser.evaluate(`fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.id === ${JSON.stringify(other)})?.running ?? false)`)
+    const idle = await browser.evaluate(`fetch('/api/sessions').then((r) => r.json()).then((list) => list.find((entry) => entry.id === ${JSON.stringify(other)})?.running ?? null)`)
     assert.equal(idle, false, 'the navigation destination is idle')
     await browser.evaluate(`globalThis.showSession(${JSON.stringify(other)})`)
     assert.ok(await browser.waitFor('document.querySelector("[data-chat-running]") === null', 15_000), 'the row leaves with the view')
