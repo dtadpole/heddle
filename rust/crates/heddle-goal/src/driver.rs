@@ -17,13 +17,20 @@ use futures::future::{BoxFuture, FutureExt, Shared};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::service::{GoalBlockReason, GoalPhase, GoalRef, GoalService, GoalView};
+use crate::service::{GoalActivation, GoalBlockReason, GoalPhase, GoalRef, GoalService, GoalView};
 
 /// The block code used when the round cap is reached — DSH's own.
 pub const ROUND_LIMIT_CODE: &str = "round-limit";
 
 /// The block code used when a round cannot be started at all.
 pub const QUEUE_FAILED_CODE: &str = "queue-failed";
+
+/// The block code DSH writes when a goal round is rejected before entering its step (dsh-goal-round-driver
+/// lib/index.js:326-333).
+pub const PROMPT_REJECTED_CODE: &str = "prompt-rejected";
+
+/// DSH's sentence for that block.
+pub const PROMPT_REJECTED_MESSAGE: &str = "Goal round was rejected before entering its step.";
 
 /// What should happen next for one goal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,7 +135,7 @@ pub struct DriverOutcome {
     /// Rounds admitted and answered.
     pub rounds: u64,
     /// Why the chain ended: `idle`, `no-goal`, `disarmed`, `phase-complete`, `round-limit`, `goal-moved`,
-    /// `cleared`, `round-not-admitted`, `turn-failed`, `no-runtime`, …
+    /// `cleared`, `round-not-admitted`, `prompt-rejected`, `turn-failed`, `no-runtime`, …
     pub stopped: String,
     /// Present when the chain ended by blocking the goal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -486,6 +493,11 @@ impl GoalDriver {
                     let goal_id = view.goal.id.clone();
                     let revision = view.goal.revision;
                     let before = view.rounds_started;
+                    // Where this round's own events start, so a round that was not admitted can be read back.
+                    let mark = self
+                        .goals
+                        .session_events(session)
+                        .map_or(0, |events| events.len());
                     let source = GoalRoundSource {
                         kind: "goal".to_owned(),
                         goal_id: goal_id.clone(),
@@ -551,6 +563,37 @@ impl GoalDriver {
                         };
                     };
                     if after.rounds_started <= before {
+                        // DSH's `prompt-rejected`: a round whose step was rejected before it entered — here, the
+                        // archived-session gate refusing the round's first step, whose turn ends `blocked` — blocks
+                        // the goal it served, when that goal is still the same revision, active and armed
+                        // (dsh-goal-round-driver lib/index.js:326-333). The goal is then not run again by itself,
+                        // and after an unarchive a person's resume starts it, as it does in DSH; left active and
+                        // armed, the resume was refused as "already active and armed".
+                        if self.ended_blocked_since(session, mark)
+                            && after.goal.id == goal_id
+                            && after.goal.revision == revision
+                            && after.goal.phase == GoalPhase::Active
+                            && after.activation == GoalActivation::Armed
+                        {
+                            let reason = GoalBlockReason {
+                                code: PROMPT_REJECTED_CODE.to_owned(),
+                                message: PROMPT_REJECTED_MESSAGE.to_owned(),
+                            };
+                            let outcome = self.goals.block(
+                                session,
+                                &GoalRef {
+                                    id: goal_id,
+                                    revision,
+                                },
+                                &json!({ "code": reason.code, "message": reason.message }),
+                            );
+                            return DriverOutcome {
+                                rounds,
+                                stopped: PROMPT_REJECTED_CODE.to_owned(),
+                                blocked: Some(reason),
+                                error: outcome.err().map(|error| error.to_string()),
+                            };
+                        }
                         return DriverOutcome {
                             rounds: rounds + 1,
                             stopped: "round-not-admitted".to_owned(),
@@ -570,6 +613,14 @@ impl GoalDriver {
                 }
             }
         }
+    }
+
+    /// Whether the events `session` gained since `mark` end a turn with DSH's `blocked`: the archived-session gate's
+    /// `turn/failed` `{"reason": {"kind": "blocked"}}`, the one turn end heddle writes for a rejected step.
+    fn ended_blocked_since(&self, session: &str, mark: usize) -> bool {
+        self.goals
+            .session_events(session)
+            .is_ok_and(|events| events.iter().skip(mark).any(is_blocked_turn_end))
     }
 
     /// Clear a settled lane, draining an edge that arrived as it settled.
@@ -603,6 +654,10 @@ impl GoalDriver {
 pub enum SessionEdge {
     /// `turn/completed`: the session is idle — request a pass.
     TurnCompleted,
+    /// `turn/failed`: a turn's other end (the archived-session gate's `{"kind": "blocked"}`, a teammate's failed
+    /// turn). The session is idle again, but no pass is requested: a round started from a refused turn's end
+    /// would be refused again.
+    TurnFailed,
     /// `model/request`, `assistant/chunk`, `turn/retry`, `tool/result`: a turn is in flight.
     TurnActivity,
     /// `goal/change`: request a pass if the session is at rest; a running turn's completion re-evaluates.
@@ -611,10 +666,19 @@ pub enum SessionEdge {
     Other,
 }
 
+/// Whether `event` ends its turn with DSH's `blocked`: the archived-session gate's `turn/failed`
+/// `{"reason": {"kind": "blocked"}}`, the one turn end heddle writes for a rejected step (`isBlockedTurnEnd` in
+/// `src/goal/driver.ts`). Any other `turn/failed` (a teammate's turn that failed, whose `reason` is its error) is a
+/// failure, DSH's `agent/error`.
+fn is_blocked_turn_end(event: &Value) -> bool {
+    event["type"] == "turn/failed" && event["reason"]["kind"] == "blocked"
+}
+
 /// Classify a session event by its `type`.
 pub fn classify_session_event(event_type: &str) -> SessionEdge {
     match event_type {
         "turn/completed" => SessionEdge::TurnCompleted,
+        "turn/failed" => SessionEdge::TurnFailed,
         "model/request" | "assistant/chunk" | "turn/retry" | "tool/result" => {
             SessionEdge::TurnActivity
         }
@@ -670,6 +734,21 @@ impl DriverTrigger {
                     .turn_ended(session, turn_end_of(completed.as_ref(), event));
                 self.on_session_event(session, kind)
             }
+            // The gate's refusal (`{"kind": "blocked"}`, DSH's `turn/end` `blocked`) leaves the goal armed, so a
+            // refused goal round can block it `prompt-rejected` in the driver; any other `turn/failed` is a failure
+            // and disarms continuation, as DSH's `agent/error` listener does (dsh-goal-round-driver
+            // lib/index.js:211-213) and a failed `turn/completed` does (#93). Either way the busy span ends and no
+            // pass is requested ([`SessionEdge::TurnFailed`]).
+            "turn/failed" => {
+                self.last_completed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(session);
+                if !is_blocked_turn_end(event) {
+                    self.driver.turn_ended(session, TurnEnd::Failed);
+                }
+                self.on_session_event(session, kind)
+            }
             _ => self.on_session_event(session, kind),
         }
     }
@@ -684,6 +763,17 @@ impl DriverTrigger {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(session);
                 self.request_if_known(session)
+            }
+            // A turn that ended `turn/failed` ends the busy span as a completed one does (DSH's driver is ready again
+            // at every idle, dsh-goal-round-driver lib/index.js:84-86, 223-241), so a goal resumed or edited after
+            // an unarchive is not ignored. It requests nothing: the turn was refused or failed, and a round started
+            // from its end would meet the same refusal (the TypeScript twin measured 353 refused rounds in 300 ms).
+            SessionEdge::TurnFailed => {
+                self.in_turn
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(session);
+                None
             }
             SessionEdge::TurnActivity => {
                 self.in_turn
@@ -1207,6 +1297,67 @@ mod tests {
         );
     }
 
+    // The archived-session gate (#26) and goal-stop (#93) together: every `turn/failed` ends the busy span and requests
+    // nothing; the gate's refusal leaves the goal armed (DSH's `turn/end` `blocked` does not disarm, so a refused round
+    // can block `prompt-rejected`), and a failed teammate turn disarms, as DSH's `agent/error` does.
+    #[tokio::test]
+    async fn a_refused_turn_failed_leaves_the_goal_armed_and_a_failed_one_disarms_it() {
+        let (log, goals) = setup();
+        create(&goals, 4.0);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let trigger = DriverTrigger::new(driver);
+        assert!(
+            trigger
+                .on_event("s1", &json!({"type": "model/request"}))
+                .is_none()
+        );
+        assert!(
+            trigger
+                .on_event(
+                    "s1",
+                    &json!({"type": "turn/failed", "reason": {"kind": "blocked"}})
+                )
+                .is_none(),
+            "a refused turn's end requests nothing"
+        );
+        assert_eq!(
+            goals.get("s1").unwrap().unwrap().activation,
+            GoalActivation::Armed,
+            "and leaves the goal armed"
+        );
+        assert!(
+            trigger
+                .on_event("s1", &json!({"type": "model/request"}))
+                .is_none()
+        );
+        assert!(
+            trigger
+                .on_event(
+                    "s1",
+                    &json!({"type": "turn/failed", "reason": "provider down"})
+                )
+                .is_none(),
+            "a failed turn's end requests nothing"
+        );
+        let after = goals.get("s1").unwrap().unwrap();
+        assert_eq!(
+            after.goal.phase,
+            GoalPhase::Active,
+            "the goal keeps its phase"
+        );
+        assert_eq!(
+            after.activation,
+            GoalActivation::Disarmed,
+            "and is disarmed: no abnormal auto-retry"
+        );
+        let run = trigger
+            .on_event("s1", &json!({"type": "goal/change"}))
+            .expect("the session is at rest after turn/failed");
+        assert_eq!(run.await.stopped, "disarmed");
+        assert!(calls.lock().unwrap().is_empty(), "no round started");
+    }
+
     #[tokio::test]
     async fn a_round_that_was_not_admitted_stops_the_chain() {
         let (log, goals) = setup();
@@ -1515,6 +1666,206 @@ mod tests {
             trigger.on_session_event("nope", "turn/completed").is_none(),
             "an unknown session is a no-op"
         );
+    }
+
+    // developer-five's review of the archived-session gate (issue #26): a turn refused at a later step writes
+    // `turn/failed` {"reason":{"kind":"blocked"}}, which the trigger ignored, so the session stayed busy and a goal
+    // resumed after the unarchive was ignored until some other turn completed.
+    #[tokio::test]
+    async fn a_turn_that_ends_failed_leaves_the_session_at_rest_and_a_later_resume_starts_a_round()
+    {
+        let (log, goals) = setup();
+        let created = create(&goals, 1.0);
+        let paused = goals
+            .pause(
+                "s1",
+                &GoalRef {
+                    id: created.goal.id.clone(),
+                    revision: created.goal.revision,
+                },
+            )
+            .unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(goals.clone(), Arc::new(runner(&log, &calls)));
+        let trigger = DriverTrigger::new(driver.clone());
+
+        // A person's turn asks the model, then the gate refuses its next step.
+        assert!(trigger.on_session_event("s1", "model/request").is_none());
+        assert!(
+            trigger.on_session_event("s1", "turn/failed").is_none(),
+            "the refused turn's end requests nothing by itself"
+        );
+        // After the unarchive, the person resumes the goal.
+        goals
+            .resume(
+                "s1",
+                &GoalRef {
+                    id: paused.goal.id.clone(),
+                    revision: paused.goal.revision,
+                },
+            )
+            .unwrap();
+        let run = trigger.on_session_event("s1", "goal/change");
+        assert!(
+            run.is_some(),
+            "the session is at rest after turn/failed, so the resume requests a pass"
+        );
+        let outcome = run.unwrap().await;
+        assert_eq!(outcome.rounds, 1, "{outcome:?}");
+        assert_eq!(calls.lock().unwrap().len(), 1, "the resume started round 1");
+        assert_eq!(
+            classify_session_event("turn/failed"),
+            SessionEdge::TurnFailed
+        );
+    }
+
+    // The other half of the same review: clearing busy must not start the refused round again. The runner stands
+    // for a round the gate refuses at its first step: no message is admitted, the turn's `turn/failed` end is
+    // appended, and it reaches the trigger while the chain is still running, as the boot forwards it.
+    #[tokio::test]
+    async fn a_refused_round_is_not_started_again_by_its_own_turn_failed_end() {
+        let (log, goals) = setup();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let cell: Arc<OnceLock<Arc<DriverTrigger>>> = Arc::new(OnceLock::new());
+        let hook: Hook = {
+            let cell = Arc::clone(&cell);
+            let log = log.clone();
+            Arc::new(move |session: &str, _round: u64| {
+                log.append_raw(
+                    session,
+                    json!({ "type": "turn/failed", "reason": { "kind": "blocked" } }),
+                );
+                if let Some(trigger) = cell.get() {
+                    drop(trigger.on_session_event(session, "turn/failed"));
+                }
+            })
+        };
+        let refused = TestRunner {
+            log: log.clone(),
+            calls: calls.clone(),
+            hook: Some(hook),
+            fail: false,
+            record: false,
+        };
+        let driver = GoalDriver::new(goals.clone(), Arc::new(refused));
+        let trigger = Arc::new(DriverTrigger::new(driver.clone()));
+        assert!(cell.set(Arc::clone(&trigger)).is_ok());
+        create(&goals, 5.0);
+        let outcome = trigger
+            .on_session_event("s1", "goal/change")
+            .expect("at rest, a goal change requests a pass")
+            .await;
+        assert_eq!(outcome.stopped, PROMPT_REJECTED_CODE, "{outcome:?}");
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            1,
+            "the refused round ran once and its own end did not start it again"
+        );
+        assert_eq!(
+            goals.get("s1").unwrap().unwrap().goal.phase,
+            GoalPhase::Blocked,
+            "the refused round blocked its goal, as DSH's does"
+        );
+    }
+
+    /// A round runner over a session the archived-session gate may refuse: while `archived`, the round's first step
+    /// is rejected (no message admitted, the turn ends `turn/failed` {"reason":{"kind":"blocked"}}); otherwise the
+    /// round is admitted and its turn completes.
+    struct GatedRunner {
+        log: Arc<MemoryLog>,
+        archived: Arc<std::sync::atomic::AtomicBool>,
+        calls: Arc<Mutex<Vec<(u64, String)>>>,
+    }
+
+    impl RoundRunner for GatedRunner {
+        fn run(
+            &self,
+            session: &str,
+            prompt: String,
+            source: GoalRoundSource,
+        ) -> BoxFuture<'static, Result<(), String>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((source.round, prompt.clone()));
+            if self.archived.load(std::sync::atomic::Ordering::SeqCst) {
+                self.log.append_raw(
+                    session,
+                    json!({ "type": "turn/failed", "reason": { "kind": "blocked" } }),
+                );
+            } else {
+                self.log.append_raw(
+                    session,
+                    json!({
+                        "type": "message",
+                        "message": {
+                            "role": "user",
+                            "content": [{"type": "text", "text": prompt}],
+                            "source": source
+                        }
+                    }),
+                );
+                self.log
+                    .append_raw(session, json!({ "type": "turn/completed", "rounds": 1 }));
+            }
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    // DSH blocks a goal whose round its pre-step rejects, with `prompt-rejected` (dsh-goal-round-driver
+    // lib/index.js:326-333). Before this, heddle stopped the chain as `round-not-admitted` and left the goal active
+    // and armed, so after an unarchive a resume was refused as "already active and armed".
+    #[tokio::test]
+    async fn a_round_refused_before_its_step_blocks_the_goal_and_a_resume_after_the_unarchive_runs_it()
+     {
+        let (log, goals) = setup();
+        let archived = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let driver = GoalDriver::new(
+            goals.clone(),
+            Arc::new(GatedRunner {
+                log: log.clone(),
+                archived: archived.clone(),
+                calls: calls.clone(),
+            }),
+        );
+        create(&goals, 1.0);
+        let outcome = driver.request("s1").await;
+        assert_eq!(outcome.stopped, PROMPT_REJECTED_CODE, "{outcome:?}");
+        assert_eq!(outcome.rounds, 0, "the refused round was not admitted");
+        let blocked = goals.get("s1").unwrap().unwrap();
+        assert_eq!(
+            blocked.goal.phase,
+            GoalPhase::Blocked,
+            "the goal is blocked, not left active and armed"
+        );
+        assert_eq!(
+            blocked.goal.blocked_reason,
+            Some(GoalBlockReason {
+                code: "prompt-rejected".into(),
+                message: "Goal round was rejected before entering its step.".into(),
+            }),
+            "with DSH's code and sentence"
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        archived.store(false, std::sync::atomic::Ordering::SeqCst);
+        goals
+            .resume(
+                "s1",
+                &GoalRef {
+                    id: blocked.goal.id.clone(),
+                    revision: blocked.goal.revision,
+                },
+            )
+            .unwrap();
+        let outcome = driver.request("s1").await;
+        assert_eq!(outcome.rounds, 1, "the resume ran round 1: {outcome:?}");
+        assert_eq!(outcome.stopped, "round-limit");
+        assert_eq!(calls.lock().unwrap().len(), 2);
     }
 
     #[test]

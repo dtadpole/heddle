@@ -97,7 +97,7 @@ const CHINESE = {
   search: '搜索会话',
   searchTitle: '搜索会话 (⌥⌘K)',
   add: '添加工作区',
-  addTitle: '将一个文件夹注册为工作区根目录',
+  addTitle: '将一个文件夹注册为工作区根目录 (⌥⌘O)',
   field: '搜索会话',
   fieldName: '搜索会话名称',
   tree: '工作区文件夹',
