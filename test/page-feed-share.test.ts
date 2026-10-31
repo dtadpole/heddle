@@ -500,6 +500,13 @@ function runTurnHarness(answer: string) {
     function refreshRunningStatus() {}
     async function renderSettledAnswers() {}
     function renderScheduleCards() {}
+    async function attachTurnUsage() {}
+    async function attachEditedFiles() {}
+    function markStopped() {}
+    function noteCompletion() {}
+    function rememberCurrent() {}
+    function chooseWorkspace() {}
+    const pendingInteractions = new Map();
     async function renderTree() {}
     async function refreshSessions() { calls.push('sessions read') }
     function hideApproval() {}
