@@ -385,6 +385,58 @@ test('a text the parser cannot render is shown as its own escaped words, not as 
 })
 
 
+test('footnotes render numbered references, cited definitions and one backref per occurrence', () => {
+  const html = renderMarkdown('first[^Note] then[^b] again[^note].\n\n[^b]: bee *text*.\n[^Note]: the note.\n[^unused]: never cited.')
+  assert.match(html, /href="#fn-note" id="fnref-note"[^>]*>1<\/a>/)
+  assert.match(html, /href="#fn-b" id="fnref-b"[^>]*>2<\/a>/)
+  assert.match(html, /id="fnref-note-2"[^>]*>1<\/a>/)
+  assert.ok(html.indexOf('<li id="fn-note">') < html.indexOf('<li id="fn-b">'))
+  assert.match(html, /<section class="footnotes">/)
+  assert.match(html, /bee <em>text<\/em>/)
+  assert.match(html, /href="#fnref-note-2" class="footnote-backref"[^>]*>↩2<\/a>/)
+  assert.doesNotMatch(html, /never cited|\[\^Note\]:/)
+  assert.equal(renderMarkdown('missing[^x] here.'), '<p>missing[^x] here.</p>\n')
+  assert.equal(renderMarkdown('no notes at all'), '<p>no notes at all</p>\n')
+})
+
+test('footnote definitions retain indented block content without swallowing following prose', () => {
+  const html = renderMarkdown('claim[^n].\n\n[^n]: first *paragraph*.\n    continued.\n\n    second **paragraph**.\n\n    - item\n\nfollowing prose.')
+  assert.match(html, /<p>first <em>paragraph<\/em>\.\ncontinued\.<\/p>/)
+  assert.match(html, /<p>second <strong>paragraph<\/strong>\.<\/p>/)
+  assert.match(html, /<ul>\n<li>item/)
+  assert.ok(html.indexOf('<p>following prose.</p>') < html.indexOf('<section class="footnotes">'))
+  assert.doesNotMatch(renderMarkdown('x[^n]\n\n[^n]: first\n[^N]: duplicate'), /duplicate/)
+})
+
+test('footnotes respect code, escapes, ordinary reference links and per-document state', () => {
+  const html = renderMarkdown('`[^n]` \\[^n] real[^n] [link][r].\n\n```text\n[^fake]: code\n```\n\n[^n]: [link][r].\n\n[r]: https://example.com')
+  assert.match(html, /<code>\[\^n\]<\/code>/)
+  assert.match(html, /\[\^fake\]: code/)
+  assert.equal((html.match(/id="fnref-n"/g) ?? []).length, 1)
+  assert.equal((html.match(/href="https:\/\/example.com"/g) ?? []).length, 2)
+  assert.equal(renderInline('alone[^n]'), 'alone[^n]')
+  assert.equal(renderMarkdown('alone[^n]'), '<p>alone[^n]</p>\n')
+  assert.doesNotMatch(renderMarkdown('[label[^n]](https://example.com)\n\n[^n]: note'), /fnref-/, 'no nested anchor in link text')
+})
+
+test('footnote bodies and hostile labels pass the existing output and URL policies', () => {
+  const html = renderMarkdown('x[^a"&<>] x[^a-2] x[^a] x[^a].\n\n[^a"&<>]: inline <script>alert(1)</script> [bad](javascript:alert(1)) ![remote](https://tracker.example/x)\n[^a-2]: other\n[^a]: okay', { base: '/w' })
+  assert.doesNotMatch(html, /<script|href="javascript:|src="https:|onerror=/)
+  assert.match(html, /link refused/)
+  const ids = [...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1])
+  assert.equal(new Set(ids).size, ids.length, 'encoded label punctuation cannot collide with repeat suffixes')
+  for (const href of followed(html).filter((url) => url.startsWith('#'))) assert.ok(ids.includes(href.slice(1)), href)
+})
+
+test('footnote references inside notes, including cycles, terminate with complete backrefs', () => {
+  const html = renderMarkdown('x[^a].\n\n[^a]: a[^b] self[^a].\n[^b]: b[^a].')
+  assert.equal((html.match(/<li id="fn-/g) ?? []).length, 2)
+  assert.match(html, /href="#fnref-a-3" class="footnote-backref"/)
+  assert.match(html, /href="#fnref-b" class="footnote-backref"/)
+  const hostile = `x[^n]\n\n[^n]: ${'*a '.repeat(2000)}<b>x</b>${' a*'.repeat(2000)}`
+  assert.equal(renderMarkdown(hostile), `<pre class="unrendered"><code>${escapeHtml(hostile)}</code></pre>`)
+})
+
 test('parser work budget preserves hostile inline input as escaped text without recursion', () => {
   const huge = '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)
   const compact = '*a '.repeat(2000) + '<script>x</script>' + ' a*'.repeat(2000)

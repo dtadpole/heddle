@@ -632,11 +632,24 @@ mod tests {
     #[test]
     fn a_footnote_is_a_reference_and_its_definition() {
         let html = render("A claim[^1].\n\n[^1]: the source\n");
-        assert!(
-            html.contains("footnote"),
-            "a footnote keeps its machinery: {html}"
-        );
+        assert!(html.contains("href=\"#fn-1\""), "a numbered reference: {html}");
+        assert!(html.contains("id=\"fnref-1\""), "a return target: {html}");
+        assert!(html.contains("class=\"footnotes\""), "a notes section: {html}");
+        assert!(html.contains("id=\"fn-1\""), "a note target: {html}");
+        assert!(html.contains("href=\"#fnref-1\""), "a backref: {html}");
         assert!(html.contains("the source"), "{html}");
+        assert!(!html.contains("[^1]"), "not literal markdown: {html}");
+    }
+
+    #[test]
+    fn footnotes_keep_repeated_references_block_content_and_the_safety_policy() {
+        let html = render("claim[^n] again[^n].\n\n[^n]: first *paragraph*.\n\n    second **paragraph** with [bad](javascript:alert(1)).\n\nfollowing prose.");
+        assert!(html.contains("id=\"fnref-n-2\""), "a repeat has its own target: {html}");
+        assert!(html.contains("href=\"#fnref-n-2\""), "a repeat has a backref: {html}");
+        assert!(html.contains("<em>paragraph</em>"), "{html}");
+        assert!(html.contains("<strong>paragraph</strong>"), "{html}");
+        assert!(html.contains("following prose."), "{html}");
+        assert!(!html.contains("href=\"javascript:"), "{html}");
     }
 
     #[test]
