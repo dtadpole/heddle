@@ -298,12 +298,21 @@ test('the composer queues with Enter while a turn runs, and Ctrl+Enter sends wha
     )
     assert.equal(server.double.requests.length, 4, 'each message was one turn')
 
-    /** The arrow button is the same gesture as Enter, which is DSH's rule for its primary action. */
+    /**
+     * The arrow button is the same gesture as Enter, which is DSH's rule for its primary action.
+     *
+     * The count is read before the click and then waited for. The person's message is drawn once the server has logged
+     * it, which can come before the model is asked. Reading the count once, right after the message appeared, failed
+     * whenever the model request was a moment later (seen on the Rust build with #128's detached turns), and reading
+     * it after the click could already include the new request.
+     */
+    const before = server.double.requests.length
     await type(browser, 'by button')
     await browser.evaluate('document.getElementById("send").click()')
-    const before = server.double.requests.length
     await browser.waitFor('document.getElementById("log").innerText.includes("by button")', 15_000)
-    assert.equal(server.double.requests.length, before + 1, 'and that was one more turn')
+    assert.ok(await until(() => server.double.requests.length >= before + 1, 15_000), 'and that was one more turn')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal(server.double.requests.length, before + 1, 'and only one')
   } finally {
     browser.close()
     await server.close()
@@ -1262,6 +1271,13 @@ test('the dock elements open the reference\u2019s detail surfaces, and close aga
     await type(browser, 'open the tables')
     await press(browser, { key: 'Enter' })
     assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000))
+    /**
+     * The live figures fill the dock first and the turn's end re-reads the durable fold; a surface opened between the
+     * two reads "No statistics yet". With detached turns (#128) the end comes as a verdict on the stream, which can land
+     * right as the dock is read, so the panel is opened once the fold's own step count is in (developer-twelve's
+     * f49d4bb5 waits on the same fold in the statistics test).
+     */
+    await browser.waitFor('(document.querySelector(\'[data-stat="steps"]\') || {}).textContent === "1 steps"', 20_000)
 
     await click('time')
     assert.ok(await browser.waitFor('document.getElementById("stat-popover").textContent.includes("LLM time")', 20_000))
@@ -1885,6 +1901,10 @@ test('a message the server took is not put back or resent when the connection dr
    * Enter sent it again as a duplicate turn. DSH restores a draft only for a failed submission. The drop is made
    * deterministic in the page: the turn's response stream errors as a lost connection does, right after the answer's
    * text has been read, while the model double still holds the stream open.
+   *
+   * Since #128 the page sends its turns detached: the server answers `202 {session, turn}` once the prompt is in the
+   * log, and the answer and the verdict come over the event stream. The same drop then hits that answer's body, after
+   * the server took the message, and the claim is unchanged: not put back, not reported unsent, not sent twice.
    */
   const server = await startServer('dropped-end', { holdOpenMs: 4000 })
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -1896,6 +1916,10 @@ test('a message the server took is not put back or resent when the connection dr
       window.fetch = async (input, init) => {
         const response = await real(input, init)
         if (!String(input).includes('/api/turn') || response.body === null) return response
+        if ((response.headers.get('content-type') ?? '').includes('application/json')) {
+          const lost = new ReadableStream({ pull(controller) { controller.error(new TypeError('Failed to fetch')) } })
+          return new Response(lost, { status: response.status, statusText: response.statusText, headers: response.headers })
+        }
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
         let seen = ''
