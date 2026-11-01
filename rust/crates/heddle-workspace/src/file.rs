@@ -120,6 +120,27 @@ mod tests {
         path.to_str().unwrap().to_string()
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_is_not_a_missing_file_and_has_no_host_path() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "denied.txt", b"private fixture text");
+        let restore = Restore(Path::new(&path).to_owned(), std::fs::metadata(&path).unwrap().permissions());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0)).unwrap();
+        let denial = std::fs::read(&path).expect_err("unjudged on hosts that can read mode 000: run as an unprivileged user");
+        assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(read_file_text(&path, None).unwrap_err().to_string(), "cannot read file: permission denied");
+        drop(restore);
+        assert_eq!(read_file_text(&path, None).unwrap().text, "private fixture text");
+    }
+
     #[test]
     fn a_small_file_is_whole_and_counts_its_lines() {
         let dir = tempfile::tempdir().unwrap();
