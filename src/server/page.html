@@ -13380,8 +13380,11 @@ const EXPANDED_KEY = 'heddle.tree.expanded.v1'
 const rowIndex = new Map()
 /**
  * Each row element's own entry (`{ node, li, icon }`, the value `rowIndex` keeps for its path). A redraw builds its rows
- * off the page and keeps a live row the new drawing draws the same (#143), so the entry goes with the element: `rowIndex`
- * is made again from the rows on the page once the drawing is in.
+ * off the page and keeps a live row the new drawing draws the same (#143), so the entry goes with the element. `rowIndex`
+ * holds only rows on the page (developer-ten's N2): `nodeRow` writes no index, a level drawn on the page is indexed as it
+ * is drawn (`indexShownRows`), a redraw's rows are indexed from its own list (`rowsIn`) until they go in, and `rowIndex` is
+ * made again from the page then (`indexDrawnRows`). Before, `nodeRow` wrote the redraw's detached rows into `rowIndex`, so
+ * a reveal during a refresh opened, selected and scrolled to a row that was never put on the page.
  */
 const rowEntries = new WeakMap()
 /** The rows whose level a person's (or a reveal's) `toggle` is still reading: a redraw gives such a row its own complete level. */
@@ -14600,11 +14603,11 @@ let selectedPath = null
  * not what a treeitem means. The stylesheet reads the attribute, so the style and the ARIA name cannot disagree.
  *
  * `root` is the list marked: the tree on the page, or a redraw's new tree before it goes in (#143), so the open session's
- * row arrives marked and the page never shows the tree with no row selected.
+ * row arrives marked and the page never shows the tree with no row selected; `index` is that list's rows by path.
  */
-function markSelection(root = treeList) {
+function markSelection(root = treeList, index = rowIndex) {
   /** DSH's `containsCurrent`: a group whose subtree holds the open session tints its folder, folded or not. */
-  for (const entry of rowIndex.values()) {
+  for (const entry of index.values()) {
     if (entry.node.group === undefined) continue
     if (WorkspaceTree.containsSession(entry.node.group, current)) entry.li.dataset.containsCurrent = 'true'
     else delete entry.li.dataset.containsCurrent
@@ -14649,12 +14652,12 @@ async function openCurrentGroup() {
   if (current === id) syncSelectionToSession()
 }
 
-/** Move the mark to the row whose session is the one now shown, when that row is drawn at all. */
-function syncSelectionToSession() {
+/** Move the mark to the row whose session is the one now shown, when that row is drawn at all (`index`: a redraw's rows). */
+function syncSelectionToSession(index = rowIndex) {
   if (current === null) return
   /** A session row first: a folder row bound to the same session is where it worked, not the conversation itself. */
   for (const kind of ['session', null]) {
-    for (const [path, entry] of rowIndex) {
+    for (const [path, entry] of index) {
       if (kind !== null && entry.node.kind !== kind) continue
       if (entry.node.session?.id === current) {
         chooseSelected(path)
@@ -18540,7 +18543,8 @@ function restoreTreeFocus(focus, done = false) {
 function paintSessionRows(list, group, depth) {
   const focus = treeFocus()
   for (const old of list.querySelectorAll(':scope > li[data-slot="sessions"], :scope > li[data-slot="more"]')) {
-    if (old.dataset.rowKey !== undefined) rowIndex.delete(old.dataset.rowKey)
+    /** Only a row on the page is in `rowIndex` (N2): a redraw's list repainted off the page leaves the page's rows indexed. */
+    if (old.dataset.rowKey !== undefined && rowIndex.get(old.dataset.rowKey)?.li === old) rowIndex.delete(old.dataset.rowKey)
     old.remove()
   }
   const groupRows = list.querySelectorAll(':scope > li[data-slot="group"]')
@@ -18600,6 +18604,7 @@ function paintSessionRows(list, group, depth) {
     rows.push(li)
   }
   for (const li of rows) list.insertBefore(li, anchor)
+  indexShownRows(list)
   restoreTreeFocus(focus)
   paintRunningMarks()
 }
@@ -19118,9 +19123,8 @@ function nodeRow(node, depth = 0) {
   }
 
   li.append(row)
-  const entry = { node, li, icon }
-  rowIndex.set(node.path, entry)
-  rowEntries.set(li, entry)
+  /** The row's entry goes with its element; `rowIndex` takes it once the row is on the page (N2). */
+  rowEntries.set(li, { node, li, icon })
   return li
 }
 
@@ -20003,6 +20007,7 @@ async function loadChildren(node, li, offPage = false) {
   if (node.group !== undefined) {
     for (const child of node.group.children) group.append(groupRow(child))
     paintSessionRows(group, node.group, depth + 1)
+    indexShownRows(group)
     let files = []
     let failed = null
     if (node.kind === 'workspace') {
@@ -20031,6 +20036,7 @@ async function loadChildren(node, li, offPage = false) {
       group.append(heading)
       for (const child of files) group.append(nodeRow(child, depth + 1))
       if (failed !== null) group.append(failedLevelLine(failed))
+      indexShownRows(group)
     }
     if (group.children.length === 0) {
       const empty = document.createElement('div')
@@ -20095,6 +20101,7 @@ async function loadChildren(node, li, offPage = false) {
    * this store does not hold keeps its row here, as before, so it does not vanish.
    */
   for (const child of folderRows(children)) group.append(nodeRow(child, depth + 1))
+  indexShownRows(group)
   if (group.children.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'empty'
@@ -20630,12 +20637,12 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
 async function renderFlatList() {
   /**
    * The rows on screen stay while the index is read and are replaced in one step once it is in (#143): the list was
-   * emptied first, so for a read's round trip it showed no row and no selection. A drawing a newer one overtook draws
-   * nothing (`treeGeneration`, which `renderTree` counts).
+   * emptied first, so for a read's round trip it showed no row and no selection. A drawing draws nothing once a newer one
+   * has landed (`treeLanded`; `renderTree` counts the drawings in `treeGeneration`).
    */
   const generation = treeGeneration
   const index = await loadSearchIndex()
-  if (generation !== treeGeneration) return
+  if (generation < treeLanded) return
   const focus = treeFocus()
   heldTreeFocus = focus
   rowIndex.clear()
@@ -20733,28 +20740,34 @@ async function renderFlatList() {
 }
 
 /**
- * Which drawing of the tree is the newest (#143). Every `renderTree` call counts one; a drawing a newer one overtook (its
- * reads answered later, or it was still reading its levels) draws nothing, and its caller waits for the newest to land
- * (`newestTreeDrawn`), so the step it takes next reads the tree on the page. `treeLanded` is the newest one that finished.
+ * The tree's drawings, counted (#143). Every `renderTree` call is one; `treeRead` is the newest whose two list reads were
+ * taken in, `treeLanded` the newest the page shows. A drawing lands unless a newer one already has, so its caller waits
+ * for its own drawing at most, however fast refreshes come (developer-ten's N1: when a drawing gave way to any newer one
+ * that had merely started, refreshes 400 ms apart over slow folder reads let none land, and every awaiting caller and the
+ * tree waited with them). A drawing whose reads answered after a newer one's were taken in draws nothing either, since
+ * its answers are older than those; its caller goes on once that newer one lands (`treeLandedAt`).
  */
 let treeGeneration = 0
+let treeRead = 0
 let treeLanded = 0
+/** Callers waiting for a drawing to land: `{ generation, resolve }`, let go once one at least that new has. */
 let treeWaiters = []
 
-/** Resolves once the newest drawing has landed: at once when it already has. */
-function newestTreeDrawn() {
-  if (treeLanded === treeGeneration) return Promise.resolve()
-  return new Promise((resolve) => treeWaiters.push(resolve))
+/** Resolves once a drawing at least as new as `generation` has landed: at once when one has. */
+function treeLandedAt(generation) {
+  if (treeLanded >= generation) return Promise.resolve()
+  return new Promise((resolve) => treeWaiters.push({ generation, resolve }))
 }
 
-/**
- * A drawing ends: the newest lets the callers of the drawings it overtook go on, and an overtaken one answers with the
- * newest's landing, which is what its caller then waits for.
- */
+/** A drawing landed (or failed, which leaves the page as it was): the newest the page shows, and its waiters go on. */
 function treeDrawn(generation) {
-  if (generation !== treeGeneration) return newestTreeDrawn()
-  treeLanded = generation
-  for (const resolve of treeWaiters.splice(0)) resolve()
+  if (generation > treeLanded) treeLanded = generation
+  const waiting = treeWaiters
+  treeWaiters = []
+  for (const waiter of waiting) {
+    if (waiter.generation <= treeLanded) waiter.resolve()
+    else treeWaiters.push(waiter)
+  }
   return undefined
 }
 
@@ -20775,8 +20788,8 @@ async function renderTree() {
   let sessions
   try {
     const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
-    /** A newer drawing started while these were read: what they answered is older than what it draws (#143). */
-    if (generation !== treeGeneration) return treeDrawn(generation)
+    /** A newer drawing landed while these were read: the page already shows newer answers (#143). */
+    if (generation < treeLanded) return treeLandedAt(generation)
     if (workspaceResponse.status === 503) {
       workspaceRoutes = 'absent'
       treeList.replaceChildren()
@@ -20789,23 +20802,24 @@ async function renderTree() {
       workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
       await renderFlatList()
-      if (generation === treeGeneration) setNote('this server predates the workspace tree, so sessions are listed in one column')
+      if (generation > treeLanded) setNote('this server predates the workspace tree, so sessions are listed in one column')
       return treeDrawn(generation)
     }
     workspaceRoutes = 'served'
     workspaces = (await workspaceResponse.json()).workspaces ?? []
     sessions = sessionResponse.ok ? await sessionResponse.json() : []
   } catch (error) {
-    if (generation === treeGeneration) setNote('could not read the workspaces: ' + (error && error.message))
+    if (generation > treeLanded) setNote('could not read the workspaces: ' + (error && error.message))
     return treeDrawn(generation)
   }
-  if (generation !== treeGeneration) return treeDrawn(generation)
+  /** A newer drawing's answers were taken in first: these are older, and that one lands on its own (#143). */
+  if (generation < treeRead || generation < treeLanded) return treeLandedAt(generation)
+  treeRead = generation
   /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
   if (Array.isArray(workspaces)) {
     knownWorkspaces = workspaces
     forgetRemovedWorkspace(workspaces)
   }
-  rowIndex.clear()
   noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
   childSessions = (Array.isArray(sessions) ? sessions : []).filter((meta) => meta?.origin === 'subagent')
@@ -20882,7 +20896,8 @@ async function renderTree() {
   /** The watermarks the open groups' sessions were just drawn with: Show more pressed while the levels are read moves one. */
   const marks = watermarkState()
   const opened = await drawing
-  if (generation !== treeGeneration) return treeDrawn(generation)
+  /** Only a newer drawing that has landed stops this one: one that has merely started does not (N1). */
+  if (generation < treeLanded) return treeLandedAt(generation)
   /**
    * A group opened or folded while the levels were read — by a person, a reveal, or a session opened from elsewhere — and
    * the drawing would undo it: the tree is drawn again from the shape as it is now, and the page keeps the person's act
@@ -20890,9 +20905,10 @@ async function renderTree() {
    */
   if (!sameMembers(opening, treeOpening())) return renderTree()
   if (watermarkState() !== marks) repaintSessionRowsOffPage(built)
-  /** The selection is marked in the new tree, so the open session's row goes in selected (#143). */
-  if (selectedPath === null) syncSelectionToSession()
-  markSelection(built)
+  /** The selection is marked in the new tree, from its own rows, so the open session's row goes in selected (#143, N2). */
+  const drawn = rowsIn(built)
+  if (selectedPath === null) syncSelectionToSession(drawn)
+  markSelection(built, drawn)
   /**
    * Read again now, after the reads above: the keyboard may have moved to another row, or out of the tree, while they
    * were in flight, and the place given back is where it is when the rows are replaced.
@@ -21075,13 +21091,26 @@ function adoptTreeItem(kept, fresh) {
   } else placeTree(level, freshLevel)
 }
 
+/** The tree rows in `list` by path, from their own entries: a redraw's rows before they go in, or the page's. */
+function rowsIn(list) {
+  const index = new Map()
+  for (const li of list.querySelectorAll('li[role="treeitem"]')) {
+    const entry = rowEntries.get(li)
+    if (entry !== undefined) index.set(entry.node.path, entry)
+  }
+  return index
+}
+
+/** Index the rows a level just drew, when that level is on the page; a redraw's level is indexed once it goes in (N2). */
+function indexShownRows(list) {
+  if (!list.isConnected) return
+  for (const [path, entry] of rowsIn(list)) rowIndex.set(path, entry)
+}
+
 /** `rowIndex` again, from the rows now on the page: a kept row with its own entry, a new one with the drawing's. */
 function indexDrawnRows() {
   rowIndex.clear()
-  for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
-    const entry = rowEntries.get(li)
-    if (entry !== undefined) rowIndex.set(entry.node.path, entry)
-  }
+  for (const [path, entry] of rowsIn(treeList)) rowIndex.set(path, entry)
 }
 
 /**

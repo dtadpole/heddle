@@ -507,7 +507,7 @@ test('the page asks newSessionWorkspace with the whole index, kept before the ar
   const aim = body('function newConversationTarget() {')
   assert.match(aim, /workspaces: knownWorkspaces/, 'the composer\'s place with no session open reads the whole registry, which "the only workspace" counts (#142)')
   assert.match(aim, /remembered: lastWorkspace/, 'and this browser\'s memory of its last workspace (#142)')
-  assert.match(body('async function renderTree() {'), /if \(Array\.isArray\(workspaces\)\) \{\s*knownWorkspaces = workspaces[^}]*\}\n\s*rowIndex\.clear\(\)/, 'the tree keeps the whole answer before it filters')
+  assert.match(body('async function renderTree() {'), /if \(Array\.isArray\(workspaces\)\) \{\s*knownWorkspaces = workspaces[^}]*\}\n\s*noteSessions\(sessions\)/, 'the tree keeps the whole answer before it filters')
   assert.match(body('async function restoreSelection() {'), /knownWorkspaces = workspaceBody\.workspaces/, 'and so does a load')
   assert.match(body('async function startNewSession() {'), /const workspace = newSessionWorkspace\(\)/, 'the header and the Automation tasks page\'s New both ask it')
 })

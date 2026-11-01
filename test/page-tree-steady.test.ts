@@ -86,11 +86,13 @@ const REQUIRED = [
   'menuItemsFor',
   'placeKeyed',
   'renderTree',
+  'revealSession',
 ]
-/** What this fix adds; absent on the page before it. */
+/** What this fix adds; absent on the page before it. `newestTreeDrawn` is the first round's, which N1 replaced. */
 const ADDED = [
   'paintDisclosure',
   'newestTreeDrawn',
+  'treeLandedAt',
   'treeDrawn',
   'treeOpening',
   'sameMembers',
@@ -102,6 +104,8 @@ const ADDED = [
   'treeItemSignature',
   'placeTree',
   'adoptTreeItem',
+  'rowsIn',
+  'indexShownRows',
   'indexDrawnRows',
 ]
 
@@ -305,10 +309,11 @@ class FakeElement {
   getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 } }
   getAnimations() { return [] }
   animate() { return { finished: Promise.resolve() } }
-  scrollIntoView() {}
+  scrollIntoView() { this.ownerDocument.scrolled.push(this) }
 }
 const document = {
   mutations: 0,
+  scrolled: [],
   createElement: (tag) => new FakeElement(tag, document),
   createElementNS: (_, tag) => new FakeElement(tag, document),
 }
@@ -369,6 +374,9 @@ interface Page {
   rows(): Row[]
   pending(): string[]
   hold(on: boolean): void
+  delay(ms: number): void
+  reveal(id: string): Promise<unknown>
+  scrolled(key: string): string
   releaseFirst(): boolean
   focus(key: string): void
   stamp(key: string): string | null
@@ -406,6 +414,7 @@ function load(data: World, expandedPaths: string[]): Page {
     let sessionDragging = null
     let workspaceDragging = null
     let treeGeneration = 0
+    let treeRead = 0
     let treeLanded = 0
     let treeWaiters = []
     const NEW_CONVERSATION_NOTE = 'a new conversation in '
@@ -447,6 +456,7 @@ function load(data: World, expandedPaths: string[]): Page {
     ${collapsedMemory()}
     const held = []
     let holding = false
+    let delayMs = 0
     const respond = (url) => {
       const path = url.startsWith('/api/tree?path=') ? decodeURIComponent(url.slice('/api/tree?path='.length)) : null
       const reply =
@@ -460,6 +470,7 @@ function load(data: World, expandedPaths: string[]): Page {
     /** Each answer is what the server held when it was asked; a held one arrives when the test lets it go. */
     const fetch = (url) => {
       const answer = respond(url)
+      if (delayMs > 0) return new Promise((resolve) => setTimeout(() => resolve(answer), delayMs))
       if (!holding) return Promise.resolve(answer)
       return new Promise((resolve) => held.push({ url, resolve: () => resolve(answer) }))
     }
@@ -475,6 +486,15 @@ function load(data: World, expandedPaths: string[]): Page {
       })),
       pending: () => held.map((entry) => entry.url),
       hold: (on) => { holding = on },
+      delay: (ms) => { delayMs = ms },
+      reveal: (id) => { current = id; return revealSession(id) },
+      scrolled: (key) => {
+        const last = document.scrolled[document.scrolled.length - 1]
+        if (last === undefined) return 'nothing was scrolled into view'
+        const li = last.closest('li')
+        if (!last.isConnected) return 'a row off the page (' + (li?.dataset.rowKey ?? last.tagName) + ')'
+        return li === rowLi(key) ? 'on the page' : 'another row (' + (li?.dataset.rowKey ?? last.tagName) + ')'
+      },
       releaseFirst: () => { const next = held.shift(); if (next === undefined) return false; next.resolve(); return true },
       focus: (key) => rowLi(key).focus(),
       more: (path) => rowLi('node:' + path)?.querySelector(':scope > ul[role="group"] > li[data-slot="more"]') ?? null,
@@ -519,6 +539,7 @@ function load(data: World, expandedPaths: string[]): Page {
       encodeURIComponent,
       decodeURIComponent,
       queueMicrotask,
+      setTimeout,
       console,
     },
   ) as Page
@@ -721,4 +742,51 @@ test('a group a person folds while the refresh reads its levels stays folded onc
   assert.equal(rows.find((row) => row.key === 'node:/w/a')?.open, 'false', `A stays folded\nsaw: ${describe(rows)}`)
   assert.equal(rows.some((row) => SESSIONS_OF_A.includes(row.key)), false, 'with its sessions not drawn')
   assert.equal(rows.find((row) => row.key === 'node:/w/b')?.open, 'true', 'and B stays open')
+})
+
+test('refreshes that come faster than a drawing takes still land, and a caller awaiting one goes on (developer-ten\'s N1)', async () => {
+  const T = 20
+  const data = world()
+  const view = load(data, [B, A])
+  await view.render()
+  data.sessions = data.sessions.map((meta) => (meta.id === 's-a1' ? { ...meta, title: 'during the storm' } : meta))
+  /** Every read answers T later, so a drawing (the two lists, then both folders) takes about 2T; a refresh comes every T. */
+  view.delay(T)
+  const started = Date.now()
+  let resolvedAt: number | null = null
+  void view.render().then(() => {
+    resolvedAt = Date.now() - started
+  })
+  let landedAt: number | null = null
+  for (let call = 1; call < 15; call += 1) {
+    await new Promise((done) => setTimeout(done, T))
+    if (landedAt === null && view.rows().find((row) => row.key === 'session:s-a1')?.label === 'during the storm') landedAt = Date.now() - started
+    void view.render()
+  }
+  const stormEnded = Date.now() - started
+  await new Promise((done) => setTimeout(done, 6 * T))
+  await view.render()
+  assert.ok(resolvedAt !== null && resolvedAt < stormEnded, `the first caller went on while the refreshes kept coming (it went on after ${resolvedAt} ms; they came for ${stormEnded} ms)`)
+  assert.ok(landedAt !== null && landedAt < stormEnded, `and the tree showed the new answer while they kept coming (at ${landedAt} ms)`)
+  assert.equal(view.rows().find((row) => row.key === 'session:s-a1')?.label, 'during the storm', 'the newest answer is on the page at the end')
+})
+
+test('a reveal during a refresh scrolls to the row on the page, which the refresh keeps (developer-ten\'s N2)', async () => {
+  const view = load(world(), [A])
+  await view.render()
+  view.hold(true)
+  const drawing = view.render()
+  await settle()
+  /** The two lists answer; the refresh is now reading its folders, with its new rows off the page. */
+  view.releaseFirst()
+  view.releaseFirst()
+  await settle()
+  const reveal = view.reveal('s-a3')
+  await settle()
+  view.hold(false)
+  while (view.releaseFirst()) await settle()
+  await Promise.all([reveal, drawing])
+  assert.equal(view.scrolled('session:s-a3'), 'on the page', 'the row scrolled into view is the revealed session\'s row on the page')
+  const selected = view.rows().filter((row) => row.selected === 'true').map((row) => row.key)
+  assert.deepEqual(plain(selected), ['session:s-a3'], 'and it is the one selected row')
 })

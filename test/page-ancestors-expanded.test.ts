@@ -119,6 +119,7 @@ function load(storage: Record<string, string>, current: string | null, grouping 
     const levelsLoading = new WeakSet()
     const watermarks = new Map()
     let treeGeneration = 0
+    let treeRead = 0
     let treeLanded = 0
     let treeWaiters = []
     /**
@@ -205,7 +206,7 @@ function load(storage: Record<string, string>, current: string | null, grouping 
     ${source('toggle')}
     ${optional('paintDisclosure')}
     ${source('renderTree')}
-    ${['newestTreeDrawn', 'treeDrawn', 'treeOpening', 'sameMembers', 'watermarkState', 'openOffPage', 'openRowOffPage', 'repaintSessionRowsOffPage', 'indexDrawnRows'].map(optional).join('\n')}
+    ${['treeLandedAt', 'treeDrawn', 'treeOpening', 'sameMembers', 'watermarkState', 'openOffPage', 'openRowOffPage', 'repaintSessionRowsOffPage', 'rowsIn', 'indexDrawnRows'].map(optional).join('\n')}
     ${optional('openCurrentGroup')}
     ${optional('reopenChildGroups')}
     const list = (key) => (key in stored ? JSON.parse(stored[key]).sort() : null)
