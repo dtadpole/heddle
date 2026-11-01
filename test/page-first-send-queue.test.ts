@@ -33,6 +33,12 @@ function optional(name: string): string {
 
 const block = (marker: string) => page.slice(page.indexOf(`/* ${marker}:begin */`), page.indexOf(`/* ${marker}:end */`))
 
+/** The page's detached-turn verdicts (#128), as the stream's `turn` frames reach them. */
+const verdicts = (() => {
+  const start = page.indexOf('const turnVerdicts = (() => {')
+  return start < 0 ? 'const turnVerdicts = { receive() {}, wait: () => new Promise(() => {}), lateTail() {} }' : page.slice(start, page.indexOf('\n})()\n', start) + 6)
+})()
+
 interface Flow {
   sent: { prompt: string; session: string | null; fresh: boolean }[]
   current: string | null
@@ -48,7 +54,7 @@ const N = 'session-33333333-3333-4333-8333-333333333333'
  * `boot` is a saved session the boot's restore opens after the first message was sent and before its frame lands
  * (developer-ten's N1), or null.
  */
-function flow(options: { before: string[]; after: string[]; front?: string; boot?: string | null }): Promise<Flow> {
+function flow(options: { before: string[]; after: string[]; front?: string; boot?: string | null; detached?: boolean }): Promise<Flow> {
   return runInNewContext(
     `
     const QUEUE_KEY_NONE = ''
@@ -125,13 +131,26 @@ function flow(options: { before: string[]; after: string[]; front?: string; boot
     let frameLanded
     const frameSeen = new Promise((resolve) => { frameLanded = resolve })
     const frame = (name, data) => new TextEncoder().encode('event: ' + name + '\\ndata: ' + JSON.stringify(data) + '\\n\\n')
+    /** #128: the page follows the stream before it sends, and a server without detach streams the turn. */
+    const events = { whenOpen: async () => {} }
+    /** #128's detached answer: 202 {session, turn} at acceptance, and the verdict later on the event stream. */
+    let runningTick = 0, turnSeq = 0
+    ${verdicts}
+    const detachedAnswer = (session, first) => {
+      const turn = 't' + ++turnSeq
+      const verdict = () => turnVerdicts.receive({ turn, outcome: 'done', session, finishReason: 'stop', rounds: 1, denials: [] })
+      if (first) firstEnds.then(() => setImmediate(verdict))
+      else setImmediate(verdict)
+      return { ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => { if (first) setImmediate(frameLanded); return { session, turn } } }
+    }
     const sendTurn = async (body) => {
       sent.push({ prompt: body.prompt, session: body.session, fresh: body.new === true })
       const session = body.session ?? CREATED
+      if (OPTIONS.detached) return detachedAnswer(session, body.session === null)
       const steps = body.session === null
         ? [async () => frame('session', { session }), async () => { frameLanded(); await firstEnds; return frame('done', { session, text: 'answer', finishReason: 'stop', rounds: 1, denials: [] }) }]
         : [async () => frame('done', { session, text: 'answer', finishReason: 'stop', rounds: 1, denials: [] })]
-      return { ok: true, body: { getReader() { return { read: async () => (steps.length === 0 ? { done: true } : { done: false, value: await steps.shift()() }) } } } }
+      return { ok: true, headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) }, body: { getReader() { return { read: async () => (steps.length === 0 ? { done: true } : { done: false, value: await steps.shift()() }) } } } }
     }
     ${source('runTurn')}
     const settle = () => new Promise((resolve) => setImmediate(resolve))
@@ -183,4 +202,13 @@ test('the same when the page showed another session as the frame landed and N1 o
   const run = await flow({ before: ['second'], after: ['third'], boot: 'session-44444444-4444-4444-8444-444444444444' })
   assert.deepEqual(run.sent.map((entry) => [entry.prompt, entry.session]), [['first', null], ['second', N], ['third', N]], `saw: ${JSON.stringify(run)}`)
   assert.deepEqual(Object.values(run.left).flat(), [])
+})
+
+test('on a detached turn (#128), the 202 names the created session and the queue moves to it the same way, the N1 case too', async () => {
+  const run = await flow({ before: ['second'], after: ['third'], front: 'urgent', detached: true })
+  assert.deepEqual(run.sent, expectSent(['urgent', 'second', 'third']), `saw: ${JSON.stringify(run)}`)
+  assert.deepEqual(Object.values(run.left).flat(), [])
+  const boot = await flow({ before: ['second'], after: ['third'], boot: 'session-44444444-4444-4444-8444-444444444444', detached: true })
+  assert.deepEqual(boot.sent.map((entry) => [entry.prompt, entry.session]), [['first', null], ['second', N], ['third', N]], `saw: ${JSON.stringify(boot)}`)
+  assert.equal(boot.current, N, 'and N1 opened the created session')
 })

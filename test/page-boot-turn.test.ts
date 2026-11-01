@@ -71,8 +71,15 @@ function harness(created: string): Run {
     /** The page's own open: it ends an unavailable session's state, makes the session current and redraws it (here, records that it was asked). */
     const showSession = async (id) => { opened.push(id); unavailableSession = null; current = id; return true }
     const frames = 'event: session\\ndata: ' + JSON.stringify({ session: CREATED }) + '\\n\\n'
+    /** #128: a turn is sent once the page follows the event stream; here it always does. */
+    const events = { whenOpen: async () => {} }
+    /**
+     * The turn is answered as a stream, the shape a server without #128's detach still sends; runTurn reads its frames
+     * through the same verdict() as a detached turn's, so the N1 adoption below is judged either way.
+     */
     const sendTurn = async () => ({
       ok: true,
+      headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) },
       body: {
         getReader() {
           let sent = false

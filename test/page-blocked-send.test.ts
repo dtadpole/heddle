@@ -29,6 +29,12 @@ function source(name: string): string {
 
 const block = (marker: string) => page.slice(page.indexOf(`/* ${marker}:begin */`), page.indexOf(`/* ${marker}:end */`))
 
+/** The page's detached-turn verdicts (#128), as the stream's `turn` frames reach them. */
+const verdicts = (() => {
+  const start = page.indexOf('const turnVerdicts = (() => {')
+  return start < 0 ? 'const turnVerdicts = { receive() {}, wait: () => new Promise(() => {}), lateTail() {} }' : page.slice(start, page.indexOf('\n})()\n', start) + 6)
+})()
+
 interface Ended {
   /** The rows the log holds, newest last: `kind:text`, a notice nested under a row as `kind:text>notice`. */
   rows(): string[]
@@ -47,7 +53,7 @@ interface Ended {
  * session `turn` whose stream answers `done` with `payload`. `running` lists the sessions with a running turn, each with
  * the rounds the page counted for it.
  */
-function finish(options: { open: string | null; turn: string; payload: Record<string, unknown>; running?: Record<string, number>; draft?: string }): Promise<Ended> {
+function finish(options: { open: string | null; turn: string; payload: Record<string, unknown>; running?: Record<string, number>; draft?: string; detached?: boolean }): Promise<Ended> {
   return runInNewContext(
     `
     const QUEUE_KEY_NONE = ''
@@ -113,8 +119,18 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     ${source('turnNotice')}
     ${page.search(/\nfunction liveRoundsOf\(/) >= 0 ? source('liveRoundsOf') : ''}
     const frames = 'event: done\\ndata: ' + JSON.stringify({ session: OPTIONS.turn, ...OPTIONS.payload }) + '\\n\\n'
-    const sendTurn = async () => ({
+    /** #128's detached answer: 202 at acceptance, and the turn's verdict later on the event stream. */
+    let runningTick = 0
+    ${verdicts}
+    const detachedAnswer = () => {
+      setTimeout(() => turnVerdicts.receive({ turn: 't1', outcome: 'done', session: OPTIONS.turn, ...OPTIONS.payload }), 1)
+      return { ok: true, status: 202, headers: { get: (name) => (name === 'content-type' ? 'application/json' : null) }, json: async () => ({ session: OPTIONS.turn, turn: 't1' }) }
+    }
+    /** #128: the page follows the stream before it sends, and a server without detach streams the turn. */
+    const events = { whenOpen: async () => {} }
+    const sendTurn = async () => OPTIONS.detached ? detachedAnswer() : ({
       ok: true,
+      headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) },
       body: { getReader() { let sent = false; return { read: async () => (sent ? { done: true } : ((sent = true), { done: false, value: new TextEncoder().encode(frames) })) } } },
     })
     ${source('runTurn')}
@@ -129,7 +145,7 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
       ended: () => [...turnsEnded],
     }))
     `,
-    { OPTIONS: options, JSON, Promise, TextEncoder, TextDecoder, performance, Error, Array, Object, String, Number, Set, Map },
+    { OPTIONS: options, JSON, Promise, TextEncoder, TextDecoder, performance, Error, Array, Object, String, Number, Set, Map, setTimeout },
   ) as Promise<Ended>
 }
 
@@ -191,4 +207,17 @@ test('an early-end notice is drawn only into the turn\'s own session: not into t
   assert.deepEqual(Array.from(elsewhere.rows()), ['assistant:the previous answer'], 'nor onto the answer of the session the person opened since')
   const own = await finish({ open: S, turn: S, payload: stopped })
   assert.deepEqual(Array.from(own.rows()), ['assistant:the previous answer>Stopped by the caller'], 'its own session still carries it, on its answer')
+})
+
+test('on a detached turn (#128) the verdict draws the same: the blocked row and the words back, the notice only in its own session, and no ended mark', async () => {
+  /** The verdict carries the done frame's fields (turnVerdict in web.ts, turn_verdict in server.rs), so the rules hold. */
+  const blocked = await finish({ open: S, turn: S, payload: blockedAtOnce, detached: true })
+  assert.deepEqual(Array.from(blocked.rows()), ['notice:Blocked: an archived session runs no model step until it is unarchived'], 'the blocked row (B1)')
+  assert.equal(blocked.field(), 'where does this go', 'the words come back')
+  assert.deepEqual(Array.from(blocked.cleared()), [S], 'and the archived session is let go')
+  const stopped = { text: '', finishReason: 'stopped', rounds: 1, denials: [], ended: ['stopped by the caller'] }
+  const elsewhere = await finish({ open: M, turn: S, payload: stopped, detached: true })
+  assert.deepEqual(Array.from(elsewhere.rows()), ['assistant:the previous answer'], 'no notice in another session (B2)')
+  const own = await finish({ open: S, turn: S, payload: { text: 'done', finishReason: 'stop', rounds: 1, denials: [] }, running: { [S]: 1 }, detached: true })
+  assert.deepEqual(Array.from(own.ended()), [], 'its verdict follows the stream\'s own end of the turn, so nothing is marked ended to hide the next turn')
 })

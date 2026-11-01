@@ -84,7 +84,9 @@ function harness(): Harness {
     let sessionListener;
     const events = { addEventListener(name, listener) {
       if (name === 'session') sessionListener = listener;
-    }};
+    },
+    // #128: runTurn sends once the page follows the stream; here it always does.
+    whenOpen: async () => {} };
     const endpointOptions = [], chosenEndpoint = null, endpointDefault = null;
     const windowFor = () => undefined;
     const cells = new Map();
@@ -103,7 +105,8 @@ function harness(): Harness {
     const renderSettledAnswers = async () => {}, renderTree = async () => {}, refreshSessions = async () => {};
     const sendTurn = async () => {
       let delivered = false;
-      return { ok: true, body: { getReader: () => ({ read: async () => {
+      // A streamed answer (a server without #128's detach): runTurn reads its frames through the same verdict().
+      return { ok: true, headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) }, body: { getReader: () => ({ read: async () => {
         if (delivered) return { done: true };
         delivered = true;
         return { done: false, value: new TextEncoder().encode('event: done\\ndata: {"session":"S"}\\n\\n') };
