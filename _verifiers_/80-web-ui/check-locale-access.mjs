@@ -77,10 +77,26 @@ const ACCESS = `({
   close: document.getElementById('access-dialog-close').getAttribute('aria-label'),
 })`
 
+/**
+ * The chip's title names the server's default before a session is open and the session's mode once one is. A reload can
+ * open one (DSH's restoreSelection starts a fresh session in the last workspace on a first visit), so either sentence is
+ * right, as long as it is in the page's language.
+ */
+const TITLES = {
+  zh: ['此服务器默认运行的沙箱模式（workspace-write）；打开一个会话后可更改', '此会话运行的沙箱模式：workspace-write'],
+  en: ['the sandbox mode this server runs under by default (workspace-write); open a session to change it', 'the sandbox mode this session runs under: workspace-write'],
+}
+
+/** The words with the title judged on its own, against the two sentences of `language`. */
+function judged(words, language) {
+  const { title, ...rest } = words
+  assert.ok(TITLES[language].includes(title), `the chip's title is one of the ${language} sentences (saw ${JSON.stringify(title)})`)
+  return rest
+}
+
 const CHINESE = {
   label: '工作区内修改',
   name: '访问模式，当前：工作区内修改',
-  title: '此服务器默认运行的沙箱模式（workspace-write）；打开一个会话后可更改',
   menu: ['仅可查看', '工作区内修改', '完全权限'],
   dialog: '确认启用完全权限？',
   heading: '确认启用完全权限？',
@@ -122,14 +138,14 @@ test('the access mode, its menu and the Full access confirmation follow the inte
     assert.deepEqual([english.label, english.menu], ['Workspace Write', ['Read Only', 'Workspace Write', 'Full access']])
 
     await chooseLanguage(browser, 'zh')
-    assert.deepEqual(await browser.evaluate(ACCESS), CHINESE, 'the chip, the menu and the confirmation are Chinese at once')
+    assert.deepEqual(judged(await browser.evaluate(ACCESS), 'zh'), CHINESE, 'the chip, the menu and the confirmation are Chinese at once')
 
     await browser.goto(new URL('/', server.url).href)
     assert.ok(await browser.waitFor(`document.body.dataset.ready === 'true'`, 20_000), 'the page reloads')
-    assert.deepEqual(await browser.evaluate(ACCESS), CHINESE, 'and a reload keeps them')
+    assert.deepEqual(judged(await browser.evaluate(ACCESS), 'zh'), CHINESE, 'and a reload keeps them')
 
     await chooseLanguage(browser, 'en')
-    assert.deepEqual(await browser.evaluate(ACCESS), english, 'English comes back word for word')
+    assert.deepEqual(judged(await browser.evaluate(ACCESS), 'en'), judged(english, 'en'), 'English comes back word for word')
   } finally {
     browser.close()
     server.kill()
