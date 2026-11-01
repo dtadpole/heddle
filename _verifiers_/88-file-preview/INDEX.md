@@ -45,6 +45,28 @@ _tools_/local-build/run --ts -- node --test --test-name-pattern='standalone PNG'
 
 Run from the repository root; build the selected CLI through its corresponding resource gate first.
 
+## Functional footnote regression
+
+[`check-footnotes.mjs`](check-footnotes.mjs) judges functional Markdown footnotes through the actual
+`/api/file` renderer against either built CLI, honoring `HEDDLE_BIN`. Its isolated, offline document
+cites one note twice and includes multiple paragraphs, bold text, a list and safe/unsafe URLs. It
+checks one rendered note body, two visible numeric citations, safe return links, and sanitized
+markup. This is not full Markdown grammar parity or an exact DSH/Rust/TypeScript anchor DOM contract.
+
+**No browser by default.** The optional actual File-panel check runs **headless** only when
+`HEDDLE_FOOTNOTE_BROWSER=1` and the shared browser gate permits it; `HEDDLE_VERIFY_UI=0` skips it
+normally. Startup, HTTP requests, tests and cleanup are bounded. Build the selected CLI first;
+the verifier neither builds nor contacts a model endpoint.
+
+```bash
+node --test _verifiers_/88-file-preview/check-footnotes.mjs
+HEDDLE_FOOTNOTE_BROWSER=1 node --test _verifiers_/88-file-preview/check-footnotes.mjs
+# For the other built CLI, prefix either command with HEDDLE_BIN=/path/to/heddle.
+```
+
+Run from the repository root. The optional browser test is a labelled skip unless requested;
+the default API test still judges the selected build.
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.
