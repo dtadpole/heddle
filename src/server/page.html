@@ -13159,13 +13159,14 @@ async function showHtml(path, body, ticket) {
     RETURN_DOM: false,
   })
   /**
-   * The policy goes in as the first thing in the document, and `base` after it, so a relative reference the browser
-   * resolves itself — a `url()` inside a stylesheet, which the rewrite cannot see — still lands beside the document.
+   * The policy goes first in the document, with no injected base, as in DSH's basic static HTML preview (#40).
+   * Quoted resource attributes already point at the authenticated raw route. A filesystem-folder base neither
+   * serves relative CSS dependencies through that route nor complies with base-uri 'none'; CSS url()/@import
+   * dependency rewriting remains a separate limitation rather than a reason to widen this policy.
    */
-  const base = path.slice(0, path.lastIndexOf('/') + 1)
   const framed = clean.replace(
     /<head([^>]*)>/i,
-    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}"><base href="${base}">`,
+    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}">`,
   )
   htmlView.setAttribute('sandbox', 'allow-same-origin')
   /**

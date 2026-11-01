@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 import { ALLOWED_ATTRS, ALLOWED_TAGS, isHtmlDocument, PREVIEW_CSP, rewriteResources } from '../src/server/html.ts'
@@ -29,24 +30,26 @@ test('a relative resource is resolved beside its document, and a foreign one is 
   assert.match(html, /src="data:image\/png;base64,AA"/, 'a data URL is not a file to look for')
 })
 
-test('every attribute a browser fetches is rewritten, and a fragment is not a filename', () => {
+test('quoted resource attributes are rewritten, and relative CSS remains an explicit limitation', () => {
   const html = rewriteResources(
-    '<link rel="stylesheet" href="s.css"><a href="page.html#part">x</a><img srcset="a.png 1x, b.png 2x"><style>h1 { background: url(bg.png) }</style>',
+    '<link rel="stylesheet" href="s.css"><a href="page.html#part">x</a><img srcset="a.png 1x, b.png 2x"><style>@import "nested.css"; h1 { background: url(bg.png) }</style>',
     '/docs',
     serve,
   )
   assert.match(html, /href="\/api\/raw\?path=%2Fdocs%2Fs\.css"/, 'a stylesheet')
   assert.match(html, /href="\/api\/raw\?path=%2Fdocs%2Fpage\.html#part"/, 'a link keeps its fragment')
   assert.match(html, /srcset="\/api\/raw\?path=%2Fdocs%2Fa\.png 1x, \/api\/raw\?path=%2Fdocs%2Fb\.png 2x"/, 'and a srcset keeps its descriptors')
-  /** A `url()` inside a stylesheet is not an attribute, so the `<base>` element is what resolves it. */
-  assert.match(html, /url\(bg\.png\)/, 'a url() in CSS is left for the base element')
+  // CSS url()/@import are not resource attributes. They were never served through the raw route by the old
+  // filesystem base either; full CSS dependency rewriting is a separate capability, not a policy exception.
+  assert.match(html, /url\(bg\.png\)/, 'relative CSS is not claimed as supported')
+  assert.match(html, /@import "nested\.css"/, 'nor relative CSS imports')
 })
 
 test('the allow-list keeps a reading pane and leaves out everything that acts', () => {
   for (const tag of ['p', 'h1', 'img', 'table', 'pre', 'style', 'link']) {
     assert.ok(ALLOWED_TAGS.includes(tag), `${tag} is allowed`)
   }
-  for (const tag of ['script', 'iframe', 'form', 'input', 'button', 'object', 'embed']) {
+  for (const tag of ['script', 'iframe', 'form', 'input', 'button', 'object', 'embed', 'base']) {
     assert.ok(!ALLOWED_TAGS.includes(tag), `${tag} is not`)
   }
   for (const attribute of ['src', 'href', 'srcset', 'alt', 'style']) {
@@ -62,6 +65,13 @@ test('the policy forbids script, framing and forms outright', () => {
   assert.match(PREVIEW_CSP, /frame-src 'none'/, 'and nothing may be framed')
   assert.match(PREVIEW_CSP, /form-action 'none'/, 'and nothing may be submitted')
   assert.match(PREVIEW_CSP, /default-src 'none'/, 'with everything else denied by default')
+  assert.match(PREVIEW_CSP, /base-uri 'none'/, 'no source or injected base may alter URL resolution')
+})
+
+test('Rust and TypeScript use exactly the same restrictive preview CSP', () => {
+  const rust = readFileSync(new URL('../rust/crates/heddle-server/src/preview.rs', import.meta.url), 'utf8')
+  const policy = rust.match(/pub const PREVIEW_CSP: &str = "([^"]+)";/)?.[1]
+  assert.equal(policy, PREVIEW_CSP)
 })
 
 test('an html file is a renderer of its own, and produces no markup on the server', () => {

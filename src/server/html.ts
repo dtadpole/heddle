@@ -15,9 +15,9 @@
  *    enforces. A document's own CSS also cannot reach the harness UI from in there, which is what makes a page look
  *    like a page instead of repainting the app around it.
  * 3. **The server rewrites the document's relative resources**, because a document written beside its images says
- *    `<img src="icon.png">` and the browser would look for that at the **server root**. The base element would do
- *    the same job for anything the browser fetches itself, and it is set as well; the rewrite is what makes an
- *    attribute visible to the sanitiser, which compares every URL against where it points.
+ *    `<img src="icon.png">` and the browser would look for that at the **server root**. Quoted resource attributes
+ *    point at the authenticated raw route before sanitisation. No base is injected, matching DSH's basic static
+ *    HTML preview and `base-uri 'none'`; relative CSS url()/@import dependencies are not rewritten or supported.
  */
 
 /** The part of a document a preview is allowed to contain. Anything outside it is dropped. */
