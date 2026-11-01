@@ -15,7 +15,11 @@ import {
   collectFiles,
   findPython,
   isLogPath,
+  isProtectedRejection,
   messageWarnings,
+  parkedContent,
+  protectedDetail,
+  seatFromTeam,
   unionLines,
   verifyLanded,
 } from '../../record-commit.mjs'
@@ -534,4 +538,203 @@ test('a run with the repository validator names the python it used and why', (t)
   const r = cli(w, ['--message', 'docs(test): name the python', '--file', '_projects_/x/note.md', '--no-sync', '--dry-run'])
   assert.equal(r.status, OK, r.output)
   assert.match(r.output, /  python: \S+ \(no \.venv; a python3? with PyYAML\)/, 'no .venv in the scratch record repo, and the report says so')
+})
+
+// 2026-11-01 ~12:45 PST: github.com/dtadpole/reflection main became protected, and every
+// record push failed with GH006. A protected main now parks the commit on
+// refs/heads/records/<seat>. The fake remote's update hook refuses main as GitHub does.
+const GH006 = 'echo "error: GH006: Protected branch update failed for refs/heads/main." >&2\necho "error: Changes must be made through a pull request." >&2'
+
+function protect(w, refusal = GH006) {
+  const hook = join(w.origin, 'hooks', 'update')
+  writeFileSync(hook, `#!/bin/sh\ncase "$1" in\n  refs/heads/main)\n${refusal}\n    exit 1;;\nesac\nexit 0\n`)
+  chmodSync(hook, 0o755)
+}
+
+// What an owner's bypass or a merged pull request does: main moves without a push to it.
+function bypass(w, files, message = 'merged') {
+  git(w.writer, ['fetch', '-q', 'origin'])
+  git(w.writer, ['reset', '-q', '--hard', 'origin/main'])
+  for (const [path, content] of Object.entries(files)) write(w.writer, path, content)
+  git(w.writer, ['add', '-A'])
+  git(w.writer, ['commit', '-q', '-m', message])
+  git(w.writer, ['push', '-q', 'origin', 'HEAD:refs/heads/bypass'])
+  git(w.origin, ['update-ref', 'refs/heads/main', 'refs/heads/bypass'])
+  git(w.origin, ['update-ref', '-d', 'refs/heads/bypass'])
+}
+
+const originRef = (w, ref) => {
+  const r = spawnSync('git', ['rev-parse', '--verify', '-q', ref], { cwd: w.origin, encoding: 'utf8' })
+  return r.status === 0 ? r.stdout.trim() : null
+}
+const parkedLine = (r, seat) => new RegExp(`^parked on records/${seat} ([0-9a-f]{40})$`).exec(r.stdout.trim().split('\n').at(-1) ?? '')
+const recordsRefs = (w) => git(w.origin, ['for-each-ref', '--format=%(refname)', 'refs/heads/records'])
+const park = (w, paths, extra = [], env = {}) =>
+  cli(w, ['--message', 'docs(test): a parked record', ...paths.flatMap((path) => ['--file', path]), '--validator', w.validator, ...extra], env)
+
+test('a protected-branch refusal is told from a race, and its GitHub line is the detail', () => {
+  assert.ok(isProtectedRejection('remote: error: GH006: Protected branch update failed for refs/heads/main.'))
+  assert.ok(isProtectedRejection('!\tHEAD:refs/heads/main\t[remote rejected] (protected branch hook declined)'))
+  assert.ok(isProtectedRejection('remote: error: GH013: Repository rule violations found for refs/heads/main.'))
+  assert.ok(isProtectedRejection('remote: - Changes must be made through a pull request.'))
+  assert.equal(isProtectedRejection('! [rejected] HEAD -> main (fetch first)'), false)
+  assert.equal(isProtectedRejection('! [rejected] HEAD -> main (non-fast-forward)'), false)
+  assert.equal(isProtectedRejection('remote: error: quota exceeded'), false)
+  assert.equal(protectedDetail('To x\nremote: error: GH006: Protected branch update failed for refs/heads/main.\nremote: error: more'), 'GH006: Protected branch update failed for refs/heads/main.')
+})
+
+test('the seat is the TEAM.yaml key of this session, found in any project roster', (t) => {
+  const repo = mkdtempSync(join(tmpdir(), 'record-commit-seat-'))
+  t.after(() => rmSync(repo, { recursive: true, force: true }))
+  write(repo, '_projects_/a/TEAM.yaml', 'members:\n  - key: other\n    session_id: session-1\n')
+  write(repo, '_projects_/b/TEAM.yaml', "mechanical_backstop:\n  session_id: session-2\nmembers:\n  - key: hd-coordinator\n    session_id: 'session-3'\n  - key: developer-two\n    title: x\n    session_id: session-2\n")
+  assert.equal(seatFromTeam(repo, 'session-2'), 'developer-two')
+  assert.equal(seatFromTeam(repo, 'session-3'), 'hd-coordinator', 'a quoted session id')
+  assert.equal(seatFromTeam(repo, 'session-1'), 'other')
+  assert.equal(seatFromTeam(repo, 'session-9'), null)
+  assert.equal(seatFromTeam(repo, undefined), null)
+})
+
+test('a log parked on an existing records branch gets only its own lines', () => {
+  const file = { kind: 'log', origin: Buffer.from('a\nb\nmain\n'), content: Buffer.from('a\nb\nseat\n') }
+  assert.equal(parkedContent(file, Buffer.from('a\nb\nearlier\n')).toString(), 'a\nb\nearlier\nseat\n')
+  const plain = { kind: 'file', origin: Buffer.from('x\n'), content: Buffer.from('y\n') }
+  assert.equal(parkedContent(plain, Buffer.from('z\n')).toString(), 'y\n')
+})
+
+test('a protected main parks the commit on records/<seat>, created from origin/main, and exits 0 with the line', (t) => {
+  const w = world(t)
+  protect(w)
+  const main = originRef(w, 'main')
+  write(w.live, '_projects_/x/note.md', 'one\nparked\n')
+  const r = park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  const line = parkedLine(r, 'dev-one')
+  assert.ok(line, `the last line is 'parked on records/dev-one <sha>':\n${r.output}`)
+  assert.match(r.output, /push rejected: main is protected \(GH006: Protected branch update failed for refs\/heads\/main\.\)/)
+  assert.match(r.output, /created from origin\/main [0-9a-f]{7}/)
+  assert.equal(originRef(w, 'main'), main, 'main did not move')
+  assert.equal(originRef(w, 'refs/heads/records/dev-one'), line[1])
+  assert.equal(originRef(w, `${line[1]}^`), main, 'the parked commit sits on origin/main')
+  assert.equal(git(w.origin, ['show', `${line[1]}:_projects_/x/note.md`]), 'one\nparked')
+  assert.equal(git(w.live, ['rev-parse', 'HEAD']), main, 'the live tree was not synced')
+  assert.equal(read(w.live, '_projects_/x/note.md'), 'one\nparked\n', 'the live edit is kept')
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('a second park appends on the branch, carrying only the seat\'s own log lines', (t) => {
+  const w = world(t)
+  protect(w)
+  write(w.live, '_projects_/x/note.md', 'one\nfirst\n')
+  const first = parkedLine(park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one']), 'dev-one')[1]
+  bypass(w, { '_logs_/run.jsonl': 'a\nb\nmain line\n' })
+  write(w.live, '_projects_/x/other.md', 'other\nsecond\n')
+  write(w.live, '_logs_/run.jsonl', 'a\nb\nseat line\n')
+  const r = park(w, ['_projects_/x/other.md', '_logs_/run.jsonl'], ['--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  const second = parkedLine(r, 'dev-one')[1]
+  assert.match(r.output, new RegExp(`appended to records/dev-one ${first.slice(0, 7)}`))
+  assert.equal(originRef(w, `${second}^`), first, 'appended, not replaced')
+  assert.equal(git(w.origin, ['show', `${second}:_projects_/x/note.md`]), 'one\nfirst', 'the first park is kept')
+  assert.equal(git(w.origin, ['show', `${second}:_projects_/x/other.md`]), 'other\nsecond')
+  assert.equal(git(w.origin, ['show', `${second}:_logs_/run.jsonl`]), 'a\nb\nseat line', 'own lines only, not main\'s')
+  assert.equal(originShow(w, '_logs_/run.jsonl'), 'a\nb\nmain line\n', 'main keeps its log')
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('a rerun of a parked edit pushes nothing new and still names the branch', (t) => {
+  const w = world(t)
+  protect(w)
+  write(w.live, '_projects_/x/note.md', 'one\nagain\n')
+  const first = parkedLine(park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one']), 'dev-one')[1]
+  const r = park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, /already carried by records\/dev-one/)
+  assert.equal(parkedLine(r, 'dev-one')[1], first)
+  assert.equal(originRef(w, 'refs/heads/records/dev-one'), first)
+})
+
+test('a records branch that main already contains is fast-forwarded', (t) => {
+  const w = world(t)
+  protect(w)
+  write(w.live, '_projects_/x/note.md', 'one\nmerged later\n')
+  const first = parkedLine(park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one']), 'dev-one')[1]
+  git(w.origin, ['update-ref', 'refs/heads/main', first])
+  write(w.live, '_projects_/x/other.md', 'other\nafter the merge\n')
+  const r = park(w, ['_projects_/x/other.md'], ['--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, new RegExp(`fast-forwarded from ${first.slice(0, 7)}`))
+  assert.equal(originRef(w, `${parkedLine(r, 'dev-one')[1]}^`), first)
+})
+
+test('without --seat the seat is this session\'s TEAM.yaml key', (t) => {
+  const w = world(t)
+  protect(w)
+  write(w.live, '_projects_/t/TEAM.yaml', 'members:\n  - key: dev-two\n    session_id: session-abc\n')
+  write(w.live, '_projects_/x/note.md', 'one\nfrom the roster\n')
+  const r = park(w, ['_projects_/x/note.md'], [], { DSH_SESSION_ID: 'session-abc' })
+  assert.equal(r.status, OK, r.output)
+  assert.ok(parkedLine(r, 'dev-two'), r.output)
+  assert.match(r.output, /seat dev-two, the TEAM\.yaml key of session-abc/)
+})
+
+test('a protected main with no seat known is refused, and nothing is pushed anywhere', (t) => {
+  const w = world(t)
+  protect(w)
+  const main = originRef(w, 'main')
+  write(w.live, '_projects_/x/note.md', 'one\nno seat\n')
+  const r = park(w, ['_projects_/x/note.md'], [], { DSH_SESSION_ID: 'session-unknown' })
+  assert.equal(r.status, REFUSED, r.output)
+  assert.match(r.output, /refusing: no seat to park on; pass --seat NAME/)
+  assert.doesNotMatch(r.output, /^parked on/m)
+  assert.equal(originRef(w, 'main'), main)
+  assert.equal(recordsRefs(w), '')
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('a rejection that is not protection is still refused, never parked', (t) => {
+  const w = world(t)
+  protect(w, 'echo "error: quota exceeded" >&2')
+  write(w.live, '_projects_/x/note.md', 'one\nquota\n')
+  const r = park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one'])
+  assert.equal(r.status, REFUSED, r.output)
+  assert.match(r.output, /push rejected: /)
+  assert.doesNotMatch(r.output, /^parked on|is protected/m)
+  assert.equal(recordsRefs(w), '')
+})
+
+test('a records branch another run moves mid-park is rebuilt on, and both commits are kept', (t) => {
+  const w = world(t)
+  protect(w)
+  const hookDir = join(w.live, '.git', 'hooks')
+  mkdirSync(hookDir, { recursive: true })
+  writeFileSync(
+    join(hookDir, 'pre-push'),
+    `#!/bin/sh
+while read local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/records/*)
+      if [ ! -f "$RACE_MARKER" ]; then
+        touch "$RACE_MARKER"
+        unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+        git -C "$WRITER" fetch -q origin
+        git -C "$WRITER" reset -q --hard origin/main
+        printf 'other run\\n' > "$WRITER/_projects_/x/other.md"
+        git -C "$WRITER" commit -qam 'another run of the seat'
+        git -C "$WRITER" push -q origin HEAD:refs/heads/records/dev-one
+      fi;;
+  esac
+done
+exit 0
+`,
+  )
+  chmodSync(join(hookDir, 'pre-push'), 0o755)
+  write(w.live, '_projects_/x/note.md', 'one\nmid-park\n')
+  const r = park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one'], { RACE_MARKER: join(w.root, 'race'), WRITER: w.writer })
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, /records\/dev-one moved while parking/)
+  const sha = parkedLine(r, 'dev-one')[1]
+  assert.equal(git(w.origin, ['show', `${sha}:_projects_/x/other.md`]), 'other run', 'the other run is kept')
+  assert.equal(git(w.origin, ['show', `${sha}:_projects_/x/note.md`]), 'one\nmid-park')
+  assert.equal(originRef(w, 'refs/heads/records/dev-one'), sha)
 })
