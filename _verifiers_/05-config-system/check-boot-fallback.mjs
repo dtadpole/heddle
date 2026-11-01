@@ -131,7 +131,8 @@ test('Settings still answers on a fallen-back row and Reset removes the broken v
       body: JSON.stringify({ ops: [{ op: 'unset', path: ['contextWindow'] }] }),
     })
     assert.equal(reset.status, 200, `Reset is accepted\n${await reset.text()}`)
-    assert.ok(!readFileSync(patch, 'utf8').includes('-5'), 'and the broken value is gone from the patch')
+    // The exact value the fixture wrote into the block, not any '-5' the shipped tree may hold (a model id, a date).
+    assert.ok(!readFileSync(patch, 'utf8').includes('"contextWindow": -5'), 'and the broken value is gone from the settings block')
     await server.stop()
     server = undefined
     const again = await runCli(['--profile', profile, '--endpoint', 'scripted', '--turn', 'again'], { env, cwd: home })
