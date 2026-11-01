@@ -208,7 +208,7 @@ test('a retained tail at or above the trigger is refused', () => {
     () => resolveBudget({ endpointWindow: 100, configPolicy: { thresholdRatio: 0.2, retainRatio: 0.2 } }),
     (error: unknown) => error instanceof BudgetError && error.code === 'RETAIN_NOT_BELOW_THRESHOLD',
   )
-  // A side in tokens against a ratio of the endpoint's own window, and a policy's own field under its index.
+  // A side in tokens against a ratio of the endpoint's own window, and a field the policy wrote under its index.
   assert.throws(
     () => resolveBudget({ endpoint: 'small', endpointWindow: 1000, configPolicy: { retainTokens: 900 } }),
     (error: unknown) =>
@@ -219,6 +219,11 @@ test('a retained tail at or above the trigger is refused', () => {
     () => resolveBudget({ endpoint: 'small', configWindow: 1000, policies: [{ endpoint: 'other' }, { endpoint: 'small', thresholdTokens: 100 }] }),
     (error: unknown) =>
       error instanceof BudgetError &&
-      error.message.startsWith('policies[1].retainRatio (0.16) of contextWindow 1000 is 160 tokens, which must be less than thresholdTokens (100):'),
+      error.message.startsWith('retainRatio (0.16) of contextWindow 1000 is 160 tokens, which must be less than policies[1].thresholdTokens (100):'),
+  )
+  // A configured window that is no window is said first, in the words a Save of it is refused with.
+  assert.throws(
+    () => resolveBudget({ configWindow: -5 }),
+    (error: unknown) => error instanceof BudgetError && error.code === 'NO_CAPACITY' && error.message === 'contextWindow (-5) must be a positive integer',
   )
 })

@@ -82,7 +82,7 @@ pub use component_schemas::{
 };
 pub use compose::{ComponentName, ComposedRow, EntryRow, Provenance, compose, origin_of};
 pub use context_rule::{
-    CONTEXT_BUDGET_RULE, RetainNotBelow, context_budget_problems, retain_not_below,
+    CONTEXT_BUDGET_RULE, RetainNotBelow, context_budget_problems, retain_not_below, written_at,
 };
 pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,

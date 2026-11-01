@@ -1,6 +1,6 @@
 import { RETAIN_RATIO, THRESHOLD_RATIO } from '../context/budget.ts'
 
-import { retainNotBelow } from './budget-words.ts'
+import { retainNotBelow, writtenAt } from './budget-words.ts'
 
 /**
  * The context row's values, judged where they are written (issue #212).
@@ -61,11 +61,11 @@ export function contextConfigProblems(config: unknown): readonly string[] {
   if (bounds.length > 0) return bounds
 
   const window = number(row.contextWindow) ?? DEFAULT_CONTEXT_WINDOW
-  const problems: string[] = [...scopeProblems('', row, window)]
+  const problems: string[] = [...scopeProblems('', undefined, row, window)]
   for (const [index, own] of policies.entries()) {
     if (own === null || !FIELDS.some((field) => own[field] !== undefined)) continue
     const merged: Scope = Object.fromEntries(FIELDS.map((field) => [field, own[field] ?? row[field]]))
-    problems.push(...scopeProblems(`policies[${index}].`, merged, window))
+    problems.push(...scopeProblems(`policies[${index}].`, own, merged, window))
   }
   return problems
 }
@@ -94,8 +94,8 @@ function scopeBounds(prefix: string, own: Scope): readonly string[] {
   return problems
 }
 
-/** One scope's merged budget: the retained tail below its trigger. */
-function scopeProblems(prefix: string, merged: Scope, window: number): readonly string[] {
+/** One scope's merged budget: the retained tail below its trigger; each side named where its field was written. */
+function scopeProblems(prefix: string, own: Scope | undefined, merged: Scope, window: number): readonly string[] {
   const thresholdTokens = number(merged.thresholdTokens)
   const retainTokens = number(merged.retainTokens)
   const thresholdRatio = number(merged.thresholdRatio) ?? THRESHOLD_RATIO
@@ -105,5 +105,19 @@ function scopeProblems(prefix: string, merged: Scope, window: number): readonly 
   // Ratios alone are judged whatever the window, as DSH's validateRatioRetention judges them at load.
   const ratiosConflict = thresholdTokens === undefined && retainTokens === undefined && retainRatio >= thresholdRatio
   if (!ratiosConflict && retain < threshold) return []
-  return [retainNotBelow({ prefix, windowName: 'contextWindow', window, thresholdTokens, retainTokens, thresholdRatio, retainRatio, threshold, retain })]
+  const at = own as Readonly<Record<string, unknown>> | undefined
+  return [
+    retainNotBelow({
+      thresholdFrom: writtenAt(prefix, at, thresholdTokens !== undefined ? 'thresholdTokens' : 'thresholdRatio'),
+      retainFrom: writtenAt(prefix, at, retainTokens !== undefined ? 'retainTokens' : 'retainRatio'),
+      windowName: 'contextWindow',
+      window,
+      thresholdTokens,
+      retainTokens,
+      thresholdRatio,
+      retainRatio,
+      threshold,
+      retain,
+    }),
+  ]
 }

@@ -13,7 +13,7 @@
  *   instead of looping a summariser that cannot make progress.
  */
 
-import { retainNotBelow } from '../config/budget-words.ts'
+import { retainNotBelow, writtenAt } from '../config/budget-words.ts'
 
 /** Compact when the estimate reaches this fraction of the window. DSH's default. */
 export const THRESHOLD_RATIO = 0.8
@@ -78,6 +78,10 @@ export function resolveBudget(input: {
   readonly policies?: readonly ({ readonly endpoint: string } & BudgetPolicy)[]
 }): Budget {
   const window = input.endpointWindow ?? input.configWindow
+  /** A configured window that is no window is said as the window it is, before any ratio is taken of it (#212). */
+  if (input.endpointWindow === undefined && window !== undefined && !(Number.isInteger(window) && window > 0)) {
+    throw new BudgetError(`contextWindow (${window}) must be a positive integer`, 'NO_CAPACITY')
+  }
   if (window === undefined) {
     throw new BudgetError(
       input.endpoint === undefined
@@ -103,11 +107,14 @@ export function resolveBudget(input: {
   if (retainTokens >= thresholdTokens) {
     /**
      * Named by what was written (#212): the setting each side came from, and the window it was taken of, in the words a
-     * Save of the same values is refused with (src/config/budget-words.ts); a policy's own field is named under its index.
+     * Save of the same values is refused with (src/config/budget-words.ts); a field the matched policy wrote is named
+     * under its index, a field from the row or the default without one.
      */
-    const ownField = override !== undefined && (['thresholdRatio', 'retainRatio', 'thresholdTokens', 'retainTokens'] as const).some((field) => override[field] !== undefined)
+    const own = override as Readonly<Record<string, unknown>> | undefined
+    const at = `policies[${overrideAt}].`
     const sentence = retainNotBelow({
-      prefix: ownField ? `policies[${overrideAt}].` : '',
+      thresholdFrom: writtenAt(at, own, policy.thresholdTokens !== undefined ? 'thresholdTokens' : 'thresholdRatio'),
+      retainFrom: writtenAt(at, own, policy.retainTokens !== undefined ? 'retainTokens' : 'retainRatio'),
       windowName: input.endpointWindow !== undefined ? `endpoint '${input.endpoint}' window` : 'contextWindow',
       window,
       thresholdTokens: policy.thresholdTokens,
