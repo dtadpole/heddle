@@ -4687,6 +4687,11 @@ const MESSAGES = Object.freeze({
     'header.chat': 'Chat',
     'header.trajectory': 'Trajectory',
     'header.file': 'File',
+    'chat.usage.head': 'Tokens · {total}',
+    'chat.usage.input': 'Input',
+    'chat.usage.cacheRead': 'Cache read',
+    'chat.usage.cacheWrite': 'Cache write',
+    'chat.usage.output': 'Output',
     'header.thisSession': 'this session',
     'header.more': 'More actions',
     'header.download': 'Download session log',
@@ -5354,6 +5359,11 @@ const MESSAGES = Object.freeze({
     'header.chat': '对话',
     'header.trajectory': '轨迹',
     'header.file': '文件',
+    'chat.usage.head': '用量 · {total}',
+    'chat.usage.input': '未缓存输入',
+    'chat.usage.cacheRead': '缓存读取',
+    'chat.usage.cacheWrite': '缓存写入',
+    'chat.usage.output': '输出',
     'header.thisSession': '此会话',
     'header.more': '更多操作',
     'header.download': '下载会话日志',
@@ -6105,11 +6115,16 @@ function markStopped() {
  * provider reported, and a bucket nobody reported is left out rather than shown as zero.
  */
 const TURN_USAGE_BUCKETS = [
-  ['inputTokens', 'Input'],
-  ['cacheReadTokens', 'Cache read'],
-  ['cacheWriteTokens', 'Cache write'],
-  ['outputTokens', 'Output'],
+  ['inputTokens', 'chat.usage.input'],
+  ['cacheReadTokens', 'chat.usage.cacheRead'],
+  ['cacheWriteTokens', 'chat.usage.cacheWrite'],
+  ['outputTokens', 'chat.usage.output'],
 ]
+/** The closed row's words, from its total; drawn here and again on a language change (#80). */
+function paintTurnUsageHead(row) {
+  const head = row.querySelector(':scope > summary')
+  if (head !== null) head.textContent = t('chat.usage.head', { total: Number(row.dataset.turnUsage).toLocaleString('en-US') })
+}
 function turnUsageRow(usage) {
   const present = TURN_USAGE_BUCKETS.filter(([key]) => typeof usage[key] === 'number' && Number.isFinite(usage[key]))
   if (present.length === 0) return null
@@ -6118,20 +6133,28 @@ function turnUsageRow(usage) {
   row.className = 'turn-usage'
   row.dataset.turnUsage = String(total)
   const head = document.createElement('summary')
-  head.textContent = `Tokens · ${total.toLocaleString('en-US')}`
   const figures = document.createElement('div')
   figures.className = 'turn-usage-figures'
   for (const [key, label] of present) {
     const figure = document.createElement('span')
     figure.dataset.bucket = key
+    // The bucket's name is marked with its key, so applyLocale says it again; the figure is a number.
+    const name = document.createElement('span')
+    name.dataset.i18n = label
+    name.textContent = t(label)
     const value = document.createElement('b')
     value.textContent = usage[key].toLocaleString('en-US')
-    figure.append(`${label} `, value)
+    figure.append(name, ' ', value)
     figures.append(figure)
   }
   row.append(head, figures)
+  paintTurnUsageHead(row)
   return row
 }
+/** A language change says every drawn row's total again; the bucket names follow their data-i18n marks. */
+window.addEventListener('heddle:locale', () => {
+  for (const row of document.querySelectorAll('#log .turn-usage')) paintTurnUsageHead(row)
+})
 /** The live turn's row, once it ends: the durable fold decides, so a live answer shows exactly what a reload shows. */
 async function attachTurnUsage() {
   if (current === null) return
