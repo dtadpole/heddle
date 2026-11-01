@@ -125,6 +125,18 @@ pub enum SessionError {
     /// create makes the folder). `MissingFolderError` in the TypeScript build, word for word.
     #[error("This workspace's folder no longer exists: \"{folder}\"")]
     MissingFolder { folder: String },
+    /// An append that did not reach the session's log (#221): `the session could not be saved: <reason>`, the reason in
+    /// words ([`crate::append::unsaved_reason`]: `no space left on device` for ENOSPC) and never the log's path, which
+    /// the I/O error carried into the turn's error frame. The append was cut back before this was answered
+    /// ([`crate::append`]), or, when the cut failed too, the session's writer refuses its later appends with this same
+    /// sentence until the session is opened again (`source` is `None` on those). `SessionUnsavedError` in the TypeScript
+    /// build, word for word.
+    #[error("the session could not be saved: {reason}")]
+    Unsaved {
+        reason: String,
+        #[source]
+        source: Option<std::io::Error>,
+    },
 }
 
 /// The last component of a path, or the path itself when it has none.

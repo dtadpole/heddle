@@ -5159,6 +5159,136 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
+    /// A runner that writes the prompt into a real store as the agent loop does first, and fails the turn with the
+    /// store's error as `heddle`'s `Turns` maps a turn error (`ServiceError::new(error.to_string())`).
+    struct SavingTurns(heddle_session::SessionService);
+
+    impl TurnRunner for SavingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let service = self.0.clone();
+            Box::pin(async move {
+                let handle = service
+                    .open(&request.session)
+                    .expect("the session the route opened");
+                service
+                    .user(&handle, &request.prompt, None)
+                    .map_err(|error| ServiceError::new(error.to_string()))?;
+                Ok(TurnOutcome::default())
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_whose_prompt_cannot_be_saved_fails_in_words_on_the_stream_and_in_its_verdict() {
+        // #221 (J183): an append the store could not make reached the turn's error frame as the log's absolute path
+        // and the system's text (`…/<id>.v2.jsonl.zstd: No space left on device (os error 28)`), home directory
+        // included. The store now answers `the session could not be saved: <reason>`, in words, and the route carries
+        // that sentence on the stream and in a detached turn's verdict. The disk here is a log this user may not
+        // write, the one failure a test can cause for real: `permission denied`.
+        use crate::adapters::StoreSessions;
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-turn-unsaved-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(scratch.join("ws")).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let inner = heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        );
+        let handle = inner
+            .start(heddle_session::StartOptions {
+                cwd: Some(scratch.join("ws").to_string_lossy().into_owned()),
+                ..heddle_session::StartOptions::default()
+            })
+            .unwrap();
+        std::fs::set_permissions(&handle.transcript, std::fs::Permissions::from_mode(0o444))
+            .unwrap();
+        if std::fs::OpenOptions::new()
+            .append(true)
+            .open(&handle.transcript)
+            .is_ok()
+        {
+            // Running as a user permissions do not bind (root): no failure to judge.
+            std::fs::remove_dir_all(&scratch).ok();
+            return;
+        }
+        let harness = Harness::new(
+            Arc::new(StoreSessions::new(inner.clone())),
+            Arc::new(Models),
+            Arc::new(SavingTurns(inner.clone())),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let (router, state) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-unsaved")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        const WORDS: &str = "the session could not be saved: permission denied";
+
+        let body = json!({"session": handle.id, "prompt": "t4"});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        let text = body_text(&bytes);
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let error = text
+            .split("\n\n")
+            .find(|block| block.starts_with("event: error"))
+            .and_then(|block| block.lines().find_map(|line| line.strip_prefix("data: ")))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .unwrap_or_else(|| panic!("the stream ends in an error frame\n{text}"));
+        assert_eq!(error["message"], json!(WORDS), "in words\n{text}");
+        assert_eq!(error["session"], json!(handle.id));
+        assert!(!text.contains("event: done"), "{text}");
+        assert!(
+            !text.contains(scratch.to_string_lossy().as_ref()),
+            "and without the store's path on disk\n{text}"
+        );
+
+        let body = json!({"session": handle.id, "prompt": "t5", "detach": true});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let turn = serde_json::from_slice::<Value>(&bytes).unwrap()["turn"]
+            .as_str()
+            .expect("the turn id")
+            .to_owned();
+        let verdict = loop {
+            let (event, data, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), next_pushed(&mut pushed))
+                    .await
+                    .expect("the verdict arrives");
+            if event == "turn" && data["turn"] == json!(turn) {
+                break data;
+            }
+        };
+        assert_eq!(verdict["outcome"], json!("error"));
+        assert_eq!(
+            verdict["message"],
+            json!(WORDS),
+            "the detached verdict carries the same sentence"
+        );
+        std::fs::set_permissions(&handle.transcript, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     /// A runner that counts the turns it is asked to run.
     struct CountingTurns(Arc<std::sync::atomic::AtomicUsize>);
 

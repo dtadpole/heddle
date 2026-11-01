@@ -1269,6 +1269,157 @@ test('a session interrupted mid-frame still reads, and its next turn lands', asy
   }
 })
 
+test('a full disk fails the turn in words and leaves no torn frame, and a turn answered after space came back survives a restart (#221)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #221, journey J183, by its own steps, on a 24 MB HFS+ disk image as the session root. Measured before the fix
+   * on both builds: an append that met ENOSPC left its partial frame in the middle of the log; the turn route reported
+   * nothing the page could draw; t6, answered after the filler was removed, was appended after the partial frame; and
+   * the next start's repair, right for a crash-torn tail (J155), cut the log at the tear and dropped t6.
+   *
+   * DSH truncates a failed append back to the size it had (dsh-session-persistence-jsonl lib/index.js:3299-3335,
+   * appendLines and rollbackAppend), and its checkpoint policy fails the step closed when the session cannot be saved.
+   * So: t4 fails in words, the log is never torn, and t6 is still there after a restart, with nothing dropped.
+   */
+  const { spawnSync } = await import('node:child_process')
+  const { randomBytes } = await import('node:crypto')
+  const fs = await import('node:fs')
+  if (!skipUnless(context, process.platform === 'darwin' && fs.existsSync('/usr/bin/hdiutil'), 'a small disk image needs hdiutil, which only macOS has')) return
+  const h = harness('full-disk')
+  const image = join(h.home, 'small.dmg')
+  const mount = join(h.home, 'small')
+  const root = join(mount, 'sessions')
+  const script = join(h.home, 'script.json')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
+  const env = { ...h.env, HOME: h.home }
+  let live
+  let attached = false
+  try {
+    const made = spawnSync('hdiutil', ['create', '-size', '24m', '-fs', 'HFS+', '-volname', 'heddle-j183', image], { encoding: 'utf8' })
+    assert.equal(made.status, 0, `the disk image was created\n${made.stdout}${made.stderr}`)
+    fs.mkdirSync(mount, { recursive: true })
+    const mounted = spawnSync('hdiutil', ['attach', '-nobrowse', '-mountpoint', mount, image], { encoding: 'utf8' })
+    assert.equal(mounted.status, 0, `the disk image was attached\n${mounted.stdout}${mounted.stderr}`)
+    attached = true
+
+    const connect = async () => {
+      live = await startServer(serverArgs, env)
+      const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+      return cookie
+    }
+    let cookie = await connect()
+    /** One streamed turn, its answer in the script; the frames are read back by name. */
+    const turn = async (body, answer) => {
+      fs.writeFileSync(script, JSON.stringify({ steps: [{ text: answer }] }))
+      const response = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const text = await response.text()
+      const frames = text
+        .split('\n\n')
+        .map((block) => ({ event: /^event: (.*)$/m.exec(block)?.[1], data: /^data: (.*)$/m.exec(block)?.[1] }))
+        .filter((frame) => frame.event !== undefined)
+        .map((frame) => {
+          try {
+            return { event: frame.event, data: JSON.parse(frame.data ?? 'null') }
+          } catch {
+            return { event: frame.event, data: frame.data }
+          }
+        })
+      return { status: response.status, text, frames }
+    }
+    /** About 30 KB of text that compresses poorly, as J183's long prompts: a frame far larger than a block's slack. */
+    const long = (label) => `${label} ${randomBytes(22_000).toString('base64')}`
+    const view = async (id) => {
+      const response = await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })
+      assert.equal(response.status, 200, 'the session is served')
+      return (await response.json()).turns ?? []
+    }
+    const usersOf = (turns) => turns.filter((row) => row.kind === 'user').map((row) => String(row.text ?? '').slice(0, 24))
+
+    const t1 = await turn({ prompt: 't1 remember the word loom', folder: h.work }, 'answer one')
+    assert.equal(t1.status, 200, `t1 ran\n${t1.text}`)
+    assert.ok(t1.frames.some((frame) => frame.event === 'done') && !t1.frames.some((frame) => frame.event === 'error'), `t1 answered\n${t1.text.slice(0, 2000)}`)
+    const id = t1.frames.find((frame) => typeof frame.data?.session === 'string')?.data.session
+    assert.ok(typeof id === 'string', `t1 names its session\n${t1.text.slice(0, 2000)}`)
+    const log = transcriptFile(join(root, id))
+    assert.ok(log.startsWith(mount), `the session's log is on the small disk: ${log}`)
+    for (const [label, answer] of [['t2', 'answer two'], ['t3', 'answer three']]) {
+      const done = await turn({ session: id, prompt: long(label) }, answer)
+      assert.ok(done.status === 200 && done.frames.some((frame) => frame.event === 'done'), `${label} answered\n${done.text.slice(0, 2000)}`)
+    }
+
+    /** The disk is filled: the filler grows until the disk refuses it, in ever smaller writes. */
+    const filler = join(mount, 'filler')
+    const fd = fs.openSync(filler, 'w')
+    try {
+      for (const size of [1 << 20, 1 << 16, 1 << 12, 1 << 9]) {
+        const chunk = Buffer.alloc(size, 0x5a)
+        for (;;) {
+          try {
+            if (fs.writeSync(fd, chunk) < size) break
+          } catch (error) {
+            if (error.code !== 'ENOSPC') throw error
+            break
+          }
+        }
+      }
+    } finally {
+      fs.closeSync(fd)
+    }
+    const free = fs.statfsSync(mount)
+    assert.ok(free.bavail * free.bsize < 64 * 1024, `the disk is full: ${free.bavail * free.bsize} bytes free`)
+
+    /** t4 fails, visibly and in words, and the log keeps only whole frames. */
+    const t4 = await turn({ session: id, prompt: long('t4') }, 'answer four')
+    assert.equal(t4.status, 200, `the turn route answered t4\n${t4.text.slice(0, 2000)}`)
+    const failed = t4.frames.find((frame) => frame.event === 'error')
+    assert.ok(failed !== undefined, `t4's stream ends in an error frame the page draws, not an empty body or a done\n${t4.text.slice(0, 2000)}`)
+    assert.equal(failed.data?.message, 'the session could not be saved: no space left on device', 'and the frame says why, in words')
+    assert.equal(failed.data?.session, id, 'and names its session')
+    assert.ok(!t4.frames.some((frame) => frame.event === 'done'), 't4 is not reported as done')
+    const afterFailure = decodeTranscript(readFileSync(log))
+    assert.equal(afterFailure.torn, false, `the failed append left no partial frame behind (${readFileSync(log).length - afterFailure.readableBytes} stray bytes)`)
+    assert.ok(!usersOf(await view(id)).some((text) => text.startsWith('t4')), 'and the view does not show t4, which is not on disk')
+
+    /** Space comes back; t6 answers, lands right after the whole frames, and outlives a restart. */
+    fs.unlinkSync(filler)
+    const t6 = await turn({ session: id, prompt: 't6 after the space came back' }, 'answer six')
+    assert.ok(t6.status === 200 && t6.frames.some((frame) => frame.event === 'done') && !t6.frames.some((frame) => frame.event === 'error'), `t6 answered\n${t6.text.slice(0, 2000)}`)
+    const beforeRestart = decodeTranscript(readFileSync(log))
+    assert.equal(beforeRestart.torn, false, 'the log holds only whole frames before the restart')
+    assert.ok(beforeRestart.lines.some((line) => line.includes('t6 after the space came back')), 't6 is in the log')
+
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 500))
+    cookie = await connect()
+    const restarted = await view(id)
+    const users = usersOf(restarted)
+    assert.deepEqual(
+      users.map((text) => text.slice(0, 2)),
+      ['t1', 't2', 't3', 't6'],
+      `after the restart every turn on disk is there, t6 included\nsaw: ${users.join(' | ')}`,
+    )
+    assert.ok(restarted.some((row) => row.kind === 'assistant' && row.text === 'answer six'), 'and t6 keeps its answer')
+    const events = readTranscript(log)
+    const repaired = events.filter((event) => event.type === 'transcript/repaired')
+    assert.deepEqual(repaired, [], `the restart's repair dropped nothing\n${JSON.stringify(repaired)}`)
+    assert.deepEqual(events.map((event) => event.seq), events.map((_, index) => index), 'every seq is written once, in order')
+  } finally {
+    live?.kill()
+    await new Promise((done) => setTimeout(done, 300))
+    if (attached) {
+      const detached = spawnSync('hdiutil', ['detach', mount], { encoding: 'utf8' })
+      if (detached.status !== 0) spawnSync('hdiutil', ['detach', '-force', mount], { encoding: 'utf8' })
+    }
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session one process is writing refuses a second writer, so its log never holds a seq twice', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsTurn()) && (await supportsWeb()), CAPABILITY)) return
   /**
