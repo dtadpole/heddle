@@ -12,7 +12,8 @@ import { heddleCommand, isolatedHome, repoRoot, removeDir, runCli, scriptedConfi
  *
  * A paused goal reads 已暂停的目标 with 恢复目标 / 完成目标 / 编辑目标 / 清除目标; a todo_write call is 更新任务清单 with
  * 1/3 已完成 and 新增 3, its items 已完成 / 进行中 / 待处理; the dock counts 1 已完成 · 1 进行中 · 1 待处理. Switched to
- * English in Settings, all three read in English again.
+ * English in Settings, all three read in English again. The docks' own labels follow too: the to-do heading 任务, the
+ * card's 查看, the goal dock's 会话目标 and 目标内容, and its 运行中.
  */
 
 const CAPABILITY = 'the goal and to-do docks in the page language'
@@ -90,6 +91,12 @@ const WORDS = `JSON.stringify({
   statuses: [...(${ROW}?.querySelectorAll('.todo-call-status') ?? [])].map((node) => node.textContent.trim()),
   progress: document.getElementById('todo-progress')?.textContent ?? null,
   glyphs: [...document.querySelectorAll('#todo-list .todo-glyph')].map((glyph) => glyph.getAttribute('aria-label')),
+  inspect: ${ROW}?.querySelector('.todo-call-raw > summary')?.textContent ?? null,
+  todoTitle: document.getElementById('todo-title')?.textContent ?? null,
+  todoLabel: document.getElementById('todo-panel')?.getAttribute('aria-label') ?? null,
+  goalLabel: document.getElementById('goal-bar')?.getAttribute('aria-label') ?? null,
+  objectiveLabel: document.getElementById('goal-objective')?.getAttribute('aria-label') ?? null,
+  running: document.getElementById('goal-running')?.textContent ?? null,
 })`
 
 test('the goal dock, the to-do dock and the to-do card read in the page language', async (context) => {
@@ -145,6 +152,12 @@ test('the goal dock, the to-do dock and the to-do card read in the page language
     assert.deepEqual(chinese.statuses, ['已完成', '进行中', '待处理'])
     assert.equal(chinese.progress, '1 已完成\u2002·\u20021 进行中\u2002·\u20021 待处理')
     assert.deepEqual(chinese.glyphs, ['已完成', '进行中', '待处理'])
+    assert.equal(chinese.inspect, '查看')
+    assert.equal(chinese.todoTitle, '任务')
+    assert.equal(chinese.todoLabel, '任务')
+    assert.equal(chinese.goalLabel, '会话目标')
+    assert.equal(chinese.objectiveLabel, '目标内容')
+    assert.equal(chinese.running, '运行中')
 
     await chooseLanguage(browser, 'en', 'en')
     assert.ok(await browser.waitFor(`document.getElementById('goal-phase').textContent === 'Paused Goal'`, 10_000), 'the goal dock reads in English')
@@ -156,6 +169,12 @@ test('the goal dock, the to-do dock and the to-do card read in the page language
     assert.ok((english.line ?? '').includes('1/3 completed'), english.line)
     assert.deepEqual(english.statuses, ['Completed', 'In progress', 'Pending'])
     assert.equal(english.progress, '1 done\u2002·\u20021 in progress\u2002·\u20021 pending')
+    assert.equal(english.inspect, 'Inspect')
+    assert.equal(english.todoTitle, 'To-dos')
+    assert.equal(english.todoLabel, 'To-dos')
+    assert.equal(english.goalLabel, 'Session goal')
+    assert.equal(english.objectiveLabel, 'Goal objective')
+    assert.equal(english.running, 'running')
   } finally {
     browser?.close()
     server.kill()
