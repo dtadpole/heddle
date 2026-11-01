@@ -50,6 +50,15 @@ grounded_in:
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.
+- [`check-access-focus.mjs`](check-access-focus.mjs) — headless functional keyboard containment for the shared
+  source page's custom full-access risk card (#103), served on a private port 0 with API/authentication fixtures
+  that refuse writes. Three candidates before acknowledgement and four after cycle with native Tab and Shift+Tab;
+  the checkbox keeps native Space, buttons keep native Enter, Escape/Cancel/Close return to the access chip, and
+  only explicit Enable activation attempts a confirmed permission request. This does not claim full accessibility
+  or independently verify both built servers. The exact installed DSH reference is the permission-presets client's
+  `RiskConfirmation`, supplied by primitives and shipped in `dsh-web-frontend/dist/assets/index-CN7NIWNw.js`:
+  named export `RiskConfirmation` maps to `uA`, which calls `Modal` (`S_`), which calls focus hook `x_`.
+  Heddle retains its existing custom card and initial/return focus, rather than redesigning it as a native dialog.
 - [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's workspace controls, add, rename and delete, at
   DSH parity: registering a folder over the API the dialog posts to, the refusals that keep the controls honest
   (a rename to another workspace's name is `409 workspace/name-conflict`), delete removing the registration while its
