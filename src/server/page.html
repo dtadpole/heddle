@@ -4171,6 +4171,25 @@ const MESSAGES = Object.freeze({
     'question.open': 'Open question',
     'panel.noContext': 'No context figures yet \u2014 send a message to start measuring.',
     'panel.noStats': 'No statistics yet \u2014 send a message to start measuring.',
+    'stats.turns': '{count} turns',
+    'stats.steps': '{count} steps',
+    'stats.cacheHit': 'Cache hit {percent}%',
+    'stats.title': 'Session statistics',
+    'stats.usageTitle': 'Token usage',
+    'stats.contextTitle': 'Context usage',
+    'stats.llmTime': 'LLM time',
+    'stats.toolTime': 'Tool time',
+    'stats.ttft': 'Avg time to first token (TTFT)',
+    'stats.speed': 'Tokens per second (TPS)',
+    'stats.cacheHitLabel': 'Cache hit',
+    'stats.uncachedInput': 'Uncached input',
+    'stats.cachedInput': 'Cached input',
+    'stats.cacheWrite': 'Cache write',
+    'stats.output': 'Output',
+    'stats.context.used': 'of context used',
+    'stats.context.system': 'System prompt',
+    'stats.context.tools': 'Tool definitions',
+    'stats.context.messages': 'Messages',
     'schedule.card.deleted': 'Deleted',
     'schedule.card.open': 'Open',
     'schedule.delete.action': 'Delete',
@@ -4720,6 +4739,25 @@ const MESSAGES = Object.freeze({
     'question.open': '打开问题',
     'panel.noContext': '还没有上下文数据——发送一条消息即开始统计。',
     'panel.noStats': '还没有统计数据——发送一条消息即开始统计。',
+    'stats.turns': '{count} 轮',
+    'stats.steps': '{count} 步',
+    'stats.cacheHit': '缓存命中 {percent}%',
+    'stats.title': '会话统计',
+    'stats.usageTitle': 'Token 用量',
+    'stats.contextTitle': '上下文用量',
+    'stats.llmTime': '模型用时',
+    'stats.toolTime': '工具调用用时',
+    'stats.ttft': '首 token 平均（TTFT）',
+    'stats.speed': '输出速度（TPS）',
+    'stats.cacheHitLabel': '缓存命中',
+    'stats.uncachedInput': '未缓存输入',
+    'stats.cachedInput': '缓存读取',
+    'stats.cacheWrite': '缓存写入',
+    'stats.output': '输出',
+    'stats.context.used': '上下文已用',
+    'stats.context.system': '系统提示词',
+    'stats.context.tools': '工具定义',
+    'stats.context.messages': '对话消息',
     'schedule.card.deleted': '已删除',
     'schedule.card.open': '打开',
     'schedule.delete.action': '删除',
@@ -12019,17 +12057,22 @@ function formatWindow(value) {
   return value < 1e6 ? `${scaled(value / 1e3)}K` : `${scaled(value / 1e6)}M`
 }
 
-function statPanelRows(kind) {
+/**
+ * One panel's rows, `[label, value]`. The labels are DSH's (`stats.dialog.*`, `message.turnUsage.*`) in the page language
+ * through `words`, the page's t() (#80), which the panel passes; without it, as the unit test calls it, the English.
+ * `total`, `percent` and `used` are the rows' own names, which the panel reads back and never prints.
+ */
+function statPanelRows(kind, words = (key) => ({ 'stats.llmTime': 'LLM time', 'stats.toolTime': 'Tool time', 'stats.ttft': 'Avg time to first token (TTFT)', 'stats.speed': 'Tokens per second (TPS)', 'stats.cacheHitLabel': 'Cache hit', 'stats.uncachedInput': 'Uncached input', 'stats.cachedInput': 'Cached input', 'stats.cacheWrite': 'Cache write', 'stats.output': 'Output' })[key] ?? key) {
   const stats = sessionStats ?? {}
   const rows = []
   const push = (label, value) => { if (value !== undefined && value !== null && value !== '') rows.push([label, value]) }
   if (kind === 'time') {
-    if (typeof stats.llmMs === 'number') push('LLM time', formatDurationMs(stats.llmMs))
-    if (typeof stats.toolMs === 'number') push('Tool time', formatDurationMs(stats.toolMs))
-    if (typeof stats.ttftMs === 'number' && typeof stats.ttftSteps === 'number' && stats.ttftSteps > 0) push('Avg time to first token (TTFT)', formatDurationMs(stats.ttftMs / stats.ttftSteps))
+    if (typeof stats.llmMs === 'number') push(words('stats.llmTime'), formatDurationMs(stats.llmMs))
+    if (typeof stats.toolMs === 'number') push(words('stats.toolTime'), formatDurationMs(stats.toolMs))
+    if (typeof stats.ttftMs === 'number' && typeof stats.ttftSteps === 'number' && stats.ttftSteps > 0) push(words('stats.ttft'), formatDurationMs(stats.ttftMs / stats.ttftSteps))
     const generationMs = (stats.generationMs ?? 0) + liveGenerationMs
     const decodeTokens = (stats.decodeTokens ?? 0) + liveDecodeTokens
-    if (generationMs > 0 && decodeTokens > 0) push('Tokens per second (TPS)', `${formatRate(decodeTokens / (generationMs / 1000))} tok/s`)
+    if (generationMs > 0 && decodeTokens > 0) push(words('stats.speed'), `${formatRate(decodeTokens / (generationMs / 1000))} tok/s`)
   } else if (kind === 'usage') {
     const usage = addUsage(stats.usage, liveUsage)
     if (usage !== undefined) {
@@ -12037,11 +12080,11 @@ function statPanelRows(kind) {
       const hasBilled = usage.inputTokens !== undefined || usage.cacheReadTokens !== undefined || usage.cacheWriteTokens !== undefined
       const total = hasBilled && usage.outputTokens !== undefined ? billed + usage.outputTokens : hasBilled ? billed : usage.outputTokens
       if (total !== undefined) push('total', `${formatExactCount(total)} tok`)
-      if (hasBilled && billed > 0 && usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) push('Cache hit', `${formatCacheHit(usage.cacheReadTokens, billed)}%`)
-      if (usage.inputTokens !== undefined) push('Uncached input', `${formatExactCount(usage.inputTokens)} tok`)
-      if (usage.cacheReadTokens !== undefined) push('Cached input', `${formatExactCount(usage.cacheReadTokens)} tok`)
-      if (usage.cacheWriteTokens !== undefined) push('Cache write', `${formatExactCount(usage.cacheWriteTokens)} tok`)
-      if (usage.outputTokens !== undefined) push('Output', `${formatExactCount(usage.outputTokens)} tok`)
+      if (hasBilled && billed > 0 && usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) push(words('stats.cacheHitLabel'), `${formatCacheHit(usage.cacheReadTokens, billed)}%`)
+      if (usage.inputTokens !== undefined) push(words('stats.uncachedInput'), `${formatExactCount(usage.inputTokens)} tok`)
+      if (usage.cacheReadTokens !== undefined) push(words('stats.cachedInput'), `${formatExactCount(usage.cacheReadTokens)} tok`)
+      if (usage.cacheWriteTokens !== undefined) push(words('stats.cacheWrite'), `${formatExactCount(usage.cacheWriteTokens)} tok`)
+      if (usage.outputTokens !== undefined) push(words('stats.output'), `${formatExactCount(usage.outputTokens)} tok`)
     }
   } else {
     const used = stats.lastPromptTokens
@@ -12081,12 +12124,12 @@ function renderStatPopover() {
   const popover = document.getElementById('stat-popover')
   if (popover === null) return
   const stats = sessionStats ?? {}
-  const rows = statPanelRows(statPopoverKind)
+  const rows = statPanelRows(statPopoverKind, t)
   const head = document.createElement('div')
   head.className = 'stat-panel-head'
   const title = document.createElement('span')
   title.className = 'stat-panel-title'
-  title.textContent = statPopoverKind === 'time' ? 'Session statistics' : statPopoverKind === 'usage' ? 'Token usage' : ''
+  title.textContent = statPopoverKind === 'time' ? t('stats.title') : statPopoverKind === 'usage' ? t('stats.usageTitle') : ''
   if (statPopoverKind === 'context') {
     const percentRow = rows.find(([label]) => label === 'percent')
     const usedRow = rows.find(([label]) => label === 'used')
@@ -12110,7 +12153,7 @@ function renderStatPopover() {
     percent.textContent = percentRow === undefined ? '' : percentRow[1]
     const sub = document.createElement('span')
     sub.className = 'stat-panel-sub'
-    sub.textContent = percentRow === undefined ? '' : 'of context used'
+    sub.textContent = percentRow === undefined ? '' : t('stats.context.used')
     header.append(percent, sub)
     if (usedRow !== undefined) {
       const figures = document.createElement('span')
@@ -12123,7 +12166,7 @@ function renderStatPopover() {
       const bar = document.createElement('div')
       bar.className = 'stat-bar'
       const colours = ['#8b95a1', '#a78bfa', 'var(--accent)']
-      const names = ['System prompt', 'Tool definitions', 'Messages']
+      const names = [t('stats.context.system'), t('stats.context.tools'), t('stats.context.messages')]
       const values = [sections.system, sections.tools, sections.messages]
       for (let index = 0; index < values.length; index += 1) {
         const segment = document.createElement('div')
@@ -12153,7 +12196,7 @@ function renderStatPopover() {
     } else if (sections !== undefined) {
       /** Sections without a window still count; only the bar's denominators are missing. */
       const values = [sections.system, sections.tools, sections.messages]
-      const names = ['System prompt', 'Tool definitions', 'Messages']
+      const names = [t('stats.context.system'), t('stats.context.tools'), t('stats.context.messages')]
       const colours = ['#8b95a1', '#a78bfa', 'var(--accent)']
       const list = document.createElement('dl')
       list.className = 'stat-panel-rows'
@@ -12216,6 +12259,11 @@ function closeStatPopover() {
   for (const trigger of document.querySelectorAll('[data-stat-pill]')) trigger.setAttribute('aria-expanded', 'false')
 }
 
+/** The open panel's accessible name, DSH's dialog titles in the page language (#80). */
+function statPopoverLabel(kind) {
+  return kind === 'time' ? t('stats.title') : kind === 'usage' ? t('stats.usageTitle') : t('stats.contextTitle')
+}
+
 function toggleStatPopover(kind, trigger) {
   const popover = document.getElementById('stat-popover')
   if (popover === null) return
@@ -12227,7 +12275,7 @@ function toggleStatPopover(kind, trigger) {
   statPopoverKind = kind
   statPopoverAnchor = trigger
   popover.hidden = false
-  popover.setAttribute('aria-label', kind === 'time' ? 'Session statistics' : kind === 'usage' ? 'Token usage' : 'Context usage')
+  popover.setAttribute('aria-label', statPopoverLabel(kind))
   trigger.setAttribute('aria-expanded', 'true')
   renderStatPopover()
 }
@@ -12256,6 +12304,12 @@ document.addEventListener('pointerdown', (event) => {
 })
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && statPopoverKind !== null) closeStatPopover()
+})
+/** A language change redraws the dock's figures and an open panel, its accessible name included (#80). */
+window.addEventListener('heddle:locale', () => {
+  const popover = document.getElementById('stat-popover')
+  if (statPopoverKind !== null && popover !== null) popover.setAttribute('aria-label', statPopoverLabel(statPopoverKind))
+  updateStatusBar()
 })
 
 /** Show the dock only when at least one figure is printable. */
@@ -12289,8 +12343,9 @@ function updateStatusBar() {
 
   const turnsCell = cell('turns')
   const stepsCell = cell('steps')
-  if (turnsCell !== null) turnsCell.textContent = `${turns} turns`
-  if (stepsCell !== null) stepsCell.textContent = `${steps} steps`
+  /** DSH's `stats.counts`, "{turns} turns {steps} steps" / "{turns} 轮 {steps} 步", one phrase per cell (#80). */
+  if (turnsCell !== null) turnsCell.textContent = t('stats.turns', { count: turns })
+  if (stepsCell !== null) stepsCell.textContent = t('stats.steps', { count: steps })
 
   /**
    * The rate is `decodeTokens / generationMs` over the session's own log: one span per round from its request
@@ -12322,7 +12377,7 @@ function updateStatusBar() {
   const cacheSep = cell('cache-sep')
   const usagePill = statusBar.querySelector('[data-stat-pill="usage"]')
   if (totalCell !== null) totalCell.textContent = total === undefined ? '' : `${formatTokenCount(total)} tok`
-  if (cacheCell !== null) cacheCell.textContent = cacheHit === null ? '' : `Cache hit ${cacheHit}%`
+  if (cacheCell !== null) cacheCell.textContent = cacheHit === null ? '' : t('stats.cacheHit', { percent: cacheHit })
   if (cacheSep !== null) cacheSep.hidden = cacheHit === null
   if (usagePill !== null) usagePill.hidden = total === undefined
 

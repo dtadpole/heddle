@@ -19,6 +19,20 @@ function source(name: string): string {
   return page.slice(start, end + 2)
 }
 
+// The page's English table, so the lifted dock draws through the page's own t() as it does in English (#80). A page
+// from before the interface language has no table and draws no key, so an empty table serves it.
+const ENGLISH: Record<string, string> = (() => {
+  const start = page.indexOf('  en: Object.freeze({')
+  if (start < 0) return {}
+  const end = page.indexOf('\n  }),', start)
+  const entries: Record<string, string> = {}
+  for (const match of page.slice(start, end).matchAll(/^\s+'([^']+)': '((?:[^'\\]|\\.)*)',$/gm)) entries[match[1]!] = match[2]!.replace(/\\'/g, "'")
+  return entries
+})()
+function englishT(key: string, vars: Record<string, unknown> = {}): string {
+  return (ENGLISH[key] ?? key).replace(/\{(\w+)\}/g, (whole, name: string) => (name in vars ? String(vars[name]) : whole))
+}
+
 // Stack12 owns lifecycle in the registered EventSource callback, not handleSessionPayload.
 // Execute that callback and the page's drawing function unchanged; no substitute history buffer.
 function sessionListenerSource(): string {
@@ -133,7 +147,7 @@ function harness(): Harness {
          liveGenerationMs = 200; liveDecodeTokens = 5; liveRoundStartedAt = 123;
          updateStatusBar();
        }, snapshot })
-  `, { initialUsage: { ...liveUsage }, TextEncoder, TextDecoder, performance: { now: () => 42 },
+  `, { initialUsage: { ...liveUsage }, TextEncoder, TextDecoder, performance: { now: () => 42 }, t: englishT,
     queueRead: (read: Read) => reads.push(read), recordPaint: (value: Snapshot) => paints.push(normalized(value)),
   }, { timeout: 1000 }) as Omit<Harness, 'reads' | 'paints'>
   return { ...h, snapshot: () => normalized(h.snapshot()), reads, paints }
