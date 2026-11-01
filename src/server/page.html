@@ -4390,6 +4390,22 @@ const MESSAGES = Object.freeze({
     'trajectory.tick.records': 'records',
     'trajectory.tick.startUnknown': 'start unknown',
     'trajectory.tick.running': 'running',
+    'trajectory.tick.kindSeparator': ', ',
+    'trajectory.kindName.user': 'user',
+    'trajectory.kindName.assistant': 'assistant',
+    'trajectory.kindName.reasoning': 'reasoning',
+    'trajectory.kindName.tool': 'tool',
+    'trajectory.kindName.context': 'context',
+    'trajectory.kindName.system': 'system',
+    'trajectory.kindName.compaction': 'compaction',
+    'trajectory.collapsed': '{count} records — click to expand',
+    'trajectory.record.noOutput': 'no output',
+    'trajectory.attachment.open': 'open {name}',
+    'trajectory.attachment.images.one': '{count} image',
+    'trajectory.attachment.images.other': '{count} images',
+    'trajectory.attachment.files.one': '{count} file',
+    'trajectory.attachment.files.other': '{count} files',
+    'trajectory.readError': 'could not read the ledger: {message}',
     'trajectory.legend.recorded': '{duration} recorded',
     'trajectory.legend.turns': '{count} turn(s)',
     'trajectory.toolbar.duration': 'Duration',
@@ -4923,6 +4939,22 @@ const MESSAGES = Object.freeze({
     'trajectory.tick.records': '记录',
     'trajectory.tick.startUnknown': '开始时间未知',
     'trajectory.tick.running': '运行中',
+    'trajectory.tick.kindSeparator': '、',
+    'trajectory.kindName.user': '用户',
+    'trajectory.kindName.assistant': '助手',
+    'trajectory.kindName.reasoning': '思考',
+    'trajectory.kindName.tool': '工具',
+    'trajectory.kindName.context': '上下文',
+    'trajectory.kindName.system': '系统',
+    'trajectory.kindName.compaction': '已压缩',
+    'trajectory.collapsed': '{count} 条记录 — 点击展开',
+    'trajectory.record.noOutput': '无输出',
+    'trajectory.attachment.open': '打开 {name}',
+    'trajectory.attachment.images.one': '图片 ×{count}',
+    'trajectory.attachment.images.other': '图片 ×{count}',
+    'trajectory.attachment.files.one': '文件 ×{count}',
+    'trajectory.attachment.files.other': '文件 ×{count}',
+    'trajectory.readError': '无法读取轨迹：{message}',
     'trajectory.legend.recorded': '已记录 {duration}',
     'trajectory.legend.turns': '{count} 轮',
     'trajectory.toolbar.duration': '时长',
@@ -7403,7 +7435,7 @@ async function showLedger(id) {
     if (ticket !== ledgerFetches) return
     const note = document.createElement('div')
     note.className = 'turn denied'
-    note.textContent = 'could not read the ledger: ' + (error && error.message)
+    note.textContent = t('trajectory.readError', { message: error && error.message })
     ledger.append(note)
   }
 }
@@ -7650,11 +7682,13 @@ function earlierWindowStart(rows, start, size) {
  * A user record's attachment counts, as DSH's row shows them beside the text: the nonzero image and file counts, or ''
  * when it carried none (S151). Pure, and fenced so test/page-ledger-attachments.test.ts judges it.
  */
-function attachmentCounts(attachments) {
+function attachmentCounts(attachments, words = (key, vars) => vars.count + ({ 'trajectory.attachment.images.one': ' image', 'trajectory.attachment.images.other': ' images', 'trajectory.attachment.files.one': ' file', 'trajectory.attachment.files.other': ' files' })[key]) {
+  /** `words` is the page's t() (#80), which the page passes; without it, as the unit test calls it, the English. */
   const list = Array.isArray(attachments) ? attachments : []
   const images = list.filter((item) => item?.kind === 'image').length
   const files = list.filter((item) => item?.kind === 'file').length
-  return [images > 0 ? images + (images === 1 ? ' image' : ' images') : '', files > 0 ? files + (files === 1 ? ' file' : ' files') : '']
+  const count = (kind, n) => words(`trajectory.attachment.${kind}.${n === 1 ? 'one' : 'other'}`, { count: n })
+  return [images > 0 ? count('images', images) : '', files > 0 ? count('files', files) : '']
     .filter(Boolean)
     .join(' · ')
 }
@@ -7881,7 +7915,7 @@ function rowNode(row, index) {
   if (collapsed) {
     const summary = document.createElement('span')
     summary.className = 'tr-text'
-    summary.textContent = '▸ ' + (trajectory.counts.get(row.turn) ?? 0) + ' records — click to expand'
+    summary.textContent = '▸ ' + t('trajectory.collapsed', { count: trajectory.counts.get(row.turn) ?? 0 })
     content.append(summary)
   } else if (row.kind === 'tool') {
     content.append(toolRowNode(record))
@@ -7891,7 +7925,7 @@ function rowNode(row, index) {
     text.textContent = (toolCallOnly(record) ? t('trajectory.toolCallOnly') : row.preview ?? previewOf(record)) + (record.inFlight === true ? t('trajectory.runningSuffix') : '')
     content.append(text)
     /** A user record counts what it carried beside its text, as DSH's does, an attachment-only record included. */
-    const counts = attachmentCounts(record.attachments)
+    const counts = attachmentCounts(record.attachments, t)
     if (counts !== '') {
       const badge = document.createElement('span')
       badge.className = 'tr-attach-count'
@@ -7941,7 +7975,7 @@ function toolRowNode(record) {
   const result = document.createElement('span')
   result.className = 'tr-result'
   const out = String(record.result ?? '')
-  result.textContent = out === '' ? 'no output' : out.split('\n')[0] ?? ''
+  result.textContent = out === '' ? t('trajectory.record.noOutput') : out.split('\n')[0] ?? ''
   if (out === '') result.classList.add('tr-no-output')
   /** The arrow rides in the result cell: as a third grid item it wrapped the row onto a second line. */
   const answer = document.createElement('span')
@@ -8077,7 +8111,7 @@ function attachmentList(attachments) {
       const open = document.createElement('button')
       open.type = 'button'
       open.className = 'tr-attach-thumb'
-      open.setAttribute('aria-label', 'open ' + words.name)
+      open.setAttribute('aria-label', t('trajectory.attachment.open', { name: words.name }))
       const picture = document.createElement('img')
       picture.src = url
       picture.alt = words.name
@@ -8201,9 +8235,18 @@ function timelineDuration(lasted) {
  * because DSH's overview invents no elapsed time for work in flight. Positions are fractions of the timeline's domain,
  * which starts at `startsAtMs` and lasts `totalMs`. Pure, and fenced so test/page-timeline-tip.test.ts judges it.
  */
-function timelineTickText(span, totalMs, startsAtMs, words = (key, vars) => ({ 'trajectory.tick.turn': 'turn ' + vars.turn, 'trajectory.tick.records': 'records', 'trajectory.tick.startUnknown': 'start unknown', 'trajectory.tick.running': 'running' })[key]) {
-  /** `words` is the page's t() (#80), which the page passes; without it, as the unit test calls it, the English. */
-  const label = words('trajectory.tick.turn', { turn: span.turn }) + ' · ' + ((span.kinds ?? []).join(', ') || words('trajectory.tick.records', {}))
+function timelineTickText(span, totalMs, startsAtMs, words = (key, vars) => (key.startsWith('trajectory.kindName.') ? key.slice('trajectory.kindName.'.length) : ({ 'trajectory.tick.turn': 'turn ' + vars.turn, 'trajectory.tick.records': 'records', 'trajectory.tick.startUnknown': 'start unknown', 'trajectory.tick.running': 'running', 'trajectory.tick.kindSeparator': ', ' })[key])) {
+  /**
+   * `words` is the page's t() (#80), which the page passes; without it, as the unit test calls it, the English. A kind
+   * is named in the page language (`trajectory.kindName.*`, the English its own name); one the page does not know is
+   * shown as recorded.
+   */
+  const kindName = (kind) => {
+    const key = 'trajectory.kindName.' + kind
+    const named = words(key, {})
+    return typeof named === 'string' && named !== key ? named : String(kind)
+  }
+  const label = words('trajectory.tick.turn', { turn: span.turn }) + ' · ' + ((span.kinds ?? []).map(kindName).join(words('trajectory.tick.kindSeparator', {})) || words('trajectory.tick.records', {}))
   const lasted = Math.max(0, (span.end - span.start) * totalMs)
   const duration = timelineDuration(lasted)
   let clock = null
