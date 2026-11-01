@@ -120,6 +120,19 @@ HEDDLE_BIN=/path/to/pinned/heddle node _tools_/verify-runner/run.mjs _verifiers_
 The folder's existing `check*.mjs` entry-point discovery includes this check automatically.
 This entry describes authored coverage, not execution evidence; a parent-run result is required.
 
+## HTML base policy regression
+
+The HTML check in [`check.mjs`](check.mjs) uses a **headless browser** and reads its actual recorded console
+for `base-uri` violations. It verifies that source base elements are sanitized, no base is injected, the
+`base-uri 'none'` policy and script/form/frame/sandbox restrictions remain intact, and quoted image and
+linked stylesheet resources still load via the authenticated raw route. Relative CSS `url()`/`@import`
+dependencies remain unsupported; this check does not claim full CSS dependency parity or URL isolation.
+
+```bash
+_tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
+HEDDLE_BIN=/path/to/heddle _tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
+```
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.
