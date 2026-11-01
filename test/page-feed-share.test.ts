@@ -490,7 +490,11 @@ function runTurnHarness(answer: string) {
     const runningSessions = new Set(['S']), runningSince = new Map();
     const log = { append() {} };
     function updateStatusBar() {}
-    function selectionForTurn() { return {} }
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    const endpointOptions = [], endpointDefault = null, unavailableSession = null;
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set();
+    ${source('selectionForSeat')}
+    ${source('selectionForTurn')}
     async function refreshSessionStats() {}
     function add(kind, text) { calls.push(kind + ':' + text) }
     function lastTurnRow() { return null }

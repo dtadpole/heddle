@@ -30,7 +30,7 @@ function harness(deferredCommands = false) {
   const context = {
     rows, calls, slashReady, performance, TextDecoder,
     fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
-    events: { addEventListener: (_name: string, fn: typeof handle) => { handle = fn } },
+    events: { addEventListener: (_name: string, fn: typeof handle) => { handle = fn }, whenOpen: async () => {} },
     document: { getElementById: () => branch, createElement: (): Row => ({ className: '', textContent: '', dataset: {}, setAttribute: noop }) },
     log: { replaceChildren: () => { rows.length = 0; calls.push('clear') }, append: (row: Row) => rows.push(row) },
     add: (kind: string, text: string) => { rows.push({ className: kind, textContent: text, dataset: {}, setAttribute: noop }) },
@@ -52,7 +52,7 @@ function harness(deferredCommands = false) {
     markBranchable: (seq: number) => calls.push(`branch:${seq}`), renderSettledAnswers: async () => { calls.push('answers') },
     attachEditedFiles: async () => { calls.push('files') }, settleReasoning: noop,
     addUsage: (_old: unknown, usage: unknown) => usage, messageContentText: () => 'user', contentAttachments: () => [],
-    sendTurn: async () => ({ ok: true, body: { getReader: () => ({ read: async () => ({ done: true }) }) } }),
+    sendTurn: async () => ({ ok: true, headers: { get: () => 'text/event-stream' }, body: { getReader: () => ({ read: async () => ({ done: true }) }) } }),
     newConversationTarget: () => ({ path: 'workspace' }), selectionForTurn: () => ({}),
     fetchSessionAccess: async () => { calls.push('fetch-access') }, stopTurn: async () => {},
   }
@@ -190,7 +190,7 @@ for (const unavailable of [false, true]) {
     const state = harness()
     let release!: (value: { value: Uint8Array; done: boolean }) => void
     let reads = 0
-    state.context.sendTurn = async () => ({ ok: true, body: { getReader: () => ({ read: async () => {
+    state.context.sendTurn = async () => ({ ok: true, headers: { get: () => 'text/event-stream' }, body: { getReader: () => ({ read: async () => {
       if (reads++ > 0) return { done: true }
       return await new Promise((resolve) => { release = resolve })
     } }) } }) as Awaited<ReturnType<typeof state.context.sendTurn>>

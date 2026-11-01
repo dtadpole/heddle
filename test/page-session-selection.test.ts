@@ -69,6 +69,7 @@ function harness() {
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map(), recordedSelections = new Set();
     const pendingSaves = new Set(), QUEUE_KEY_NONE = '', sends = [];
     const performance = { now: () => 0 };
+    const events = { whenOpen: async () => {} };
     function selectionForTurn() { return { endpoint: chosenEndpoint, model: chosenModel } }
     async function sendTurn(body) { sends.push(body); return { ok: false, status: 400, text: async () => 'stop here' } }
     function setNote() {}

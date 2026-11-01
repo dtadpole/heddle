@@ -83,6 +83,7 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
     const QUEUE_KEY_NONE = '';
     let activeFolder = null;
     const firstTreeReady = Promise.resolve(), workspaceRoutes = 'absent';
+    const events = { whenOpen: async () => {} };
     function newConversationTarget() { return null }
     const modelTrigger = { setAttribute() {} };
     const modelSpinner = { hidden: true };
