@@ -159,6 +159,32 @@ test('the question card speaks the interface language around the model\'s own wo
       submit: document.getElementById('question-submit').textContent,
     })`)
     assert.deepEqual(words, { prev: '上一题', next: '下一题', choices: '选项', placeholder: '输入其他答案', custom: '你的答案', skip: '跳过', submit: '提交' })
+    // A language change with the card open keeps the model's header and redraws the page's words (developer-ten M1, N1).
+    await browser.evaluate(`(() => { document.getElementById('settings-open').click(); return true })()`)
+    await browser.waitFor(`document.getElementById('settings-dialog').open === true`, 10_000)
+    await browser.evaluate(`(() => {
+      const select = document.getElementById('settings-language')
+      select.value = 'en'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      document.getElementById('settings-dialog').close()
+      return true
+    })()`)
+    await browser.waitFor(`document.documentElement.getAttribute('lang') === 'en'`, 5_000)
+    const english = await cardState(browser)
+    assert.equal(english.title, 'Pick', 'the model\'s header survives a language change')
+    assert.equal(english.position, '1 of 2', 'and the pager follows the new language')
+    assert.equal(await browser.evaluate(`document.getElementById('question-submit').textContent`), 'Submit')
+    await browser.evaluate(`(() => { document.getElementById('settings-open').click(); return true })()`)
+    await browser.waitFor(`document.getElementById('settings-dialog').open === true`, 10_000)
+    await browser.evaluate(`(() => {
+      const select = document.getElementById('settings-language')
+      select.value = 'zh'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      document.getElementById('settings-dialog').close()
+      return true
+    })()`)
+    await browser.waitFor(`document.documentElement.getAttribute('lang') === 'zh-CN'`, 5_000)
+    assert.deepEqual([(await cardState(browser)).title, (await cardState(browser)).position], ['Pick', '1 / 2'], 'and back in Chinese')
     await click(browser, '#question-options .q-option[data-label="Red"]')
     assert.equal((await cardState(browser)).position, '2 / 2', 'a choice moves on')
     // The second question has no header, so the card names it in the page language.
