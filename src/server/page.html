@@ -7825,6 +7825,24 @@ let sessionFolder = null
  * late was appended under the newer session too. So every step after an await first checks that this is still the
  * latest open (`showGeneration`).
  */
+/**
+ * Whether this page is being left (a reload, a link): set at `beforeunload` and `pagehide`, before the navigation stops the
+ * page's requests, and cleared at `pageshow` or after a while (a navigation that turned into a download leaves the page
+ * where it was). A history read that fails then failed because the page is leaving, and failHistory writes no empty
+ * selection for it. A property of the page's global, so the functions the unit tests lift read it unbound.
+ */
+for (const name of ['beforeunload', 'pagehide']) {
+  window.addEventListener(name, () => {
+    globalThis.heddlePageLeaving = true
+    setTimeout(() => {
+      globalThis.heddlePageLeaving = false
+    }, 10_000)
+  })
+}
+window.addEventListener('pageshow', () => {
+  globalThis.heddlePageLeaving = false
+})
+
 async function showSession(id) {
   const generation = ++showGeneration
   const superseded = () => generation !== showGeneration || current !== id
@@ -7933,8 +7951,18 @@ async function showSession(id) {
     log.append(note)
     paintEmptyState()
     applySessionAccess(null)
-    /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
-    rememberCurrent()
+    /**
+     * And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open
+     * to lock. It is written a task later, while this failure still shows: a page being navigated away (a reload, a
+     * link) stops its requests, and the read rejects while the old page still runs, so an immediate write emptied the
+     * selection of a session that could be read, and the next load restored nothing (check-chat-view's resize test,
+     * reloading twice in quick succession). The old page runs no later task, so only a failure on a page that stays is
+     * written.
+     */
+    setTimeout(() => {
+      if (globalThis.heddlePageLeaving === true) return
+      if (unavailableSession === id && current === null) rememberCurrent()
+    }, 0)
     paintComposerAccess()
     renderComposerState()
     selectedPath = null

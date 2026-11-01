@@ -33,7 +33,7 @@ function harness(deferredCommands = false) {
   const slashReady = deferredCommands ? new Promise((resolve) => { releaseCommands = resolve }) : Promise.resolve(commands)
   const branch = { textContent: 'old branch' }
   const context = {
-    rows, calls, slashReady, performance, TextDecoder,
+    rows, calls, slashReady, performance, TextDecoder, setTimeout,
     fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
     events: { addEventListener: (_name: string, fn: typeof handle) => { handle = fn }, whenOpen: async () => {} },
     document: { getElementById: () => branch, createElement: (): Row => ({ className: '', textContent: '', dataset: {}, setAttribute: noop }) },
@@ -160,6 +160,35 @@ for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as c
     assert.deepEqual(state.rows.map((row) => row.textContent), ['recovered'])
   })
 }
+test('a history read cut off by leaving the page clears no saved selection; a page that stays clears it a task later', { timeout: 5000 }, async () => {
+  /**
+   * check-chat-view's resize test, on the union with 4b2a0552 (and flaky on stack Q): it reloads twice in quick
+   * succession, so the page being left is still reading the restored session's history. Navigating stops its requests,
+   * the read rejects while the old page still runs, and failHistory wrote the empty selection at once (rememberCurrent):
+   * the next load then restored nothing, and `#log .turn` never came. Before failHistory, the catch drew a note and kept
+   * the selection. The empty selection is now written in a later task, which a page being navigated away never runs;
+   * a page that stays still does not keep a failed selection (check-history-read-failure's "failed selection not
+   * persisted"), one task later.
+   */
+  const state = harness(); const loading = state.show('S'); const request = await started(state)
+  const remembered = () => state.calls.filter((call) => call === 'remember').length
+  assert.equal(remembered(), 1, 'the open remembers the session it opens')
+  request.reject(new Error('Failed to fetch'))
+  for (let turn = 0; turn < 50; turn += 1) await Promise.resolve()
+  assert.equal(state.state().unavailable, 'S', 'the failure is drawn at once')
+  assert.equal(remembered(), 1, 'but nothing is written in the task the read failed in, the one a page being left still runs')
+  assert.equal(await loading, false)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(remembered(), 2, 'a page that stays writes the empty selection a task later')
+
+  /** A page that said it is leaving (beforeunload, pagehide) writes none, whenever the read fails. */
+  const leaving = harness(); const reading = leaving.show('S'); const read = await started(leaving)
+  ;(leaving.context as Record<string, unknown>).heddlePageLeaving = true
+  read.reject(new Error('Failed to fetch'))
+  assert.equal(await reading, false)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.equal(leaving.calls.filter((call) => call === 'remember').length, 1, 'only the open\'s own write: the leaving page keeps the saved session')
+})
 test('a command already awaiting its module cannot draw after unavailable history', { timeout: 5000 }, async () => {
   const state = harness(true)
   state.handle({ session: 'S', event: { type: 'command/run' } })
