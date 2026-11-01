@@ -117,6 +117,8 @@ test('all installed provider literals match exact synthetic suffix shapes', () =
     assert.equal(spans[0]!.end, token.length, prefix)
     assert.equal(h.scan(prefix + suffix.slice(0, min - 1)).length, 0, prefix + ' below min')
     assert.equal(h.scan('word_' + token).length, 0, prefix + ' left word boundary')
+    assert.equal(h.scan(prefix + '!'.repeat(min)).length, 0, prefix + ' suffix rejects punctuation')
+    assert.equal(h.scan(token + '!')[0]!.end, token.length, prefix + ' suffix stops at punctuation')
   }
   for (const [prefix, max] of [['AKIA', 16], ['ASIA', 16], ['LTAI', 20], ['AKID', 36]] as const) {
     assert.equal(h.scan(prefix + 'A'.repeat(max)).length, 1)
@@ -147,6 +149,11 @@ test('JWT and address passwords use exact spans and completely mask token-shaped
   const h = harness()
   const jwt = 'eyJ' + 'a'.repeat(8) + '.eyJ' + 'b'.repeat(8) + '.' + 'c'.repeat(8)
   assert.equal(h.scan(jwt)[0]!.data.masked, mask(jwt))
+  for (const malformed of [
+    'eyJ' + 'a'.repeat(7) + '.eyJ' + 'b'.repeat(8) + '.' + 'c'.repeat(8),
+    'eyJ' + 'a'.repeat(8) + '.eyJ' + 'b'.repeat(7) + '.' + 'c'.repeat(8),
+    'eyJ' + 'a'.repeat(8) + '.eyJ' + 'b'.repeat(8) + '.' + 'c'.repeat(7),
+  ]) assert.equal(h.scan(malformed).length, 0, 'each JWT run meets its own minimum')
   const url = 'postgres://user:' + fakeKey + '@host/db'
   const span = h.scan(url)[0]!
   assert.equal(span.start, 'postgres://user:'.length)
@@ -230,12 +237,24 @@ test('the complete shared module parses without global declaration collisions', 
   assert.doesNotThrow(() => new AsyncFunction(page.slice(start, end)))
 })
 
-test('prefix-heavy and long ordinary text progress without broad regex backtracking', () => {
+test('200K no-match and prefix-heavy texts progress, and 200K unfinished PEM masks linearly', () => {
   const h = harness()
-  const plain = ('word_sk-' + 'a'.repeat(30) + ' ').repeat(2000)
+  const ordinary = 'ordinary text '.repeat(15000)
+  const plain = ('word_sk-' + 'a'.repeat(30) + ' ').repeat(5500)
+  assert.ok(ordinary.length >= 200000 && plain.length >= 200000)
+  assert.equal(h.scan(ordinary).length, 0)
   assert.equal(h.scan(plain).length, 0)
-  const tokens = Array.from({ length: 1000 }, () => fakeKey).join(' ')
+  const tokens = Array.from({ length: 6000 }, () => fakeKey).join(' ')
+  assert.ok(tokens.length >= 200000)
   const spans = h.scan(tokens)
-  assert.equal(spans.length, 1000)
+  assert.equal(spans.length, 6000)
   assert.ok(spans.every((span, index) => index === 0 || span.start >= spans[index - 1]!.end))
+  const pem = '-----BEGIN PRIVATE KEY-----\n' + 'a'.repeat(200000)
+  const masked = h.scan(pem)
+  assert.equal(masked.length, 1)
+  assert.equal(masked[0]!.end, pem.length)
+  assert.equal(masked[0]!.data.masked, '-----BEGIN PRIVATE KEY-----\n' + '*'.repeat(200000))
+  const start = performance.now()
+  for (let index = 0; index < 3; index++) { h.scan(ordinary); h.scan(plain); h.scan(tokens); h.scan(pem) }
+  assert.ok(performance.now() - start < 3000, 'bounded scanner handles 200K runs without catastrophic backtracking (generous local budget)')
 })
