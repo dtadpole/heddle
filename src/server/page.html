@@ -7492,13 +7492,22 @@ function renderTimeline(timeline_, data = {}) {
     return viewport === null || viewport === undefined || (Number(tick.dataset.x1) >= viewport.from - 1e-9 && Number(tick.dataset.x0) <= viewport.to + 1e-9)
   }
   const holds = (tick, stop) => stop !== null && tick.dataset.turn === stop.turn && tick.dataset.lane === stop.lane && Number(tick.dataset.rank0) <= stop.rank && stop.rank <= Number(tick.dataset.rank1)
-  /** A stop names a record (turn, lane, rank) and where it was drawn; a bar that holds the last stop's record keeps it. */
+  /**
+   * A stop names a record (turn, lane, rank) and where it was drawn; a bar that holds the last stop's record keeps it,
+   * and gives it a place again when another unit had taken its place away (developer-ten's note on N2).
+   */
   const makeStop = (stop, previous = trajectory.barStop) => {
     for (const tick of wrapper.querySelectorAll('.tr-tick')) tick.tabIndex = tick === stop ? 0 : -1
     const kept = stop !== null && previous !== null && holds(stop, previous)
     trajectory.barStop = stop === null
       ? null
-      : { id: data.id, turn: stop.dataset.turn, lane: stop.dataset.lane, rank: kept ? previous.rank : Number(stop.dataset.rank0), x0: kept ? previous.x0 : Number(stop.dataset.x0) }
+      : {
+          id: data.id,
+          turn: stop.dataset.turn,
+          lane: stop.dataset.lane,
+          rank: kept ? previous.rank : Number(stop.dataset.rank0),
+          x0: kept && Number.isFinite(previous.x0) ? previous.x0 : Number(stop.dataset.x0),
+        }
   }
   /**
    * The bars for the viewport (developer-ten's zoom N6): merged at the width they are drawn at, the track's over the
