@@ -1,6 +1,6 @@
 // A turn that names no reasoning effort runs at its model's declared default (#157), as DSH's dsh-llm
 // resolveCallWithInfo resolves `requested ?? reasoning.defaultEffort`: the provider receives that level's value and the
-// session's model/request record names it (the resolved request also carries reasoningEffortDefault). A model that declares levels but
+// session's model/request record names it, marked reasoningEffortDefault as DSH marks adapterDefaults. A model that declares levels but
 // no default sends nothing (the provider's own default). Runs against whichever harness HEDDLE_BIN names, or the
 // TypeScript build; a local OpenAI-compatible double stands in for the provider.
 import assert from 'node:assert/strict'
@@ -74,7 +74,7 @@ async function modelRequests(server, session) {
   return text.split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.type === 'model/request')
 }
 
-test('a turn that names no effort runs at the model\'s declared default, and its record names that level', async (context) => {
+test('a turn that names no effort runs at the model\'s declared default, recorded as that level and marked as a default', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), 'web')) return
   const home = isolatedHome('effort-default')
   const double = await chatDouble({ content: 'ok' })
@@ -123,6 +123,17 @@ test('a turn that names no effort runs at the model\'s declared default, and its
     const records = await modelRequests(server, firstSession)
     assert.ok(records.length >= 1, 'the session recorded its request')
     assert.equal(records[0].reasoningEffort, 'xhigh', 'the record names the effort the call ran at')
+    assert.equal(records[0].reasoningEffortDefault, true, 'marked as the model default, not a person\'s choice')
+    const all = await call(server, 'GET', '/api/sessions')
+    const namedSession = (Array.isArray(all.body) ? all.body : []).map((meta) => meta.id).filter((id) => id !== firstSession)
+    assert.equal(namedSession.length, 2, 'the named and the no-default turns each started a session')
+    for (const id of namedSession) {
+      const own = await modelRequests(server, id)
+      assert.ok(own.length >= 1, `session ${id} recorded its request`)
+      for (const record of own) {
+        assert.equal(record.reasoningEffortDefault, undefined, `a named level or no level is not marked as a default (${JSON.stringify(record).slice(0, 160)})`)
+      }
+    }
   } finally {
     server?.kill()
     await double.close()

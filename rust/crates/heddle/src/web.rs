@@ -508,6 +508,9 @@ fn with_live_rows(
         .services
         .get::<Arc<heddle_config::ModelRowSource>>("model-row")
         .map(|source| (rows_of(crate::builtins::Builtin::Model), source));
+    // The row's default selection (A104) is the model service's own, read once at start; a live write carries it
+    // there too, as the TypeScript build's re-created model plugin does.
+    let model_service = boot.services.get::<Arc<heddle_llm::ModelService>>("model");
     let locale = boot
         .services
         .get::<Arc<heddle_config::LiveLocale>>("locale")
@@ -526,7 +529,17 @@ fn with_live_rows(
             if let Some((ids, source)) = &model
                 && ids.iter().any(|id| id == ns)
             {
-                return source.set_row_config(config);
+                source.set_row_config(config)?;
+                if let Some(service) = &model_service {
+                    let text = |key: &str| {
+                        config
+                            .get(key)
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned)
+                    };
+                    service.set_defaults(text("defaultModel"), text("defaultEffort"));
+                }
+                return Ok(());
             }
             if let Some((ids, live)) = &locale
                 && ids.iter().any(|id| id == ns)
@@ -656,7 +669,14 @@ impl heddle_web_composer::status::StatusHost for Composer {
 impl heddle_web_composer::model_switcher::ModelHost for Composer {
     fn describe_endpoints(&self) -> heddle_web_composer::model_switcher::EndpointListing {
         let nominated = self.nominated.clone().or_else(|| self.models.nominated());
-        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref());
+        // The default selection rides along, so a composer opening a fresh session shows and sends it (A104).
+        let selection = self.models.default_selection();
+        let view = heddle_config::describe_endpoints(&self.models.list(), nominated.as_deref())
+            .with_selection(
+                selection.endpoint.as_deref(),
+                selection.model,
+                selection.reasoning_effort,
+            );
         heddle_web_composer::model_switcher::EndpointListing {
             endpoints: view
                 .endpoints
@@ -664,6 +684,8 @@ impl heddle_web_composer::model_switcher::ModelHost for Composer {
                 .filter_map(|endpoint| endpoint.as_object().cloned())
                 .collect(),
             default: view.default,
+            default_model: view.default_model,
+            default_effort: view.default_effort,
         }
     }
 
@@ -874,6 +896,10 @@ impl heddle_web_files::host::FilesHost for PageHost {
             Ok(reading) => serde_json::to_value(reading)
                 .and_then(serde_json::from_value)
                 .map_err(|error| FileReadError::NotText(error.to_string())),
+            Err(heddle_workspace::FileReadError::Unreadable { name }) => {
+                Err(FileReadError::Unreadable { name })
+            }
+            Err(heddle_workspace::FileReadError::ReadFailed) => Err(FileReadError::ReadFailed),
             Err(error @ heddle_workspace::FileReadError::NotAFile(_)) => {
                 Err(FileReadError::NotAFile(error.to_string()))
             }
@@ -1204,6 +1230,27 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         && let Some(note) = heddle_team::command::web_start_note(&team).await
     {
         notes.push(note);
+    }
+    // And for background children: a child the previous process left mid-turn is closed and reported to its
+    // parent as interrupted, which the process that ran it can no longer do (#170). The parents' turns run on
+    // this runtime without being awaited here.
+    if let (Some(subagents), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_agent::SubagentService>>("subagents"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        let ids: Vec<String> = sessions
+            .list()
+            .iter()
+            .map(|meta| meta.id().to_owned())
+            .collect();
+        let reported = subagents.report_interrupted(&ids);
+        if reported > 0 {
+            notes.push(format!(
+                "reported {reported} interrupted subagent(s) to their parent(s)"
+            ));
+        }
     }
     // Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule); a
     // committed reminder write reaches the page's subscribers as `event: schedule`.
@@ -2018,6 +2065,15 @@ mod tests {
             env.clone(),
         ));
         boot.services.provide("model-row", Arc::clone(&source));
+        let composed = source.compose().unwrap();
+        let models = Arc::new(
+            heddle_llm::ModelService::from_configuration(
+                composed.endpoints,
+                composed.nominated.as_deref(),
+            )
+            .unwrap(),
+        );
+        boot.services.provide("model", Arc::clone(&models));
         let locale = Arc::new(heddle_config::LiveLocale::default());
         boot.services.provide("locale", Arc::clone(&locale));
         let catalog = crate::builtins::BuiltinCatalog::new(env.clone(), root.clone());
@@ -2036,12 +2092,23 @@ mod tests {
         assert_eq!(applies("model").as_deref(), Some("live"));
         assert_eq!(applies("tools").as_deref(), Some("restart"));
         assert_eq!(source.compose().unwrap().nominated.as_deref(), Some("one"));
+        assert_eq!(
+            models.default_selection().model,
+            None,
+            "no default model is configured yet"
+        );
         let mut fields = serde_json::Map::new();
         fields.insert("default".to_owned(), serde_json::json!("two"));
+        fields.insert("defaultModel".to_owned(), serde_json::json!("m"));
         let entry = service
             .write("model", &heddle_config::SettingsWrite::Update(fields), None)
             .unwrap();
         assert_eq!(entry.apply_error, None);
+        assert_eq!(
+            models.default_selection().model.as_deref(),
+            Some("m"),
+            "the written default model is the next new session's, with no restart (A104)"
+        );
         let changed = source
             .changed()
             .expect("the write reached the source")
