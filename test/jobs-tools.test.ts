@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -252,20 +252,71 @@ test('echo x; exit 3 settles completed with exit code 3, and job_output renders 
 
 test('job_output reads only new output, and wait with a short timeout leaves the job running', async () => {
   const h = harness()
-  const id = jobIdOf((await h.call('bash', { command: 'echo one; sleep 0.3; echo two; sleep 30', run_in_background: true })).output)
-  await new Promise((resolve) => setTimeout(resolve, 150))
-  const first = await h.call('job_output', { job_id: id })
-  assert.equal(first.output, 'one\n[status: running]')
-  await new Promise((resolve) => setTimeout(resolve, 400))
-  const second = await h.call('job_output', { job_id: id })
-  assert.equal(second.output, 'two\n[status: running]')
-  const waited = Date.now()
-  const timedOut = await h.call('job_output', { job_id: id, wait: true, timeout_ms: 100 })
-  assert.ok(Date.now() - waited >= 90)
-  assert.equal(timedOut.output, '(no new output)\n[status: running]')
-  assert.equal(h.jobs.get(id, h.a.id).status, 'running')
-  h.jobs.kill(id, h.a.id)
-  await settled(h.events, id)
+  const fixture = join(h.workspace, 'output-handshake.cjs')
+  const release = join(h.workspace, 'release-two')
+  // Install the watcher before acknowledging readiness; keep it alive after the second write.
+  writeFileSync(fixture, `
+    const { existsSync, watch } = require('node:fs')
+    let released = false
+    const watcher = watch('.', (_event, filename) => {
+      if (!released && String(filename) === 'release-two' && existsSync('release-two')) {
+        released = true
+        process.stdout.write('two\\n')
+      }
+    })
+    process.stdout.write('one\\n')
+  `)
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
+  try {
+    const result = await h.call('bash', { command: `exec ${quote(process.execPath)} ${quote(fixture)}`, run_in_background: true })
+    assert.equal(result.error, undefined)
+    const id = jobIdOf(result.output)
+    // Observe real producer output without moving the model's consuming cursor. Subscribe before rechecking.
+    const outputAtLeast = (total: number) => new Promise<void>((resolve, reject) => {
+      let unsubscribe: () => void = () => undefined
+      const finish = (error?: Error) => {
+        unsubscribe()
+        clearTimeout(timer)
+        if (error === undefined) resolve()
+        else reject(error)
+      }
+      const timer = setTimeout(() => finish(new Error(`job ${id} did not reach ${total} output bytes within 10s`)), 10_000)
+      const check = () => {
+        try {
+          const job = h.jobs.get(id, h.a.id)
+          if (job.output.total >= total) finish()
+          else if (job.status !== 'running') finish(new Error(`job ${id} ended before ${total} output bytes: ${job.status}`))
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)))
+        }
+      }
+      unsubscribe = h.jobs.subscribe((event) => {
+        if ((event.type === 'output' && event.id === id) || (event.type === 'settled' && event.job.id === id)) check()
+      })
+      check()
+    })
+    await outputAtLeast(4)
+    const first = await h.call('job_output', { job_id: id })
+    assert.equal(first.output, 'one\n[status: running]')
+    writeFileSync(release, '')
+    await outputAtLeast(8)
+    const second = await h.call('job_output', { job_id: id })
+    assert.equal(second.output, 'two\n[status: running]')
+    const waited = Date.now()
+    const timedOut = await h.call('job_output', { job_id: id, wait: true, timeout_ms: 100 })
+    assert.ok(Date.now() - waited >= 90)
+    assert.equal(timedOut.output, '(no new output)\n[status: running]')
+    assert.equal(h.jobs.get(id, h.a.id).status, 'running')
+  } finally {
+    try {
+      for (const job of h.jobs.list(h.a.id)) {
+        h.jobs.kill(job.id, h.a.id)
+        await settled(h.events, job.id)
+      }
+    } finally {
+      h.detach()
+    }
+  }
 })
 
 test('job_output with wait collects the settle, which is then awaited', async () => {
