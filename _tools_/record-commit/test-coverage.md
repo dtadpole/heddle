@@ -1,9 +1,9 @@
 ---
 title: What the record-commit tests cover
 created: 2026-10-24T05:00:49Z
-modified: 2026-10-26T14:40:22Z
+modified: 2026-11-01T21:12:46Z
 level: L2
-version: 1.0.0
+version: 1.1.0
 description: The cases the record-commit unit suite exercises, and one dry run against a scratch clone of the real record.
 status: unverified
 grounded_in:
@@ -22,6 +22,16 @@ a staging tree with `--base`, nothing-to-commit, a dry run that commits nothing,
 on a given file rebuilt from a fresh origin and refused, a commit that cannot sync exiting 3, argument and path checks,
 the read-back verifier's failure modes, and the validator python (the repository's `.venv` first, else a
 `python3` with PyYAML, named in the report).
+
+## A protected main
+
+Eleven more tests use a fake origin whose update hook refuses main with GH006. They cover telling that refusal from a
+race, and finding the seat in a roster. A first park creates `records/<seat>` on main and exits 0 with the line. A
+second park appends and carries only its own log lines. A rerun pushes nothing new, and a branch main already contains
+is fast-forwarded. They also cover the seat taken from `$DSH_SESSION_ID`, no seat refused with nothing pushed, a
+rejection that is not protection never parked, and a branch moved mid-park rebuilt on. Eight mutants of the new
+code were each caught. One more test checks that a refusal shows the remote's reasons and the porcelain `!` line,
+not only git's last line.
 
 ## A dry run against the real record
 
