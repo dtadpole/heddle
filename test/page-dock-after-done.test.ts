@@ -99,6 +99,12 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
     function chooseWorkspace() {}
     function adoptSession(id) { composerKey = id }
     function adoptLooseQueue() {}
+    /** #142: the page holds the stream's events for its own first turn while nothing is open (looseTurnEvents). */
+    let looseTurnEvents = null
+    const LOOSE_EVENTS_LIMIT = 2000
+    ${optional('holdLooseTurn')}
+    ${optional('holdLooseEvent')}
+    ${optional('adoptLooseEvents')}
     async function fetchSessionAccess() {}
     async function stopTurn() {}
     async function showSession(id) { current = id; return true }

@@ -247,8 +247,10 @@ test('after a failed load the live stream draws only that session, and a reset r
   assert.ok(handlerAt > 0, 'the page follows the session stream')
   const handler = page.slice(handlerAt, page.indexOf('\n})\n', handlerAt))
   assert.match(handler, /const shown = current \?\? unavailableSession/, 'the handler reads the shown session, a failed one included')
-  assert.equal([...handler.matchAll(/if \(shown === null \|\| payload\.session === shown\) \{/g)].length, 2, 'a turn failure and a turn end draw only for it')
-  assert.match(handler, /if \(shown && payload\.session !== shown\) return/, 'and every other event of another session stops there')
+  assert.equal([...handler.matchAll(/if \(shown !== null && payload\.session === shown\) \{/g)].length, 2, 'a turn failure and a turn end draw only for it')
+  assert.match(handler, /if \(payload\.session !== shown\) return/, 'and every other event of another session stops there')
+  /** With nothing shown, no other session's turn draws either: only this page's own first turn, held (#142). */
+  assert.match(handler, /if \(shown === null\) \{\s*holdLooseEvent\(payload\)\s*return\s*\}/, 'and with nothing shown, an event is only held for this page\'s own first turn')
   assert.doesNotMatch(handler, /current === null \|\| payload\.session === current|if \(current && payload\.session !== current\)/, 'no filter is left on current alone')
   const resetAt = page.indexOf("events.addEventListener('reset', () => {")
   assert.ok(resetAt > 0, 'the page follows the stream reset')
