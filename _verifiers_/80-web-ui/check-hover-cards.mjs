@@ -423,27 +423,70 @@ test("a session card says every status DSH's does: Waiting for answer, Plan awai
     const drawn = [parent, questioned, reviewed, finishing].map((handle) => `document.querySelector(${JSON.stringify(sessionRow(handle.id))}) !== null`).join(' && ')
     await browser.waitFor(drawn, 15_000)
 
-    /** The fourth session's turn runs and ends with no session open on the page: its completion is unread, a done dot. */
+    /**
+     * The fourth session's turn runs and ends with no session open on the page: its completion is unread, a done dot. Its
+     * prompt makes it the newest row, so the tree redraws in a new order 400 ms after the turn's last event
+     * (`scheduleTreeRefresh`); the order is waited for, and then a moment more, so no row moves under the pointer later.
+     * The first version read a row's place before that redraw, and the pointer then rested on the row that took the place:
+     * a card for another session (the read said `null`), on every build.
+     */
     const turn = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'one more thing', folder: work, session: finishing.id }) })
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
-    await browser.waitFor(`document.querySelector(${JSON.stringify(`${sessionRow(finishing.id)} > .status-dot[data-state="done"]`)}) !== null`, 15_000)
+    const order = `JSON.stringify([...document.querySelectorAll('#tree li[data-kind="session"]')].map((li) => li.dataset.sessionId))`
+    try {
+      await browser.waitFor(
+        `(() => { const first = document.querySelector('#tree li[data-kind="session"]'); return first?.dataset.sessionId === ${JSON.stringify(finishing.id)} && first.querySelector(':scope > .row > .status-dot[data-state="done"]') !== null })()`,
+        15_000,
+      )
+    } catch {
+      assert.fail(`the finished session is the newest row, with a done dot\nrows: ${await browser.evaluate(order)}`)
+    }
+    await sleep(1_000)
+    const settled = JSON.parse(await browser.evaluate(order))
+    assert.equal(settled[0], finishing.id, `the rows have settled with the finished session first\nrows: ${JSON.stringify(settled)}`)
+    assert.deepEqual([...settled].sort(), [finishing.id, reviewed.id, questioned.id, parent.id].sort(), `and they are the four conversations; the child is hidden\nrows: ${JSON.stringify(settled)}`)
 
+    /** Test 1's hover: the pointer away from the list, onto the row, the dwell, then the card — here also told which row it is for. */
     const move = (x, y) => browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' })
-    const box = async (selector) =>
-      JSON.parse(await browser.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return JSON.stringify({ x: Math.round(r.left + Math.min(40, r.width / 2)), y: Math.round(r.top + r.height / 2) }) })()`))
-    const statuses = `(() => { const card = document.querySelector('.hover-card'); return card === null || card.hidden || card.dataset.hoverKey !== KEY ? null : JSON.stringify([...card.querySelectorAll('.hover-status')].map((line) => [line.querySelector('.hover-dot')?.dataset.state ?? null, line.textContent])) })()`
+    const shownCard = `(() => { const card = document.querySelector('.hover-card'); return card === null || card.hidden ? null : JSON.stringify({ key: card.dataset.hoverKey ?? null, statuses: [...card.querySelectorAll('.hover-status')].map((line) => [line.querySelector('.hover-dot')?.dataset.state ?? null, line.textContent]) }) })()`
+    /** Where the pointer goes on a row (test 1's point), whether the row is on screen, and which session row is really there. */
+    const aim = async (handle) =>
+      JSON.parse(
+        await browser.evaluate(`(() => {
+          const row = document.querySelector(${JSON.stringify(sessionRow(handle.id))})
+          if (row === null) return JSON.stringify({ drawn: false })
+          const r = row.getBoundingClientRect()
+          const x = Math.round(r.left + Math.min(40, r.width / 2))
+          const y = Math.round(r.top + r.height / 2)
+          const hit = document.elementFromPoint(x, y)
+          return JSON.stringify({ drawn: true, x, y, visible: r.width > 0 && r.height > 0 && y > 0 && y < innerHeight && x > 0 && x < innerWidth, under: hit?.closest('li[data-kind="session"]')?.dataset.sessionId ?? null })
+        })()`),
+      )
     const cardOf = async (handle, expected, what) => {
-      const at = await box(sessionRow(handle.id))
-      await move(at.x, at.y)
-      const probe = statuses.replace('KEY', JSON.stringify(`session:${handle.id}`))
-      try {
-        await browser.waitFor(`${probe} === ${JSON.stringify(JSON.stringify(expected))}`, 5_000)
-      } catch {
-        assert.fail(`${what}\nsaw: ${await browser.evaluate(probe)}`)
+      const want = JSON.stringify({ key: `session:${handle.id}`, statuses: expected })
+      let seen = null
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await move(1100, 700)
+        await browser.waitFor(`${shownCard} === null`, 3_000).catch(() => false)
+        const at = await aim(handle)
+        assert.equal(at.drawn, true, `${what}: the row is drawn\nrows: ${await browser.evaluate(order)}`)
+        assert.equal(at.visible, true, `${what}: the row is on screen\nsaw: ${JSON.stringify(at)}`)
+        if (at.under !== handle.id) {
+          seen = { pointerWouldRestOn: at.under }
+          await sleep(500)
+          continue
+        }
+        await move(at.x, at.y)
+        try {
+          await browser.waitFor(`${shownCard} === ${JSON.stringify(want)}`, 5_000)
+          return
+        } catch {
+          seen = JSON.parse((await browser.evaluate(shownCard)) ?? 'null')
+        }
       }
+      assert.fail(`${what}\nwanted: ${want}\nsaw: ${JSON.stringify(seen)}\nrows: ${await browser.evaluate(order)}`)
     }
     /** Each state still holds when its card is read: said by the server just before. */
-    await move(1100, 700)
     await settle(() => waitsOn(questioned, 'color'), 'the question still waits')
     await cardOf(questioned, [['warning', 'Waiting for answer']], 'a session whose question waits says Waiting for answer')
     await settle(() => waitsOn(reviewed, 'plan-review'), 'the plan review still waits')
