@@ -2862,6 +2862,58 @@ test('a turn stopped from the page is marked as stopped where it ended, live', a
   }
 })
 
+test('a turn stopped from a page that did not send it, one reloaded while it ran, is marked as stopped live, as DSH draws a turn\'s end from the session\'s events', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Issue #201, the remaining case of #34. That fix drew the stopped notice from the sending page's own turn stream, its
+   * `cancelled`. A page reloaded while the turn runs re-attaches through the session's event stream only. It showed Stop,
+   * and its Stop ended the turn, but it drew no "Stopped by the caller" until another reload. The turn's recorded
+   * `assistant/completed` carries the reason on the event stream, so the reloaded page must draw it live, once. A reload
+   * after that must read the same.
+   */
+  const server = await startServer('stopped-mark-attached', () => [
+    { toolCall: { name: 'bash', arguments: { command: 'sleep 20; echo slow' } } },
+    { text: 'never reached' },
+  ], { sandboxRoot: true })
+  const browser = await openBrowser()
+  const noticesOf = 'JSON.stringify([...document.querySelectorAll("#log .turn-notice")].map((notice) => notice.textContent))'
+  const openSession = async (session) => {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    return browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`)
+  }
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    assert.equal(await openSession(session), true, 'the session opens')
+    await sendMessage(browser, 'run the slow command')
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.tool") !== null', 20_000), 'the slow call starts')
+
+    /** The page that sent the turn goes away; the reloaded page has no turn stream of its own. */
+    assert.equal(await openSession(session), true, 'the reloaded page opens the running session')
+    assert.ok(await browser.waitFor('document.getElementById("stop").hidden === false', 10_000), 'the reloaded page shows the turn running, with Stop')
+    await browser.evaluate('document.getElementById("stop").click()')
+    assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 10_000), 'its Stop ends the turn')
+    const marked = await browser.waitFor(`${noticesOf} !== "[]"`, 5_000).catch(() => false)
+    const live = JSON.parse(await browser.evaluate(noticesOf))
+    assert.ok(marked, `the reloaded page marks the stopped turn without another reload (${JSON.stringify(live)})`)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    assert.deepEqual(JSON.parse(await browser.evaluate(noticesOf)), ['Stopped by the caller'], 'once, in the words a reload draws')
+    assert.ok(!(await browser.evaluate('document.getElementById("log").innerText.includes("never reached")')), 'and nothing after the stop was drawn')
+
+    assert.equal(await openSession(session), true, 'the session opens again')
+    assert.ok(await browser.waitFor(`${noticesOf} !== "[]"`, 10_000), 'a reload draws the notice')
+    assert.deepEqual(JSON.parse(await browser.evaluate(noticesOf)), ['Stopped by the caller'], 'and reads the same as the live page did')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
 test('a turn that runs while its session is opening is drawn once, not live and again from history', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
