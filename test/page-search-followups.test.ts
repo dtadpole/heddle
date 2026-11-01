@@ -20,6 +20,18 @@ import { test } from 'node:test'
 
 const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
 
+/** The page's English table (#80): the lifted search code draws its words through t(), as the page does. */
+const ENGLISH: Record<string, string> = (() => {
+  const start = page.indexOf('  en: Object.freeze({')
+  const table: Record<string, string> = {}
+  if (start < 0) return table
+  const stop = page.indexOf('\n  }),', start)
+  for (const match of page.slice(start, stop).matchAll(/^\s+'([^']+)': '((?:[^'\\]|\\.)*)',$/gm)) table[match[1]!] = match[2]!.replace(/\\'/g, "'")
+  return table
+})()
+const englishT = (key: string, vars: Record<string, unknown> = {}): string =>
+  Object.entries(vars).reduce((text, [name, value]) => text.split('{' + name + '}').join(String(value)), ENGLISH[key] ?? key)
+
 /** A top-level function of the page: from its `function` line to the first line that is a lone `}`. */
 function source(name: string): string {
   const start = page.search(new RegExp(`\\n(?:async )?function ${name}\\(`))
@@ -164,10 +176,11 @@ function searchPage(fetch: (url: string) => Promise<Reply>, noted: Meta[][]) {
     noteSessions: (list: Meta[]) => noted.push(list),
     setTimeout: (callback: () => void) => timers.push(callback),
     clearTimeout: () => undefined,
+    t: englishT,
   }
   const run = new Function(
     'env',
-    `const { document, fetch, treeList, noteSessions, setTimeout, clearTimeout } = env
+    `const { document, fetch, treeList, noteSessions, setTimeout, clearTimeout, t } = env
     ${pure}
     let archiveMode = 'hide'
     let groupingMode = 'tree'
