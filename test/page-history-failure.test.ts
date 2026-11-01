@@ -46,7 +46,7 @@ function harness(deferredCommands = false) {
     paintRunningMarks: noop, jobsSessionChanged: noop, applySessionAccess: noop,
     adoptSession: () => calls.push('adopt'), refreshSessions: async () => {}, syncSelectionToSession: noop,
     showLedger: async () => {}, paintSessionHeading: () => calls.push('heading'), renderTree: async () => {},
-    markSelection: noop, paintScheduleHeader: noop,
+    markSelection: noop, paintScheduleHeader: noop, renderModelSeat: noop,
     rememberChatScroll: noop, restoreChatScroll: () => calls.push('scroll'), refreshGoal: async () => {}, refreshTodo: async () => {},
     renderScheduleCards: () => calls.push('cards'), renderScheduleDrawer: noop,
     refreshScheduleList: async () => {}, refreshScheduleCatalog: async () => {},
@@ -69,6 +69,7 @@ function harness(deferredCommands = false) {
     const liveTurns = new Map();
     let sessionLoading = null, composerKey = 'S', accessMode;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    let defaultSelection = { model: 'default-model', effort: 'low' };
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map();
     const recordedSelections = new Set(), pendingSaves = new Set();
     function selectionForTurn() {
@@ -280,3 +281,24 @@ test('successful history still replays only post-snapshot drawing without repeat
   assert.equal(state.calls.filter((call) => call === 'branch:12').length, 1)
   assert.ok(state.calls.includes('answers')); assert.ok(state.calls.includes('scroll'))
 })
+
+for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as const) {
+  test(`a vanished session's draft starts from the default selection, while a read lost in transit keeps the seat: ${failure} (A104)`, { timeout: 5000 }, async () => {
+    const state = harness()
+    const initial = state.show('A'); const history = await started(state)
+    history.resolve({ ok: true, json: async () => ({ endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', turns: [] }) })
+    assert.equal(await initial, true)
+    assert.deepEqual({ ...state.selection() }, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }, 'A\'s seat is shown first')
+    const loading = state.show('B'); const request = await started(state, 2)
+    if (failure === 'HTTP refusal') request.resolve({ ok: false, status: 404, statusText: 'Not Found', json: async () => ({ error: 'no such session' }) })
+    else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
+    else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
+    assert.equal(await loading, false)
+    assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'B', loading: false, selectedPath: null })
+    const expected = failure === 'HTTP refusal'
+      ? { endpoint: null, model: 'default-model', effort: 'low' }
+      : { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }
+    assert.deepEqual({ ...state.selection() }, expected, failure === 'HTTP refusal' ? 'the server said B is gone: the draft starts from the default selection' : 'B could not be read: the seat stays')
+    assert.equal(state.seat('A').held?.model, 'model-A', 'A keeps its own held seat either way')
+  })
+}

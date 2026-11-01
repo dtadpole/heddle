@@ -1740,6 +1740,8 @@ export class SessionStore {
       readonly endpoint: string
       readonly model?: string
       readonly reasoningEffort?: string
+      /** The level is the model's declared default, not a choice (#157; DSH's adapterDefaults.reasoningEffort). */
+      readonly reasoningEffortDefault?: true
       readonly messages: number
       readonly tools: readonly string[]
       readonly estimatedTokens?: number
