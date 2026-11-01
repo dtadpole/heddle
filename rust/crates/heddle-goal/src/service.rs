@@ -264,6 +264,9 @@ pub struct FoldedGoal {
     pub updated_at: Option<String>,
     /// The latest mutation's identity, a clear tombstone included.
     pub last_ref: Option<GoalRef>,
+    /// The current goal came with a fork's seed and was not changed in this session since (issue #166): its last
+    /// `goal/change` is older than the session's own `session/created`, as a seed keeps the source's times.
+    pub inherited_by_fork: bool,
 }
 
 /// One refusal with the code the caller named.
@@ -581,8 +584,16 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
     let mut updated_at: Option<String> = None;
     let mut last_ref: Option<GoalRef> = None;
     let mut seen: std::collections::HashSet<GoalId> = std::collections::HashSet::new();
+    // The session's own birth, and when its goal last changed: a seeded change predates the birth. Both are the
+    // logs' ISO-8601 UTC times, which order as strings.
+    let mut born_at: Option<String> = None;
+    let mut changed_at: Option<String> = None;
 
     for event in events {
+        if born_at.is_none() && event.get("type").and_then(Value::as_str) == Some("session/created")
+        {
+            born_at = event.get("at").and_then(Value::as_str).map(str::to_owned);
+        }
         if let Some((goal_id, revision, round)) = goal_round_of(event) {
             if let Some(current) = &goal
                 && current.id.as_str() == goal_id
@@ -596,6 +607,7 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
         let Some(change) = decode_goal_change(event)? else {
             continue;
         };
+        changed_at = event.get("at").and_then(Value::as_str).map(str::to_owned);
         match change {
             GoalChange::Clear { cleared, .. } => {
                 let Some(current) = &goal else {
@@ -697,12 +709,15 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
         }
     }
 
+    let inherited_by_fork = goal.is_some()
+        && matches!((&changed_at, &born_at), (Some(changed), Some(born)) if changed < born);
     Ok(FoldedGoal {
         goal,
         rounds_started,
         created_at,
         updated_at,
         last_ref,
+        inherited_by_fork,
     })
 }
 
@@ -1037,7 +1052,8 @@ impl GoalService {
             return Err(transition_error(&current, "resume", &resumable));
         }
         if current.phase == GoalPhase::Active
-            && self.activation_of(&session, &current) == GoalActivation::Armed
+            && self.activation_of(&session, &current, folded.inherited_by_fork)
+                == GoalActivation::Armed
         {
             return Err(refused(
                 GoalErrorCode::InvalidTransition,
@@ -1198,13 +1214,21 @@ impl GoalService {
 
     /// The process-local activation, defaulting from the durable phase: an `active` goal is armed again by a
     /// new process, which is the owner's rule that goal pushing survives a restart.
-    fn activation_of(&self, session: &str, goal: &GoalSnapshot) -> GoalActivation {
+    /// A goal a fork brought along stays, with its phase, revisions and round count, but an active one is disarmed
+    /// in the branch until a person resumes it there (issue #166; dsh-goal: an active goal is disarmed after a fork).
+    /// Read from the log, so a restart keeps the branch quiet too.
+    fn activation_of(
+        &self,
+        session: &str,
+        goal: &GoalSnapshot,
+        inherited_by_fork: bool,
+    ) -> GoalActivation {
         self.activation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(session)
             .copied()
-            .unwrap_or(if goal.phase == GoalPhase::Active {
+            .unwrap_or(if goal.phase == GoalPhase::Active && !inherited_by_fork {
                 GoalActivation::Armed
             } else {
                 GoalActivation::Disarmed
@@ -1215,7 +1239,7 @@ impl GoalService {
     fn view_of(&self, session: &str, folded: &FoldedGoal) -> Option<GoalView> {
         let goal = folded.goal.clone()?;
         Some(GoalView {
-            activation: self.activation_of(session, &goal),
+            activation: self.activation_of(session, &goal, folded.inherited_by_fork),
             goal,
             rounds_started: folded.rounds_started,
             created_at: folded.created_at.clone().unwrap_or_default(),
@@ -1477,6 +1501,59 @@ mod tests {
             "a replacement is a new identity"
         );
         assert_eq!(second.goal.revision, 1);
+    }
+
+    /// Issue #166: a fork's seed carries the goal; an inherited active goal reads as disarmed (its last change is
+    /// older than the branch's own `session/created`, also for a fresh service as after a restart) until a person
+    /// resumes it in the branch.
+    #[test]
+    fn a_goal_a_fork_inherited_is_kept_disarmed_until_resumed_there() {
+        let (log, service) = fixture("source");
+        let created = service
+            .create(
+                "source",
+                CreateGoal {
+                    objective: "keep the notes tidy".into(),
+                    max_goal_rounds: Some(9.0),
+                },
+            )
+            .unwrap();
+        assert_eq!(created.activation, GoalActivation::Armed);
+        // The branch: its own birth now, then the source's goal events with their older times, as a seed keeps them.
+        log.create("branch");
+        log.append_raw(
+            "branch",
+            json!({"seq": 0, "at": crate::test_support::FIXED_NOW, "type": "session/created"}),
+        );
+        for mut event in log.events("source") {
+            event["at"] = json!("2000-01-01T00:00:00.000Z");
+            log.append_raw("branch", event);
+        }
+        let inherited = service.get("branch").unwrap().unwrap();
+        assert_eq!(inherited.goal.id, created.goal.id);
+        assert_eq!(inherited.goal.phase, GoalPhase::Active);
+        assert_eq!(inherited.goal.max_goal_rounds, 9);
+        assert_eq!(
+            inherited.activation,
+            GoalActivation::Disarmed,
+            "an inherited goal spends no rounds in the branch on its own"
+        );
+        assert!(fold_goal(&log.events("branch")).unwrap().inherited_by_fork);
+        let restarted = GoalService::new(log.clone(), GoalConfig::default());
+        assert_eq!(
+            restarted.get("branch").unwrap().unwrap().activation,
+            GoalActivation::Disarmed
+        );
+        let resumed = service
+            .resume("branch", &inherited.goal.goal_ref())
+            .unwrap();
+        assert_eq!(resumed.activation, GoalActivation::Armed);
+        let restarted = GoalService::new(log.clone(), GoalConfig::default());
+        assert_eq!(
+            restarted.get("branch").unwrap().unwrap().activation,
+            GoalActivation::Armed,
+            "a resume in the branch is the branch's own, and survives a restart"
+        );
     }
 
     #[test]
