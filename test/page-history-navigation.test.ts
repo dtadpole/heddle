@@ -260,6 +260,39 @@ for (const recovery of ['pageshow', 'expiry'] as const) {
   })
 }
 
+test('D067 generation guard: pageshow cannot clear old pending S before newer failed S zero-delay task', async () => {
+  const state = harness(); const { loading, request } = await state.start()
+  state.navigate('pagehide', true)
+  request.reject(new Error('generation 1 navigation failure'))
+  assert.equal(await loading, false)
+  state.advanceClock(0) // Actual generation 1 callback retains pending S while leaving.
+  assert.equal(state.saved(), 'S')
+  assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S')])
+
+  const retry = await state.open('S') // Actual showSession increments to generation 2.
+  retry.request.reject(new Error('generation 2 retry failure'))
+  assert.equal(await retry.loading, false)
+  assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'S' },
+    'both non-generation stillShown gates match the old pending S failure')
+  assert.equal(state.saved(), 'S', 'new failure callback remains queued until advanceClock(0)')
+  const writesBeforeResume = [...state.writes]
+  assert.deepEqual(writesBeforeResume.map(({ value }) => value), [state.record('S'), state.record('S')])
+
+  state.navigate('pageshow', true) // Resume OLD pending generation 1, before generation 2's zero-delay task.
+  assert.deepEqual(state.writes, writesBeforeResume,
+    'pageshow must not persist old pending generation before newer failed S zero-delay task')
+  assert.equal(state.saved(), 'S', 'generation guard preserves saved S before the new failure callback')
+  assert.deepEqual(state.rows.map(({ textContent }) => textContent), ['Failed to load history: generation 2 retry failure'])
+
+  state.advanceClock(0) // Only generation 2's actual failure callback may now persist empty.
+  assert.equal(state.saved(), null)
+  assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S'), state.record('S'), state.record(null)])
+  assert.equal(state.writes.filter(({ value }) => value === state.record(null)).length, 1,
+    'new generation failure writes empty exactly once')
+  state.advanceClock(10_000)
+  assert.equal(state.writes.length, 3, 'resumed old pending failure and cancelled expiry cannot write again')
+})
+
 test('D067 edge: expired navigation allows a later ordinary retry failure to persist', async () => {
   const state = harness(); const { loading, request } = await state.start()
   state.navigate('beforeunload'); request.reject(new Error('navigation pending'))
