@@ -10,7 +10,8 @@
 //! Where the Rust component is stricter than the TypeScript schema, the stricter rule is written, because a
 //! value the schema lets through and the component then refuses is the failure this module exists to
 //! prevent:
-//! - fields the component reads as unsigned integers are `integer` with `minimum: 0`;
+//! - fields the component reads as unsigned integers are `integer` with `minimum: 0`, except `context`'s,
+//!   which its named rule bounds in DSH's words (`context_rule.rs`, #212);
 //! - `subagent-tool` refuses unknown keys.
 //!
 //! Schemastery's `step(1)` is `integer`, and its `min` and `max` are `minimum` and `maximum`.
@@ -23,42 +24,38 @@ fn schema(value: Value) -> Option<Schema> {
     Schema::from_json(value).ok()
 }
 
-/// A whole number of at least 0: what a Rust `u64` or `usize` field accepts.
-fn count() -> Value {
-    json!({ "type": "integer", "minimum": 0 })
-}
-
 /// `src/context/service.ts` `Config`, against heddle-context's `ContextConfig`.
 pub fn context_schema() -> Option<Schema> {
-    let ratio = json!({ "type": "number", "minimum": 0, "maximum": 1 });
+    // The numbers are bounded by the context rule, by name, in DSH's compaction-basic words, with the
+    // budget across fields after them (#212); the TypeScript rule says the same sentences.
+    let number = json!({ "type": "number" });
     let policy = json!({
         "type": "object",
         "required": ["endpoint"],
         "properties": {
             "endpoint": { "type": "string" },
-            "thresholdRatio": ratio,
-            "retainRatio": ratio,
-            "thresholdTokens": count(),
-            "retainTokens": count(),
+            "thresholdRatio": number,
+            "retainRatio": number,
+            "thresholdTokens": number,
+            "retainTokens": number,
         }
     });
-    // The budget across fields (the retained tail below the trigger) is judged by name once the fields fit (#212).
     schema(json!({
         "type": "object",
         "x-heddle-rule": crate::context_rule::CONTEXT_BUDGET_RULE,
         "properties": {
             "system": { "type": "string" },
-            "contextWindow": { "type": "integer", "minimum": 1, "default": 1_048_576 },
-            "thresholdRatio": ratio,
-            "retainRatio": ratio,
-            "thresholdTokens": count(),
-            "retainTokens": count(),
+            "contextWindow": { "type": "number", "default": 1_048_576 },
+            "thresholdRatio": number,
+            "retainRatio": number,
+            "thresholdTokens": number,
+            "retainTokens": number,
             "policies": { "type": "array", "items": policy, "default": [] },
             "instructions": { "type": "boolean", "default": true },
-            "instructionsMaxBytes": count(),
+            "instructionsMaxBytes": number,
             "endpoint": { "type": "string" },
             "model": { "type": "string" },
-            "summarizeMaxTokens": count(),
+            "summarizeMaxTokens": number,
         }
     }))
 }
@@ -175,7 +172,7 @@ mod tests {
         );
         assert_eq!(
             problems(context_schema(), json!({ "contextWindow": 0 })),
-            vec!["contextWindow must be at least 1"]
+            vec!["contextWindow (0) must be a positive integer"]
         );
         assert_eq!(
             problems(

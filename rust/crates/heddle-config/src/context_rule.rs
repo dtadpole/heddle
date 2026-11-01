@@ -1,14 +1,17 @@
-//! The context row's budget rule, judged where a value is written (issue #212).
+//! The context row's values, judged where they are written (issue #212).
 //!
 //! heddle-context's `resolve_budget` refuses a budget whose retained tail is not below its trigger, but it
 //! runs when a turn starts, so a settings write could save a value that failed every later turn on that
-//! server. This is the same rule over the written configuration, run by [`crate::Schema::check`] for a
-//! schema that names it ([`CONTEXT_BUDGET_RULE`], which [`crate::context_schema`] does), so a Save and
-//! `config --validate` refuse it first. `src/config/context-rule.ts` is its twin, word for word.
+//! server. This is the context row's rule over the written configuration, run by [`crate::Schema::check`]
+//! for a schema that names it ([`CONTEXT_BUDGET_RULE`], which [`crate::context_schema`] does), so a Save
+//! and `config --validate` refuse it first. `src/config/context-rule.ts` is its twin, word for word: the
+//! TypeScript schema declares these numbers plain (a bound there would also stop a boot), so the bounds are
+//! the rule's in both builds, and both say them in the same sentence.
 //!
-//! The words are DSH's compaction-basic where it has a rule of the same shape (`assertRatio`,
-//! `validateRatioRetention`): a ratio is a number in (0, 1], and a retained ratio must be less than the
-//! resolved threshold ratio, whatever the window. Where only the window decides (a tail in tokens against
+//! The words are DSH's compaction-basic (`assertPositiveInteger`, `assertNonNegativeInteger`,
+//! `assertRatio`, `validateRatioRetention`): a window is a positive integer, a token count a non-negative
+//! integer, a ratio a number in (0, 1], and a retained ratio must be less than the resolved threshold
+//! ratio, whatever the window. Where only the window decides (a tail in tokens against
 //! a trigger by ratio, or a window too small for the ratios), the sentence names each side by what was
 //! written and the configured `contextWindow` it was judged at; an endpoint that declares its own window
 //! is budgeted against that window when a turn runs.
@@ -58,49 +61,103 @@ fn problem(path: String, message: String) -> SchemaProblem {
     SchemaProblem { path, message }
 }
 
-/// Every way the context row's budget fields would fail a turn; empty when they would not.
-pub fn context_budget_problems(config: &Value) -> Vec<SchemaProblem> {
-    let window = field(config, "contextWindow").unwrap_or(DEFAULT_CONTEXT_WINDOW);
-    let mut problems = scope_problems("", config, &|name| field(config, name), window);
-    if let Some(policies) = config.get("policies").and_then(Value::as_array) {
-        for (index, entry) in policies.iter().enumerate() {
-            if !entry.is_object() || !FIELDS.iter().any(|name| entry.get(*name).is_some()) {
-                continue;
-            }
-            let merged = |name: &str| field(entry, name).or_else(|| field(config, name));
-            problems.extend(scope_problems(
-                &format!("policies[{index}]."),
-                entry,
-                &merged,
-                window,
+/// A set value as JavaScript's `String(value)` prints it; a number as [`shown`].
+fn written(value: &Value) -> String {
+    match value.as_f64() {
+        Some(number) => shown(number),
+        None => match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        },
+    }
+}
+
+/// DSH's `assertPositiveInteger` (`min` 1) or `assertNonNegativeInteger` (`min` 0), for a field that is set.
+fn whole(problems: &mut Vec<SchemaProblem>, scope: &Value, prefix: &str, name: &str, min: f64) {
+    let Some(value) = scope.get(name) else {
+        return;
+    };
+    let fits = value
+        .as_f64()
+        .is_some_and(|n| n.is_finite() && n.fract() == 0.0 && n >= min);
+    if !fits {
+        let kind = if min > 0.0 {
+            "a positive integer"
+        } else {
+            "a non-negative integer"
+        };
+        problems.push(problem(
+            format!("{prefix}{name}"),
+            format!("({}) must be {kind}", written(value)),
+        ));
+    }
+}
+
+/// One scope's own fields: its ratios in (0, 1] (DSH's `assertRatio`) and its token counts whole.
+fn scope_bounds(problems: &mut Vec<SchemaProblem>, scope: &Value, prefix: &str) {
+    for name in ["thresholdRatio", "retainRatio"] {
+        let Some(value) = scope.get(name) else {
+            continue;
+        };
+        let fits = value
+            .as_f64()
+            .is_some_and(|n| n.is_finite() && n > 0.0 && n <= 1.0);
+        if !fits {
+            problems.push(problem(
+                format!("{prefix}{name}"),
+                format!("({}) must be a number in (0, 1]", written(value)),
             ));
         }
     }
-    problems
+    for name in ["thresholdTokens", "retainTokens"] {
+        whole(problems, scope, prefix, name, 0.0);
+    }
 }
 
-/// One scope: its own ratios in range, then the merged budget's tail below its trigger.
-fn scope_problems(
-    prefix: &str,
-    own: &Value,
-    merged: &dyn Fn(&str) -> Option<f64>,
-    window: f64,
-) -> Vec<SchemaProblem> {
+/// Every way the context row's values would fail a turn or a start; empty when they would not.
+pub fn context_budget_problems(config: &Value) -> Vec<SchemaProblem> {
+    let policies: Vec<&Value> = config
+        .get("policies")
+        .and_then(Value::as_array)
+        .map(|entries| entries.iter().collect())
+        .unwrap_or_default();
+    // Every bound first, on the fields each scope writes; the budget is only judged over numbers it can use.
     let mut problems = Vec::new();
-    for name in ["thresholdRatio", "retainRatio"] {
-        if let Some(value) = field(own, name)
-            && (value <= 0.0 || value > 1.0)
-        {
-            problems.push(problem(
-                format!("{prefix}{name}"),
-                format!("({}) must be a number in (0, 1]", shown(value)),
-            ));
+    whole(&mut problems, config, "", "contextWindow", 1.0);
+    scope_bounds(&mut problems, config, "");
+    whole(&mut problems, config, "", "instructionsMaxBytes", 0.0);
+    whole(&mut problems, config, "", "summarizeMaxTokens", 1.0);
+    for (index, entry) in policies.iter().enumerate() {
+        if entry.is_object() {
+            scope_bounds(&mut problems, entry, &format!("policies[{index}]."));
         }
     }
     if !problems.is_empty() {
         return problems;
     }
 
+    let window = field(config, "contextWindow").unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    let mut problems = scope_problems("", &|name| field(config, name), window);
+    for (index, entry) in policies.iter().enumerate() {
+        if !entry.is_object() || !FIELDS.iter().any(|name| entry.get(*name).is_some()) {
+            continue;
+        }
+        let merged = |name: &str| field(entry, name).or_else(|| field(config, name));
+        problems.extend(scope_problems(
+            &format!("policies[{index}]."),
+            &merged,
+            window,
+        ));
+    }
+    problems
+}
+
+/// One scope's merged budget: the retained tail below its trigger.
+fn scope_problems(
+    prefix: &str,
+    merged: &dyn Fn(&str) -> Option<f64>,
+    window: f64,
+) -> Vec<SchemaProblem> {
     let threshold_tokens = merged("thresholdTokens");
     let retain_tokens = merged("retainTokens");
     let threshold_ratio = merged("thresholdRatio").unwrap_or(THRESHOLD_RATIO);
@@ -215,6 +272,51 @@ mod tests {
             vec![
                 "retainRatio (0.16) of contextWindow 1048576 is 167772 tokens, which must be less than thresholdTokens (1000)"
             ]
+        );
+    }
+
+    #[test]
+    fn the_bounds_are_dshs_on_the_row_and_in_each_policy() {
+        assert_eq!(
+            said(json!({ "contextWindow": -5 })),
+            vec!["contextWindow (-5) must be a positive integer"]
+        );
+        assert_eq!(
+            said(json!({ "contextWindow": 1.5 })),
+            vec!["contextWindow (1.5) must be a positive integer"]
+        );
+        assert_eq!(
+            said(json!({ "contextWindow": 0 })),
+            vec!["contextWindow (0) must be a positive integer"]
+        );
+        assert_eq!(
+            said(json!({ "thresholdRatio": -1 })),
+            vec!["thresholdRatio (-1) must be a number in (0, 1]"]
+        );
+        assert_eq!(
+            said(json!({ "thresholdRatio": 2 })),
+            vec!["thresholdRatio (2) must be a number in (0, 1]"]
+        );
+        assert_eq!(
+            said(json!({ "retainTokens": 2.5 })),
+            vec!["retainTokens (2.5) must be a non-negative integer"]
+        );
+        assert_eq!(
+            said(json!({ "instructionsMaxBytes": -1 })),
+            vec!["instructionsMaxBytes (-1) must be a non-negative integer"]
+        );
+        assert_eq!(
+            said(json!({ "summarizeMaxTokens": 0 })),
+            vec!["summarizeMaxTokens (0) must be a positive integer"]
+        );
+        assert_eq!(
+            said(json!({ "policies": [{ "endpoint": "x", "retainTokens": -1 }] })),
+            vec!["policies[0].retainTokens (-1) must be a non-negative integer"]
+        );
+        assert_eq!(
+            said(json!({ "contextWindow": 0, "retainRatio": 0.99, "thresholdRatio": 0.5 })),
+            vec!["contextWindow (0) must be a positive integer"],
+            "a bound speaks before the budget"
         );
     }
 
