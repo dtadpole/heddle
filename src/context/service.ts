@@ -24,6 +24,8 @@ export * from './compaction.ts'
 export * from './instructions.ts'
 export * from './meter.ts'
 export * from './prune.ts'
+/** The rule a settings write and `config --validate` run over this row before a turn could fail on it (#212). */
+export { contextConfigProblems as configProblems } from '../config/context-rule.ts'
 
 export const name = 'context'
 
