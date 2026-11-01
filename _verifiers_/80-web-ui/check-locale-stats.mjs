@@ -13,8 +13,9 @@ import { chatDouble, heddleCommand, isolatedHome, repoRoot, removeDir, runCli, s
  * After one turn whose provider reported 1000 prompt tokens (800 of them cached) and 50 output tokens against a 2000-token
  * window, a Chinese page's dock reads 1 轮 1 步 and 缓存命中 80%; the time panel is 会话统计 with rows such as 模型用时 and
  * 输出速度（TPS）, the usage panel Token 用量 with 缓存命中 / 未缓存输入 / 缓存读取 / 输出, and the context panel says
- * 上下文已用 and is named 上下文用量. Switched to English in Settings with the context panel open, the panel and the dock
- * read in English, and so do the other two panels.
+ * 上下文已用 and is named 上下文用量; the context gauge itself is named, and tips, 上下文已用 50% (DSH's context.aria). Switched
+ * to English in Settings with the context panel open, the panel and the dock read in English (the gauge: 50% of context
+ * used), and so do the other two panels.
  */
 
 const CAPABILITY = 'the session-statistics dock in the page language'
@@ -86,6 +87,8 @@ const DOCK = `JSON.stringify({
   turns: document.querySelector('[data-stat="turns"]')?.textContent ?? null,
   steps: document.querySelector('[data-stat="steps"]')?.textContent ?? null,
   cache: document.querySelector('[data-stat="cache"]')?.textContent ?? null,
+  gauge: document.querySelector('[data-stat-pill="context"]')?.getAttribute('aria-label') ?? null,
+  gaugeTip: document.querySelector('[data-stat-pill="context"]')?.getAttribute('title') ?? null,
 })`
 const PANEL = `JSON.stringify({
   open: document.getElementById('stat-popover').hidden === false,
@@ -146,7 +149,8 @@ test('the session-statistics dock and its panels read in the page language, and 
     const time = await openPanel(browser, 'time')
     const usage = await openPanel(browser, 'usage')
     const contextPanel = await openPanel(browser, 'context')
-    assert.deepEqual(dock, { turns: '1 轮', steps: '1 步', cache: '缓存命中 80%' })
+    // The context gauge is named for what its figure is, DSH's context.aria: 1000 of a 2000-token window.
+    assert.deepEqual(dock, { turns: '1 轮', steps: '1 步', cache: '缓存命中 80%', gauge: '上下文已用 50%', gaugeTip: '上下文已用 50%' })
     assert.equal(time.title, '会话统计')
     assert.equal(time.label, '会话统计')
     // No tool ran, so the time panel has no Tool time row.
@@ -166,7 +170,7 @@ test('the session-statistics dock and its panels read in the page language, and 
     assert.equal(contextEnglish.label, 'Context usage')
     assert.equal(contextEnglish.sub, 'of context used')
     assert.deepEqual(contextEnglish.terms, ['System prompt', 'Tool definitions', 'Messages'])
-    assert.deepEqual(JSON.parse(await browser.evaluate(DOCK)), { turns: '1 turns', steps: '1 steps', cache: 'Cache hit 80%' })
+    assert.deepEqual(JSON.parse(await browser.evaluate(DOCK)), { turns: '1 turns', steps: '1 steps', cache: 'Cache hit 80%', gauge: '50% of context used', gaugeTip: '50% of context used' })
     const timeEnglish = await openPanel(browser, 'time')
     assert.equal(timeEnglish.title, 'Session statistics')
     assert.equal(timeEnglish.label, 'Session statistics')
