@@ -13,6 +13,9 @@ import { test } from 'node:test'
  *   "Showing the first 20 results". DSH has the same latent outcome (dsh-api-session-controller lib/index.js:2016-2084
  *   ranks every session with a `cwd`; dsh-client-ui-workspace lib/client.js:1197-1219 filters after that cut and keeps
  *   the host's `hasMore`), so DSH's wire is kept and the page says "Showing the first 20" only when it shows twenty.
+ *   #189 (J170) revised it: that left a cut list looking complete. The page now sends its archive filter so the host
+ *   skips hidden sessions before its cut, and a list the host still cut says so whatever its length — never beside
+ *   "No matching sessions", which stays alone when the host found no more.
  * - N3: revealing a search hit stops once another session became the open one during any of its awaits.
  * - N4: a one-column list that could not read the sessions still ends its redraw: the held keyboard place is let go.
  * - N5: the archive notice's "filter archived sessions" redraws a standing search under the filter it switched to.
@@ -147,6 +150,8 @@ interface SearchPage {
   loadSearchIndex: () => Promise<Index | null>
   refreshSessions: () => Promise<void>
   held: () => { searchIndex: Index | null; heldIndex: Index | null }
+  /** Choose the archive filter, as View options does before it redraws a standing search. */
+  setArchived: (mode: string) => void
 }
 
 /**
@@ -182,7 +187,7 @@ function searchPage(fetch: (url: string) => Promise<Reply>, noted: Meta[][]) {
     function showArchiveNotice() {}
     ${region('let searchIndex = null', 'async function openSearchResult(')}
     ${source('refreshSessions')}
-    return { applySearch, loadSearchIndex, refreshSessions, held: () => ({ searchIndex, heldIndex }) }`,
+    return { applySearch, loadSearchIndex, refreshSessions, held: () => ({ searchIndex, heldIndex }), setArchived: (mode) => { archiveMode = mode } }`,
   )(env) as SearchPage
   /** Type a query, then let every answer and the debounce run. */
   const search = async (query: string) => {
@@ -301,11 +306,11 @@ test('N1: a read the refresh overtook, with no newer one, reads again rather tha
 })
 
 /**
- * N2: the host ranks every session with a `cwd`, subagent children and archived ones included, and the page filters
- * after its twenty are cut. When hidden sessions fill those twenty, nothing is listed: "No matching sessions" is right,
- * and "Showing the first 20 results" beside it was not.
+ * #189 (J170), after N2. A host that ranks every session with a `cwd` and fills its twenty with hidden ones — DSH's
+ * host, or this one asked without the filter — cuts a visible match before the page sees it. N2 had this list say
+ * "No matching sessions" alone, which read as complete; it was cut, and now says so with DSH's sentence instead.
  */
-test('N2: hidden sessions that fill the host\'s twenty rows leave "No matching sessions" alone, without "Showing the first 20"', async () => {
+test('#189: hidden sessions that fill the host\'s twenty, with more found, say the list was cut rather than "No matching sessions"', async () => {
   const hidden = Array.from({ length: 20 }, (_, index) =>
     session(`s-hidden-${String(index).padStart(2, '0')}`, index + 1, index % 2 === 0 ? { title: `archived ${index}`, archived: true } : { title: `child ${index}`, origin: 'subagent' }),
   )
@@ -320,7 +325,51 @@ test('N2: hidden sessions that fill the host\'s twenty rows leave "No matching s
     return answer(null, 404)
   }
   const { search } = searchPage(async (url) => route(url), [])
+  assert.deepEqual(await search('quokka'), { hits: 0, note: null, more: 'Showing the first 20 results. Narrow your search.' })
+})
+
+test('N2 kept: hidden hits and no more found leave "No matching sessions" alone, with no "Showing the first 20" beside it', async () => {
+  const hidden = Array.from({ length: 5 }, (_, index) => session(`s-hidden-${index}`, index + 1, { title: `archived ${index}`, archived: true }))
+  const route = (url: string): Reply => {
+    if (url === '/api/sessions') return answer(hidden)
+    if (url === '/api/tree') return tree
+    if (url === '/api/workspaces') return answer({ workspaces: [workspace('/code/repo', hidden.map((meta) => meta.id))] })
+    if (url.startsWith('/api/sessions/search')) return answer({ items: hidden.map((meta) => ({ sessionId: meta.id, snippet: 'the quokka ledger' })), hasMore: false })
+    return answer(null, 404)
+  }
+  const { search } = searchPage(async (url) => route(url), [])
   assert.deepEqual(await search('quokka'), { hits: 0, note: 'No matching sessions', more: null })
+})
+
+/**
+ * #189: the request carries the archive filter, and the host answers only the rows it shows — so another filter is
+ * another question. One visible match and 21 archived ones that outrank it, answered the way the host now answers.
+ */
+test('#189: the search asks with the archive filter, and choosing another filter asks the host again', async () => {
+  const visible = session('s-visible', 30, { title: 'plain note 0' })
+  const archived = Array.from({ length: 21 }, (_, index) => session(`s-archived-${String(index).padStart(2, '0')}`, index + 1, { title: `plain note ${index + 1}`, archived: true }))
+  const sessions = [visible, ...archived]
+  const asked: string[] = []
+  const route = (url: string): Reply => {
+    if (url === '/api/sessions') return answer(sessions)
+    if (url === '/api/tree') return tree
+    if (url === '/api/workspaces') return answer({ workspaces: [workspace('/code/repo', sessions.map((meta) => meta.id))] })
+    if (url.startsWith('/api/sessions/search')) {
+      asked.push(url)
+      const filter = new URL(url, 'http://page.test').searchParams.get('archived')
+      const rows = filter === 'show' ? [...archived, visible] : filter === 'only' ? archived : filter === 'hide' ? [visible] : archived
+      return answer({ items: rows.slice(0, 20).map((meta) => ({ sessionId: meta.id, snippet: 'zorbliquant noted' })), hasMore: rows.length > 20 })
+    }
+    return answer(null, 404)
+  }
+  const { run, search } = searchPage(async (url) => route(url), [])
+  assert.deepEqual(await search('zorbliquant'), { hits: 1, note: null, more: null }, 'Hide archived: the visible match, and nothing more')
+  assert.deepEqual(asked, ['/api/sessions/search?q=zorbliquant&archived=hide'])
+  assert.deepEqual(await search('zorbliquant'), { hits: 1, note: null, more: null }, 'the same query under the same filter asks nothing')
+  assert.equal(asked.length, 1)
+  run.setArchived('show')
+  assert.deepEqual(await search('zorbliquant'), { hits: 20, note: null, more: 'Showing the first 20 results. Narrow your search.' }, 'Show archived: twenty rows, and the list was cut')
+  assert.deepEqual(asked, ['/api/sessions/search?q=zorbliquant&archived=hide', '/api/sessions/search?q=zorbliquant&archived=show'])
 })
 
 test('N2: twenty rows shown and more found still say "Showing the first 20"', async () => {

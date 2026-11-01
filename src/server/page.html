@@ -18225,10 +18225,16 @@ const ContentSearch = (() => {
     const byId = new Map(metas.map((meta) => [meta.id, meta]))
     const ordered = [...local]
     const included = new Set(local.map((entry) => entry.meta.id))
+    /** Host hits this page leaves out: hidden here, a blank, or a session its index does not hold. */
+    let dropped = 0
     for (const item of found) {
       const meta = byId.get(item.sessionId)
+      if (meta !== undefined && included.has(meta.id)) continue
       /** DSH's host half takes the same rows: no blank session, and the archive filter (`lib/client.js:1200`). */
-      if (meta === undefined || included.has(meta.id) || WorkspaceTree.placeholder(meta) || !WorkspaceTree.visible(meta, archived)) continue
+      if (meta === undefined || WorkspaceTree.placeholder(meta) || !WorkspaceTree.visible(meta, archived)) {
+        dropped += 1
+        continue
+      }
       included.add(meta.id)
       const workspace = owner.get(meta.id) ?? (typeof meta.cwd === 'string' && meta.cwd.length > 0 ? WorkspaceTree.basename(meta.cwd) : '')
       ordered.push({ meta, workspace })
@@ -18238,13 +18244,20 @@ const ContentSearch = (() => {
         .slice(0, WorkspaceTree.SEARCH_LIMIT)
         .map((entry) => (snippets.has(entry.meta.id) ? { ...entry, snippet: snippets.get(entry.meta.id) } : entry)),
       /**
-       * "Showing the first 20" only when twenty rows are shown. The host ranks every session with a `cwd`, a subagent's
-       * child and an archived one included, and the rows are filtered after its twenty are cut — as DSH's are (its
-       * controller, dsh-api-session-controller lib/index.js:2016-2084; its client, `lib/client.js:1197-1200`). DSH keeps
-       * the host's `hasMore` whatever is left (`:1219`), so hidden sessions that filled the twenty drew "No matching
-       * sessions" beside "Showing the first 20 results". The wire stays DSH's; the sentence follows the rows shown.
+       * Whether the list was cut, which is when DSH's "Showing the first 20 results. Narrow your search." is said: twenty
+       * rows shown and more found, or the host said it found more and this page left out some of the hits it sent.
+       *
+       * The page sends its archive filter, and the host skips what the page would hide before it cuts its twenty (#189),
+       * so a short list with the host's `hasMore` should not happen. When it does — the index read before a session was
+       * archived, or a host that ignores the filter — the hits left out may have stood in front of visible ones, and an
+       * empty list saying "No matching sessions" would not be true. DSH keeps the host's `hasMore` whatever is left
+       * (dsh-client-ui-workspace `lib/client.js:1219`) and draws both sentences (`:3492-3498`); the N2 review asked for
+       * never both at once, so the cut sentence stands instead of "No matching sessions", and a host that found no more
+       * leaves an empty list with "No matching sessions" alone.
        */
-      hasMore: ordered.length >= WorkspaceTree.SEARCH_LIMIT && (content?.hasMore === true || ordered.length > WorkspaceTree.SEARCH_LIMIT),
+      hasMore:
+        ordered.length > WorkspaceTree.SEARCH_LIMIT ||
+        (content?.hasMore === true && (ordered.length >= WorkspaceTree.SEARCH_LIMIT || dropped > 0)),
     }
   }
 
@@ -20208,7 +20221,7 @@ async function applySearch() {
   const results = document.getElementById('search-results')
   const note = document.getElementById('search-note')
   const more = document.getElementById('search-more')
-  requestContentSearch(query)
+  requestContentSearch(query, archiveMode)
   if (query.length === 0) {
     results.hidden = true
     results.replaceChildren()
@@ -20234,8 +20247,12 @@ async function applySearch() {
     more.textContent = ''
     return
   }
-  /** The host's answer for **this** query, else loading — DSH's `currentRemote` (`lib/client.js:3445-3450`). */
-  const remote = contentSearch.query === query ? contentSearch : { query, status: 'loading', items: [], hasMore: false }
+  /**
+   * The host's answer for **this** query under **this** filter, else loading — DSH's `currentRemote` (`lib/client.js:3445-3450`).
+   * The filter is part of the question since the host answers only the rows the filter shows (#189).
+   */
+  const remote =
+    contentSearch.query === query && contentSearch.archived === archiveMode ? contentSearch : { query, archived: archiveMode, status: 'loading', items: [], hasMore: false }
   const pending = remote.status === 'loading'
   const { items, hasMore } = ContentSearch.merge(index.workspaces, index.sessions, query, remote, { archived: archiveMode })
   results.replaceChildren(
@@ -20310,9 +20327,10 @@ async function applySearch() {
   paintSearchPending(pending ? (items.length === 0 ? 2 : 1) : 0)
   /**
    * DSH's two sentences (`search.noMatches`, `search.hasMore`, dsh-client-ui-workspace `lib/client.js:4909-4910`). "No
-   * matching sessions" waits for the host's answer, as DSH's does (`!pending`, `lib/client.js:3492`).
+   * matching sessions" waits for the host's answer, as DSH's does (`!pending`, `lib/client.js:3492`), and is not said
+   * of a list that was cut (`ContentSearch.merge`'s `hasMore`, #189): that list says so instead.
    */
-  note.hidden = items.length > 0 || pending
+  note.hidden = items.length > 0 || pending || hasMore
   note.textContent = note.hidden ? '' : 'No matching sessions'
   more.hidden = !hasMore
   more.textContent = hasMore ? `Showing the first ${WorkspaceTree.SEARCH_LIMIT} results. Narrow your search.` : ''
@@ -20326,13 +20344,18 @@ async function applySearch() {
  * metadata matches visible without an additional warning", dsh-client-ui-workspace README, Search). The same query
  * again asks nothing — unless its request failed: a failure is not kept as the query's answer (#58), so the redraw that
  * reports it asks nothing and the next search for that query asks the host again.
+ *
+ * The request carries the archive filter (`archived=hide|show|only`, #189), so the host skips the sessions this page
+ * would hide — subagent children, blanks, archived ones under `hide` — before it cuts its twenty: a visible match is no
+ * longer pushed out by hidden ones. The filter is part of the question, so choosing another one asks the host again.
+ * DSH asks with the query alone (dsh-client-ui-workspace `lib/client.js:5048-5052`).
  */
-let contentSearch = { query: '', status: 'idle', items: [], hasMore: false }
+let contentSearch = { query: '', archived: 'hide', status: 'idle', items: [], hasMore: false }
 let contentSearchTimer = null
 let contentSearchAbort = null
 
-function requestContentSearch(query) {
-  if (query === contentSearch.query) {
+function requestContentSearch(query, archived = 'hide') {
+  if (query === contentSearch.query && (query === '' || archived === contentSearch.archived)) {
     if (contentSearch.status !== 'error') return
     if (contentSearch.reported !== true) {
       contentSearch.reported = true
@@ -20344,12 +20367,12 @@ function requestContentSearch(query) {
   contentSearchTimer = null
   contentSearchAbort = null
   if (query === '') {
-    contentSearch = { query: '', status: 'idle', items: [], hasMore: false }
+    contentSearch = { query: '', archived, status: 'idle', items: [], hasMore: false }
     return
   }
   const controller = new AbortController()
   contentSearchAbort = controller
-  contentSearch = { query, status: 'loading', items: [], hasMore: false }
+  contentSearch = { query, archived, status: 'loading', items: [], hasMore: false }
   const settle = (next) => {
     if (controller.signal.aborted) return
     contentSearch = next
@@ -20357,10 +20380,10 @@ function requestContentSearch(query) {
   }
   contentSearchTimer = setTimeout(() => {
     contentSearchTimer = null
-    fetch(`/api/sessions/search?q=${encodeURIComponent(query)}`, { signal: controller.signal })
+    fetch(`/api/sessions/search?q=${encodeURIComponent(query)}&archived=${encodeURIComponent(archived)}`, { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`search answered ${response.status}`))))
-      .then((body) => settle({ query, status: 'ready', items: Array.isArray(body?.items) ? body.items : [], hasMore: body?.hasMore === true }))
-      .catch(() => settle({ query, status: 'error', items: [], hasMore: false }))
+      .then((body) => settle({ query, archived, status: 'ready', items: Array.isArray(body?.items) ? body.items : [], hasMore: body?.hasMore === true }))
+      .catch(() => settle({ query, archived, status: 'error', items: [], hasMore: false }))
   }, ContentSearch.DEBOUNCE_MS)
 }
 

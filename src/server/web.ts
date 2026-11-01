@@ -36,7 +36,7 @@ import { canonicalPath, isUnder } from '../paths.ts'
 import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
-import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
+import { SessionSearchQueryError, searchSessions, searchViewOf } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
@@ -882,10 +882,14 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * user or assistant messages hold `q` as a phrase, ranked, at most 20, each with its snippet, and `hasMore`. The
    * rules live in `src/session/search.ts`; a refused query answers 400 with DSH's sentence. Matched before the
    * `/api/sessions/<id>` routes below, which would otherwise answer it as "not a session id".
+   *
+   * `archived` (`hide`, `show` or `only`, read as `/api/tree` reads it) is the page's view (#189): the sessions the page
+   * would not draw — subagent children, blanks, and archived ones per the filter — are skipped before the twenty are
+   * cut. Without it the answer is DSH's, every session with a `cwd`.
    */
   if (url.pathname === '/api/sessions/search' && request.method === 'GET') {
     try {
-      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '')
+      const page = searchSessions(ctx.session.store, url.searchParams.get('q') ?? '', searchViewOf(url.searchParams.get('archived')))
       respond(response, 200, 'application/json', `${JSON.stringify(page, null, 2)}\n`)
     } catch (error) {
       const refused = error instanceof SessionSearchQueryError

@@ -82,8 +82,9 @@ pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode}
 pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
 pub use search::{
     SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
-    SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,
-    SessionSearchPage, SessionSearchQueryError, normalize_search_query,
+    SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchArchived, SessionSearchHit,
+    SessionSearchIndex, SessionSearchPage, SessionSearchQueryError, SessionSearchView,
+    normalize_search_query, search_visible,
 };
 pub use service::{
     CreateAtOptions, ForkOutcome, ModeChange, OpenAtOptions, SessionConfig, SessionService,

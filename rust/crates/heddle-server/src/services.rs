@@ -269,9 +269,14 @@ pub trait SessionService: Send + Sync {
 
     /// Content search (`GET /api/sessions/search`): the sessions whose user or assistant messages hold the query
     /// as a phrase, ranked, at most 20, with snippets (`heddle_session::SessionSearchIndex`). The route has already
-    /// refused a query DSH refuses; `Err` is a failure it answers `500`. A store without search says so.
-    fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
-        let _ = query;
+    /// refused a query DSH refuses; `Err` is a failure it answers `500`. A store without search says so. `view` is
+    /// the page's archive filter (#189): given one, only the sessions the page draws as rows are ranked.
+    fn search(
+        &self,
+        query: &str,
+        view: Option<heddle_session::SessionSearchView>,
+    ) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+        let _ = (query, view);
         Err(ServiceError::new("session search is unavailable"))
     }
 }

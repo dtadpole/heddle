@@ -1058,6 +1058,10 @@ async fn list_sessions(State(state): State<AppState>) -> Response {
 /// lib/index.js:2010-2123): `{"items":[{"sessionId","snippet"}],"hasMore"}`, at most 20, ranked and quoted by
 /// `heddle_session::search`. A query DSH refuses answers `400` with its sentence. The static segment wins over
 /// `/api/sessions/{id}`, which would otherwise answer it as "not a session id".
+///
+/// `archived` (`hide`, `show` or `only`, read as `/api/tree` reads it) is the page's view (#189): the sessions the
+/// page would not draw — subagent children, blanks, and archived ones per the filter — are skipped before the twenty
+/// are cut. Without it the answer is DSH's, every session with a `cwd`.
 async fn search_sessions(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -1067,7 +1071,9 @@ async fn search_sessions(
         Ok(query) => query,
         Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal.message),
     };
-    match state.harness().sessions.search(&query) {
+    let view =
+        heddle_session::SessionSearchView::from_query(params.get("archived").map(String::as_str));
+    match state.harness().sessions.search(&query, view) {
         Ok(page) => respond::json(StatusCode::OK, &page),
         Err(error) => respond::error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6936,6 +6942,68 @@ mod tests {
             let refusal: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(refusal["error"], "session search query must not be empty");
         }
+
+        // #189: `archived` is the page's view, read as `/api/tree` reads it. These sessions hold an answer and no
+        // prompt, so the page draws each as a blank and none is a hit under a view; without one nothing changed.
+        // `test/session-search-view.test.ts` judges the TypeScript route on the same sessions.
+        let hits = |bytes: &[u8]| -> Vec<String> {
+            let page: Value = serde_json::from_slice(bytes).unwrap();
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["sessionId"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=Quokka%20Ledger&archived=hide",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            page,
+            json!({"items": [], "hasMore": false}),
+            "no blank is a hit"
+        );
+        // A title makes each a row; then the second is archived.
+        let store = sessions.inner().store();
+        store.rename(&one, "the first").unwrap();
+        store.rename(&two, "the second").unwrap();
+        let shelve = heddle_session::FlagPatch {
+            archived: Some(true),
+            ..heddle_session::FlagPatch::default()
+        };
+        store.flags(&two, shelve).unwrap();
+        for (filter, expected) in [
+            ("hide", vec![one.clone()]),
+            ("show", vec![two.clone(), one.clone()]),
+            ("only", vec![two.clone()]),
+            ("1", vec![two.clone(), one.clone()]),
+            ("bogus", vec![one.clone()]),
+            ("", vec![one.clone()]),
+        ] {
+            let path = format!("/api/sessions/search?q=Quokka%20Ledger&archived={filter}");
+            let (status, _, bytes) = call(&router, Method::GET, &path, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK, "{filter}");
+            assert_eq!(hits(&bytes), expected, "archived={filter}");
+        }
+        let (_, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=Quokka%20Ledger",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(
+            hits(&bytes),
+            vec![two.clone(), one.clone()],
+            "without it, every session"
+        );
+
         let (status, _, _) = call(
             &router,
             Method::GET,

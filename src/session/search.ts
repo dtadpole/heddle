@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs'
 
-import { foldSurface, indexBySeq, type SessionEvent, type SessionStore } from './store.ts'
+import { foldSurface, indexBySeq, type SessionEvent, type SessionMeta, type SessionStore } from './store.ts'
 import { decodeTranscript } from './transcript.ts'
 import { DIACRITICS, FOLDS, SEPARATORS } from './unicode61.ts'
 
@@ -54,6 +54,53 @@ export interface SessionSearchHit {
 export interface SessionSearchPage {
   readonly items: readonly SessionSearchHit[]
   readonly hasMore: boolean
+}
+
+/**
+ * **The sidebar's view** (#189): the rows the page draws, so a search can answer from those alone.
+ *
+ * DSH ranks every session with a `cwd` (dsh-api-session-controller lib/index.js:2016-2018) and its sidebar drops the
+ * hidden ones from the host's twenty afterwards (dsh-client-ui-workspace lib/client.js:1197-1200), keeping the host's
+ * `hasMore` (:1219). When hidden sessions — archived ones under the default filter, subagent children — fill the twenty,
+ * a visible session that matches is cut before the page ever sees it, and the list reads "No matching sessions".
+ * Measured by developer-six (J170): one visible match and 21 archived ones found nothing on either build.
+ *
+ * The route therefore takes the page's archive filter, and a search given a view skips what the page would hide
+ * **before** the twenty are cut: so "No matching sessions" is true, and `hasMore` means more rows the page can show.
+ * Without a view the search is DSH's own — every session with a `cwd` — so a client that sends no filter is answered
+ * as before.
+ */
+export interface SessionSearchView {
+  /** The page's archive filter: `hide` (its default), `show`, or `only`. */
+  readonly archived: 'hide' | 'show' | 'only'
+}
+
+/**
+ * The route's `archived` parameter: absent is no view (DSH's answer); `only` and `show` are those filters, `1` is `show`
+ * too, and anything else is `hide` — the reading `/api/tree` gives the same parameter, so the page sends one value to both.
+ */
+export function searchViewOf(archived: string | null | undefined): SessionSearchView | undefined {
+  if (archived === null || archived === undefined) return undefined
+  return { archived: archived === 'only' ? 'only' : archived === 'show' || archived === '1' ? 'show' : 'hide' }
+}
+
+/**
+ * Whether the page draws a session as a row under `view`: its `WorkspaceTree.visible` and `placeholder` rules.
+ *
+ * - A **subagent child** never: its row is its parent's (DSH's `sessionVisible`, client.js:964-965). A fork carries a
+ *   `parentSession` too, but no `origin`, and it is a conversation of its own with a row of its own, so the origin decides.
+ * - An **archived** session per the filter: out under `hide`, in under `show`, and the only rows under `only`.
+ * - A **blank** never: no turn, no title, not pinned and not archived (the page's `placeholder`, DSH's `summary.blank`,
+ *   client.js:1185, :1200). The page also spares a running blank; the host need not ask, because a turn records its
+ *   prompt — and counts it — before it runs, so a session that holds a message to find has a turn.
+ */
+export function searchVisible(meta: SessionMeta, view: SessionSearchView): boolean {
+  if (meta.origin === 'subagent') return false
+  const archived = meta.archived === true
+  if (view.archived === 'only' ? !archived : view.archived === 'hide' && archived) return false
+  const titled = typeof meta.title === 'string' && meta.title.trim().length > 0
+  const blank = (meta.turns ?? 0) === 0 && !titled && meta.pinned !== true && !archived
+  return !blank
 }
 
 /** A query DSH refuses as `gateway/bad-request`, with DSH's sentence. */
@@ -467,14 +514,22 @@ export class SessionSearchIndex {
     this.store = store
   }
 
-  /** DSH's `session.search`: the query validated with DSH's sentences, then the ranked page. */
-  search(query: unknown): SessionSearchPage {
+  /**
+   * DSH's `session.search`: the query validated with DSH's sentences, then the ranked page. Given the page's `view`
+   * (#189), only the sessions it draws as rows are ranked, so the twenty are cut from those.
+   */
+  search(query: unknown, view?: SessionSearchView): SessionSearchPage {
     const normalized = normalizeSearchQuery(query)
     const corpus: { id: string; documents: readonly PreparedDocument[] }[] = []
     const seen = new Set<string>()
     for (const meta of this.store.list()) {
       /** DSH searches the visible sessions only: those whose header carries a `cwd` (lib/index.js:2018). */
       if (typeof meta.cwd !== 'string' || meta.cwd.length === 0) continue
+      /** A session the view hides keeps what was read of it, for the next view that shows it. */
+      if (view !== undefined && !searchVisible(meta, view)) {
+        seen.add(meta.id)
+        continue
+      }
       const handle = this.store.open(meta.id)
       if (handle === null) continue
       seen.add(meta.id)
@@ -510,11 +565,11 @@ export class SessionSearchIndex {
 const indexes = new WeakMap<SessionStore, SessionSearchIndex>()
 
 /** Search a store through its one index, so a server's repeated queries reuse what earlier ones read. */
-export function searchSessions(store: SessionStore, query: unknown): SessionSearchPage {
+export function searchSessions(store: SessionStore, query: unknown, view?: SessionSearchView): SessionSearchPage {
   let index = indexes.get(store)
   if (index === undefined) {
     index = new SessionSearchIndex(store)
     indexes.set(store, index)
   }
-  return index.search(query)
+  return index.search(query, view)
 }

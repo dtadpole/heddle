@@ -317,9 +317,13 @@ impl SessionService for StoreSessions {
             .map(meta_of)
     }
 
-    fn search(&self, query: &str) -> Result<heddle_session::SessionSearchPage, ServiceError> {
+    fn search(
+        &self,
+        query: &str,
+        view: Option<heddle_session::SessionSearchView>,
+    ) -> Result<heddle_session::SessionSearchPage, ServiceError> {
         self.search
-            .search(self.service.store(), query)
+            .search(self.service.store(), query, view)
             .map_err(|refusal| ServiceError::with_code(refusal.message.clone(), refusal.code()))
     }
 }

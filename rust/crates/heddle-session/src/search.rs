@@ -28,6 +28,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::event::SessionEvent;
+use crate::meta::{SessionMeta, SessionOrigin};
 use crate::store::SessionStore;
 use crate::surface::{fold_surface, index_by_seq};
 use crate::transcript::decode_transcript;
@@ -57,6 +58,75 @@ pub struct SessionSearchHit {
 pub struct SessionSearchPage {
     pub items: Vec<SessionSearchHit>,
     pub has_more: bool,
+}
+
+/// The page's archive filter, as a search view carries it: `hide` (its default), `show`, or `only`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSearchArchived {
+    Hide,
+    Show,
+    Only,
+}
+
+/// **The sidebar's view** (#189): the rows the page draws, so a search can answer from those alone.
+///
+/// DSH ranks every session with a `cwd` (dsh-api-session-controller lib/index.js:2016-2018) and its sidebar drops the
+/// hidden ones from the host's twenty afterwards (dsh-client-ui-workspace lib/client.js:1197-1200), keeping the
+/// host's `hasMore` (:1219); hidden sessions that fill the twenty cut a visible match before the page sees it. Given
+/// a view, the search skips what the page would hide **before** the cut, so "No matching sessions" is true and
+/// `hasMore` means more rows the page can show. Without one the search is DSH's own. `SessionSearchView` in
+/// `src/session/search.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSearchView {
+    pub archived: SessionSearchArchived,
+}
+
+impl SessionSearchView {
+    /// The route's `archived` parameter: absent is no view (DSH's answer); `only` and `show` are those filters, `1`
+    /// is `show` too, and anything else is `hide` — the reading `/api/tree` gives the same parameter.
+    pub fn from_query(archived: Option<&str>) -> Option<SessionSearchView> {
+        let archived = match archived? {
+            "only" => SessionSearchArchived::Only,
+            "show" | "1" => SessionSearchArchived::Show,
+            _ => SessionSearchArchived::Hide,
+        };
+        Some(SessionSearchView { archived })
+    }
+}
+
+/// Whether the page draws a session as a row under `view`: its `WorkspaceTree.visible` and `placeholder` rules.
+///
+/// - A **subagent child** never: its row is its parent's. A fork carries a `parentSession` too, but no `origin`,
+///   and it has a row of its own, so the origin decides.
+/// - An **archived** session per the filter: out under `hide`, in under `show`, the only rows under `only`.
+/// - A **blank** never: no turn, no title, not pinned and not archived (the page's `placeholder`, DSH's
+///   `summary.blank`). The page also spares a running blank; a turn records its prompt — and counts it — before it
+///   runs, so a session that holds a message to find has a turn.
+pub fn search_visible(meta: &SessionMeta, view: SessionSearchView) -> bool {
+    if meta.origin() == Some(SessionOrigin::Subagent) {
+        return false;
+    }
+    let archived = meta.archived();
+    let shown = match view.archived {
+        SessionSearchArchived::Hide => !archived,
+        SessionSearchArchived::Show => true,
+        SessionSearchArchived::Only => archived,
+    };
+    if !shown {
+        return false;
+    }
+    let titled = meta.title().is_some_and(|title| !js_trim(title).is_empty());
+    let blank = no_turns(meta) && !titled && !meta.pinned() && !archived;
+    !blank
+}
+
+/// The page's `(meta.turns ?? 0) === 0`: the count absent, `null`, or the number zero.
+fn no_turns(meta: &SessionMeta) -> bool {
+    match meta.as_map().get("turns") {
+        None | Some(Value::Null) => true,
+        Some(Value::Number(count)) => count.as_f64() == Some(0.0),
+        Some(_) => false,
+    }
 }
 
 /// A query DSH refuses as `gateway/bad-request`, with DSH's sentence.
@@ -587,11 +657,13 @@ impl SessionSearchIndex {
         SessionSearchIndex::default()
     }
 
-    /// DSH's `session.search`: the query validated with DSH's sentences, then the ranked page.
+    /// DSH's `session.search`: the query validated with DSH's sentences, then the ranked page. Given the page's
+    /// `view` (#189), only the sessions it draws as rows are ranked, so the twenty are cut from those.
     pub fn search(
         &self,
         store: &SessionStore,
         query: &str,
+        view: Option<SessionSearchView>,
     ) -> Result<SessionSearchPage, SessionSearchQueryError> {
         let normalized = normalize_search_query(query)?;
         let mut corpus: Vec<(String, Arc<Vec<PreparedDocument>>)> = Vec::new();
@@ -600,6 +672,11 @@ impl SessionSearchIndex {
         for meta in store.list() {
             // DSH searches the visible sessions only: those whose header carries a `cwd` (lib/index.js:2018).
             if meta.cwd().is_empty() {
+                continue;
+            }
+            // A session the view hides keeps what was read of it, for the next view that shows it.
+            if view.is_some_and(|view| !search_visible(&meta, view)) {
+                seen.insert(meta.id().to_string());
                 continue;
             }
             let Some(handle) = store.open(meta.id()) else {
@@ -983,7 +1060,7 @@ mod tests {
 
         let index = SessionSearchIndex::new();
         assert_eq!(
-            index.search(&store, "Quokka Colony").unwrap(),
+            index.search(&store, "Quokka Colony", None).unwrap(),
             SessionSearchPage {
                 items: vec![SessionSearchHit {
                     session_id: first.id.clone(),
@@ -996,7 +1073,7 @@ mod tests {
             page.items.into_iter().map(|item| item.session_id).collect()
         };
         assert_eq!(
-            ids(index.search(&store, "ledger").unwrap()),
+            ids(index.search(&store, "ledger", None).unwrap()),
             vec![second.id.clone(), first.id.clone()]
         );
         store
@@ -1006,12 +1083,209 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            ids(index.search(&store, "quokka colony").unwrap()),
+            ids(index.search(&store, "quokka colony", None).unwrap()),
             vec![second.id.clone(), first.id.clone()]
         );
         assert_eq!(
-            index.search(&store, " ").unwrap_err().code(),
+            index.search(&store, " ", None).unwrap_err().code(),
             "gateway/bad-request"
         );
+    }
+
+    fn say(store: &SessionStore, handle: &crate::event::SessionHandle, role: Role, text: &str) {
+        store.message(handle, message(role, text)).unwrap();
+    }
+
+    fn archive(store: &SessionStore, id: &str) {
+        let patch = crate::meta::FlagPatch {
+            archived: Some(true),
+            ..crate::meta::FlagPatch::default()
+        };
+        store.flags(id, patch).unwrap();
+    }
+
+    /// #189, developer-six's J170: one visible session holds the word in a longer answer, 21 archived ones in shorter
+    /// answers that outrank it. Without a view the answer is DSH's — twenty archived sessions with `hasMore` — and the
+    /// page, hiding archived sessions, showed "No matching sessions". `search.test.ts`'s twin.
+    #[test]
+    fn a_view_ranks_only_the_rows_the_page_draws_before_the_cut() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let root = dir.path().join("store");
+        let store = SessionStore::new(root.to_str().unwrap(), &heddle_config::Env::default());
+        let cwd = dir.path().join("work-189").to_string_lossy().into_owned();
+        let create = || {
+            store
+                .create(CreateOptions {
+                    cwd: Some(cwd.clone()),
+                    ..CreateOptions::default()
+                })
+                .unwrap()
+        };
+        let visible = create();
+        say(&store, &visible, Role::User, "plain note 0");
+        let longer = "zorbliquant, and a few more words than the archived ones have";
+        say(&store, &visible, Role::Assistant, longer);
+        let archived: Vec<String> = (1..=21)
+            .map(|index| {
+                let handle = create();
+                say(&store, &handle, Role::User, &format!("plain note {index}"));
+                say(&store, &handle, Role::Assistant, "zorbliquant noted");
+                archive(&store, &handle.id);
+                handle.id
+            })
+            .collect();
+        let index = SessionSearchIndex::new();
+        let view = |archived| Some(SessionSearchView { archived });
+        let ids = |page: &SessionSearchPage| -> Vec<String> {
+            page.items
+                .iter()
+                .map(|item| item.session_id.clone())
+                .collect()
+        };
+
+        let dsh = index.search(&store, "zorbliquant", None).unwrap();
+        assert_eq!((dsh.items.len(), dsh.has_more), (20, true));
+        assert!(
+            ids(&dsh).iter().all(|id| archived.contains(id)),
+            "no view: DSH's answer, as before — the archived sessions fill the twenty"
+        );
+        assert_eq!(
+            index
+                .search(&store, "zorbliquant", view(SessionSearchArchived::Hide))
+                .unwrap(),
+            SessionSearchPage {
+                items: vec![SessionSearchHit {
+                    session_id: visible.id.clone(),
+                    snippet: longer.to_string(),
+                }],
+                has_more: false,
+            },
+            "Hide archived: the visible session, and nothing more"
+        );
+        let shown = index
+            .search(&store, "zorbliquant", view(SessionSearchArchived::Show))
+            .unwrap();
+        assert_eq!((shown.items.len(), shown.has_more), (20, true));
+        assert_eq!(ids(&shown), ids(&dsh), "Show archived: in DSH's order");
+        let only = index
+            .search(&store, "zorbliquant", view(SessionSearchArchived::Only))
+            .unwrap();
+        assert_eq!((only.items.len(), only.has_more), (20, true));
+        assert!(ids(&only).iter().all(|id| archived.contains(id)));
+    }
+
+    #[test]
+    fn a_view_skips_children_and_blanks_and_keeps_forks_and_titled_pinned_or_archived_blanks() {
+        let dir = tempfile::tempdir().expect("a temp directory");
+        let root = dir.path().join("store");
+        let store = SessionStore::new(root.to_str().unwrap(), &heddle_config::Env::default());
+        let cwd = dir
+            .path()
+            .join("work-189-rows")
+            .to_string_lossy()
+            .into_owned();
+        let create = |options: CreateOptions| {
+            store
+                .create(CreateOptions {
+                    cwd: Some(cwd.clone()),
+                    ..options
+                })
+                .unwrap()
+        };
+        let parent = create(CreateOptions::default());
+        say(&store, &parent, Role::User, "plain note");
+        say(
+            &store,
+            &parent,
+            Role::Assistant,
+            "a kestrel ledger, the parent",
+        );
+        // A subagent's child: its row is its parent's, so it is never a hit of its own.
+        let child = create(CreateOptions {
+            parent_session: Some(parent.id.clone()),
+            origin: Some(SessionOrigin::Subagent),
+            delegation_depth: Some(1),
+            ..CreateOptions::default()
+        });
+        say(&store, &child, Role::User, "delegated");
+        say(&store, &child, Role::Assistant, "kestrel ledger");
+        // A blank: an answer but no turn and no title, which the page never draws as a hit.
+        let blank = create(CreateOptions::default());
+        say(&store, &blank, Role::Assistant, "kestrel ledger");
+        // Zero turns as well, but a person titled, pinned or archived each: rows the page draws.
+        let titled = create(CreateOptions {
+            title: Some("named by a person".to_string()),
+            ..CreateOptions::default()
+        });
+        say(&store, &titled, Role::Assistant, "kestrel ledger, titled");
+        let pinned = create(CreateOptions::default());
+        say(&store, &pinned, Role::Assistant, "kestrel ledger, pinned");
+        let pin = crate::meta::FlagPatch {
+            pinned: Some(true),
+            ..crate::meta::FlagPatch::default()
+        };
+        store.flags(&pinned.id, pin).unwrap();
+        let shelved = create(CreateOptions::default());
+        say(
+            &store,
+            &shelved,
+            Role::Assistant,
+            "kestrel ledger, archived",
+        );
+        archive(&store, &shelved.id);
+        // A fork names its source as `parentSession` but has no `origin`: a conversation with a row of its own.
+        let fork = create(CreateOptions {
+            parent_session: Some(parent.id.clone()),
+            ..CreateOptions::default()
+        });
+        say(&store, &fork, Role::User, "forked");
+        say(&store, &fork, Role::Assistant, "kestrel ledger, the fork");
+
+        let index = SessionSearchIndex::new();
+        let found = |archived: Option<SessionSearchArchived>| -> Vec<String> {
+            let view = archived.map(|archived| SessionSearchView { archived });
+            let page = index.search(&store, "kestrel ledger", view).unwrap();
+            let mut ids: Vec<String> = page.items.into_iter().map(|item| item.session_id).collect();
+            ids.sort();
+            ids
+        };
+        let sorted = |handles: &[&crate::event::SessionHandle]| -> Vec<String> {
+            let mut ids: Vec<String> = handles.iter().map(|handle| handle.id.clone()).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(
+            found(None),
+            sorted(&[&parent, &child, &blank, &titled, &pinned, &shelved, &fork]),
+            "no view: every session with a cwd, as DSH answers"
+        );
+        assert_eq!(
+            found(Some(SessionSearchArchived::Hide)),
+            sorted(&[&parent, &titled, &pinned, &fork]),
+            "Hide archived: no child, no blank, no archived session"
+        );
+        assert_eq!(
+            found(Some(SessionSearchArchived::Show)),
+            sorted(&[&parent, &titled, &pinned, &shelved, &fork]),
+            "Show archived: the archived one joins; an archived session is no blank"
+        );
+        assert_eq!(
+            found(Some(SessionSearchArchived::Only)),
+            sorted(&[&shelved]),
+            "Archived only: the archived one alone"
+        );
+    }
+
+    #[test]
+    fn the_archived_parameter_is_read_as_the_tree_reads_it() {
+        let read =
+            |value: Option<&str>| SessionSearchView::from_query(value).map(|view| view.archived);
+        assert_eq!(read(None), None, "absent: no view, DSH's answer");
+        assert_eq!(read(Some("hide")), Some(SessionSearchArchived::Hide));
+        assert_eq!(read(Some("show")), Some(SessionSearchArchived::Show));
+        assert_eq!(read(Some("1")), Some(SessionSearchArchived::Show));
+        assert_eq!(read(Some("only")), Some(SessionSearchArchived::Only));
+        assert_eq!(read(Some("")), Some(SessionSearchArchived::Hide));
+        assert_eq!(read(Some("bogus")), Some(SessionSearchArchived::Hide));
     }
 }

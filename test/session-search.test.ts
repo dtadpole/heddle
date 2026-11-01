@@ -19,7 +19,7 @@ import {
   tokenize,
   type PreparedDocument,
 } from '../src/session/search.ts'
-import { SessionStore, type SessionEvent } from '../src/session/store.ts'
+import { SessionStore, type SessionEvent, type SessionHandle } from '../src/session/store.ts'
 import { DIACRITICS, FOLDS, SEPARATORS } from '../src/session/unicode61.ts'
 
 /**
@@ -279,4 +279,90 @@ test('the index searches a real store, and a log written since is read again', (
   store.message(second, { role: 'assistant', content: [{ type: 'text', text: 'a quokka colony, twice: quokka colony' }] })
   assert.deepEqual(index.search('quokka colony').items.map((item) => item.sessionId), [second.id, first.id], 'the new answer is found and outranks')
   assert.throws(() => index.search(' '), SessionSearchQueryError)
+})
+
+/**
+ * #189, developer-six's J170: one visible session holds the word in a longer answer, 21 archived ones hold it in shorter
+ * answers, so all 21 outrank it. DSH's answer — every session with a `cwd` — is twenty archived sessions with `hasMore`,
+ * and the page, which hides archived sessions by default, showed "No matching sessions". Given the page's filter, the
+ * search ranks only the rows the page draws, before the twenty are cut.
+ */
+const say = (store: SessionStore, handle: SessionHandle, role: 'user' | 'assistant', text: string) => store.message(handle, { role, content: [{ type: 'text', text }] })
+
+test('#189: with the page\'s archive filter the search ranks only the rows it draws, before the twenty are cut; without one it is unchanged', () => {
+  const store = new SessionStore(join(scratch, 'store-189'))
+  const cwd = join(scratch, 'work-189')
+  const visible = store.create({ cwd })
+  say(store, visible, 'user', 'plain note 0')
+  say(store, visible, 'assistant', 'zorbliquant, and a few more words than the archived ones have')
+  const archived = Array.from({ length: 21 }, (_, index) => {
+    const handle = store.create({ cwd })
+    say(store, handle, 'user', `plain note ${index + 1}`)
+    say(store, handle, 'assistant', 'zorbliquant noted')
+    store.flags(handle.id, { archived: true })
+    return handle.id
+  })
+  const index = new SessionSearchIndex(store)
+  const ids = (page: { items: readonly { sessionId: string }[] }) => page.items.map((item) => item.sessionId)
+
+  const dsh = index.search('zorbliquant')
+  assert.deepEqual(
+    [dsh.items.length, dsh.hasMore, ids(dsh).every((id) => archived.includes(id))],
+    [20, true, true],
+    'no view: DSH\'s answer, as before — the archived sessions fill the twenty and the visible one is cut',
+  )
+  assert.deepEqual(
+    index.search('zorbliquant', { archived: 'hide' }),
+    { items: [{ sessionId: visible.id, snippet: 'zorbliquant, and a few more words than the archived ones have' }], hasMore: false },
+    'Hide archived: the visible session is the answer, and nothing more is hidden behind it',
+  )
+  const shown = index.search('zorbliquant', { archived: 'show' })
+  assert.deepEqual([shown.items.length, shown.hasMore], [20, true], 'Show archived: every session is a row, so twenty of 22 and more')
+  assert.deepEqual(ids(shown), ids(dsh), 'in DSH\'s order')
+  const only = index.search('zorbliquant', { archived: 'only' })
+  assert.deepEqual(
+    [only.items.length, only.hasMore, ids(only).every((id) => archived.includes(id))],
+    [20, true, true],
+    'Archived only: twenty of the 21 archived, and more; never the visible one',
+  )
+})
+
+test('#189: a view skips subagent children and blank sessions as the page does, and keeps a fork and a titled, pinned or archived zero-turn session', () => {
+  const store = new SessionStore(join(scratch, 'store-189-rows'))
+  const cwd = join(scratch, 'work-189-rows')
+  const parent = store.create({ cwd })
+  say(store, parent, 'user', 'plain note')
+  say(store, parent, 'assistant', 'a kestrel ledger, the parent')
+  /** A subagent's child: its row is its parent's, so it is never a hit of its own. */
+  const child = store.create({ cwd, parentSession: parent.id, origin: 'subagent', delegationDepth: 1 })
+  say(store, child, 'user', 'delegated')
+  say(store, child, 'assistant', 'kestrel ledger')
+  /** A blank: an answer but no turn and no title, which the page never draws as a hit. */
+  const blank = store.create({ cwd })
+  say(store, blank, 'assistant', 'kestrel ledger')
+  /** Zero turns as well, but a person titled, pinned or archived each: rows the page draws. */
+  const titled = store.create({ cwd, title: 'named by a person' })
+  say(store, titled, 'assistant', 'kestrel ledger, titled')
+  const pinned = store.create({ cwd })
+  say(store, pinned, 'assistant', 'kestrel ledger, pinned')
+  store.flags(pinned.id, { pinned: true })
+  const shelved = store.create({ cwd })
+  say(store, shelved, 'assistant', 'kestrel ledger, archived')
+  store.flags(shelved.id, { archived: true })
+  /** A fork names its source as `parentSession` but has no `origin`: a conversation with a row of its own. */
+  const fork = store.create({ cwd, parentSession: parent.id })
+  say(store, fork, 'user', 'forked')
+  say(store, fork, 'assistant', 'kestrel ledger, the fork')
+  const index = new SessionSearchIndex(store)
+  const found = (view?: { archived: 'hide' | 'show' | 'only' }) =>
+    index
+      .search('kestrel ledger', view)
+      .items.map((item) => item.sessionId)
+      .sort()
+  const sorted = (...handles: { id: string }[]) => handles.map((handle) => handle.id).sort()
+
+  assert.deepEqual(found(), sorted(parent, child, blank, titled, pinned, shelved, fork), 'no view: every session with a cwd, as DSH answers')
+  assert.deepEqual(found({ archived: 'hide' }), sorted(parent, titled, pinned, fork), 'Hide archived: no child, no blank, no archived session')
+  assert.deepEqual(found({ archived: 'show' }), sorted(parent, titled, pinned, shelved, fork), 'Show archived: the archived one joins; an archived session is no blank')
+  assert.deepEqual(found({ archived: 'only' }), sorted(shelved), 'Archived only: the archived one alone')
 })

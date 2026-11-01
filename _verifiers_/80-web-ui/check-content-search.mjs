@@ -219,6 +219,116 @@ test('content search: a phrase found only inside a turn joins the hits with its 
 })
 
 /**
+ * #189, developer-six's J170 replayed. One visible session holds a rare word in a longer answer; 21 more hold it in
+ * shorter answers and are archived, so all 21 outrank the visible one. The host used to rank every session and cut at
+ * twenty — DSH's host does too (dsh-api-session-controller lib/index.js:2016-2084) — so it answered twenty archived
+ * sessions with `hasMore`, the page dropped them under the default Hide archived, and the list said "No matching
+ * sessions" over a session in the tree that matched. Now the page sends its archive filter and the host skips what the
+ * page hides before its cut: the visible session is found. Under *All conversations (show archived)* every session is a
+ * row, so twenty show with DSH's "Showing the first 20 results. Narrow your search." (`lib/client.js:3496-3498`, `:4910`).
+ * The titles do not hold the word, so every hit here is the host's.
+ */
+test('content search: a visible match outranked by 21 archived ones is found, and Show archived lists twenty with the cut sentence (#189)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('content-search-crowd')
+  const root = fixtureDir('content-search-crowd-repo')
+  mkdirSync(root, { recursive: true })
+  const { config, script } = scriptedConfig({ home, steps: [{ text: 'noted' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `registered the workspace (${added.text})`)
+    const sessionIds = async () => JSON.parse((await api(server.url, cookie, '/api/sessions')).text).map((meta) => meta.id)
+    /** A new session in the folder per turn, answered with its own text; the session it made is the one id that is new. */
+    const turn = async (prompt, answer) => {
+      writeFileSync(script, `${JSON.stringify({ steps: [{ text: answer }] })}\n`)
+      const known = new Set(await sessionIds())
+      const ran = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt, folder: root, new: true }) })
+      assert.equal(ran.status, 200, `the turn "${prompt}" ran (${ran.status})`)
+      const made = (await sessionIds()).filter((id) => !known.has(id))
+      assert.equal(made.length, 1, `the turn "${prompt}" made one session`)
+      return made[0]
+    }
+    const longer = 'zorbliquant, and a few more words than the archived notes have'
+    await turn('plain note 0', longer)
+    const archived = []
+    for (let index = 1; index <= 21; index += 1) archived.push(await turn(`plain note ${index}`, 'zorbliquant noted'))
+    for (const id of archived) {
+      const flagged = await api(server.url, cookie, `/api/sessions/${id}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+      assert.equal(flagged.status, 200, `archived ${id} (${flagged.text})`)
+    }
+
+    browser = await openBrowser({ width: 1280, height: 900 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    /** READ, plus DSH's cut sentence under the hits. */
+    const readAll = `() => ({ ...(${READ})(), more: document.getElementById('search-more').hidden ? null : document.getElementById('search-more').textContent })`
+    /** Run `act` in the page, then wait until the host was asked and its answer drawn; answer what the list shows and what was asked. */
+    const settle = async (act, done) =>
+      JSON.parse(
+        await browser.evaluate(
+          `(async () => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+            const read = ${readAll}
+            const asked = []
+            const original = window.fetch
+            window.fetch = (input, init) => {
+              const url = String(input instanceof Request ? input.url : input)
+              if (url.includes('/api/sessions/search')) asked.push(new URL(url, location.href).search)
+              return original(input, init)
+            }
+            await (${act})()
+            const deadline = performance.now() + 10000
+            while (performance.now() < deadline && !(asked.length > 0 && read().pending === null && (${done})(read()))) await wait(25)
+            await wait(150)
+            window.fetch = original
+            return JSON.stringify({ shown: read(), asked })
+          })()`,
+          30_000,
+        ),
+      )
+
+    const typed = await settle(
+      `async () => { const field = document.getElementById('session-search'); field.value = 'zorbliquant'; field.dispatchEvent(new Event('input', { bubbles: true })) }`,
+      `(shown) => shown.hits.length > 0 || shown.note !== null`,
+    )
+    assert.deepEqual(
+      typed.shown,
+      { hits: [{ title: 'plain note 0', snippet: longer }], pending: null, note: null, more: null },
+      `Hide archived: the visible session that holds the word is found, and the list is complete\nsaw: ${JSON.stringify(typed)}`,
+    )
+    assert.deepEqual(typed.asked, ['?q=zorbliquant&archived=hide'], 'the host was asked with the page\'s filter')
+
+    await browser.evaluate(`document.querySelector('#view-options button').click()`)
+    await browser.waitFor(`[...document.querySelectorAll('#view-options [role^=menuitem]')].some((entry) => entry.textContent.trim() === 'All conversations (show archived)')`, 5_000)
+    const shown = await settle(
+      `async () => { [...document.querySelectorAll('#view-options [role^=menuitem]')].find((entry) => entry.textContent.trim() === 'All conversations (show archived)').click() }`,
+      `(shown) => shown.hits.length >= 20`,
+    )
+    assert.deepEqual(
+      { rows: shown.shown.hits.length, note: shown.shown.note, more: shown.shown.more, pending: shown.shown.pending },
+      { rows: 20, note: null, more: 'Showing the first 20 results. Narrow your search.', pending: null },
+      `Show archived: twenty of the 22 rows, and DSH's sentence says the list was cut\nsaw: ${JSON.stringify(shown)}`,
+    )
+    assert.ok(
+      shown.shown.hits.every((hit) => /^plain note \d+$/.test(hit.title) && typeof hit.snippet === 'string' && hit.snippet.includes('zorbliquant')),
+      `each row is a session found inside its answer, with its snippet\nsaw: ${JSON.stringify(shown.shown.hits)}`,
+    )
+    assert.deepEqual(shown.asked, ['?q=zorbliquant&archived=show'], 'the new filter asked the host again')
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
+  }
+})
+
+/**
  * A failed host request (#58). DSH's README, Search: "a failed content search leaves metadata matches visible without an
  * additional warning" — its error state draws the name matches and no sentence (dsh-client-ui-workspace
  * `lib/client.js:3753-3760`, `:3492`). A failure is not the query's answer either: the next search for the same query

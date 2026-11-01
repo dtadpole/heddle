@@ -122,32 +122,44 @@ test('twenty rows at most; more when twenty are shown and the host said so, or w
 })
 
 /**
- * N2 (developer-ten's review of content-search-page): the host ranks every session with a `cwd`, a subagent's child and an
- * archived session included, and the page filters after the host's twenty are cut. DSH does the same — its controller
- * ranks every session with a `cwd` (dsh-api-session-controller lib/index.js:2016-2018, cut at 20 :2029-2084) and its
- * client filters after (dsh-client-ui-workspace lib/client.js:1197-1200) yet keeps the host's `hasMore` (:1219) — so the
- * wire stays DSH's. What changes is the sentence: "Showing the first 20 results" is said only when twenty are shown,
- * never beside "No matching sessions" or beside a shorter list.
+ * #189 (developer-six's J170), after N2 (developer-ten's review of content-search-page). DSH's controller ranks every
+ * session with a `cwd` (dsh-api-session-controller lib/index.js:2016-2018, cut at 20 :2029-2084) and its client drops
+ * the hidden ones after (dsh-client-ui-workspace lib/client.js:1197-1200), keeping the host's `hasMore` (:1219), so a
+ * list the host cut says "Showing the first 20 results" (:3496-3498). N2 made that sentence follow the rows shown — never
+ * beside "No matching sessions" — which left a cut list looking complete: hidden sessions that filled the host's twenty
+ * read "No matching sessions" over a visible match beyond them. The page now sends its filter, so the host skips what it
+ * hides before the cut; and when the host still says more and the page left hits out, the list says it was cut.
  */
-test('the host\'s hasMore says "Showing the first 20" only when twenty rows are shown', () => {
+test('the host\'s hasMore with hits left out says the list was cut, at any length; with no more, an empty list is no match', () => {
   const hidden = Array.from({ length: 20 }, (_, index) =>
     session(`s-h${String(index).padStart(2, '0')}`, index, index % 2 === 0 ? { title: `a ${index}`, archived: true } : { title: `c ${index}`, origin: 'subagent' }),
   )
   const live = [session('s-live', 40, { title: 'unrelated' }), session('s-kept', 41, { title: 'unrelated too' })]
   const filled = { items: hidden.map((meta) => ({ sessionId: meta.id, snippet: 'quokka' })), hasMore: true }
   const none = search.merge([], [...hidden, ...live], 'quokka', filled)
-  assert.deepEqual([none.items.length, none.hasMore], [0, false], 'hidden sessions filled the twenty: nothing shown, and no "Showing the first 20" beside "No matching sessions"')
+  assert.deepEqual([none.items.length, none.hasMore], [0, true], 'hidden sessions filled the twenty and the host found more: nothing shown, and the list was cut')
   const some = search.merge([], [...hidden, ...live], 'quokka', { items: [...filled.items.slice(0, 18), { sessionId: 's-live', snippet: 'quokka' }, { sessionId: 's-kept', snippet: 'quokka' }], hasMore: true })
-  assert.deepEqual([some.items.length, some.hasMore], [2, false], 'two shown of the twenty: not "the first 20" either')
+  assert.deepEqual([some.items.length, some.hasMore], [2, true], 'two shown, eighteen left out, and more found: cut')
   const shown = search.merge([], [...hidden, ...live], 'quokka', filled, { archived: 'show' })
-  assert.deepEqual([shown.items.length, shown.hasMore], [10, false], 'under Show archived the ten archived ones are shown, and ten is not twenty')
+  assert.deepEqual([shown.items.length, shown.hasMore], [10, true], 'under Show archived the ten children are still left out: cut')
+  const complete = search.merge([], [...hidden, ...live], 'quokka', { ...filled, hasMore: false })
+  assert.deepEqual([complete.items.length, complete.hasMore], [0, false], 'the host found nothing more: an empty list is "No matching sessions" alone')
+  const unknown = search.merge([], live, 'quokka', { items: [{ sessionId: 's-live', snippet: 'quokka' }, { sessionId: 's-new', snippet: 'quokka' }], hasMore: true })
+  assert.deepEqual([unknown.items.length, unknown.hasMore], [1, true], 'a hit the index does not hold yet is left out too')
+  const visibleOnly = search.merge([], live, 'quokka', { items: live.map((meta) => ({ sessionId: meta.id, snippet: 'quokka' })), hasMore: false })
+  assert.deepEqual([visibleOnly.items.length, visibleOnly.hasMore], [2, false], 'the host filtered first: every hit shown, nothing more')
 })
 
-test('the page asks the host after the debounce, aborts a stale query, and shows DSH\'s pending status', () => {
-  assert.match(page, /fetch\(`\/api\/sessions\/search\?q=\$\{encodeURIComponent\(query\)\}`, \{ signal: controller\.signal \}\)/, 'the host route, abortable')
+test('the page asks the host after the debounce, with its archive filter, aborts a stale query, and shows DSH\'s pending status', () => {
+  assert.match(
+    page,
+    /fetch\(`\/api\/sessions\/search\?q=\$\{encodeURIComponent\(query\)\}&archived=\$\{encodeURIComponent\(archived\)\}`, \{ signal: controller\.signal \}\)/,
+    'the host route, with the filter (#189), abortable',
+  )
+  assert.match(page, /requestContentSearch\(query, archiveMode\)/, 'the filter the tree is drawn with')
   assert.match(page, /contentSearchAbort\?\.abort\(\)/, 'a newer keystroke aborts the older request')
   assert.match(page, /\}, ContentSearch\.DEBOUNCE_MS\)/, 'after the debounce')
   assert.match(page, /'aria-label', 'Searching session history…'/, "DSH's status label (search.pending)")
-  assert.match(page, /note\.hidden = items\.length > 0 \|\| pending/, '"No matching sessions" waits for the host')
+  assert.match(page, /note\.hidden = items\.length > 0 \|\| pending \|\| hasMore/, '"No matching sessions" waits for the host, and is not said of a cut list')
   assert.match(page, /quote\.className = 'hit-snippet'/, 'a hit shows its snippet')
 })
