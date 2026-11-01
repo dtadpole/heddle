@@ -259,6 +259,9 @@ struct Shared {
     port: u16,
     /// The page's interactive terminals, per session (#85).
     terminals: TerminalRegistry,
+    /// Whether the session service announces every title it writes, which this server pushes as `session/renamed`
+    /// (#33). When it does not, the rename route pushes its own rename.
+    renames_announced: bool,
 }
 
 impl AppState {
@@ -388,6 +391,21 @@ impl ServerBuilder {
             .token
             .clone()
             .unwrap_or_else(token::create_launch_token);
+        // Every title the session store writes reaches every page as `session/renamed` (#33). DSH records each title
+        // change and every view of the session follows (inventory-shell S16). That covers a person's rename, the first
+        // message's fallback and the title model's answer, so the push comes from the store, as `web.ts` hears its
+        // `session/renamed` event, not from the rename route alone.
+        let renames_announced = {
+            let hub = self.events.clone();
+            self.harness
+                .sessions
+                .on_renamed(Arc::new(move |session: &str, title: &str| {
+                    hub.push(
+                        "sessions",
+                        &json!({"type": "session/renamed", "session": session, "title": title}),
+                    );
+                }))
+        };
         let state = AppState {
             inner: Arc::new(Shared {
                 harness: self.harness,
@@ -399,6 +417,7 @@ impl ServerBuilder {
                 secret,
                 port,
                 terminals: TerminalRegistry::default(),
+                renames_announced,
             }),
         };
 
@@ -1565,10 +1584,16 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
-            state.events().push(
-                "sessions",
-                &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
-            );
+            // A store that announces its titles has pushed this one already (#33). Otherwise the push names the
+            // title cleaned as the store cleans what it keeps, as the announcing store and the TypeScript server do,
+            // not the raw body.
+            if !state.inner.renames_announced {
+                let kept = heddle_session::title_text::clean_session_title(&title);
+                state.events().push(
+                    "sessions",
+                    &json!({"type": "session/renamed", "session": id.as_str(), "title": kept}),
+                );
+            }
             respond::json(StatusCode::OK, &meta)
         }
     }
@@ -6278,7 +6303,7 @@ mod tests {
             &router,
             &format!("/api/sessions/{session}/title"),
             &cookie,
-            r#"{"title":"renamed"}"#,
+            r#"{"title":"  renamed \u0007  "}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -6286,7 +6311,8 @@ mod tests {
         assert_eq!(event, "sessions");
         assert_eq!(
             data,
-            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+            json!({"type": "session/renamed", "session": session, "title": "renamed"}),
+            "the push names the title cleaned as the store keeps it, not the raw body"
         );
         assert!(
             id.is_some(),
@@ -6648,6 +6674,33 @@ mod tests {
                 .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
             "{turns:?}"
         );
+
+        // #33: a store that announces its titles pushes a person's rename exactly once, as the store kept it
+        // (cleaned); the route adds no second push.
+        let mut renamed = state.events().subscribe();
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/title"),
+            &cookie,
+            r#"{"title":"  Loom   notes  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut pushed = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), renamed.next_frame()).await
+        {
+            if frame.event == "sessions"
+                && frame.data.contains("session/renamed")
+                && frame.data.contains("Loom")
+            {
+                pushed.push(frame.data);
+            }
+        }
+        assert_eq!(pushed.len(), 1, "one push per rename: {pushed:?}");
+        let data: Value = serde_json::from_str(&pushed[0]).unwrap();
+        assert_eq!(data["session"], id.as_str());
+        assert_eq!(data["title"], "Loom notes", "the title the store kept");
         std::fs::remove_dir_all(&scratch).ok();
     }
 

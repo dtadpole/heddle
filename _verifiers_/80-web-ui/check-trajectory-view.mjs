@@ -691,3 +691,288 @@ test('an older ledger read that fails after a newer one drew leaves no error und
     await server.close()
   }
 })
+
+test('the overview draws one bar per record, and an answer bar splits at its TTFT, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH's overview draws a bar per record in its lane, and an assistant bar splits into
+   * TTFT and decoding with a tip that names both. The page drew one tick per turn per lane, with no split.
+   */
+  const server = await startServer('record-bars')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew per-record bars')
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({
+      bars: [...document.querySelectorAll('#timeline .tr-bar')].map((bar) => ({ lane: bar.dataset.lane, kind: bar.dataset.kind, label: bar.getAttribute('aria-label') ?? '', split: bar.dataset.split === 'true', ttft: bar.style.getPropertyValue('--ttft'), image: getComputedStyle(bar).backgroundImage })),
+    })`))
+    assert.ok(state.bars.every((bar) => /^turn \d+ · /.test(bar.label)), `every bar is named 'turn N · kind · …' (${state.bars.map((bar) => bar.label).join(' | ')})`)
+    /**
+     * The default equal mode lays bars out in slots, and a slot is layout only: each bar says the same clock and
+     * duration as in the actual-duration mode (developer-ten's B1 - the slot's width read as the record's duration).
+     */
+    await browser.evaluate(`document.getElementById('tr-duration').click()`)
+    const actualLabels = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#timeline .tr-bar')].map((bar) => bar.getAttribute('aria-label') ?? ''))`))
+    await browser.evaluate(`document.getElementById('tr-duration').click()`)
+    const singles = (labels) => labels.filter((label) => !/ records/.test(label)).sort()
+    assert.deepEqual(singles(state.bars.map((bar) => bar.label)), singles(actualLabels), 'a record says the same clock and duration in both duration modes')
+    /**
+     * The split follows the server's own data. The scripted provider can answer within one millisecond, and an answer
+     * that took no time has nothing to split; so the claim is that the page draws the split exactly when the ledger's
+     * record carries a TTFT and decoding that add up to a positive time, and names both in its tip.
+     */
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const answers = (view.body.timeline?.records ?? []).filter((record) => record.kind === 'assistant')
+    assert.ok(answers.length > 0, `the timeline lists the answer as a record (${JSON.stringify(view.body.timeline?.records)})`)
+    const timed = answers.some((record) => record.ttftMs !== undefined && record.decodingMs !== undefined && record.ttftMs + record.decodingMs > 0)
+    const splitBars = state.bars.filter((bar) => bar.lane === 'model' && bar.split)
+    if (!timed) {
+      assert.equal(splitBars.length, 0, 'an answer that took no time draws no split')
+      return
+    }
+    assert.ok(splitBars.length > 0, `an answer bar in the model lane carries the TTFT split (${JSON.stringify(state.bars)})`)
+    assert.match(splitBars[0].ttft, /^\d+(\.\d)?%$/, 'its split is a share of the bar')
+    assert.match(splitBars[0].image, /linear-gradient/, `and the split is painted: no older rule resets the bar's gradient (${splitBars[0].image})`)
+    await browser.evaluate(`document.querySelector('#timeline .tr-bar[data-split="true"]').dispatchEvent(new PointerEvent('pointerenter'))`)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const tip = await browser.evaluate(`document.getElementById('timeline-tip')?.hidden === false ? document.getElementById('timeline-tip').textContent : ''`)
+    assert.match(tip, /TTFT \d+(\.\d+)? (ms|s) · decoding \d+(\.\d+)? (ms|s)/, `the hover tip names the TTFT and the decoding (${tip})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a slash command between two turns is drawn where it ran, in its own Between turns section, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH draws a record outside every turn chronologically, in its own `Between turns`
+   * section ("A standalone compaction request appears chronologically in its own Between turns section"), and its turn
+   * fold leaves such a section open. Both builds listed every loose record after the last turn, with no section head,
+   * so a command run between turns 1 and 2 read as if it had run after turn 2.
+   */
+  const server = await startServer('between-turns')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const runTurn = async (prompt) => {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+      await turn.text()
+    }
+    await runTurn('what is in here')
+    const command = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/permission' }) })
+    assert.equal(command.status, 200, `the command ran (${command.status} ${JSON.stringify(command.body)})`)
+    await runTurn('and again')
+
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const rows = view.body.rows ?? []
+    const shape = rows.map((row) => `${row.loose ? 'between' : 'turn ' + row.turn}${row.turnStart ? '*' : ''} ${row.record.label}`).join(' / ')
+    const firstOfTurn2 = rows.findIndex((row) => row.turn === 2)
+    const lastOfTurn1 = rows.findLastIndex((row) => row.turn === 1)
+    const section = rows.slice(lastOfTurn1 + 1, firstOfTurn2)
+    assert.ok(lastOfTurn1 >= 0 && firstOfTurn2 > lastOfTurn1, `both turns are in the rows\nsaw: ${shape}`)
+    assert.deepEqual(section.map((row) => row.record.label), ['command/run', 'command/done'], `the command sits between turn 1 and turn 2\nsaw: ${shape}`)
+    assert.ok(section.every((row) => row.loose && row.record.afterTurn === 1), `it belongs to no turn and follows turn 1\nsaw: ${shape}`)
+    assert.deepEqual(section.map((row) => row.turnStart), [true, false], `and its first row heads its own section\nsaw: ${shape}`)
+
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the table drew rows')
+    const drawn = (expression) => browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tr-table tbody tr')].map((tr) => ${expression}))`)
+    const heads = JSON.parse(await drawn(`(tr.dataset.turnStart === 'true' ? (tr.querySelector('.tr-turn-label')?.textContent ?? '?') : '') + '|' + tr.dataset.turn`))
+    const labelled = heads.filter((entry) => !entry.startsWith('|')).map((entry) => entry.split('|')[0])
+    assert.deepEqual(labelled, ['Turn 1', 'Between turns', 'Turn 2'], `the table heads read Turn 1, Between turns, Turn 2 in that order (${heads.join(' ')})`)
+    await browser.evaluate(`document.getElementById('tr-turns').click()`)
+    const folded = JSON.parse(await drawn(`tr.dataset.turn + (tr.dataset.turnStart === 'true' ? '*' : '')`))
+    assert.deepEqual(folded, ['1*', '0*', '0', '2*'], `with turns folded, each turn shows its head and the section stays whole (${folded.join(' ')})`)
+    await browser.evaluate(`[...document.querySelectorAll('#tr-table tbody tr')].find((tr) => tr.dataset.turn === '0')?.click()`)
+    const where = await browser.evaluate(`document.querySelector('#tr-details .tr-d-where')?.textContent ?? ''`)
+    assert.equal(where, 'Between turns', 'and its record says where it sits in the details pane')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('the overview zooms with the wheel, pans with a right-button drag, and a right click clears the window, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH's overview "wheel gestures zoom the time domain; a right-button click clears the
+   * selected interval, and a right-button drag pans an already zoomed viewport" (dsh-client-ui-trajectory README). The
+   * strip had drag-to-focus only: a wheel scrolled the page, and the right button opened the browser's menu.
+   */
+  const server = await startServer('overview-zoom')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew its bars')
+    const read = () => browser.evaluate(`JSON.stringify((() => {
+      const strip = document.getElementById('timeline').getBoundingClientRect()
+      const track = document.querySelector('#timeline .tr-lane-track').getBoundingClientRect()
+      const focus = document.querySelector('#timeline .tr-focus')
+      return {
+        zoomed: document.querySelector('#timeline .tr-lanes').dataset.zoomed,
+        trackLeft: track.left - strip.left,
+        trackWidth: track.width,
+        stripWidth: strip.width,
+        stripLeft: strip.left,
+        stripY: strip.top + strip.height / 2,
+        focus: focus === null ? 'none' : getComputedStyle(focus).display,
+        dimmed: document.querySelectorAll('#tr-table tbody tr[data-focus="outside"]').length,
+      }
+    })())`).then((text) => JSON.parse(text))
+    const fire = (type, init) => browser.evaluate(`(() => {
+      const strip = document.getElementById('timeline')
+      const event = ${type === 'wheel' ? 'new WheelEvent' : type === 'contextmenu' ? 'new MouseEvent' : 'new PointerEvent'}(${JSON.stringify(type)}, { bubbles: true, cancelable: true, pointerId: 31, ...${JSON.stringify(init)} })
+      return strip.dispatchEvent(event)
+    })()`)
+    const before = await read()
+    assert.equal(before.zoomed, 'false', 'the strip starts with the whole domain')
+    const middle = before.stripLeft + before.stripWidth / 2
+
+    assert.equal(await fire('wheel', { deltaY: -600, clientX: middle, clientY: before.stripY }), false, 'the strip takes the wheel, so the page does not scroll')
+    const zoomed = await read()
+    assert.equal(zoomed.zoomed, 'true', 'a wheel up zooms in')
+    assert.ok(zoomed.trackWidth > before.trackWidth * 1.5, `the lanes are drawn wider than the strip (${before.trackWidth} to ${zoomed.trackWidth})`)
+    /**
+     * A zoomed strip cannot be scrolled by focus (developer-ten's B1): a bar outside the view is no tab stop, and even
+     * focused from script it leaves the strip where it was, so the pointer still maps to the bars under it.
+     */
+    const focusState = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const bars = [...document.querySelectorAll('#timeline .tr-bar')]
+      const hidden = bars.filter((bar) => bar.tabIndex === -1)
+      hidden[0]?.focus()
+      return { bars: bars.length, hidden: hidden.length, scrollLeft: document.getElementById('timeline').scrollLeft }
+    })())`))
+    assert.ok(focusState.hidden < focusState.bars, `the bars in view stay tab stops (${JSON.stringify(focusState)})`)
+    assert.equal(focusState.scrollLeft, 0, `focusing a bar outside the view does not scroll the strip (${JSON.stringify(focusState)})`)
+    assert.ok(Math.abs(zoomed.trackLeft + (zoomed.trackWidth - before.stripWidth) / 2) < 2, `about the pointer at the middle, the track stays centred (left ${zoomed.trackLeft})`)
+
+    await fire('pointerdown', { button: 2, buttons: 2, clientX: middle, clientY: before.stripY })
+    await fire('pointermove', { button: 2, buttons: 2, clientX: middle + 120, clientY: before.stripY })
+    await fire('pointerup', { button: 2, clientX: middle + 120, clientY: before.stripY })
+    const panned = await read()
+    assert.ok(Math.abs(panned.trackLeft - (zoomed.trackLeft + 120)) < 2, `a right-button drag pans the zoomed lanes with the pointer (${zoomed.trackLeft} to ${panned.trackLeft})`)
+    assert.equal(panned.trackWidth, zoomed.trackWidth, 'and keeps the zoom')
+
+    const third = before.stripWidth / 3
+    await fire('pointerdown', { button: 0, buttons: 1, clientX: before.stripLeft + third, clientY: before.stripY })
+    await fire('pointermove', { button: 0, buttons: 1, clientX: before.stripLeft + 2 * third, clientY: before.stripY })
+    await fire('pointerup', { button: 0, clientX: before.stripLeft + 2 * third, clientY: before.stripY })
+    assert.equal((await read()).focus, 'block', 'a left-button drag focuses a window, as before')
+    await fire('pointerdown', { button: 2, buttons: 2, clientX: middle, clientY: before.stripY })
+    await fire('pointerup', { button: 2, clientX: middle, clientY: before.stripY })
+    const cleared = await read()
+    assert.deepEqual([cleared.focus, cleared.dimmed], ['none', 0], 'a right click clears the window and undims every row')
+    assert.equal(cleared.trackLeft, panned.trackLeft, 'and leaves the zoom where it was')
+    assert.equal(await fire('contextmenu', { clientX: middle, clientY: before.stripY }), false, "the browser's menu stays shut over the strip")
+
+    await fire('wheel', { deltaY: 5000, clientX: middle, clientY: before.stripY })
+    const whole = await read()
+    assert.equal(whole.zoomed, 'false', 'a wheel down back past the whole domain shows the whole again')
+    assert.ok(Math.abs(whole.trackWidth - before.trackWidth) < 1 && Math.abs(whole.trackLeft - before.trackLeft) < 1, 'with the lanes as they were')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test("a user record counts its images and files, and its inspector lists them with a thumbnail that loads, as DSH's does", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21): DSH's trajectory row shows a user record's nonzero image and file counts beside its text,
+   * and its inspector lists each attachment after the message (a contained thumbnail that opens the lightbox, or a file
+   * icon, with name, size and type). The ledger dropped every non-text part, so the row and the inspector showed text only.
+   */
+  const server = await startServer('ledger-attachments')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const upload = async (name, body) => {
+      const answer = await fetch(new URL(`/api/uploads?name=${encodeURIComponent(name)}`, server.url), { method: 'POST', headers: { cookie, origin }, body })
+      assert.equal(answer.status, 200, `the upload of ${name} was stored (${answer.status})`)
+      return String((await answer.json()).path ?? '')
+    }
+    const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+    const image = await upload('pixel.png', pixel)
+    const notes = await upload('notes.txt', 'a few notes\n')
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what are these', folder: server.work, session, attachments: [image, notes] }),
+    })
+    assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
+    await turn.text()
+
+    const view = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)
+    const prompt = (view.body.rows ?? []).find((row) => row.kind === 'user')
+    assert.deepEqual(
+      (prompt?.record.attachments ?? []).map((item) => [item.kind, item.name]),
+      [['image', 'pixel.png'], ['file', 'notes.txt']],
+      `the ledger's user record carries both attachments in order (${JSON.stringify(prompt?.record)})`,
+    )
+
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelector("#tr-table tbody .tr-attach-count") !== null', 20_000), 'the user row shows its attachment counts')
+    assert.equal(await browser.evaluate('document.querySelector("#tr-table tbody .tr-attach-count").textContent'), '1 image · 1 file')
+    await browser.evaluate('document.querySelector("#tr-table tbody .tr-attach-count").closest("tr").click()')
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-details .tr-attachments li").length === 2', 10_000), 'the inspector lists both attachments')
+    assert.ok(await browser.waitFor('(document.querySelector("#tr-details .tr-attach-thumb img")?.naturalWidth ?? 0) > 0', 10_000), 'the image thumbnail loads from the session-scoped upload address')
+    const listed = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tr-details .tr-attachments li')].map((li) => [li.dataset.kind, li.querySelector('.tr-attach-name').textContent, li.querySelector('.tr-attach-detail').textContent]))`))
+    assert.deepEqual(listed.map(([kind, name]) => [kind, name]), [['image', 'pixel.png'], ['file', 'notes.txt']], `in content order (${JSON.stringify(listed)})`)
+    assert.match(listed[0][2], /^\d+ B · image\/png$/, 'the image row says its size and type')
+    assert.match(listed[1][2], /^\d+ B/, 'and the file row its size')
+    await browser.evaluate('document.querySelector("#tr-details .tr-attach-thumb").click()')
+    assert.ok(await browser.waitFor('document.querySelector("dialog.image-lightbox")?.open === true', 5_000), 'the thumbnail opens the lightbox')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
