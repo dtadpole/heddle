@@ -59,7 +59,9 @@ pub fn validate_upload_content(
     let is_image = ImageMediaType::for_extension(&extension).is_some()
         || content_type.to_ascii_lowercase().starts_with("image/");
     if bytes == 0 && is_image {
-        return Err(AttachmentInputError("an empty image is not valid".to_string()));
+        return Err(AttachmentInputError(
+            "an empty image is not valid".to_string(),
+        ));
     }
     Ok(())
 }
@@ -452,7 +454,10 @@ mod tests {
         match part {
             AttachmentPart::File { bytes, sha256, .. } => {
                 assert_eq!(bytes, 0);
-                assert_eq!(sha256, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+                assert_eq!(
+                    sha256,
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                );
             }
             other => panic!("expected an ordinary file, got {other:?}"),
         }
@@ -460,7 +465,9 @@ mod tests {
             let path = directory.join(format!("empty.{extension}"));
             std::fs::write(&path, b"").unwrap();
             assert_eq!(
-                read_attachment(&directory, &serde_json::json!(path.to_string_lossy())).unwrap_err().to_string(),
+                read_attachment(&directory, &serde_json::json!(path.to_string_lossy()))
+                    .unwrap_err()
+                    .to_string(),
                 "an empty image is not valid"
             );
         }

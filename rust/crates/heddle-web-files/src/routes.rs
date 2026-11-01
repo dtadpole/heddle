@@ -1428,8 +1428,12 @@ mod tests {
         let (base, host) = scratch("uploads-empty");
         let directory = upload_directory(&host.heddle_home());
         let (status, _, bytes) = call(
-            routes_of(host), "POST", "/api/uploads?name=a.txt", Some(Vec::new()),
-        ).await;
+            routes_of(host),
+            "POST",
+            "/api/uploads?name=a.txt",
+            Some(Vec::new()),
+        )
+        .await;
         assert_eq!(status, Status::OK);
         let saved: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(saved["bytes"], 0);
@@ -1449,8 +1453,12 @@ mod tests {
         let routes = routes_of(host);
         for extension in ["png", "PNG", "jpg", "jpeg", "webp", "gif"] {
             let (status, _, bytes) = call(
-                routes.clone(), "POST", &format!("/api/uploads?name=empty.{extension}"), Some(Vec::new()),
-            ).await;
+                routes.clone(),
+                "POST",
+                &format!("/api/uploads?name=empty.{extension}"),
+                Some(Vec::new()),
+            )
+            .await;
             assert_eq!(status, Status::BAD_REQUEST);
             assert_eq!(body_text(&bytes), "an empty image is not valid\n");
         }
@@ -1464,7 +1472,10 @@ mod tests {
         assert_eq!(response.status(), Status::BAD_REQUEST);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_text(&bytes), "an empty image is not valid\n");
-        assert!(!directory.exists(), "refused images leave no orphan uploads");
+        assert!(
+            !directory.exists(),
+            "refused images leave no orphan uploads"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
