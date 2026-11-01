@@ -11,6 +11,18 @@ import { runInNewContext } from 'node:vm'
 const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src/server/page.html'), 'utf8')
 const surfacePage = process.env.HEDDLE_TEST_SURFACES_PAGE ? readFileSync(process.env.HEDDLE_TEST_SURFACES_PAGE, 'utf8') : page
 const menu = readFileSync(process.env.HEDDLE_TEST_MENU ?? join(import.meta.dirname, '..', 'src/commands/menu.js'), 'utf8')
+/** The page's English table (#80), so a lifted function that draws its words through t() shows them as the page does. */
+const ENGLISH: Record<string, string> = (() => {
+  const start = page.indexOf('  en: Object.freeze({')
+  const table: Record<string, string> = {}
+  if (start < 0) return table
+  const end = page.indexOf('\n  }),', start)
+  for (const match of page.slice(start, end).matchAll(/^\s+'([^']+)': '((?:[^'\\]|\\.)*)',$/gm)) table[match[1]!] = match[2]!.replace(/\\'/g, "'")
+  return table
+})()
+function englishT(key: string, vars: Record<string, unknown> = {}): string {
+  return (ENGLISH[key] ?? key).replace(/\{(\w+)\}/g, (whole, name: string) => (name in vars ? String(vars[name]) : whole))
+}
 const fakeKey = 'sk-' + 'FakeFixture'.repeat(3) + '1'
 const otherKey = fakeKey.slice(0, -1) + '2'
 const maskedKey = fakeKey.slice(0, 8) + '*'.repeat(fakeKey.length - 8)
@@ -136,7 +148,7 @@ function harness(): Harness {
       steer: steerNow,
     })
   `, {
-    root, row, requests,
+    root, row, requests, t: englishT,
     fetch: async (_url: string, options: { body: string }) => { requests.push(options.body); return { ok: true } },
     document: {
       createElement: (tag: string) => new Node(tag),
