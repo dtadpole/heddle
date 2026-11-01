@@ -368,16 +368,19 @@ pub fn inherits_answer<E: Borrow<SessionEvent> + Clone>(
 /// Whether a fork inherits an event of this type.
 ///
 /// DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a
-/// child here inherits the same, except four kinds that belong to the **source** and that no fold here can tell
+/// child here inherits the same, except five kinds that belong to the **source** and that no fold here can tell
 /// apart as inherited (DSH hands every projection `inheritedEventCount`, dsh-session/lib/index.js:1418-1426):
 /// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file),
 /// `goal/change` (an active goal is armed whenever a process folds it, so an inherited one would run rounds in
-/// the branch, where DSH disarms it) and `team/*` (the journal names the source as its Lead, and the team fold
-/// refuses a foreign one). The TypeScript twin is `inheritedByFork` in `src/session/store.ts`.
+/// the branch, where DSH disarms it), `team/*` (the journal names the source as its Lead, and the team fold
+/// refuses a foreign one), and `session/flags` ([`crate::store::SESSION_FLAGS_EVENT`]: the source's pin and archive;
+/// a fork starts with neither, and a record rebuilt from its log must not take the source's). The TypeScript twin is
+/// `inheritedByFork` in `src/session/store.ts`.
 pub fn inherited_by_fork(kind: &str) -> bool {
     kind != "session/created"
         && kind != "transcript/repaired"
         && kind != "goal/change"
+        && kind != crate::store::SESSION_FLAGS_EVENT
         && !kind.starts_with("team/")
 }
 

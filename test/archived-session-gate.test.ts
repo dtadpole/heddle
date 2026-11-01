@@ -284,7 +284,10 @@ test('a goal round refused at a later step, then at its first, is not started ag
 
   sessions.flags(session.id, { archived: false })
   await settle()
-  assert.equal(sessions.store.read(session).length, events.length, 'unarchiving starts nothing by itself either')
+  /** The unarchive itself is one `session/flags` event in the log (#195); nothing else may follow it. */
+  const unflagged = (all: readonly { readonly type: string }[]) => all.filter((event) => event.type !== 'session/flags').length
+  assert.equal(unflagged(sessions.store.read(session)), unflagged(events), 'unarchiving starts nothing by itself either')
+  assert.equal(sessions.store.read(session).at(-1)?.type, 'session/flags', 'its record of the unarchive is the last event')
 
   const resumed = goals.resume(session, { id: refused!.id, revision: refused!.revision })
   assert.notEqual(resumed.revision, created.revision)

@@ -369,6 +369,9 @@ pub struct SessionStore {
     /// again, only after the log changed. Held across a whole rebuild, so two threads that find one record cut rebuild
     /// it once, and a rename written meanwhile is never replaced by the rebuilt record.
     unreadable_records: Mutex<HashMap<String, UnreadableRecord>>,
+    /// The session folders `list()` could not read and has named ([`skipped_folder_line`]), so a listing names each
+    /// once; a folder that reads again is forgotten, and a later failure is named anew.
+    unreadable_folders: Mutex<std::collections::HashSet<String>>,
 }
 
 /// Receives the line naming a log the store leaves out.
@@ -456,15 +459,46 @@ fn write_text(path: &str, text: &str) -> Result<(), SessionError> {
 /// The entries of a directory, in byte order — which is what Node's `readdirSync` returns, and the
 /// order the TypeScript store's listing depends on.
 fn entries_sorted(dir: &Path) -> Vec<String> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = read
+    read_entries_sorted(dir).unwrap_or_default()
+}
+
+/// [`entries_sorted`], answering why a directory could not be read.
+fn read_entries_sorted(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    names
+    Ok(names)
+}
+
+/// The line the store prints when a workspace's session folder in the store cannot be read (#195, developer-six's
+/// J180): a folder at mode 000 hid every session of that workspace from the list, search, get and turn without a word.
+/// The folder is named, not read; the TypeScript store prints the same (`skippedFolderLine`).
+pub fn skipped_folder_line(path: &str, reason: &str) -> String {
+    format!(
+        "heddle session: skipped the session folder {path}: {reason}, so none of its sessions is listed"
+    )
+}
+
+/// The event a change of pin or archive appends to the session's own log (#195): `{"type": "session/flags", "pinned",
+/// "archived", "pinnedAt"?}`, the whole state after the change (`SESSION_FLAGS_EVENT` in `src/session/store.ts`).
+///
+/// The record stays what every reader reads; the event is what a record rebuilt from the log restores them from.
+/// Measured on #195 (developer-six): an archived session whose record was cut came back as an ordinary row. DSH keeps
+/// both flags outside the session's header, in registry sets, so a damaged header never loses them; heddle has no
+/// registry, and the log is the one file of a session that is only appended to. It is metadata, not conversation: no
+/// surface position, not inherited by a fork ([`crate::surface::inherited_by_fork`]), and skipped by the chat
+/// transcript, the trajectory ledger and the page's live drawing.
+pub const SESSION_FLAGS_EVENT: &str = "session/flags";
+
+/// A session's pin and archive, as a [`SESSION_FLAGS_EVENT`] records them: the whole state after a change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFlags {
+    pub pinned: bool,
+    pub archived: bool,
+    /// When it was pinned; present while it is.
+    pub pinned_at: Option<String>,
 }
 
 /// A session record as the listing believes it: an object whose `id` is a string, or `None` for anything else — a
@@ -489,6 +523,8 @@ pub struct RecordFacts {
     /// The name the first message gave an untitled session ([`crate::service::title_from`], cleaned as `rename`
     /// cleans it), when one did.
     pub first_message_title: Option<String>,
+    /// The pin and archive the last [`SESSION_FLAGS_EVENT`] recorded, when one did.
+    pub flags: Option<SessionFlags>,
 }
 
 /// Whether an event entered the surface as a replacement (`surfaceOp: {"op": "replace", …}`).
@@ -527,8 +563,26 @@ pub fn record_facts(bytes: &[u8]) -> Option<RecordFacts> {
         turns: 0,
         updated: None,
         first_message_title: None,
+        flags: None,
     };
     for event in &events {
+        // The last flags event wins: each records the whole state after its change.
+        if event.kind == SESSION_FLAGS_EVENT {
+            if let (Some(pinned), Some(archived)) = (
+                event.get("pinned").and_then(Value::as_bool),
+                event.get("archived").and_then(Value::as_bool),
+            ) {
+                facts.flags = Some(SessionFlags {
+                    pinned,
+                    archived,
+                    pinned_at: event
+                        .get("pinnedAt")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+            continue;
+        }
         if event.kind != "message" || is_replacement(event) {
             continue;
         }
@@ -590,11 +644,13 @@ pub enum RebuiltTitle {
 
 /// The line the store prints when it rebuilds a session's record from its log (#195), the same line the TypeScript
 /// store prints (`rebuiltRecordLine`): the record and the log, why, which fields the log gave, and which it could not.
+/// `flags` says whether the log held a [`SESSION_FLAGS_EVENT`], which gives the pin and the archive.
 pub fn rebuilt_record_line(
     record: &str,
     log: &str,
     missing: bool,
     title: RebuiltTitle,
+    flags: bool,
     failure: Option<&str>,
 ) -> String {
     let named = match title {
@@ -607,10 +663,15 @@ pub fn rebuilt_record_line(
     } else {
         "could not be read"
     };
+    let (given, defaults) = if flags {
+        (", last prompt, pin and archive", "")
+    } else {
+        (" and last prompt", "pin, archive, ")
+    };
     let mut line = format!(
         "heddle session: rebuilt the record {record} from its log {log} (the record {cause}): \
-         cwd, created, turns and last prompt from the log, {named}; not in the log, so as a new session has them: \
-         endpoint, model, preset, pin, archive, parent session, team"
+         cwd, created, turns{given} from the log, {named}; not in the log, so as a new session has them: \
+         endpoint, model, preset, {defaults}parent session, team"
     );
     if let Some(failure) = failure {
         line.push_str(&format!("; it could not be written back: {failure}"));
@@ -657,6 +718,7 @@ impl SessionStore {
             warn: Mutex::new(None),
             renamed: Mutex::new(None),
             unreadable_records: Mutex::new(HashMap::new()),
+            unreadable_folders: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -672,6 +734,7 @@ impl SessionStore {
             warn: Mutex::new(None),
             renamed: Mutex::new(None),
             unreadable_records: Mutex::new(HashMap::new()),
+            unreadable_folders: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -842,8 +905,8 @@ impl SessionStore {
                     (None, None) => RebuiltTitle::None,
                 };
                 let title = from_definition.or(facts.first_message_title);
-                // The key order of a record `create` wrote and a prompt then touched: `id`, `created`, `cwd`, `title`,
-                // `turns`, `updated`.
+                // The key order of a record `create` wrote, a prompt then touched and `flags` then flagged: `id`,
+                // `created`, `cwd`, `title`, `turns`, `updated`, `pinned`, `pinnedAt`, `archived`.
                 let mut record = Map::new();
                 record.insert("id".to_string(), Value::String(id.to_string()));
                 record.insert("created".to_string(), Value::String(facts.created));
@@ -855,12 +918,25 @@ impl SessionStore {
                 if let Some(updated) = facts.updated {
                     record.insert("updated".to_string(), Value::String(updated));
                 }
+                // Then the flags, as `flags` adds them: a flag that is false is not written.
+                let flagged = facts.flags.is_some();
+                if let Some(flags) = facts.flags {
+                    if flags.pinned {
+                        record.insert("pinned".to_string(), Value::Bool(true));
+                        if let Some(at) = flags.pinned_at {
+                            record.insert("pinnedAt".to_string(), Value::String(at));
+                        }
+                    }
+                    if flags.archived {
+                        record.insert("archived".to_string(), Value::Bool(true));
+                    }
+                }
                 let meta =
                     SessionMeta::from_value(Value::Object(record)).expect("the record has an id");
                 match crate::fsio::write_atomic(file, meta.to_file_text()) {
                     Ok(()) => {
                         notes.remove(file);
-                        let line = rebuilt_record_line(file, &log, missing, named, None);
+                        let line = rebuilt_record_line(file, &log, missing, named, flagged, None);
                         (Some(meta), Some(line))
                     }
                     Err(error) => {
@@ -873,7 +949,14 @@ impl SessionStore {
                             },
                         );
                         let failure = error.to_string();
-                        let line = rebuilt_record_line(file, &log, missing, named, Some(&failure));
+                        let line = rebuilt_record_line(
+                            file,
+                            &log,
+                            missing,
+                            named,
+                            flagged,
+                            Some(&failure),
+                        );
                         (Some(meta), Some(line))
                     }
                 }
@@ -1088,10 +1171,29 @@ impl SessionStore {
     /// Set or clear pinned and archived in one write, answering with the record as it now is.
     /// `Ok(None)` for an unknown session; [`SessionError::Flag`] for a refused pin.
     pub fn flags(&self, id: &str, patch: FlagPatch) -> Result<Option<SessionMeta>, SessionError> {
-        let _meta = self.meta_guard();
-        let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
-            return Ok(None);
+        let (current, next) = {
+            let _meta = self.meta_guard();
+            let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
+                return Ok(None);
+            };
+            let next = Self::flagged(id, &current, patch)?;
+            let Some(meta_path) = self.meta_file(id) else {
+                return Ok(None);
+            };
+            write_text(&meta_path, &next.to_file_text())?;
+            (current, next)
         };
+        // With the meta lock released, as every append's listener is called: it may read the store.
+        self.record_flags(id, &current, &next);
+        Ok(Some(next))
+    }
+
+    /// The record `flags` writes for `patch`, or [`SessionError::Flag`] for a refused pin.
+    fn flagged(
+        id: &str,
+        current: &SessionMeta,
+        patch: FlagPatch,
+    ) -> Result<SessionMeta, SessionError> {
         let mut next = current.clone();
         if let Some(pinned) = patch.pinned {
             if pinned {
@@ -1118,11 +1220,43 @@ impl SessionStore {
                 next.remove("archived");
             }
         }
-        let Some(meta_path) = self.meta_file(id) else {
-            return Ok(None);
+        Ok(next)
+    }
+
+    /// Append a change of pin or archive to the session's own log as [`SESSION_FLAGS_EVENT`], after the record holds
+    /// it, so a record rebuilt from the log keeps them (#195; `recordFlags` in `src/session/store.ts`). A call that
+    /// changed neither flag, nor the pin's time, writes nothing.
+    ///
+    /// The append needs the session's writer lock. A store that did not hold it takes it for this one event and lets
+    /// go again, so pinning or archiving from the page does not keep a session from the command line. When another live
+    /// process writes the session ([`SessionError::AlreadyOwned`]), or the append fails otherwise, the event is not
+    /// written and one line says the flags are in the record only; the pin or archive itself stands.
+    fn record_flags(&self, id: &str, before: &SessionMeta, after: &SessionMeta) {
+        let (pinned, archived) = (after.pinned(), after.archived());
+        if pinned == before.pinned()
+            && archived == before.archived()
+            && after.pinned_at() == before.pinned_at()
+        {
+            return;
+        }
+        let Some(handle) = self.open(id) else {
+            return;
         };
-        write_text(&meta_path, &next.to_file_text())?;
-        Ok(Some(next))
+        let held = self.holds(&handle);
+        let mut event = NewEvent::new(SESSION_FLAGS_EVENT)
+            .field("pinned", pinned)
+            .field("archived", archived);
+        if pinned && let Some(at) = after.pinned_at() {
+            event = event.field("pinnedAt", at);
+        }
+        if let Err(error) = self.append(&handle, event, AppendOptions::default()) {
+            self.say(&format!(
+                "heddle session: the pin and archive of {id} are in its record only, not its log: {error}"
+            ));
+        }
+        if !held {
+            self.release(&handle);
+        }
     }
 
     /// Seed a new session with a session's **log** up to its last completed turn, in a session that
@@ -1406,7 +1540,38 @@ impl SessionStore {
                 remember(&at.join("meta.json"), &dir, &name);
                 continue;
             }
-            let entries = entries_sorted(&at);
+            let entries = match read_entries_sorted(&at) {
+                Ok(entries) => {
+                    self.unreadable_folders
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&dir);
+                    entries
+                }
+                Err(error) => {
+                    // A folder that cannot be read hides every session in it, so it is named once (#195): measured
+                    // before, a workspace's folder at mode 000 took all of its sessions out of the list, search, get and
+                    // turn with no line. A file beside the folders, or a folder removed meanwhile, holds no sessions.
+                    let kind = error.kind();
+                    if !matches!(
+                        kind,
+                        std::io::ErrorKind::NotADirectory | std::io::ErrorKind::NotFound
+                    ) && self
+                        .unreadable_folders
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(dir.clone())
+                    {
+                        let reason = if kind == std::io::ErrorKind::PermissionDenied {
+                            "permission denied"
+                        } else {
+                            "it cannot be read"
+                        };
+                        self.say(&skipped_folder_line(&dir, reason));
+                    }
+                    continue;
+                }
+            };
             let records: std::collections::HashSet<&str> = entries
                 .iter()
                 .map(String::as_str)

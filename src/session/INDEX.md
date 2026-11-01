@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.6.0
+version: 1.7.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -91,9 +91,14 @@ session silently: `list()`, `open()`, `meta()` and the prompt's touch rebuild it
 time from `session/created`, the turns and last prompt from the user messages, the title from the folder's definition,
 where a person's rename is written, or else from the first message), write it back whole, and print
 `heddle session: rebuilt the record <path> from its log <path> (…)` once, saying which fields the log could not give
-(endpoint, model, preset, pin, archive, parent session, team: left as a new session has them). DSH has no such second
-file: its metadata is the log's header line, written once. A log that cannot rebuild it (no `session/created` first)
-leaves the session out, named once, and it opens as no session, so every route answers as the list does.
+(endpoint, model, preset, parent session, team: left as a new session has them). A pin or archive is also appended to
+the log as `session/flags` (the whole state after the change; `SESSION_FLAGS_EVENT`), so the rebuild restores both from
+the last one, as DSH's registry sets keep them outside its header; the event is metadata, which a fork does not inherit
+and the chat transcript, the trajectory ledger and the page's live drawing skip. DSH has no such second file: its
+metadata is the log's header line, written once. A log that cannot rebuild it (no `session/created` first) leaves the
+session out, named once, and it opens as no session, so every route answers as the list does. A workspace's session
+folder that cannot be read (mode 000) is named once too (`heddle session: skipped the session folder <path>: …`), and
+neither read nor repaired.
 
 **The file is read once per process** (`SessionStore.load`). Events are kept in memory and advanced
 on append, because a single turn used to re-read and re-parse the whole transcript twenty-one times:

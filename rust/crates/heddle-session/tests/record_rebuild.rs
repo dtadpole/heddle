@@ -407,3 +407,350 @@ fn a_record_write_that_fails_leaves_the_old_record_whole() {
     );
     assert!(leftovers(&handle.dir).is_empty());
 }
+
+// The follow-up on #195 (developer-six): a rebuilt record lost the pin and the archive, so an archived session whose
+// record was cut came back as an ordinary row. A change of either now appends `session/flags` to the session's own log,
+// the whole state after the change, and the rebuild folds the last one.
+
+fn flag_events(store: &SessionStore, handle: &SessionHandle) -> Vec<Value> {
+    store
+        .read(handle)
+        .unwrap()
+        .iter()
+        .filter(|event| event.kind == "session/flags")
+        .map(|event| serde_json::from_str(&event.to_line()).unwrap())
+        .collect()
+}
+
+fn pin(
+    store: &SessionStore,
+    id: &str,
+    pinned: Option<bool>,
+    archived: Option<bool>,
+) -> SessionMeta {
+    store
+        .flags(id, FlagPatch { pinned, archived })
+        .unwrap()
+        .expect("the session exists")
+}
+
+fn one_session(root: &str, work: &str) -> (SessionStore, SessionHandle) {
+    let store = SessionStore::new(root, &Env::default());
+    let handle = store
+        .create(CreateOptions {
+            cwd: Some(work.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    (store, handle)
+}
+
+#[test]
+fn a_pin_or_archive_appends_one_session_flags_event_and_a_change_of_nothing_writes_none() {
+    let (_dir, root, work) = scratch();
+    let (store, handle) = one_session(&root, &work);
+    let pinned = pin(&store, &handle.id, Some(true), None);
+    let events = flag_events(&store, &handle);
+    assert_eq!(events.len(), 1, "a pin is one event");
+    let keys: Vec<&String> = events[0].as_object().unwrap().keys().collect();
+    assert_eq!(
+        keys,
+        ["seq", "at", "type", "pinned", "archived", "pinnedAt"],
+        "in the order both builds write it"
+    );
+    assert_eq!(
+        (
+            &events[0]["pinned"],
+            &events[0]["archived"],
+            &events[0]["pinnedAt"]
+        ),
+        (
+            &json!(true),
+            &json!(false),
+            &json!(pinned.pinned_at().unwrap())
+        )
+    );
+    pin(&store, &handle.id, Some(false), None);
+    pin(&store, &handle.id, Some(false), None);
+    pin(&store, &handle.id, None, Some(false));
+    let events = flag_events(&store, &handle);
+    assert_eq!(
+        events.len(),
+        2,
+        "an unpin is one more, and asking for what already holds writes nothing"
+    );
+    assert!(
+        events[1].get("pinnedAt").is_none(),
+        "an unpinned state carries no pin time"
+    );
+    pin(&store, &handle.id, None, Some(true));
+    let states: Vec<(Value, Value)> = flag_events(&store, &handle)
+        .iter()
+        .map(|event| (event["pinned"].clone(), event["archived"].clone()))
+        .collect();
+    assert_eq!(
+        states,
+        [
+            (json!(true), json!(false)),
+            (json!(false), json!(false)),
+            (json!(false), json!(true))
+        ]
+    );
+}
+
+#[test]
+fn archive_then_cut_the_rebuilt_record_is_archived_and_its_line_says_so() {
+    let (_dir, root, work) = scratch();
+    let (writer, handle) = one_session(&root, &work);
+    writer
+        .message(&handle, message(Role::User, "file this away", None))
+        .unwrap();
+    pin(&writer, &handle.id, None, Some(true));
+    writer.release(&handle);
+    let text = std::fs::read_to_string(&handle.meta).unwrap();
+    std::fs::write(&handle.meta, &text[..text.len() / 2]).unwrap();
+    let (store, lines) = restarted(&root);
+    let meta = store
+        .list()
+        .into_iter()
+        .find(|m| m.id() == handle.id)
+        .unwrap();
+    assert!(
+        meta.archived(),
+        "the session comes back archived, not as an ordinary row"
+    );
+    assert!(!meta.pinned(), "and unpinned, as it was");
+    assert_eq!(
+        record(&handle)["archived"],
+        json!(true),
+        "its record says so on disk"
+    );
+    let said = lines.lock().unwrap().clone();
+    assert_eq!(said.len(), 1);
+    assert!(
+        said[0].contains("cwd, created, turns, last prompt, pin and archive from the log, "),
+        "the line names the flags among what the log gave: {}",
+        said[0]
+    );
+    assert!(said[0].ends_with(
+        "not in the log, so as a new session has them: endpoint, model, preset, parent session, team"
+    ));
+}
+
+#[test]
+fn pin_then_remove_the_record_the_rebuilt_record_is_pinned_from_when_it_was_pinned() {
+    let (_dir, root, work) = scratch();
+    let (writer, handle) = one_session(&root, &work);
+    let pinned_at = pin(&writer, &handle.id, Some(true), None)
+        .pinned_at()
+        .unwrap()
+        .to_string();
+    writer.release(&handle);
+    std::fs::remove_file(&handle.meta).unwrap();
+    let (store, _lines) = restarted(&root);
+    let meta = store
+        .list()
+        .into_iter()
+        .find(|m| m.id() == handle.id)
+        .unwrap();
+    assert!(meta.pinned(), "pinned again");
+    assert_eq!(
+        meta.pinned_at(),
+        Some(pinned_at.as_str()),
+        "from when it was pinned"
+    );
+    assert!(!meta.archived());
+}
+
+#[test]
+fn a_newer_session_flags_event_supersedes_an_older_one() {
+    let (_dir, root, work) = scratch();
+    let writer = SessionStore::new(&root, &Env::default());
+    let create = || {
+        writer
+            .create(CreateOptions {
+                cwd: Some(work.clone()),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let (archived_after_pin, unpinned, unarchived) = (create(), create(), create());
+    pin(&writer, &archived_after_pin.id, Some(true), None);
+    pin(&writer, &archived_after_pin.id, None, Some(true));
+    pin(&writer, &unpinned.id, Some(true), None);
+    pin(&writer, &unpinned.id, Some(false), None);
+    pin(&writer, &unarchived.id, None, Some(true));
+    pin(&writer, &unarchived.id, None, Some(false));
+    for handle in [&archived_after_pin, &unpinned, &unarchived] {
+        writer.release(handle);
+        std::fs::remove_file(&handle.meta).unwrap();
+    }
+    let (store, lines) = restarted(&root);
+    let listed = store.list();
+    let flags = |id: &str| {
+        let meta = listed.iter().find(|m| m.id() == id).unwrap();
+        (meta.pinned(), meta.archived())
+    };
+    assert_eq!(
+        flags(&archived_after_pin.id),
+        (false, true),
+        "a pin then an archive: archived, the pin dropped"
+    );
+    assert_eq!(
+        flags(&unpinned.id),
+        (false, false),
+        "a pin then an unpin: neither"
+    );
+    assert_eq!(
+        flags(&unarchived.id),
+        (false, false),
+        "an archive then an unarchive: neither"
+    );
+    assert_eq!(
+        lines
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.contains("pin and archive from the log"))
+            .count(),
+        3
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_store_lets_go_after_its_flags_event_and_another_writer_keeps_the_event_out() {
+    let (_dir, root, work) = scratch();
+    let (writer, handle) = one_session(&root, &work);
+    writer.release(&handle);
+    let (page, lines) = restarted(&root);
+    pin(&page, &handle.id, Some(true), None);
+    assert_eq!(
+        flag_events(&page, &handle).len(),
+        1,
+        "the pin is in the log"
+    );
+    assert!(
+        !page.holds(&handle),
+        "and the store that wrote it holds the session no longer"
+    );
+    let lock = heddle_session::lock_path(&handle);
+    assert!(
+        !std::path::Path::new(&lock).exists(),
+        "its writer lock is gone"
+    );
+    let other = std::os::unix::process::parent_id();
+    std::fs::write(&lock, format!("{other}\n")).unwrap();
+    pin(&page, &handle.id, None, Some(true));
+    std::fs::remove_file(&lock).unwrap();
+    assert_eq!(
+        record(&handle)["archived"],
+        json!(true),
+        "the archive stands in the record"
+    );
+    let fresh = SessionStore::new(&root, &Env::default());
+    assert_eq!(
+        flag_events(&fresh, &handle).len(),
+        1,
+        "but no event was appended to a log another process writes"
+    );
+    assert_eq!(
+        *lines.lock().unwrap(),
+        [format!(
+            "heddle session: the pin and archive of {} are in its record only, not its log: session \"{}\" is already owned by an active write handle (process {other})",
+            handle.id, handle.id
+        )]
+    );
+}
+
+#[test]
+fn a_fork_does_not_carry_its_sources_session_flags() {
+    let (_dir, root, work) = scratch();
+    let (store, source) = one_session(&root, &work);
+    store
+        .message(&source, message(Role::User, "hello", None))
+        .unwrap();
+    pin(&store, &source.id, Some(true), None);
+    assert!(!heddle_session::inherited_by_fork("session/flags"));
+    let child = store
+        .fork_at(&source.id, Default::default(), Some(u64::MAX))
+        .unwrap()
+        .expect("a fork");
+    assert!(
+        flag_events(&store, &child).is_empty(),
+        "the fork does not carry the source's pin"
+    );
+    let meta = store
+        .list()
+        .into_iter()
+        .find(|m| m.id() == child.id)
+        .unwrap();
+    assert!(!meta.pinned());
+}
+
+/// developer-six's J180 on #195: a workspace's session folder at mode 000 hid every session of that workspace, and the
+/// server said nothing. The folder is named once, not read and not repaired.
+#[cfg(unix)]
+#[test]
+fn a_session_folder_the_store_cannot_read_is_named_once_and_the_rest_still_list() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, root, work) = scratch();
+    let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let elsewhere = std::fs::canonicalize(elsewhere)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let writer = SessionStore::new(&root, &Env::default());
+    let create = |cwd: &str| {
+        writer
+            .create(CreateOptions {
+                cwd: Some(cwd.to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+    };
+    let (hidden, shown) = (create(&work), create(&elsewhere));
+    writer.release(&hidden);
+    writer.release(&shown);
+    let mode = |bits: u32| {
+        std::fs::set_permissions(&hidden.dir, std::fs::Permissions::from_mode(bits)).unwrap()
+    };
+    mode(0o000);
+    if std::fs::read_dir(&hidden.dir).is_ok() {
+        // Root reads a folder at mode 000: there is nothing to judge.
+        mode(0o755);
+        return;
+    }
+    let (store, lines) = restarted(&root);
+    let ids = || -> Vec<String> { store.list().iter().map(|m| m.id().to_string()).collect() };
+    assert_eq!(
+        ids(),
+        std::slice::from_ref(&shown.id),
+        "the other workspace's session still lists"
+    );
+    ids();
+    assert_eq!(
+        *lines.lock().unwrap(),
+        [format!(
+            "heddle session: skipped the session folder {}: permission denied, so none of its sessions is listed",
+            hidden.dir
+        )],
+        "the folder is named once"
+    );
+    mode(0o755);
+    let mut both = ids();
+    both.sort();
+    let mut want = vec![hidden.id.clone(), shown.id.clone()];
+    want.sort();
+    assert_eq!(both, want, "once it reads again its sessions list");
+    mode(0o000);
+    ids();
+    mode(0o755);
+    assert_eq!(
+        lines.lock().unwrap().len(),
+        2,
+        "and a later failure is named anew"
+    );
+}

@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, mock, test } from 'node:test'
 
+import { projectLedger } from '../src/server/ledger.ts'
+import { transcriptTurns } from '../src/server/web.ts'
 import { existingSessionNames, writeSessionDefinition } from '../src/session/definition.ts'
-import { SessionStore, type SessionHandle, type SessionMeta } from '../src/session/store.ts'
+import { inheritedByFork, lockPath, SessionStore, type SessionEvent, type SessionHandle, type SessionMeta } from '../src/session/store.ts'
 import { titleFrom } from '../src/session/service.ts'
 
 /**
@@ -258,4 +260,177 @@ test('a record its log cannot rebuild leaves the session out, opens as no sessio
   )
   assert.equal(readFileSync(empty.meta, 'utf8'), '{"id": "ses', 'and its record is left as it was')
   assert.ok(!readdirSync(dirname(empty.meta)).some((name) => name.endsWith('.tmp')))
+})
+
+/**
+ * The follow-up on #195 (developer-six): a rebuilt record lost the pin and the archive, so an archived session whose
+ * record was cut came back as an ordinary row. DSH keeps both outside the session's header (registry sets), so a damaged
+ * header never loses them. Here a change of either appends `session/flags` to the session's own log, the whole state after
+ * the change, and the rebuild folds the last one.
+ */
+const flagEvents = (store: SessionStore, handle: SessionHandle): SessionEvent[] => store.read(handle).filter((event) => event.type === 'session/flags')
+
+test('a pin or archive appends one session/flags event, the whole state after it, and a change of nothing writes none', () => {
+  const { root, work } = place()
+  const store = new SessionStore(root, { warn: () => {} })
+  const handle = store.create({ cwd: work })
+  store.flags(handle.id, { pinned: true })
+  const pinned = flagEvents(store, handle)
+  assert.equal(pinned.length, 1, 'a pin is one event')
+  assert.deepEqual(Object.keys(pinned[0] ?? {}), ['seq', 'at', 'type', 'pinned', 'archived', 'pinnedAt'], 'in the order both builds write it')
+  assert.deepEqual({ pinned: pinned[0]?.pinned, archived: pinned[0]?.archived, pinnedAt: pinned[0]?.pinnedAt }, { pinned: true, archived: false, pinnedAt: record(handle).pinnedAt })
+  store.flags(handle.id, { pinned: false })
+  store.flags(handle.id, { pinned: false })
+  store.flags(handle.id, { archived: false })
+  const after = flagEvents(store, handle)
+  assert.equal(after.length, 2, 'an unpin is one more, and asking for what already holds writes nothing')
+  assert.deepEqual(Object.keys(after[1] ?? {}), ['seq', 'at', 'type', 'pinned', 'archived'], 'an unpinned state carries no pin time')
+  store.flags(handle.id, { archived: true })
+  assert.deepEqual(flagEvents(store, handle).map((event) => [event.pinned, event.archived]), [[true, false], [false, false], [false, true]])
+})
+
+test('archive, then cut: the rebuilt record is archived, and its line says the pin and archive came from the log', () => {
+  const { root, work } = place()
+  const writer = new SessionStore(root, { warn: () => {} })
+  const handle = writer.create({ cwd: work })
+  writer.message(handle, user('file this away'))
+  writer.flags(handle.id, { archived: true })
+  writer.release(handle)
+  const text = readFileSync(handle.meta, 'utf8')
+  writeFileSync(handle.meta, text.slice(0, Math.floor(text.length / 2)))
+  const { store, lines } = restarted(root)
+  const meta = store.list().find((one) => one.id === handle.id)
+  assert.equal(meta?.archived, true, 'the session comes back archived, not as an ordinary row')
+  assert.equal(meta?.pinned, undefined, 'and unpinned, as it was')
+  assert.equal(record(handle).archived, true, 'its record says so on disk')
+  assert.equal(lines.length, 1)
+  assert.match(lines[0] ?? '', /cwd, created, turns, last prompt, pin and archive from the log, /, `the line names the flags among what the log gave\n${lines[0]}`)
+  assert.match(lines[0] ?? '', /not in the log, so as a new session has them: endpoint, model, preset, parent session, team$/, 'and not among the defaults')
+})
+
+test('pin, then remove the record: the rebuilt record is pinned, from when it was pinned', () => {
+  const { root, work } = place()
+  const writer = new SessionStore(root, { warn: () => {} })
+  const handle = writer.create({ cwd: work })
+  const pinnedAt = writer.flags(handle.id, { pinned: true })?.pinnedAt
+  assert.ok(pinnedAt !== undefined)
+  writer.release(handle)
+  rmSync(handle.meta)
+  const { store } = restarted(root)
+  const meta = store.list().find((one) => one.id === handle.id)
+  assert.equal(meta?.pinned, true, 'pinned again')
+  assert.equal(meta?.pinnedAt, pinnedAt, 'with the time of the pin, so pinned rows keep their order')
+  assert.equal(meta?.archived, undefined)
+})
+
+test('a newer session/flags event supersedes an older one', () => {
+  const { root, work } = place()
+  const writer = new SessionStore(root, { warn: () => {} })
+  const archivedAfterPin = writer.create({ cwd: work })
+  writer.flags(archivedAfterPin.id, { pinned: true })
+  writer.flags(archivedAfterPin.id, { archived: true })
+  const unpinned = writer.create({ cwd: work })
+  writer.flags(unpinned.id, { pinned: true })
+  writer.flags(unpinned.id, { pinned: false })
+  const unarchived = writer.create({ cwd: work })
+  writer.flags(unarchived.id, { archived: true })
+  writer.flags(unarchived.id, { archived: false })
+  for (const handle of [archivedAfterPin, unpinned, unarchived]) {
+    writer.release(handle)
+    rmSync(handle.meta)
+  }
+  const { store, lines } = restarted(root)
+  const byId = new Map(store.list().map((meta) => [meta.id, meta]))
+  assert.deepEqual([byId.get(archivedAfterPin.id)?.pinned, byId.get(archivedAfterPin.id)?.archived], [undefined, true], 'a pin then an archive: archived, the pin dropped as the archive dropped it')
+  assert.deepEqual([byId.get(unpinned.id)?.pinned, byId.get(unpinned.id)?.archived], [undefined, undefined], 'a pin then an unpin: neither')
+  assert.deepEqual([byId.get(unarchived.id)?.pinned, byId.get(unarchived.id)?.archived], [undefined, undefined], 'an archive then an unarchive: neither')
+  assert.equal(lines.filter((line) => line.includes('pin and archive from the log')).length, 3, 'each says its flags came from the log')
+})
+
+test('a store lets go of a session after its flags event, and another process\'s writer keeps the event out while the flags stand', () => {
+  const { root, work } = place()
+  const writer = new SessionStore(root, { warn: () => {} })
+  const handle = writer.create({ cwd: work })
+  writer.release(handle)
+  const lines: string[] = []
+  const page = new SessionStore(root, { warn: (line: string) => lines.push(line) })
+  page.flags(handle.id, { pinned: true })
+  assert.equal(flagEvents(page, handle).length, 1, 'the pin is in the log')
+  assert.equal(page.holds(handle), false, 'and the store that wrote it holds the session no longer')
+  assert.throws(() => readFileSync(lockPath(handle)), /ENOENT/, 'its writer lock is gone')
+  writeFileSync(lockPath(handle), `${process.ppid}\n`)
+  try {
+    page.flags(handle.id, { archived: true })
+  } finally {
+    rmSync(lockPath(handle), { force: true })
+  }
+  assert.equal(record(handle).archived, true, 'the archive stands in the record')
+  assert.equal(flagEvents(new SessionStore(root, { warn: () => {} }), handle).length, 1, 'but no event was appended to a log another process writes')
+  assert.deepEqual(lines, [`heddle session: the pin and archive of ${handle.id} are in its record only, not its log: session "${handle.id}" is already owned by an active write handle (process ${process.ppid})`])
+})
+
+test('readers take session/flags as metadata: a fork does not inherit it, the chat does not draw it or split on it, the ledger has no row for it', () => {
+  assert.equal(inheritedByFork('session/flags'), false)
+  const { root, work } = place()
+  const store = new SessionStore(root, { warn: () => {} })
+  const source = store.create({ cwd: work })
+  store.message(source, user('hello'))
+  store.append(source, { type: 'model/request', endpoint: 'e', messages: 1, tools: [] })
+  store.append(source, { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'one ' } })
+  store.flags(source.id, { pinned: true })
+  store.append(source, { type: 'assistant/chunk', chunk: { type: 'text-delta', text: 'answer' } })
+  store.append(source, { type: 'assistant/chunk', chunk: { type: 'done', finishReason: 'stop' } })
+  store.append(source, { type: 'assistant/completed', text: 'one answer' })
+  store.append(source, { type: 'turn/completed', rounds: 1 })
+  const events = store.read(source)
+  assert.equal(events.filter((event) => event.type === 'session/flags').length, 1, 'the pin landed mid-answer')
+
+  const turns = transcriptTurns(events as never)
+  assert.deepEqual(
+    turns.filter((turn) => turn.kind === 'assistant').map((turn) => turn.text),
+    ['one answer'],
+    'the answer is one row, not two split at the pin',
+  )
+  const ledger = projectLedger(events as never)
+  const labels = [...ledger.turns.flatMap((turn) => turn.steps.flatMap((step) => step.records)), ...ledger.loose].map((one) => one.label)
+  assert.ok(!labels.includes('session/flags'), `no ledger row for it\n${labels.join(', ')}`)
+
+  const child = store.fork(source.id)
+  assert.ok(child !== null)
+  assert.deepEqual(flagEvents(store, child), [], 'the fork does not carry the source\'s pin')
+  assert.equal(store.list().find((meta) => meta.id === child.id)?.pinned, undefined)
+})
+
+test('a session folder the store cannot read is named once, and the other workspaces still list (J180)', (context) => {
+  /**
+   * developer-six's J180 on #195: a workspace's session folder at mode 000 hid every session of that workspace from the
+   * list, search, get and turn, and the server said nothing. The folder is named, not read and not repaired.
+   */
+  if (process.getuid?.() === 0) {
+    context.skip('root reads a folder at mode 000')
+    return
+  }
+  const { root, work } = place()
+  const elsewhere = `${work}-elsewhere`
+  mkdirSync(elsewhere, { recursive: true })
+  const writer = new SessionStore(root, { warn: () => {} })
+  const hidden = writer.create({ cwd: work })
+  const shown = writer.create({ cwd: elsewhere })
+  for (const handle of [hidden, shown]) writer.release(handle)
+  const { chmodSync } = fs
+  chmodSync(hidden.dir, 0o000)
+  try {
+    const { store, lines } = restarted(root)
+    const ids = () => store.list().map((meta) => meta.id)
+    assert.deepEqual(ids(), [shown.id], 'the other workspace\'s session still lists')
+    ids()
+    assert.deepEqual(lines, [`heddle session: skipped the session folder ${hidden.dir}: permission denied, so none of its sessions is listed`], 'the folder is named once')
+    chmodSync(hidden.dir, 0o755)
+    assert.deepEqual(new Set(ids()), new Set([hidden.id, shown.id]), 'once it reads again its sessions list')
+    chmodSync(hidden.dir, 0o000)
+    ids()
+    assert.equal(lines.length, 2, 'and a later failure is named anew')
+  } finally {
+    chmodSync(hidden.dir, 0o755)
+  }
 })

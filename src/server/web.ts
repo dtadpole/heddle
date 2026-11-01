@@ -3811,6 +3811,11 @@ export function transcriptTurns(
 
   for (const event of events) {
     /**
+     * A pin or archive (`session/flags`, #195) is state about the session, not conversation: it draws nothing and ends no
+     * run, so a pin written while an answer streams does not split the answer in two.
+     */
+    if (event.type === 'session/flags') continue
+    /**
      * A slash command is a row of its own, outside the conversation: `command/run` opens it and `command/done`
      * settles it with the host's words. Neither is a message, so the model never saw either.
      */

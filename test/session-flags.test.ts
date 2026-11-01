@@ -61,12 +61,25 @@ test("a session's flags are written to its record, and a flag that is false is r
   assert.equal(both?.archived, true, 'the archive landed')
   assert.equal(both?.pinned, undefined, 'and dropped the pin')
 
-  /** The rules the record keeps: a false flag is absent, and the log is untouched. */
+  /**
+   * The rules the record keeps: a false flag is absent. The log is only appended to: each change of the flags adds one
+   * `session/flags` event, the state after it, which is what a record rebuilt from the log restores them from (#195), and
+   * a change of nothing (the archived session is not pinned) adds none.
+   */
   sessions.flags(handle.id, { pinned: false })
   const unpinned = sessions.list().find((one) => one.id === handle.id)
   assert.equal(unpinned?.pinned, undefined, 'unpinning removes the field rather than storing false')
   assert.equal(unpinned?.archived, true, 'without disturbing the other flag')
-  assert.ok(readFileSync(handle.transcript).equals(transcriptBefore), 'the append-only log is not one of the places flags are written')
+  const transcriptAfter = readFileSync(handle.transcript)
+  assert.ok(transcriptAfter.subarray(0, transcriptBefore.length).equals(transcriptBefore), 'the log before the flags is untouched')
+  assert.deepEqual(
+    sessions.read(handle).slice(-2).map((event) => [event.type, event.pinned, event.archived]),
+    [
+      ['session/flags', true, false],
+      ['session/flags', false, true],
+    ],
+    'the pin and the archive each appended the state after it, and the no-op unpin nothing',
+  )
 
   assert.equal(sessions.flags('session-00000000-0000-4000-8000-000000000000', { pinned: true }), null, 'a session that does not exist is refused')
   assert.ok(root.length > 0)

@@ -1594,7 +1594,7 @@ test('a session log that is not a readable log is left out after a restart, and 
   }
 })
 
-test('a session whose record is cut or missing while its log is intact is rebuilt from the log: listed with its folder and title, open to a turn, named once, and still there after a restart (#195)', async (context) => {
+test('a session whose record is cut or missing while its log is intact is rebuilt from the log: listed with its folder, title and archive, open to a turn, named once, and still there after a restart (#195)', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   /**
    * Issue #195 (developer-six, J175), by its own steps: sessions in one workspace, titled; one record cut in half (bravo),
@@ -1607,6 +1607,11 @@ test('a session whose record is cut or missing while its log is intact is rebuil
    * the folder and the creation time in session/created, the turns in the user messages, and the title in the folder's
    * definition (a person's rename) or the first message (the name that message gave). So both builds rebuild it, write it
    * back whole, and print one line naming the repair.
+   *
+   * The follow-up (developer-six): a rebuilt record lost its archive, so an archived session whose record was cut came back
+   * as an ordinary row. DSH keeps pin and archive outside the header, in registry sets, so a damaged header never loses
+   * them; here a change of either appends session/flags to the session's log, and the rebuild folds the last one. delta is
+   * archived, then its record cut.
    */
   const h = harness('record-rebuilt')
   const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
@@ -1623,13 +1628,13 @@ test('a session whose record is cut or missing while its log is intact is rebuil
     const registered = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: h.work }) })
     assert.equal(registered.status, 200, `the folder was registered\n${await registered.text()}`)
     const made = {}
-    for (const name of ['alpha', 'bravo', 'echo']) {
+    for (const name of ['alpha', 'bravo', 'echo', 'delta']) {
       const response = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: h.work }) })
       const body = await response.text()
       assert.equal(response.status, 200, `session ${name} was created\n${body}`)
       made[name] = JSON.parse(body)
     }
-    const { alpha, bravo, echo } = { alpha: made.alpha.session, bravo: made.bravo.session, echo: made.echo.session }
+    const { alpha, bravo, echo, delta } = { alpha: made.alpha.session, bravo: made.bravo.session, echo: made.echo.session, delta: made.delta.session }
     /** bravo is named by a person, as the page's Rename names it: the store and the definition in the folder both hold it. */
     const renamed = await call(`/api/sessions/${bravo}/title`, { method: 'POST', body: JSON.stringify({ title: 'bravo note', folder: dirname(String(made.bravo.definition)) }) })
     assert.equal(renamed.status, 200, `bravo was renamed\n${await renamed.text()}`)
@@ -1643,10 +1648,15 @@ test('a session whose record is cut or missing while its log is intact is rebuil
     await turnInto(bravo, 'tell me about herons')
     /** echo is named by its first message. */
     await turnInto(echo, 'echo about the herons')
+    /** delta is named by its first message too, and then archived from its row's menu. */
+    await turnInto(delta, 'delta to be filed away')
+    const archived = await call(`/api/sessions/${delta}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(archived.status, 200, `delta was archived\n${await archived.text()}`)
     const before = JSON.parse(await (await call('/api/sessions')).text())
     const was = (id) => before.find((meta) => meta.id === id)
     assert.equal(was(bravo)?.title, 'bravo note', 'bravo carries the name it was given')
     assert.equal(was(echo)?.title, 'echo about the herons', 'echo the name its first message gave it')
+    assert.equal(was(delta)?.archived, true, 'delta is archived')
     live.kill()
     live = undefined
     await new Promise((done) => setTimeout(done, 300))
@@ -1654,10 +1664,13 @@ test('a session whose record is cut or missing while its log is intact is rebuil
     const root = join(h.home, 'sessions')
     const bravoRecord = recordFile(root, bravo)
     const echoRecord = recordFile(root, echo)
-    const bravoText = readFileSync(bravoRecord, 'utf8')
-    writeFileSync(bravoRecord, bravoText.slice(0, Math.floor(bravoText.length / 2)))
+    const deltaRecord = recordFile(root, delta)
+    for (const file of [bravoRecord, deltaRecord]) {
+      const text = readFileSync(file, 'utf8')
+      writeFileSync(file, text.slice(0, Math.floor(text.length / 2)))
+    }
     rmSync(echoRecord)
-    assert.ok(existsSync(transcriptFile(join(root, bravo))) && existsSync(transcriptFile(join(root, echo))), 'both logs are kept')
+    assert.ok([bravo, echo, delta].every((id) => existsSync(transcriptFile(join(root, id)))), 'every log is kept')
 
     live = await startServer(serverArgs, env)
     call = await connect()
@@ -1665,22 +1678,24 @@ test('a session whose record is cut or missing while its log is intact is rebuil
     const listed = await listing.text()
     assert.equal(listing.status, 200, `the sessions are listed\n${listed}`)
     const now = (id) => JSON.parse(listed).find((meta) => meta.id === id)
-    for (const id of [bravo, echo]) {
-      assert.ok(now(id) !== undefined, `the session ${id} is listed after its record was ${id === bravo ? 'cut in half' : 'removed'}\n${listed}`)
+    for (const id of [bravo, echo, delta]) {
+      assert.ok(now(id) !== undefined, `the session ${id} is listed after its record was ${id === echo ? 'removed' : 'cut in half'}\n${listed}`)
       assert.equal(now(id).cwd, was(id).cwd, 'with the folder it was bound to')
       assert.equal(now(id).title, was(id).title, 'and the title it had')
       assert.equal(now(id).turns, was(id).turns, 'and its turns')
+      assert.equal(now(id).archived, was(id).archived, `and its archive (${id === delta ? 'archived' : 'not archived'})`)
     }
     assert.ok(now(alpha) !== undefined, 'the healthy session is listed as before')
-    for (let waited = 0; waited < 2_000 && ![bravoRecord, echoRecord].every((file) => live.output().includes(file)); waited += 100) {
+    for (let waited = 0; waited < 2_000 && ![bravoRecord, echoRecord, deltaRecord].every((file) => live.output().includes(file)); waited += 100) {
       await new Promise((done) => setTimeout(done, 100))
     }
     const lines = live.output().split('\n')
-    for (const file of [bravoRecord, echoRecord]) {
+    for (const file of [bravoRecord, echoRecord, deltaRecord]) {
       const naming = lines.filter((line) => line.includes(file))
       assert.equal(naming.length, 1, `one line of the server's log names the rebuilt record ${file}\n${live.output()}`)
       assert.match(naming[0], /heddle session: rebuilt the record .* from its log /, 'as a repair from the log')
     }
+    assert.match(lines.find((line) => line.includes(deltaRecord)) ?? '', /pin and archive from the log/, "delta's line says its archive came from the log")
     for (const id of [bravo, echo]) {
       const opened = await call(`/api/sessions/${id}`)
       assert.equal(opened.status, 200, `the rebuilt session opens\n${await opened.text()}`)
@@ -1698,10 +1713,11 @@ test('a session whose record is cut or missing while its log is intact is rebuil
     live = await startServer(serverArgs, env)
     call = await connect()
     const again = JSON.parse(await (await call('/api/sessions')).text())
-    for (const id of [bravo, echo]) {
+    for (const id of [bravo, echo, delta]) {
       const meta = again.find((one) => one.id === id)
       assert.ok(meta !== undefined, `after a restart ${id} is still listed\n${JSON.stringify(again)}`)
       assert.equal(meta.title, was(id).title, 'with its title')
+      assert.equal(meta.archived, was(id).archived, 'and its archive')
     }
     await new Promise((done) => setTimeout(done, 300))
     assert.ok(!/rebuilt the record/.test(live.output()), `and nothing is rebuilt again\n${live.output()}`)
@@ -1709,6 +1725,61 @@ test('a session whose record is cut or missing while its log is intact is rebuil
     live?.kill()
     removeDir(h.home)
     removeDir(h.work)
+  }
+})
+
+test("a workspace's session folder the store cannot read is named once in the server log, and the other workspaces' sessions still list (#195, J180)", async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * developer-six's J180 on #195: a workspace's session folder in the store (<home>/sessions/<workspace key>) at mode 000
+   * hid every session of that workspace from GET /api/sessions, search, get and turn, and the server said nothing. The
+   * store does not read it or repair it; it names it once, as it names a log or a record it leaves out.
+   */
+  if (!skipUnless(context, process.getuid?.() !== 0, 'root reads a folder at mode 000, so there is nothing to judge')) return
+  const h = harness('folder-unreadable')
+  const other = fixtureDir('session-work-folder-unreadable-other')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  const env = { ...h.env, HOME: h.home }
+  const { chmodSync } = await import('node:fs')
+  let live
+  let folder
+  try {
+    live = await startServer(serverArgs, env)
+    const origin = new URL(live.url).origin
+    const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+    const call = (path, init = {}) => fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    const ids = {}
+    for (const [name, path] of [['hidden', h.work], ['shown', other]]) {
+      const registered = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(registered.status, 200, `the folder ${name} was registered\n${await registered.text()}`)
+      const made = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: path }) })
+      const body = await made.text()
+      assert.equal(made.status, 200, `a session was made in ${name}\n${body}`)
+      ids[name] = JSON.parse(body).session
+    }
+    folder = dirname(transcriptFile(join(h.home, 'sessions', ids.hidden)))
+    assert.notEqual(folder, dirname(transcriptFile(join(h.home, 'sessions', ids.shown))), 'the two workspaces have folders of their own in the store')
+    chmodSync(folder, 0o000)
+    for (let index = 0; index < 3; index += 1) {
+      const listing = await call('/api/sessions')
+      const listed = await listing.text()
+      assert.equal(listing.status, 200, `the sessions are listed\n${listed}`)
+      const listedIds = JSON.parse(listed).map((meta) => meta.id)
+      assert.ok(listedIds.includes(ids.shown), `the other workspace's session still lists\n${listed}`)
+      assert.ok(!listedIds.includes(ids.hidden), `the unreadable folder's session cannot be listed\n${listed}`)
+    }
+    for (let waited = 0; waited < 2_000 && !live.output().includes(folder); waited += 100) {
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const naming = live.output().split('\n').filter((line) => line.includes(folder))
+    assert.equal(naming.length, 1, `one line of the server's log names the folder, however often the store is listed\n${live.output()}`)
+    assert.match(naming[0], /heddle session: skipped the session folder .*: permission denied/, 'saying why, in words')
+  } finally {
+    if (folder !== undefined) chmodSync(folder, 0o755)
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    removeDir(other)
   }
 })
 

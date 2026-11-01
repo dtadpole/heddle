@@ -17,6 +17,7 @@
 //! | `turn/retry` | a `system`/`retry` record |
 //! | `turn/completed` | closes the turn, with its rounds |
 //! | `context/note` | a `system` record for `origin: system-prompt`, else a `context` record labelled by origin |
+//! | `session/flags` | nothing — a pin or archive is state about the session, not trajectory activity (#195) |
 //! | anything else | a `system` record labelled by its type, its other fields as pretty JSON (at most 2000 UTF-16 units) |
 //!
 //! A stream still open when the events end is left **in flight**: no duration, `inFlight: true`.
@@ -635,6 +636,8 @@ impl Projector {
                 self.close_turn(at, event.get("rounds").and_then(Value::as_u64));
             }
             "context/note" => self.context_note(event, at),
+            // A pin or archive (#195) is state about the session, not trajectory activity: no row, no boundary.
+            "session/flags" => {}
             other => self.unknown(event, at, other),
         }
     }
@@ -1011,6 +1014,30 @@ mod tests {
             .iter()
             .map(|record| record.kind)
             .collect()
+    }
+
+    /// #195: a pin or archive (`session/flags`) is state about the session, so the ledger draws no row for it.
+    #[test]
+    fn a_session_flags_event_is_no_row() {
+        let ledger = project_ledger(&[
+            message(1, "2026-11-01T18:00:00.000Z", "user", "hello"),
+            event(
+                2,
+                "2026-11-01T18:00:00.100Z",
+                json!({"type": "session/flags", "pinned": false, "archived": true}),
+            ),
+        ]);
+        let labels: Vec<String> = ledger
+            .turns
+            .iter()
+            .flat_map(|turn| turn.steps.iter().flat_map(|step| step.records.iter()))
+            .chain(ledger.loose.iter())
+            .map(|record| record.label.clone())
+            .collect();
+        assert!(
+            !labels.iter().any(|label| label == "session/flags"),
+            "{labels:?}"
+        );
     }
 
     #[test]

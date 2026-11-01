@@ -865,6 +865,9 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       continue
     }
 
+    /** A pin or archive (`session/flags`, #195) is state about the session, not trajectory activity: no row, no boundary. */
+    if (event.type === 'session/flags') continue
+
     /**
      * Anything else is a record without a home yet, kept rather than dropped: a ledger that silently ignores
      * events it does not recognise cannot be trusted to be complete.

@@ -476,3 +476,103 @@ process.stdout.write(JSON.stringify(lines) + '\n')
     let decoded = heddle_session::decode_transcript(&store.bytes(&handle));
     assert_eq!(decoded.lines[decoded.lines.len() - 2], expected[0]);
 }
+
+/// The `session/flags` event (#195), written by the TypeScript store itself — `src/session/store.ts`, run by Node — and
+/// by this one, for the same pin, unpin and archive. The times differ between the two runs, so `seq`, `at` and
+/// `pinnedAt` are replaced in place on both sides; every key, its position and every other value are compared.
+#[test]
+fn a_session_flags_line_is_what_the_typescript_store_writes() {
+    use heddle_session::{FlagPatch, SessionStore};
+
+    let (Ok(rust_home), Ok(node_home), Ok(directory)) = (
+        tempfile::tempdir(),
+        tempfile::tempdir(),
+        tempfile::tempdir(),
+    ) else {
+        return;
+    };
+    let store = SessionStore::new(
+        rust_home.path().to_str().expect("a UTF-8 temp path"),
+        &heddle_config::Env::default(),
+    );
+    let handle = store
+        .create(heddle_session::CreateOptions {
+            cwd: Some("/home/me/work".to_string()),
+            ..Default::default()
+        })
+        .expect("a session");
+    for (pinned, archived) in [(Some(true), None), (Some(false), None), (None, Some(true))] {
+        store
+            .flags(&handle.id, FlagPatch { pinned, archived })
+            .expect("a flags write");
+    }
+    let normalized = |line: &str| {
+        let mut value: serde_json::Value = serde_json::from_str(line).expect("an event line");
+        let object = value.as_object_mut().expect("an event is an object");
+        object.insert("seq".to_string(), serde_json::json!(0));
+        object.insert("at".to_string(), serde_json::json!("T"));
+        if object.contains_key("pinnedAt") {
+            object.insert("pinnedAt".to_string(), serde_json::json!("P"));
+        }
+        serde_json::to_string(&value).expect("serializable")
+    };
+    let written: Vec<String> = store
+        .read(&handle)
+        .expect("the log reads")
+        .iter()
+        .filter(|event| event.kind == heddle_session::SESSION_FLAGS_EVENT)
+        .map(|event| normalized(&event.to_line()))
+        .collect();
+    assert_eq!(
+        written.len(),
+        3,
+        "a pin, an unpin and an archive are three events"
+    );
+
+    let script = directory.path().join("session-flags.mjs");
+    std::fs::write(
+        &script,
+        r#"
+import { pathToFileURL } from 'node:url'
+const { SessionStore } = await import(pathToFileURL(process.argv[2]).href)
+const store = new SessionStore(process.argv[3], { warn: () => {} })
+const handle = store.create({ cwd: '/home/me/work' })
+store.flags(handle.id, { pinned: true })
+store.flags(handle.id, { pinned: false })
+store.flags(handle.id, { archived: true })
+const lines = store.read(handle).filter((event) => event.type === 'session/flags').map((event) => JSON.stringify(event))
+process.stdout.write(JSON.stringify(lines) + '\n')
+process.exit(0)
+"#,
+    )
+    .expect("the script is written");
+    let mut store_ts = typescript_transcript();
+    store_ts.set_file_name("store.ts");
+    let output = match Command::new("node")
+        .arg(&script)
+        .arg(&store_ts)
+        .arg(node_home.path())
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping: node is not installed, so the session/flags oracle cannot be run");
+            return;
+        }
+        Err(error) => panic!("running node failed: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "the session/flags oracle failed\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected: Vec<String> = serde_json::from_slice::<Vec<String>>(&output.stdout)
+        .expect("the oracle prints a JSON array")
+        .iter()
+        .map(|line| normalized(line))
+        .collect();
+    assert_eq!(
+        written, expected,
+        "the session/flags lines differ from the TypeScript store's"
+    );
+}

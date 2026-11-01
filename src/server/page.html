@@ -9626,6 +9626,8 @@ events.addEventListener('session', (message) => {
  */
 function drawSessionEvent(payload) {
   const event = payload.event
+  /** A pin or archive (`session/flags`, #195) is state about the session, not part of the conversation drawn here. */
+  if (event.type === 'session/flags') return
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
     void slashReady.then((commands) => commands?.draw(event))

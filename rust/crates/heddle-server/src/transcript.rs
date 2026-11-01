@@ -420,6 +420,11 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
 
     for event in events {
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        // A pin or archive (`session/flags`, #195) is state about the session, not conversation: it draws nothing and
+        // ends no run, so a pin written while an answer streams does not split the answer in two.
+        if event_type == heddle_session::SESSION_FLAGS_EVENT {
+            continue;
+        }
         // A slash command is a row of its own, outside the conversation: `command/run` opens it and
         // `command/done` settles it with the host's words. An event without a string `commandId` is not one.
         let command_id = event.get("commandId").and_then(Value::as_str);
@@ -779,6 +784,25 @@ fn append(turns: &mut Vec<ChatTurn>, kind: TurnKind, text: &str, index: Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #195: a pin or archive is a `session/flags` event in the session's log, and one written while an answer
+    /// streams must neither draw a row nor split the answer at it.
+    #[test]
+    fn a_session_flags_event_draws_nothing_and_does_not_split_the_answer() {
+        let events = vec![
+            serde_json::json!({"seq": 0, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+            serde_json::json!({"seq": 1, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "one "}}),
+            serde_json::json!({"seq": 2, "type": "session/flags", "pinned": true, "archived": false, "pinnedAt": "2026-11-01T18:00:00.000Z"}),
+            serde_json::json!({"seq": 3, "type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "answer"}}),
+            serde_json::json!({"seq": 4, "type": "turn/completed", "rounds": 1}),
+        ];
+        let answers: Vec<String> = transcript_turns(&events)
+            .into_iter()
+            .filter(|turn| turn.kind == TurnKind::Assistant)
+            .map(|turn| turn.text)
+            .collect();
+        assert_eq!(answers, ["one answer"]);
+    }
 
     #[test]
     fn a_failed_turn_is_the_answers_stop_reason_as_in_typescript() {

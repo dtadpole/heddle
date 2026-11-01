@@ -497,7 +497,7 @@ export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
  * Whether a fork inherits an event of this type.
  *
  * DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a child
- * here inherits the same — with four exceptions, each an event that belongs to the **source** rather than to the
+ * here inherits the same — with five exceptions, each an event that belongs to the **source** rather than to the
  * conversation, and that this store has no inherited-prefix mark to neutralise (DSH passes `inheritedEventCount` to every
  * projection, dsh-session/lib/index.js:1418-1426; heddle's folds read the whole log):
  *
@@ -507,10 +507,32 @@ export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
  *   inherited goal would start spending rounds in the branch; DSH disarms it after a fork.
  * - `team/*`: the team journal names the source as its Lead (`teamId`), and `foldTeam` refuses a foreign one, so a
  *   copied journal would break the child's team tools.
+ * - `session/flags` ({@link SESSION_FLAGS_EVENT}): the source's pin and archive. A fork starts unpinned and unarchived,
+ *   and a record rebuilt from the child's log must not take the source's flags.
  */
 export function inheritedByFork(type: string): boolean {
-  return type !== 'session/created' && type !== 'transcript/repaired' && type !== 'goal/change' && !type.startsWith('team/')
+  return (
+    type !== 'session/created' &&
+    type !== 'transcript/repaired' &&
+    type !== 'goal/change' &&
+    type !== SESSION_FLAGS_EVENT &&
+    !type.startsWith('team/')
+  )
 }
+
+/**
+ * The event a change of pin or archive appends to the session's own log (#195): `{ type: 'session/flags', pinned,
+ * archived, pinnedAt? }`, the whole state after the change.
+ *
+ * The record (`<id>.json`) stays what every reader reads; the event is what a record rebuilt from the log restores them
+ * from. Measured on #195 (developer-six): an archived session whose record was cut came back as an ordinary row. DSH
+ * keeps both flags outside the session's header, in registry sets (`pinned`, `archived`), so a damaged header never
+ * loses them; heddle has no registry, and the log is the one file of a session that is written only by appending.
+ *
+ * It is **metadata, not conversation**: it takes no surface position, a fork does not inherit it
+ * ({@link inheritedByFork}), and the chat transcript, the trajectory ledger and the page's live drawing skip it.
+ */
+export const SESSION_FLAGS_EVENT = 'session/flags'
 
 /** A recorded field that names one other event by its seq, in a log-only record (a compaction's own bookkeeping). */
 const SEQ_FIELDS = ['fromSeq', 'throughSeq', 'summarySeq', 'replacementSeq'] as const
@@ -693,6 +715,16 @@ export interface RecordFacts {
   readonly updated?: string
   /** The name the first message gave an untitled session (`titleFrom`, cleaned as `rename` cleans it), when one did. */
   readonly firstMessageTitle?: string
+  /** The pin and archive the last {@link SESSION_FLAGS_EVENT} recorded, when one did. */
+  readonly flags?: SessionFlags
+}
+
+/** A session's pin and archive, as a {@link SESSION_FLAGS_EVENT} records them: the whole state after a change. */
+export interface SessionFlags {
+  readonly pinned: boolean
+  readonly archived: boolean
+  /** When it was pinned; present while it is. */
+  readonly pinnedAt?: string
 }
 
 /**
@@ -719,7 +751,13 @@ export function recordFacts(bytes: Buffer): RecordFacts | null {
   let turns = 0
   let updated: string | undefined
   let firstMessageTitle: string | undefined
+  let flags: SessionFlags | undefined
   for (const event of events) {
+    /** The last flags event wins: each records the whole state after its change. */
+    if (event.type === SESSION_FLAGS_EVENT && typeof event.pinned === 'boolean' && typeof event.archived === 'boolean') {
+      flags = { pinned: event.pinned, archived: event.archived, ...(typeof event.pinnedAt === 'string' ? { pinnedAt: event.pinnedAt } : {}) }
+      continue
+    }
     if (event.type !== 'message' || isReplacementOp(event.surfaceOp as SurfaceOp | undefined)) continue
     const message = event.message as RecordedMessage | undefined
     if (message?.role !== 'user') continue
@@ -736,6 +774,7 @@ export function recordFacts(bytes: Buffer): RecordFacts | null {
     turns,
     ...(updated !== undefined ? { updated } : {}),
     ...(firstMessageTitle !== undefined ? { firstMessageTitle } : {}),
+    ...(flags !== undefined ? { flags } : {}),
   }
 }
 
@@ -769,18 +808,27 @@ export type RebuiltTitle = 'definition' | 'message' | 'none'
  * The line the store prints when it rebuilds a session's record from its log (#195); the Rust store prints the same.
  *
  * It names the record and the log, why the record was rebuilt, which fields the log gave, and which it could not:
- * those are left as a new session has them, and saying so is what tells a person that a pin, an archive or a model
- * choice has to be made again.
+ * those are left as a new session has them, and saying so is what tells a person that a model choice, or a pin or an
+ * archive older than the log's {@link SESSION_FLAGS_EVENT}, has to be made again. `flags` says whether the log held one.
  */
-export function rebuiltRecordLine(record: string, log: string, missing: boolean, title: RebuiltTitle, failure?: string): string {
+export function rebuiltRecordLine(record: string, log: string, missing: boolean, title: RebuiltTitle, flags: boolean, failure?: string): string {
   const named =
     title === 'definition' ? 'title from its definition in the folder' : title === 'message' ? 'title from its first message' : 'no title (no message names it)'
   return (
     `heddle session: rebuilt the record ${record} from its log ${log} (the record ${missing ? 'was missing' : 'could not be read'}): ` +
-    `cwd, created, turns and last prompt from the log, ${named}; not in the log, so as a new session has them: ` +
-    `endpoint, model, preset, pin, archive, parent session, team` +
+    `cwd, created, turns${flags ? ', last prompt, pin and archive' : ' and last prompt'} from the log, ${named}; ` +
+    `not in the log, so as a new session has them: endpoint, model, preset, ${flags ? '' : 'pin, archive, '}parent session, team` +
     (failure !== undefined ? `; it could not be written back: ${failure}` : '')
   )
+}
+
+/**
+ * The line the store prints when a workspace's session folder in the store cannot be read (#195, developer-six's J180): a
+ * folder at mode 000 hid every session of that workspace from the list, search, get and turn without a word. The folder
+ * is named, not read; the Rust store prints the same.
+ */
+export function skippedFolderLine(path: string, reason: string): string {
+  return `heddle session: skipped the session folder ${path}: ${reason}, so none of its sessions is listed`
 }
 
 /** The line the store prints when it leaves a session out because its record cannot be read and its log cannot rebuild it. */
@@ -1017,6 +1065,12 @@ export class SessionStore {
    */
   private readonly unreadableRecords = new Map<string, { readonly size: number; readonly mtimeMs: number; readonly meta: SessionMeta | null }>()
 
+  /**
+   * The session folders `list()` could not read and has named ({@link skippedFolderLine}), so a listing names each once; a
+   * folder that reads again is forgotten, and a later failure is named anew.
+   */
+  private readonly unreadableFolders = new Set<string>()
+
   constructor(
     root: string = defaultSessionRoot(),
     options: {
@@ -1188,7 +1242,34 @@ export class SessionStore {
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileAtomic(meta, `${JSON.stringify(next, null, 2)}\n`)
+    this.recordFlags(id, current, next)
     return next
+  }
+
+  /**
+   * Append a change of pin or archive to the session's own log as {@link SESSION_FLAGS_EVENT}, after the record holds it,
+   * so a record rebuilt from the log keeps them (#195). A call that changed neither flag, nor the pin's time, writes nothing.
+   *
+   * The append needs the session's writer lock. A store that did not hold it takes it for this one event and lets go
+   * again, so pinning or archiving from the page does not keep a session from the command line. When another live process
+   * writes the session ({@link SessionOwnedError}), the event is not written — that process's log is not this store's to
+   * append to — and one line says the flags are in the record only; the pin or archive itself stands, as it does when the
+   * append fails for any other reason.
+   */
+  private recordFlags(id: SessionId, before: SessionMeta, after: SessionMeta): void {
+    const pinned = after.pinned === true
+    const archived = after.archived === true
+    if (pinned === (before.pinned === true) && archived === (before.archived === true) && after.pinnedAt === before.pinnedAt) return
+    const handle = this.open(id)
+    if (handle === null) return
+    const held = this.holds(handle)
+    try {
+      this.append(handle, { type: SESSION_FLAGS_EVENT, pinned, archived, ...(pinned && after.pinnedAt !== undefined ? { pinnedAt: after.pinnedAt } : {}) })
+    } catch (error) {
+      this.warn(`heddle session: the pin and archive of ${id} are in its record only, not its log: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      if (!held) this.release(handle)
+    }
   }
 
   /**
@@ -1266,7 +1347,11 @@ export class SessionStore {
     if (facts === null) return leaveOut(skippedRecordLine(id, file, missing, log))
     const fromDefinition = definitionTitle(facts.cwd, id)
     const title = fromDefinition ?? facts.firstMessageTitle
-    /** The key order of a record `create` wrote and a prompt then touched: `id`, `created`, `cwd`, `title`, `turns`, `updated`. */
+    /**
+     * The key order of a record `create` wrote, a prompt then touched and `flags` then flagged: `id`, `created`, `cwd`,
+     * `title`, `turns`, `updated`, `pinned`, `pinnedAt`, `archived`. A flag that is false is not written, as `flags` writes it.
+     */
+    const flags = facts.flags
     const meta: SessionMeta = {
       id,
       created: facts.created,
@@ -1274,16 +1359,18 @@ export class SessionStore {
       ...(title !== undefined ? { title } : {}),
       turns: facts.turns,
       ...(facts.updated !== undefined ? { updated: facts.updated } : {}),
+      ...(flags?.pinned === true ? { pinned: true, ...(flags.pinnedAt !== undefined ? { pinnedAt: flags.pinnedAt } : {}) } : {}),
+      ...(flags?.archived === true ? { archived: true } : {}),
     }
     const named: RebuiltTitle = fromDefinition !== undefined ? 'definition' : title !== undefined ? 'message' : 'none'
     try {
       writeFileAtomic(file, `${JSON.stringify(meta, null, 2)}\n`)
       this.unreadableRecords.delete(file)
-      this.warn(rebuiltRecordLine(file, log, missing, named))
+      this.warn(rebuiltRecordLine(file, log, missing, named, flags !== undefined))
     } catch (error) {
       /** Still listed, from memory, until a write lands; the line says the file is not repaired. */
       this.unreadableRecords.set(file, { size, mtimeMs, meta })
-      this.warn(rebuiltRecordLine(file, log, missing, named, error instanceof Error ? error.message : String(error)))
+      this.warn(rebuiltRecordLine(file, log, missing, named, flags !== undefined, error instanceof Error ? error.message : String(error)))
     }
     return meta
   }
@@ -1558,7 +1645,18 @@ export class SessionStore {
       let entries: string[]
       try {
         entries = readdirSync(at)
-      } catch {
+        this.unreadableFolders.delete(at)
+      } catch (error) {
+        /**
+         * A folder that cannot be read hides every session in it, so it is named once (#195): measured before, a workspace's
+         * folder at mode 000 took all of its sessions out of the list, search, get and turn with no line. A file beside the
+         * folders, or a folder removed meanwhile, holds no sessions and is passed over as before.
+         */
+        const code = (error as NodeJS.ErrnoException).code
+        if (code !== 'ENOTDIR' && code !== 'ENOENT' && !this.unreadableFolders.has(at)) {
+          this.unreadableFolders.add(at)
+          this.warn(skippedFolderLine(at, code === 'EACCES' || code === 'EPERM' ? 'permission denied' : 'it cannot be read'))
+        }
         continue
       }
       const records = new Set(entries.filter((entry) => entry.startsWith('session-') && entry.endsWith('.json')))

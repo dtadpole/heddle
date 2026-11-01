@@ -91,10 +91,10 @@ pub use service::{
 };
 pub use store::{
     EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, RebuiltTitle,
-    RecordFacts, RenameListener, SessionStore, TRANSCRIPT_NAME, Warn, can_compress,
-    default_session_root, definition_title, is_framed, lock_path, log_name, meta_name,
-    parse_record, read_log_header, rebuilt_record_line, record_facts, skipped_log_line,
-    skipped_record_line, transcript_in,
+    RecordFacts, RenameListener, SESSION_FLAGS_EVENT, SessionFlags, SessionStore, TRANSCRIPT_NAME,
+    Warn, can_compress, default_session_root, definition_title, is_framed, lock_path, log_name,
+    meta_name, parse_record, read_log_header, rebuilt_record_line, record_facts,
+    skipped_folder_line, skipped_log_line, skipped_record_line, transcript_in,
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
