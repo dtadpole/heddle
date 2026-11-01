@@ -18,6 +18,8 @@ import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, rep
  *
  * A Chat Completions double keeps the round's model request streaming and would answer only after 8 s. The check
  * pauses the goal 1 s into the request: the round must end stopped at once, and the late answer must never be written.
+ * A message the person sent during the round (queued behind it, #28) must outlive the pause and run next, as DSH
+ * keeps the inbox (`keepInbox: true`).
  */
 
 const CAPABILITY = 'the Web UI'
@@ -86,6 +88,7 @@ const sleep = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise,
 
 const OBJECTIVE = 'GOAL-190 keep tidying'
 const LATE = 'LATE-ANSWER-190'
+const QUEUED = 'QUEUED-190 a message sent during the round'
 
 async function double() {
   let rounds = 0
@@ -106,6 +109,8 @@ async function double() {
         response.end('data: [DONE]\n\n')
       }
       if (raw.includes('Create a concise title')) return send('A title')
+      // The person's queued message is answered at once, so its turn shows it outlived the pause.
+      if (raw.includes(QUEUED)) return send('queued-answer-190')
       if (raw.includes(OBJECTIVE)) rounds += 1
       // The round's answer comes only after 8 s, with a comment every 500 ms so nothing idles out before then.
       const beat = setInterval(() => response.write(': still working\n\n'), 500)
@@ -154,6 +159,10 @@ test('#190: a person’s /goal pause aborts the round in flight, and its late an
     const end = Date.now() + 15_000
     while (provider.rounds() === 0 && Date.now() < end) await sleep(100)
     assert.equal(provider.rounds(), 1, 'the driver started a round, its model request in flight')
+    // The person sends a message while the round runs: it queues behind the round.
+    void fetch(new URL('/api/turn', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ prompt: QUEUED, folder: work, session, detach: true }) })
+      .then((response) => response.text())
+      .catch(() => {})
     await sleep(1_000)
 
     const paused = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/goal pause' }) })
@@ -168,12 +177,13 @@ test('#190: a person’s /goal pause aborts the round in flight, and its late an
     }
     let closed
     while (closed === undefined && Date.now() - pausedAt < 6_000) {
-      closed = events().findLast((event) => event.type === 'turn/completed')
+      // The session's first turn is the goal round (the session was opened empty); the queued message's comes later.
+      closed = events().find((event) => event.type === 'turn/completed')
       if (closed === undefined) await sleep(100)
     }
     assert.ok(closed !== undefined, `the round ended within 6 s of the pause (its answer was due 7 s later)`)
     // Recorded as Stop records it: TS marks the turn's close `stopped`, Rust the answer's `ended` (check-goal-stop's rule).
-    const answer = events().findLast((event) => event.type === 'assistant/completed')
+    const answer = events().find((event) => event.type === 'assistant/completed')
     assert.ok(
       closed.stopped === true || (answer?.ended ?? []).includes('stopped by the caller'),
       `the round ended stopped, as Stop ends it\n${JSON.stringify({ closed, answer })}`,
@@ -181,6 +191,8 @@ test('#190: a person’s /goal pause aborts the round in flight, and its late an
     await sleep(8_000 - (Date.now() - pausedAt) + 500)
     assert.ok(!JSON.stringify(events()).includes(LATE), 'the late answer was never written')
     assert.equal(provider.rounds(), 1, 'and no further round started')
+    const log = JSON.stringify(events())
+    assert.ok(log.includes(QUEUED) && log.includes('queued-answer-190'), 'the message queued behind the round outlived the pause, ran next and was answered')
   } finally {
     server.kill()
     provider.close()
