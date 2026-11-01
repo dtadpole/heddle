@@ -428,6 +428,49 @@ test('footnote bodies and hostile labels pass the existing output and URL polici
   for (const href of followed(html).filter((url) => url.startsWith('#'))) assert.ok(ids.includes(href.slice(1)), href)
 })
 
+test('footnote lone UTF-16 surrogates from JSON retain ordinary prose and safe distinct references', () => {
+  const labels = ['\ud800', '\udc00', '\ud800\ud800', 'x\ud800', '\ud800x', '_ud800', '_udc00', '\ufffd', '\ud800\udc00']
+  const source = `normal **prose** ${labels.map((label) => `ref[^${label}] again[^${label}]`).join(' ')}.\n\n`
+    + labels.map((label, index) => `[^${label}]: definition ${index}.`).join('\n')
+    + '\n\nfollowing *prose*.'
+  const html = renderMarkdown(JSON.parse(JSON.stringify({ source })).source as string)
+  assert.match(html, /^<p>normal <strong>prose<\/strong> ref<a /)
+  assert.match(html, /<p>following <em>prose<\/em>\.<\/p>/)
+  assert.doesNotMatch(html, /unrendered|\[\^/)
+  const ids = [...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1] ?? '')
+  assert.equal(ids.length, labels.length * 3, 'two references and one definition per label')
+  assert.equal(new Set(ids).size, ids.length, 'lone units, pairs, replacement characters and literal escape spellings differ')
+  for (const id of ids) assert.match(id, /^fn(?:ref)?-[A-Za-z0-9_]+(?:-2)?$/, 'IDs contain only safe ASCII')
+  for (const href of followed(html)) {
+    assert.ok(href.startsWith('#') && ids.includes(href.slice(1)), 'every citation and backref targets an existing ID')
+  }
+  for (let index = 0; index < labels.length; index += 1) assert.ok(html.includes(`definition ${index}.`))
+  assert.match(html, /id="fn-_uD800"/)
+  assert.match(html, /id="fn-_uDC00"/)
+  assert.equal(renderMarkdown('ordinary **prose** afterwards'), '<p>ordinary <strong>prose</strong> afterwards</p>\n')
+})
+
+test('footnote valid IDs stay stable without ambiguous underscores or repeated-reference collisions', () => {
+  const cases = [
+    ['Note', 'note'], ['é', '_C3_A9'], ['😀', '_F0_9F_98_80'], ['a', 'a'], ['a-2', 'a_2D2'],
+    ['a_2', 'a_5F2'], ['%', '_25'], ['_25', '_5F25'], ['-', '_2D'], ['_2d', '_5F2d'],
+    ['_ud800', '_5Fud800'], ['_uD800', '_5Fud800'], ['!', '_21'], ['~', '_7E'],
+  ] as const
+  for (const [label, id] of cases) {
+    const html = renderMarkdown(`normal prose ref[^${label}] again[^${label}].\n\n[^${label}]: definition.`)
+    assert.ok(html.includes(`href="#fn-${id}" id="fnref-${id}"`), label)
+    assert.ok(html.includes(`id="fnref-${id}-2"`), label)
+    assert.ok(html.includes(`<li id="fn-${id}">`), label)
+  }
+  const labels = ['a', 'a-2', 'a_2', '%', '_25', '-', '_2d']
+  const html = renderMarkdown(labels.map((label) => `x[^${label}] x[^${label}]`).join(' ')
+    + '\n\n' + labels.map((label) => `[^${label}]: note.`).join('\n'))
+  const ids = [...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1])
+  assert.equal(ids.length, labels.length * 3)
+  assert.equal(new Set(ids).size, ids.length, 'underscore escape spellings and -2 labels cannot alias generated suffixes')
+  for (const href of followed(html)) assert.ok(ids.includes(href.slice(1)), href)
+})
+
 test('footnote references inside notes, including cycles, terminate with complete backrefs', () => {
   const html = renderMarkdown('x[^a].\n\n[^a]: a[^b] self[^a].\n[^b]: b[^a].')
   assert.equal((html.match(/<li id="fn-/g) ?? []).length, 2)

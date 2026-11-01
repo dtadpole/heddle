@@ -359,9 +359,23 @@ function freshFootnotes(): FootnoteState {
 let footnotes = freshFootnotes()
 const FOOTNOTE_LABEL = /^\[\^([^\]\s]+)\]/
 const FOOTNOTE_DEFINITION = /^ {0,3}\[\^([^\]\s]+)\]:[ \t]*([^\n]*)(?:\n|$)/
-/** Encode punctuation, including hyphens, so a label ending -2 cannot collide with a repeated reference. */
+/**
+ * Keep existing UTF-8 IDs for well-formed labels, including escaped punctuation so -2 cannot alias a repeat suffix.
+ * JSON can carry lone UTF-16 surrogates, which encodeURIComponent rejects. Encode those code units as _uXXXX:
+ * UTF-8 byte escapes start with two hex digits, and literal underscores escape to _5F, so this is disjoint and
+ * injective over the case-normalized label's UTF-16 code units (without replacing malformed units with U+FFFD).
+ */
 function footnoteId(key: string): string {
-  return encodeURIComponent(key).replace(/[-_!'()*~]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`).replace(/%/g, '_')
+  let id = ''
+  for (const character of key) {
+    const unit = character.charCodeAt(0)
+    if (character.length === 1 && unit >= 0xD800 && unit <= 0xDFFF) {
+      id += `_u${unit.toString(16).toUpperCase()}`
+    } else {
+      id += encodeURIComponent(character).replace(/[-_!'()*~]/g, (punctuation) => `%${punctuation.charCodeAt(0).toString(16).toUpperCase()}`).replace(/%/g, '_')
+    }
+  }
+  return id
 }
 marked.use({
   extensions: [
