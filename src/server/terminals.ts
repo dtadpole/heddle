@@ -137,13 +137,21 @@ function shQuote(word: string): string {
  * - `script` reads from `cat`, because BSD `script` refuses a socket for stdin (`tcgetattr/ioctl: Operation not
  *   supported on socket`) and Node gives a child a socket. When `script` ends, the wrapper reports the exit
  *   status on stderr and ends its own process group, so `cat` does not outlive it.
+ * - When the server's end of stdin closes without a close (the server was killed, crashed or ran out of memory),
+ *   `cat` sees the end and the wrapper ends its own process group (#204). That ends `script`, and with the PTY
+ *   gone the shell ends too. An end of input alone would not: BSD `script` passes it on as VEOF only while the tty
+ *   is in canonical mode, and a shell waiting at its prompt keeps the tty raw, so `script` and the shell stayed
+ *   under init. The signal is SIGTERM, not SIGHUP: a server started under `nohup` hands SIGHUP down ignored.
+ *
+ * Both `kill ... 0` calls signal the wrapper's process group, so the wrapper must be spawned as a group leader
+ * (`detached`).
  */
 export function terminalArgv(platform: string, confined: readonly string[]): readonly string[] {
   const pty =
     platform === 'darwin'
       ? ['/usr/bin/script', '-q', '/dev/null', ...confined]
       : ['script', '-qfec', confined.map(shQuote).join(' '), '/dev/null']
-  return ['/bin/sh', '-c', `cat | { "$@"; echo "${EXIT_MARK}$?" >&2; kill -TERM 0; }`, 'heddle-terminal', ...pty]
+  return ['/bin/sh', '-c', `{ cat; kill -TERM 0; } | { "$@"; echo "${EXIT_MARK}$?" >&2; kill -TERM 0; }`, 'heddle-terminal', ...pty]
 }
 
 /** The shell's own argv before confinement: set the size, then become the interactive shell. */
