@@ -4221,6 +4221,146 @@ test("a conversation started through the turn route is titled by the session's o
   }
 })
 
+/**
+ * A local chat endpoint that keeps **every** request body, a session's title request included, and answers each in
+ * kind: the title request with a title, a turn with a short answer. The scripted endpoint keeps no bodies, and the
+ * other doubles here refuse the title request, so neither can show what effort the title asked for.
+ */
+async function bodyKeepingChatDouble(title) {
+  const bodies = []
+  const server = createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => {
+      body += chunk
+    })
+    request.on('end', () => {
+      if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
+        response.writeHead(404, { 'content-type': 'application/json' })
+        response.end(JSON.stringify({ error: 'no model list' }))
+        return
+      }
+      bodies.push(body)
+      const content = isTitleRequest(body) ? title : 'a turn answer'
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content }, finish_reason: null }] })}\n\n`)
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      response.write('data: [DONE]\n\n')
+      response.end()
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', () => resolvePromise()))
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}/ds`,
+    bodies,
+    close: () =>
+      new Promise((resolvePromise) => {
+        server.close(() => resolvePromise())
+        server.closeAllConnections()
+      }),
+  }
+}
+
+test("a session's title request asks for its route's least reasoning level, while its turn runs at the session's", async (context) => {
+  /**
+   * #215 (found by developer-four, J168/J173). DSH's first-prompt title provider asks for the route's least supported
+   * effort, selectReasoningEffort = (model) => model.reasoning?.efforts[0]?.id (dsh-session-title-first-prompt-llm
+   * lib/index.js:41-42), laid over the call's controls (dsh-session-title-llm lib/index.js:184-190); a route that declares
+   * no levels gets none. Measured before on both builds: the title call carried the session's id, so the server's
+   * selection rule and the default fill (#157) sent it at the session's level (max for a session at Max, xhigh for an
+   * Opus session that names none) for a five-word title. Each session here is set from the page's model seat, its first
+   * prompt runs, and both bodies are read off the wire.
+   */
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  const h = harness('title-effort')
+  const generated = 'Effort ladder title'
+  const double = await bodyKeepingChatDouble(generated)
+  const levels = ['low', 'medium', 'high', 'xhigh', 'max'].map((id) => ({ id, name: id, value: id }))
+  writeFileSync(
+    h.config,
+    JSON.stringify({
+      default: 'gateway',
+      exclude: ['scripted'],
+      endpoints: [{
+        name: 'gateway', kind: 'openai-chat', baseUrl: double.baseUrl, model: 'opus', stream: true,
+        models: [{ id: 'opus', name: 'Opus', reasoning: { default: 'xhigh', levels } }, { id: 'plain', name: 'Plain' }],
+      }],
+    }),
+  )
+  const prompt = 'Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.'
+  let live
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const handshake = await fetch(live.url, { redirect: 'manual' })
+    const cookie = String(handshake.headers.get('set-cookie') ?? '').split(';')[0]
+    const listed = async () => (await (await fetch(new URL('/api/sessions', live.url), { headers: { cookie } })).json())
+    /** One new session set from the model seat, then its first prompt; answers the bodies its turn and title sent. */
+    const firstPrompt = async (label, selection) => {
+      const folder = join(h.work, `ws-${label}`)
+      mkdirSync(folder, { recursive: true })
+      const made = await runCli(adminArgs(h, ['session', 'new', folder, '--json']), { env: h.env, cwd: h.work })
+      assert.equal(made.code, 0, `${label}: the session was created\n${made.stdout}${made.stderr}`)
+      const id = parseJson(made.stdout).session
+      const set = await fetch(new URL(`/api/sessions/${encodeURIComponent(id)}/model`, live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ endpoint: 'gateway', ...selection }),
+      })
+      assert.equal(set.status, 200, `${label}: the model seat took ${JSON.stringify(selection)}\n${await set.text()}`)
+      const from = double.bodies.length
+      const turn = await fetch(new URL('/api/turn', live.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ session: id, prompt }),
+      })
+      const stream = await turn.text()
+      assert.equal(turn.status, 200, `${label}: the first turn ran\n${stream}`)
+      assert.match(stream, /a turn answer/, `${label}: the turn was answered by the turn's request`)
+      let sent = double.bodies.slice(from)
+      for (let attempt = 0; attempt < 40 && !sent.some(isTitleRequest); attempt += 1) {
+        await new Promise((done) => setTimeout(done, 250))
+        sent = double.bodies.slice(from)
+      }
+      const titleBody = sent.find(isTitleRequest)
+      const turnBody = sent.find((body) => !isTitleRequest(body))
+      assert.ok(titleBody, `${label}: the first prompt started a title request\nsent: ${sent.length} bodies`)
+      assert.ok(turnBody, `${label}: and the turn sent its own`)
+      let title
+      for (let attempt = 0; attempt < 40 && title !== generated; attempt += 1) {
+        if (attempt > 0) await new Promise((done) => setTimeout(done, 250))
+        title = (await listed()).find((meta) => meta.id === id)?.title
+      }
+      assert.equal(title, generated, `${label}: the title answer replaced the fallback\nsaw: ${JSON.stringify(title)}`)
+      const meta = (await listed()).find((one) => one.id === id)
+      return { title: JSON.parse(titleBody), turn: JSON.parse(turnBody), meta }
+    }
+
+    const atMax = await firstPrompt('max', { model: 'opus', reasoningEffort: 'max' })
+    assert.equal(atMax.turn.reasoning_effort, 'max', 'a session at Max: its turn asks for max')
+    assert.equal(atMax.title.reasoning_effort, 'low', `and its title asks for the route's least level\ntitle body effort: ${JSON.stringify(atMax.title.reasoning_effort)}`)
+    assert.equal(atMax.title.model, 'opus', 'on the turn\'s own model')
+    assert.equal(atMax.meta?.reasoningEffort, 'max', 'the session still runs at max')
+    assert.equal(atMax.meta?.model, 'opus')
+
+    const atDefault = await firstPrompt('default', { model: 'opus' })
+    assert.equal(atDefault.turn.reasoning_effort, 'xhigh', 'a session that names no level: its turn runs at the model default')
+    assert.equal(atDefault.title.reasoning_effort, 'low', `its title, at the least level\ntitle body effort: ${JSON.stringify(atDefault.title.reasoning_effort)}`)
+    assert.equal(atDefault.meta?.reasoningEffort, undefined, 'and the session still names none')
+
+    const plain = await firstPrompt('plain', { model: 'plain' })
+    assert.equal(plain.title.model, 'plain')
+    assert.equal(plain.title.reasoning_effort, undefined, 'a route that declares no levels: the title sends no effort')
+    assert.equal(plain.turn.reasoning_effort, undefined)
+  } finally {
+    live?.kill()
+    await double.close()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
 test('a session is pinned and archived in the store, and the tree follows both', async (context) => {
   if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
   if (!skipUnless(context, await supportsFolderTree(), TREE_CAPABILITY)) return
