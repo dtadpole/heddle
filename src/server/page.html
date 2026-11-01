@@ -19243,7 +19243,6 @@ function failedLevelLine(failure) {
   return line
 }
 
-/** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
 /**
  * Open the child groups a drawing would open, once their parent is drawn open (C33): saved open, or open by DSH's
  * defaults with no saved state (`WorkspaceTree.openGroups`). DSH derives every group's state from its one record, so
@@ -19261,6 +19260,7 @@ async function reopenChildGroups(node) {
   }
 }
 
+/** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
 async function loadChildren(node, li) {
   const group = document.createElement('ul')
   group.setAttribute('role', 'group')
