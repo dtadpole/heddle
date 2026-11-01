@@ -3722,7 +3722,7 @@
   -->
   <div id="question-card" role="dialog" aria-labelledby="question-title" hidden>
     <div class="head">
-      <span class="dot" aria-hidden="true"></span><span id="question-title" data-i18n="question.title">Question</span>
+      <span class="dot" aria-hidden="true"></span><span id="question-title">Question</span>
       <span id="question-badge" class="badge" hidden></span>
       <span class="pager" id="question-pager" hidden>
         <button type="button" id="question-prev" aria-label="Previous question" data-i18n-aria-label="question.prev">‹</button>
@@ -10713,6 +10713,7 @@ function renderStatPopover() {
       const empty = document.createElement('div')
       empty.className = 'stat-panel-empty'
       empty.textContent = t('panel.noContext')
+      empty.dataset.i18n = 'panel.noContext'
       popover.append(empty)
       positionStatPopover()
       return
@@ -10817,6 +10818,7 @@ function renderStatPopover() {
     const empty = document.createElement('div')
     empty.className = 'stat-panel-empty'
     empty.textContent = t('panel.noStats')
+    empty.dataset.i18n = 'panel.noStats'
     popover.append(empty)
   }
   positionStatPopover()
@@ -24136,6 +24138,14 @@ function renderQuestion() {
   renderQuestionClock()
   questionCard.hidden = false
 }
+/**
+ * The card's script-drawn words (badge, pager, notes, the clock's line) follow a language change. Redrawing is safe:
+ * free text comes back from the draft, and the model's own header, question and options are drawn verbatim again.
+ */
+window.addEventListener('heddle:locale', () => {
+  if (questionShown !== null && !questionCard.hidden) renderQuestion()
+})
+
 function renderQuestionClock() {
   const shown = questionShown
   const countdown = document.getElementById('question-countdown')
@@ -24315,6 +24325,7 @@ function questionToolButton(node) {
   button.type = 'button'
   button.className = 'question-open'
   button.textContent = t('question.open')
+  button.dataset.i18n = 'question.open'
   button.addEventListener('click', (event) => {
     event.preventDefault()
     event.stopPropagation()
