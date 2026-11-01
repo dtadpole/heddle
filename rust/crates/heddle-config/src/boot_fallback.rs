@@ -84,20 +84,42 @@ pub fn boot_fallback(
                     rows.iter()
                         .find(|candidate| candidate.row.label() == composed.row.label())
                 })
-                .filter(|candidate| {
-                    judge_row(&candidate.row, anchor_dir(beneath).as_deref(), catalog)
-                        .problems
-                        .is_empty()
-                })
-                .map(|candidate| candidate.row.config.clone());
-            if let Some(config) = fallen {
+                .cloned();
+            if let Some(fallen) = fallen {
+                // Only the config is taken from beneath; the row that runs keeps its own component, enablement
+                // and injections, so it is that row, with that config, that must pass — a hand-edited block can
+                // change more than the config. Its config fields take the provenance of the layers they now come
+                // from.
                 let mut row = composed.row.clone();
-                row.config = config;
-                out.notes.push(format!(
-                    "heddle: {said} (in {target}); this run uses the value beneath it until Settings saves or resets it"
-                ));
-                out.rows.push(ComposedRow { row, ..composed });
-                continue;
+                row.config = fallen.row.config.clone();
+                let judged = judge_row(&row, anchor.as_deref(), catalog);
+                if judged.checked && judged.problems.is_empty() {
+                    let is_config = |field: &crate::compose::Provenance| {
+                        field.field == "config" || field.field.starts_with("config.")
+                    };
+                    let mut fields: Vec<_> = composed
+                        .fields
+                        .iter()
+                        .filter(|field| !is_config(field))
+                        .cloned()
+                        .collect();
+                    fields.extend(
+                        fallen
+                            .fields
+                            .iter()
+                            .filter(|field| is_config(field))
+                            .cloned(),
+                    );
+                    out.notes.push(format!(
+                        "heddle: {said} (in {target}); this run uses the value beneath it until Settings saves or resets it"
+                    ));
+                    out.rows.push(ComposedRow {
+                        row,
+                        fields,
+                        ..composed
+                    });
+                    continue;
+                }
             }
         }
         out.notes.push(match &file {
@@ -167,6 +189,69 @@ mod tests {
             "{}",
             fallback.notes[0]
         );
+    }
+
+    #[test]
+    fn the_running_row_with_the_config_from_beneath_must_pass_and_its_config_provenance_follows() {
+        // developer-two's case: beneath, the row is disabled and holds a bad value; a hand-edited block enables
+        // it with another bad value. The row that would run (enabled, with the value from beneath) fails, so
+        // nothing falls back and the row is named.
+        let tree = layer(
+            "base",
+            "/p/cordis.yml",
+            "- insert:\n    - id: alpha\n      name: alpha\n      disabled: true\n      config:\n        count: many\n",
+        );
+        let block = "- patch:\n    - id: alpha\n      disabled: false\n      config:\n        count: also-invalid\n";
+        let layers = vec![
+            tree.clone(),
+            layer("p/heddle.patch.yml", "/p/heddle.patch.yml", block),
+        ];
+        let rows = crate::compose::compose(&layers, &Env::default()).expect("composes");
+        assert_eq!(
+            rows[0].row.disabled,
+            Some(false),
+            "the block enables the row"
+        );
+        let fallback = boot_fallback(
+            &layers,
+            rows,
+            Some(&[tree]),
+            Some(Path::new("/p/heddle.patch.yml")),
+            &Env::default(),
+            &catalog(),
+        );
+        assert_eq!(
+            fallback.rows[0].row.config,
+            Some(json!({ "count": "also-invalid" }))
+        );
+        assert!(
+            fallback.notes[0].ends_with("fix it in the file or run `heddle config --validate`"),
+            "{}",
+            fallback.notes[0]
+        );
+
+        // A fallback's config fields are reported from the layer the config now comes from.
+        let tree = layer("base", "/p/cordis.yml", TREE);
+        let layers = vec![
+            tree.clone(),
+            layer("p/heddle.patch.yml", "/p/heddle.patch.yml", BROKEN),
+        ];
+        let rows = crate::compose::compose(&layers, &Env::default()).expect("composes");
+        let fallback = boot_fallback(
+            &layers,
+            rows,
+            Some(&[tree]),
+            Some(Path::new("/p/heddle.patch.yml")),
+            &Env::default(),
+            &catalog(),
+        );
+        let config_files: Vec<&str> = fallback.rows[0]
+            .fields
+            .iter()
+            .filter(|field| field.field.starts_with("config"))
+            .map(|field| field.file.as_str())
+            .collect();
+        assert_eq!(config_files, vec!["/p/cordis.yml"]);
     }
 
     #[test]
