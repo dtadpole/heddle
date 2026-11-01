@@ -142,26 +142,12 @@ uses the same DOMPurify configuration. Only clean output is parsed and imported 
 frame after the fixed same-origin HTML shell loads; cancellation and late failures cannot publish
 into a newer selection. No server sanitizer, path-reading shell, POST store or asset bridge is added.
 
-Authored regressions are in [`preview-shell.test.ts`](../../test/preview-shell.test.ts),
+[`preview-shell.test.ts`](../../test/preview-shell.test.ts),
 [`page-file-selection.test.ts`](../../test/page-file-selection.test.ts), and the Rust server/preview
-unit tests. Existing browser checks now inspect the loaded frame DOM and response headers rather
-than source-document markup. At the initial source checkpoint `bd80bf04`, D067 allowed only static
-diff and Node syntax checks because disk was below 16 GiB; runtime verdicts were UNJUDGED.
-
-After the parent explicitly reauthorized TypeScript validation and fresh preflights met memory free
-at least 25 percent and disk at least 16 GiB, focused regressions passed **37 of 37** and the corrected
-type check passed. The initial type check exposed a setter-only test control inferred as undefined;
-`f060f427` adds its boolean getter. The parent then formatted Rust sources in `751df88d` and reported
-**21 Rust preview tests and clippy passing**. The child ran no Cargo, build or browser commands.
-
-The first full TypeScript suite at `751df88d` honestly **failed** with **1439 tests, 1436 passed,
-2 failed and 1 skipped**. The unchanged jobs timing test's first read already contained both `one`
-and `two` instead of only `one`; its 150 ms observation is not a synchronization barrier. The
-highlight parity test could not read its cwd-relative local dependency directory, absent in the new
-worktree even though ancestor module imports resolved. The parent subsequently linked existing
-dependencies for its build; this fixes that environment premise but does not retroactively pass the
-suite or waive the jobs failure. At that shell checkpoint build/browser results and the actual-resource
-premise were pending; no blind full-suite retry or unrelated jobs test change is claimed here.
+unit tests judge the fixed-shell response, headers, sanitized import and selection lifecycle.
+The browser checks in [`check.mjs`](check.mjs) inspect the loaded frame DOM and response headers
+rather than source-document markup. These are verification contracts, not runtime verdicts;
+execution evidence must identify the selected build and checked revision.
 
 ## Main DOM and fixed-shell resource policies
 
@@ -174,32 +160,33 @@ has its own response policy; `PREVIEW_CSP` and `PREVIEW_FRAME_CSP` retain all ex
 permissions and restrictions. No ephemeral store, server sanitizer or referrer meta is introduced.
 The owner's CSS-origin Referer observation is a non-regression and does not require a policy workaround.
 
-This patch depends on the fixed authenticated shell; it is not a standalone `srcdoc` change. Exact
-TypeScript and Rust assertions cover both Browser booleans and the unchanged child policies, and
-part 80's exact expected main-page policy is updated for the same three directives with HTTPS images
-kept. The old main-page policy fails the new focused TypeScript assertion specifically on the three
-remaining HTTPS permissions (exit 1); after the change the five focused TypeScript policy assertions
-pass (exit 0), and `npm run check` passes (exit 0), both using `_tools_/local-build/run --ts` after
-fresh D067 clearance. The part 80 check passes Node syntax checking; its browser runtime verdict is
-not inferred. Rust, build and browser validation remain the parent's responsibility;
-the earlier full-suite jobs failure remains known, not waived. The named pre-push public gate is
-`node _tools_/public-hygiene/gate.mjs --range b375c6ab..HEAD` on the normal separate branch. Source
-owner review must approve the exact candidate SHA before MAIN; this patch does not land on main or
-update any live server/settings.
+This policy depends on the fixed authenticated shell; it is not a standalone `srcdoc` change. Exact
+TypeScript and Rust assertions judge both Browser booleans and the unchanged child policies.
+Part 80's main-page check judges the same three directives with HTTPS images kept; the delivered-CLI
+resource check below independently judges the complete actual response CSP. Static and syntax checks
+do not establish runtime policy behavior, and focused policy checks do not replace full integration
+or live acceptance. Source owner review must approve the exact candidate SHA before MAIN; this
+contract does not authorize a main push or changes to any live server/settings.
 
 ## Actual resource-policy regression
 
-[`check-preview-resource-policy.mjs`](check-preview-resource-policy.mjs) drives the delivered CLI selected
-by `HEDDLE_BIN`, not a source-import double. It pins authenticated fixed-shell headers and the complete main
-CSP, then uses a controlled alternate HTTPS origin with test-only certificate trust bypass. In both built
-backends, two cases passed and no cases failed: child CSS applied, child and CSS images decoded, valid WAV
-loaded under the child policy, main CSS/media requests were blocked by its exact response CSP, and a remote
-Markdown image still decoded in the main DOM. These results do not certify TLS trust or supported production
-audio/video rendering. The valid-font decode subtest was explicitly UNJUDGED because no workspace font
-fixture was provided; font-src is still pinned by headers, and the owner's separate request-count probe
-covers its CSP boundary. The first Resource Timing ownership wait failed and was replaced by decoded-asset
-and actual asset-server evidence, not by relaxing production policy. Full integration and live acceptance
-remain pending; the earlier full-suite jobs timing failure is not waived.
+[`check-preview-resource-policy.mjs`](check-preview-resource-policy.mjs) drives the default built
+TypeScript CLI or the delivered CLI selected by `HEDDLE_BIN`, not a source-import double. Its HTTP check
+judges unauthenticated shell refusal, the fixed shell body and headers, and the complete main response CSP
+with hashes derived from the served inline scripts. Its **headless browser** check uses a controlled
+alternate HTTPS origin with test-only certificate trust bypass to judge applied child CSS, decoded child
+and CSS images, a valid WAV loaded under the child policy, main CSS/media refusal by the exact response CSP
+without requests reaching the asset server, and a remote Markdown image decoded in the main DOM. Decoded
+assets and actual asset-server requests establish resource evidence, not frame Resource Timing ownership.
+These checks do not certify TLS trust or supported production audio/video rendering; the WAV is a separate
+policy fixture injected into the actual shell, not a DOMPurify renderer claim.
+
+Font decoding is opt-in through `HEDDLE_PREVIEW_FONT_FIXTURE`, naming an existing bounded valid font
+inside the workspace whose canonical path also stays inside it. With that fixture, the font subtest judges
+child decode and main `font-src` refusal with no alternate-origin request. Without it, the font subtest is
+**UNJUDGED**, not passing; exact `font-src` response headers are judged independently. A missing headless
+browser leaves the resource case unjudged. The caller must supply the selected build; this contract does
+not claim a runtime pass, full integration or live acceptance.
 
 ## Read next
 

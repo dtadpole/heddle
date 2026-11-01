@@ -19,8 +19,9 @@ import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/brows
 import { endChild, fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, run, scriptedConfig } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
- * Author-only checkpoint, NOT executed when authored. Default built CLI or HEDDLE_BIN (Rust).
- * Exact headers intentionally require the NEW main policy, not b375's retained HTTPS exceptions.
+ * Verification contract for the default built CLI or HEDDLE_BIN-selected delivered CLI.
+ * Judges exact main/frame headers, child resource loading, main CSS/media refusal and Markdown images.
+ * Exact headers require the separate main policy, with HTTPS retained only for main images.
  * An owner-approved alternate loopback HTTPS port stands for remote. HTTP would also fail under
  * the old policy and cannot establish its HTTPS regression. No production policy is widened.
  * Certificate errors are ignored only in this isolated browser for generated fake TLS material.
