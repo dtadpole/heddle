@@ -781,7 +781,10 @@ mod tests {
         assert!(show_html.contains("ticket !== fileFetches || htmlView !== frame"));
         assert!(!show_html.contains(".srcdoc ="));
         assert!(!show_html.contains("body.csp"));
-        assert_eq!(frame_policy(), format!("{PREVIEW_CSP}; frame-ancestors 'self'; sandbox allow-same-origin"));
+        assert_eq!(
+            frame_policy(),
+            format!("{PREVIEW_CSP}; frame-ancestors 'self'; sandbox allow-same-origin")
+        );
     }
 
     #[test]

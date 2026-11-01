@@ -1717,7 +1717,11 @@ mod tests {
     #[test]
     fn the_route_list_leaves_the_servers_own_paths_alone() {
         // developer-ten registers these in heddle-server; an overlap would panic in `Router::merge`.
-        for (method, path) in [("GET", "/api/html"), ("GET", "/api/html/frame"), ("GET", "/vendor/purify.js")] {
+        for (method, path) in [
+            ("GET", "/api/html"),
+            ("GET", "/api/html/frame"),
+            ("GET", "/vendor/purify.js"),
+        ] {
             assert!(
                 !ROUTES.contains(&(method, path)),
                 "{method} {path} is the server's route, not this crate's"
