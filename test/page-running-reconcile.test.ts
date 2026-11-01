@@ -63,6 +63,8 @@ function harness(): Page {
     function paintComposerAccess() {}
     function noteSessions() {}
     function noteCompletion() {}
+    // A search on screen follows every refresh (#163, judged in page-search-fresh.test.ts); none is on screen here.
+    async function applySearch() {}
     const fetch = () => new Promise((resolve) => queue((sessions) => resolve({ ok: true, json: async () => sessions })));
     ${source('markRunning')}
     ${source('refreshSessions')}

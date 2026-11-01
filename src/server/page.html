@@ -8433,6 +8433,13 @@ async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale, and a read already in flight with it. */
   searchIndex = null
   searchEpoch += 1
+  /**
+   * A search on screen follows the newer list, and is redrawn only when its hits changed (#163): every action of this
+   * page's that changes the list refreshes it here — an archive, an unarchive, a rename, a pin — and the search kept the
+   * hit as it was drawn before, an archived session still an ordinary, openable hit under Hide archived until the query
+   * was typed again. DSH derives its rows from the live list on every change (dsh-client-ui-workspace `lib/client.js:3451-3460`).
+   */
+  void applySearch({ follow: true })
   /** The newest running mark this read can know about; a mark after it outranks the read's silence. */
   const readTick = runningTick
   /**
@@ -8982,10 +8989,25 @@ function drawTurnFailure(session, message) {
  * Changes that never reach a session's log, pushed by the server (phase B item 4): an added, renamed or removed
  * workspace, and a renamed session. The tree is read again on the same debounce the log events use, and a rename of
  * the open session retitles its header, so a second page follows the first without reading the list on its own.
+ *
+ * The search index is a cache of the same two lists, so each of these frames drops it, with any read in flight from
+ * before the change, and a search on screen follows on the tree's debounce, redrawn only when its hits changed (#163).
+ * Only the tree followed before: another client's rename kept the old title in the hits, even when the query was typed
+ * again, and a workspace rename kept the old name in each hit's place label until a reload. DSH derives its search rows
+ * from the live list on every change: `deriveSearchResults` is a `useMemo` over the session list, the workspaces, the
+ * query, the archived ids and the filter (dsh-client-ui-workspace `lib/client.js:3451-3460`), and the workspaces are its
+ * live store's (`:3516-3522`).
  */
-events.addEventListener('workspace', () => scheduleTreeRefresh())
-events.addEventListener('sessions', (message) => {
+let searchFollowDue = false
+function followListChange() {
+  searchIndex = null
+  searchEpoch += 1
+  searchFollowDue = true
   scheduleTreeRefresh()
+}
+events.addEventListener('workspace', () => followListChange())
+events.addEventListener('sessions', (message) => {
+  followListChange()
   try {
     const data = JSON.parse(message.data)
     if (data.type === 'session/renamed' && data.session === current && typeof data.title === 'string' && data.title.length > 0) {
@@ -9026,6 +9048,14 @@ function scheduleTreeRefresh() {
   clearTimeout(treeRefreshTimer)
   treeRefreshTimer = setTimeout(() => {
     void renderTree()
+    /**
+     * A list change the stream reported redraws a search on screen as well (#163). Its index read is the one a keystroke
+     * since the frame started, or the one-column list's, when there is one (`loadSearchIndex` shares it, M1).
+     */
+    if (searchFollowDue) {
+      searchFollowDue = false
+      void applySearch({ follow: true })
+    }
   }, 400)
 }
 
@@ -20540,6 +20570,34 @@ let searchGeneration = 0
 const searchHits = new Map()
 
 /**
+ * What the search on screen shows, as `searchDrawing` writes it, or `null` while no search is on screen (#163). A follow
+ * after a list change compares the drawing it would make with this one and redraws only when they differ.
+ */
+let shownSearch = null
+
+/**
+ * One drawing of the search as a string: the query, whether the host is still asked and there is more, and each hit's
+ * session, title, place, archived state, age stamp and snippet — everything a hit, the skeleton rows and the two
+ * sentences are drawn from. `merged` is `ContentSearch.merge`'s answer, `null` when the search could not run.
+ */
+function searchDrawing(query, merged, pending) {
+  if (merged === null) return JSON.stringify([query, null])
+  return JSON.stringify([
+    query,
+    pending,
+    merged.hasMore,
+    merged.items.map(({ meta, workspace, snippet }) => [
+      meta.id,
+      WorkspaceTree.storedTitle(meta) ?? 'Untitled',
+      workspace ?? null,
+      meta.archived === true,
+      meta.updated ?? meta.created ?? null,
+      snippet ?? null,
+    ]),
+  ])
+}
+
+/**
  * Put `wanted` into `container` as its only children, in that order, taking out and moving as few elements as it can
  * (#151): what is no longer wanted is removed, a new element is inserted where it goes, and an element that stays in order
  * is not touched — the way a keyed React list places its rows (an element is moved only when one before it in the old
@@ -20659,18 +20717,27 @@ function searchHit(meta, workspace, snippet) {
  * What matches, in what order and how many, is `WorkspaceTree.search` — DSH's `deriveSearchResults`: the session's
  * title or its workspace's name, newest first, twenty at most. Phase A measured the version before it matching the
  * title and the **id**, so a workspace name found nothing and `capword` listed all 22 of its sessions.
+ *
+ * `{ follow: true }` is the redraw after the list under a search changed (#163): the stream reported a change, or this
+ * page refreshed the list after its own archive, unarchive or rename. It does nothing while no search is on screen, asks
+ * the host nothing (the query did not change), lets a keystroke's search go first (it takes no generation of its own), and
+ * redraws only when the drawing differs from the one on screen (`shownSearch`), so the hits a press may be on are left
+ * alone when nothing changed (#151). Its index read is shared with any read in flight for the same list (M1).
  */
-async function applySearch() {
-  const generation = ++searchGeneration
+async function applySearch(options = {}) {
+  const follow = options.follow === true
   const query = ContentSearch.sanitizeQuery(document.getElementById('session-search').value).trim()
+  if (follow && (shownSearch === null || query.length === 0)) return
+  const generation = follow ? searchGeneration : ++searchGeneration
   const results = document.getElementById('search-results')
   const note = document.getElementById('search-note')
   const more = document.getElementById('search-more')
-  requestContentSearch(query)
+  if (!follow) requestContentSearch(query)
   if (query.length === 0) {
     results.hidden = true
     results.replaceChildren()
     searchHits.clear()
+    shownSearch = null
     treeList.hidden = false
     note.hidden = true
     note.textContent = ''
@@ -20681,6 +20748,13 @@ async function applySearch() {
   }
   const index = await loadSearchIndex()
   if (generation !== searchGeneration) return
+  /** The host's answer for **this** query, else loading — DSH's `currentRemote` (`lib/client.js:3445-3450`). */
+  const remote = contentSearch.query === query ? contentSearch : { query, status: 'loading', items: [], hasMore: false }
+  const pending = remote.status === 'loading'
+  const merged = index === null ? null : ContentSearch.merge(index.workspaces, index.sessions, query, remote, { archived: archiveMode })
+  const drawing = searchDrawing(query, merged, pending)
+  if (follow && drawing === shownSearch) return
+  shownSearch = drawing
   treeList.hidden = true
   results.hidden = false
   if (index === null) {
@@ -20694,10 +20768,7 @@ async function applySearch() {
     more.textContent = ''
     return
   }
-  /** The host's answer for **this** query, else loading — DSH's `currentRemote` (`lib/client.js:3445-3450`). */
-  const remote = contentSearch.query === query ? contentSearch : { query, status: 'loading', items: [], hasMore: false }
-  const pending = remote.status === 'loading'
-  const { items, hasMore } = ContentSearch.merge(index.workspaces, index.sessions, query, remote, { archived: archiveMode })
+  const { items, hasMore } = merged
   /**
    * Each hit is the element it was on the last redraw, keyed by session (#151), as DSH's result list is a keyed React
    * list (dsh-client-ui-workspace): a redraw comes 250 ms after the last keystroke with the host's answer, and whenever the
@@ -20807,8 +20878,17 @@ document.getElementById('session-search').maxLength = ContentSearch.QUERY_MAX_CO
  * Choosing a hit is DSH's `openSearchResult` (dsh-client-ui-workspace `lib/client.js:3664`): the query is cleared, so the
  * tree is back, the session opens, and its row is revealed. Phase A measured the version before it leaving the query and
  * the results up after the click, with the opened row not drawn in the tree behind them.
+ *
+ * An archived session is refused first, whatever its hit was drawn as (#163): DSH's `openSearchResult` checks the archived
+ * ids, says why (`notifyArchivedNotOpenable`) and opens nothing, keeping the query and the results (`lib/client.js:3664-3668`).
+ * A hit drawn before an archive is an ordinary one until the search follows the list, and it opened the session, so the
+ * check is on the latest list this page read (`sessionMetas`), not on the hit.
  */
 async function openSearchResult(id) {
+  if (sessionMetas.get(id)?.archived === true) {
+    notifyArchivedNotOpenable()
+    return
+  }
   document.getElementById('session-search').value = ''
   await applySearch()
   /**
@@ -25854,7 +25934,8 @@ growComposer()
 await restoreSelection()
 void refreshApprovals()
 void refreshQuestions()
-document.getElementById('session-search').addEventListener('input', applySearch)
+/** A keystroke is a search of its own, never a follow (`applySearch`'s one argument is its options, not the event). */
+document.getElementById('session-search').addEventListener('input', () => void applySearch())
 const firstTree = renderTree().then(() => initializeDefaultWorkspace())
 /**
  * From here the page knows where a first message would start its session (#134): the hero names it, the composer is

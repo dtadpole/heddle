@@ -484,3 +484,144 @@ test('a press on a search hit, or on its Unarchive button, lands though the host
     for (const dir of [home, root]) removeDir(dir)
   }
 })
+
+/**
+ * GitHub issue #163: a standing search follows the live list. DSH derives its rows from the list on every change
+ * (`deriveSearchResults` is a `useMemo` over the session list, the workspaces, the query, the archived ids and the filter,
+ * dsh-client-ui-workspace `lib/client.js:3451-3460`), so another client's rename shows in the hits at once, an archived
+ * session leaves them under the default filter (`sessionVisible`, `:964`), and a renamed workspace is the hit's new
+ * place label. The page kept a cached index the stream never dropped: the hits kept the old title and the old workspace
+ * name, even when the query was typed again, until a reload.
+ *
+ * A second client (the API) archives one session, renames another and renames the workspace. The archive pushes no stream
+ * frame of its own yet (#167), so it is the renames' frames that bring it; the page then reads the newer list. Choosing the
+ * archived hit, shown under All conversations, says why it cannot be opened and opens nothing (`openSearchResult`,
+ * `:3664-3668`).
+ */
+test('a standing search follows another client\'s session rename, workspace rename and archive, and the archived hit opens nothing (#163)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('content-search-fresh')
+  const root = fixtureDir('content-search-fresh-repo')
+  const folders = ['alpha', 'beta', 'gamma'].map((name) => join(root, name))
+  for (const folder of folders) mkdirSync(folder, { recursive: true })
+  const { config } = scriptedConfig({ home, steps: [{ text: 'noted' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `registered the workspace (${added.text})`)
+    const workspaceId = JSON.parse(added.text).record?.id
+    assert.ok(typeof workspaceId === 'string' && workspaceId.length > 0, `the workspace has an id (${added.text})`)
+    const { realpathSync } = await import('node:fs')
+    const ids = []
+    for (const folder of folders) {
+      const ran = await api(server.url, cookie, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'a plain question', folder }) })
+      assert.equal(ran.status, 200, `a turn ran in ${folder} (${ran.status})`)
+      const listed = JSON.parse((await api(server.url, cookie, '/api/sessions')).text)
+      ids.push(listed.find((meta) => meta.cwd === realpathSync(folder))?.id)
+    }
+    const [alpha, beta, gamma] = ids
+    assert.ok(alpha && beta && gamma, 'the three sessions are listed')
+    for (const [id, title] of [
+      [alpha, 'quokka alpha'],
+      [beta, 'quokka beta'],
+      [gamma, 'quokka gamma'],
+    ]) {
+      const renamed = await api(server.url, cookie, `/api/sessions/${id}/title`, { method: 'POST', body: JSON.stringify({ title }) })
+      assert.equal(renamed.status, 200, `named ${title} (${renamed.text})`)
+    }
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+
+    /** The hits as a person reads them: each title, its place label (`workspace · age`), and whether it is drawn archived. */
+    const read = async () =>
+      JSON.parse(
+        await browser.evaluate(
+          `JSON.stringify({
+            hits: [...document.querySelectorAll('#search-results .hit')].map((hit) => ({
+              title: hit.querySelector('.hit-title').textContent,
+              place: hit.querySelector('.hit-workspace').textContent,
+              archived: hit.dataset.archived === 'true',
+            })),
+            query: document.getElementById('session-search').value,
+            shown: !document.getElementById('search-results').hidden,
+            opened: document.getElementById('session-title').textContent,
+          })`,
+        ),
+      )
+    /** Read until `wanted` holds or `ms` pass; the last reading either way, so a failure says what the page showed. */
+    const until = async (wanted, ms) => {
+      let seen = await read()
+      for (const end = Date.now() + ms; !wanted(seen) && Date.now() < end; ) {
+        await new Promise((done) => setTimeout(done, 100))
+        seen = await read()
+      }
+      return seen
+    }
+    const type = (query) => browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    const titles = (seen) => seen.hits.map((hit) => hit.title).sort()
+    /** The workspace a hit names: its place label before the age. */
+    const places = (seen) => [...new Set(seen.hits.map((hit) => hit.place.split(' · ')[0]))]
+
+    await type('quokka')
+    const before = await until((seen) => seen.hits.length === 3, 10_000)
+    assert.deepEqual(titles(before), ['quokka alpha', 'quokka beta', 'quokka gamma'], `the search lists the three sessions\nsaw: ${JSON.stringify(before)}`)
+    assert.equal(places(before).length, 1, `all three in one workspace\nsaw: ${JSON.stringify(before)}`)
+    assert.notEqual(places(before)[0], 'Garden')
+
+    /** The second client: an archive, a session rename and a workspace rename, each answered 200. */
+    const archived = await api(server.url, cookie, `/api/sessions/${beta}/flags`, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(archived.status, 200, `archived quokka beta (${archived.text})`)
+    const renamed = await api(server.url, cookie, `/api/sessions/${gamma}/title`, { method: 'POST', body: JSON.stringify({ title: 'quokka renamed elsewhere' }) })
+    assert.equal(renamed.status, 200, `renamed quokka gamma (${renamed.text})`)
+    const garden = await api(server.url, cookie, `/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: 'PATCH', body: JSON.stringify({ title: 'Garden' }) })
+    assert.equal(garden.status, 200, `renamed the workspace (${garden.text})`)
+
+    const followed = (seen) => JSON.stringify(titles(seen)) === JSON.stringify(['quokka alpha', 'quokka renamed elsewhere']) && JSON.stringify(places(seen)) === JSON.stringify(['Garden'])
+    const after = await until(followed, 8_000)
+    assert.ok(
+      followed(after),
+      `within a few seconds the standing search shows the new title, leaves out the archived session under Hide archived, and names the workspace Garden\nsaw: ${JSON.stringify(after)}`,
+    )
+    assert.equal(after.query, 'quokka', 'with the query untouched')
+
+    /** Typed again, the query runs over the newer list too. */
+    await type('')
+    await until((seen) => !seen.shown, 5_000)
+    await type('quokka')
+    const again = await until(followed, 8_000)
+    assert.ok(followed(again), `retyping shows the new names\nsaw: ${JSON.stringify(again)}`)
+
+    /** Under All conversations the archived session is a hit again, drawn archived; choosing it opens nothing. */
+    await browser.evaluate(`document.querySelector('#view-options button').click()`)
+    await browser.waitFor(`[...document.querySelectorAll('#view-options [role^=menuitem]')].some((entry) => entry.textContent.trim() === 'All conversations (show archived)')`, 5_000)
+    await browser.evaluate(`[...document.querySelectorAll('#view-options [role^=menuitem]')].find((entry) => entry.textContent.trim() === 'All conversations (show archived)').click()`)
+    const shownArchived = await until((seen) => seen.hits.some((hit) => hit.title === 'quokka beta' && hit.archived), 8_000)
+    assert.deepEqual(
+      shownArchived.hits.filter((hit) => hit.title === 'quokka beta').map((hit) => hit.archived),
+      [true],
+      `the archived session is a hit, drawn archived\nsaw: ${JSON.stringify(shownArchived)}`,
+    )
+    await browser.evaluate(`[...document.querySelectorAll('#search-results .hit')].find((hit) => hit.querySelector('.hit-title').textContent === 'quokka beta').click()`)
+    assert.ok(
+      await browser.waitFor(`document.getElementById('archive-notice').hidden === false && document.getElementById('archive-notice').dataset.kind === 'archivedNotOpenable'`, 5_000),
+      'choosing it shows the not-openable notice',
+    )
+    assert.equal(await browser.evaluate(`document.getElementById('archive-notice').textContent`), 'Archived sessions cannot be opened. Unarchive it to view.', "in DSH's words")
+    const chosen = await read()
+    assert.equal(chosen.opened, before.opened, `and nothing was opened\nsaw: ${JSON.stringify(chosen)}`)
+    assert.equal(chosen.query, 'quokka', 'the query stays')
+    assert.equal(chosen.shown, true, 'and so do the results')
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
+  }
+})

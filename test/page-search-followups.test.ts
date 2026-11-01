@@ -410,6 +410,8 @@ function revealPage(options: { grouping: 'tree' | 'list'; groupOpen: boolean; dr
     let drawn = []
     const watermarks = new Map()
     const rowIndex = new Map()
+    /** The latest list read, which \`openSearchResult\` asks whether a session is archived (#163): none is here. */
+    const sessionMetas = new Map()
     const document = { getElementById: () => ({ value: '' }) }
     async function applySearch() {}
     async function showSession(id) { return hold('show:' + id) }

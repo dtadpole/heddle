@@ -146,7 +146,10 @@ grounded_in:
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
   four keystrokes, the session found only inside its answer joining the hits with its snippet, "No matching
   sessions" only once the host has answered, and a content hit opening like any hit; a failed host request leaving
-  the name matches with no warning of their own, and the same query asking the host again (#58).
+  the name matches with no warning of their own, and the same query asking the host again (#58); and a standing
+  search following a second client's archive, session rename and workspace rename within seconds, and again when the
+  query is retyped, with the archived hit, shown under All conversations, raising DSH's not-openable notice and
+  opening nothing (#163; the archive rides on the renames' frames until #167 gives it its own).
 - [`check-hover-cards.mjs`](check-hover-cards.mjs) — the sidebar's row hover cards at DSH parity (C22, C41), with a
   real pointer: a session row's card only after the 800 ms dwell, 8px right of the row, with the full title, the
   relative time, the session's own scheduled task (a scripted `schedule_create`) and its status; the workspace row's
