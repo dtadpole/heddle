@@ -8,19 +8,22 @@ import { readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { isolatedHome, readTranscript, removeDir, runCli } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, isTitleRequest, readTranscript, refuseTitleRequest, removeDir, runCli } from '../../_tools_/verify-runner/lib.mjs'
 
 /** An OpenAI-compatible double answering each request with the next reply. */
 async function provider(replies) {
   const queue = [...replies]
   let requests = 0
   const server = createServer((request, response) => {
-    request.resume()
+    let body = ''
+    request.on('data', (chunk) => { body += chunk })
     request.on('end', () => {
       if ((request.url ?? '').endsWith('/models')) {
         response.writeHead(404).end()
         return
       }
+      /** A new session's title request is not a turn, and must not take a turn's scripted reply (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests += 1
       const reply = queue.shift() ?? { status: 500 }
       if (reply.status !== undefined) {
