@@ -254,8 +254,9 @@ test('job_output reads only new output, and wait with a short timeout leaves the
   const h = harness()
   const fixture = join(h.workspace, 'output-handshake.cjs')
   const release = join(h.workspace, 'release-two')
-  // Install the watcher before acknowledging readiness; keep it alive after the second write.
-  writeFileSync(fixture, `
+  try {
+    // Install the watcher before acknowledging readiness; keep it alive after the second write.
+    writeFileSync(fixture, `
     const { existsSync, watch } = require('node:fs')
     let released = false
     const watcher = watch('.', (_event, filename) => {
@@ -265,9 +266,8 @@ test('job_output reads only new output, and wait with a short timeout leaves the
       }
     })
     process.stdout.write('one\\n')
-  `)
-  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
-  try {
+    `)
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`
     const result = await h.call('bash', { command: `exec ${quote(process.execPath)} ${quote(fixture)}`, run_in_background: true })
     assert.equal(result.error, undefined)
     const id = jobIdOf(result.output)
