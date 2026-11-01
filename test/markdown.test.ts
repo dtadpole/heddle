@@ -46,6 +46,31 @@ test('a link that would run script is refused, and the label survives', () => {
   }
 })
 
+test('actual render Unicode author anchor before href preserves rendering and strips unsafe URI', () => {
+  // Control for the pre-existing Rust byte-index helper defect; ASCII attribute names, Unicode values only.
+  for (const value of ['é', '文字', '😀']) {
+    for (const note of ['', ' claim[^n].\n\n[^n]: preserved **note**.']) {
+      const source = `normal **prose** <a id="author-${value}" title="${value}" href="#author-${value}">author ${value}</a> <a id="unsafe-${value}" href="java&#x09;script:alert(1)">unsafe ${value}</a>${note}`
+      const html = renderMarkdown(source)
+      assert.ok(!html.includes('class="unrendered"'), 'a caught failure must not silently replace rendering')
+      assert.ok(html.includes('normal <strong>prose</strong>'))
+      assert.ok(html.includes(`id="author-${value}"`))
+      assert.ok(html.includes(`title="${value}"`))
+      assert.ok(html.includes(`href="#author-${value}"`))
+      assert.ok(html.includes(`>author ${value}</a>`))
+      assert.ok(html.includes(`id="unsafe-${value}"`))
+      assert.ok(html.includes(`>unsafe ${value}</a>`))
+      assert.deepEqual(followed(html), [`#author-${value}`])
+      assert.ok(!html.includes('alert(1)'), 'unsafe URI stripped')
+      if (note.length > 0) {
+        assert.ok(html.includes('claim<sup>1</sup>'))
+        assert.ok(html.includes('preserved <strong>note</strong>'))
+        assert.ok(html.includes('↩'))
+      }
+    }
+  }
+})
+
 test('headings, paragraphs, and rules', () => {
   const html = renderMarkdown('# Title\n\nA paragraph.\n\n---\n\n## Second\n')
   assert.match(html, /<h1>Title<\/h1>/, 'a level-one heading')

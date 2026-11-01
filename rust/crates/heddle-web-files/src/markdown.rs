@@ -979,6 +979,59 @@ mod tests {
     }
 
     #[test]
+    fn attribute_value_scans_unicode_values_before_href_without_panicking() {
+        for value in ["é", "文字", "😀"] {
+            let tag =
+                format!("<a id=\"author-{value}\" title=\"{value}\" href=\"#author-{value}\">");
+            let result = std::panic::catch_unwind(|| attribute_value(&tag, "href"));
+            assert!(
+                result.is_ok(),
+                "a byte scan must not slice inside {value}: {tag}"
+            );
+            assert_eq!(result.unwrap(), Some(format!("#author-{value}")));
+            assert_eq!(
+                attribute_value(&format!("<a id=\"author-{value}\">"), "href"),
+                None,
+                "an absent attribute still scans the Unicode value safely"
+            );
+        }
+    }
+
+    #[test]
+    fn actual_render_unicode_author_anchor_before_href() {
+        // ASCII attribute names with Unicode values pin the existing anchor helper, not an HTML grammar change.
+        for value in ["é", "文字", "😀"] {
+            for note in ["", " claim[^n].\n\n[^n]: preserved **note**."] {
+                let source = format!(
+                    "normal **prose** <a id=\"author-{value}\" title=\"{value}\" href=\"#author-{value}\">author {value}</a> <a id=\"unsafe-{value}\" href=\"java&#x09;script:alert(1)\">unsafe {value}</a>{note}"
+                );
+                let html = render(&source);
+                assert!(
+                    !html.contains("class=\"unrendered\""),
+                    "a caught helper panic must not silently replace rendering: {html}"
+                );
+                assert!(html.contains("normal <strong>prose</strong>"), "{html}");
+                assert!(html.contains(&format!("id=\"author-{value}\"")), "{html}");
+                assert!(html.contains(&format!("title=\"{value}\"")), "{html}");
+                assert!(
+                    html.contains(&format!("href=\"#author-{value}\"")),
+                    "{html}"
+                );
+                assert!(html.contains(&format!(">author {value}</a>")), "{html}");
+                assert!(html.contains(&format!("id=\"unsafe-{value}\"")), "{html}");
+                assert!(html.contains(&format!(">unsafe {value}</a>")), "{html}");
+                assert_eq!(followed(&html), [format!("#author-{value}")], "{html}");
+                assert!(!html.contains("alert(1)"), "unsafe URI stripped: {html}");
+                if !note.is_empty() {
+                    assert!(html.contains("claim<sup>1</sup>"), "{html}");
+                    assert!(html.contains("preserved <strong>note</strong>"), "{html}");
+                    assert!(html.contains('↩'), "{html}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_title_holding_a_greater_than_sign_does_not_end_its_tag_early() {
         // `tag_end` and `attribute_value` scan the tag rather than splitting on '>', which is what this pins.
         let html = render_at("/w/a.md", "[x](https://e.example \"a > b\")");
