@@ -3685,8 +3685,8 @@
     nothing new.
   -->
   <div id="hero-workspace" hidden>
-    <button type="button" id="hero-workspace-chip" aria-label="Choose workspace" aria-haspopup="menu" aria-expanded="false" aria-controls="hero-workspace-menu"><span class="label">Choose workspace</span></button>
-    <div id="hero-workspace-menu" role="menu" aria-label="Choose workspace" hidden></div>
+    <button type="button" id="hero-workspace-chip" aria-label="Choose workspace" data-i18n-aria-label="hero.chooseWorkspace" aria-haspopup="menu" aria-expanded="false" aria-controls="hero-workspace-menu"><span class="label">Choose workspace</span></button>
+    <div id="hero-workspace-menu" role="menu" aria-label="Choose workspace" data-i18n-aria-label="hero.chooseWorkspace" hidden></div>
   </div>
   <!--
     DSH's TodoPanel, measured live from its own rendered dock: a section labelled "To-dos" with a header button
@@ -4124,6 +4124,20 @@ const MESSAGES = Object.freeze({
     'sessionId.copied': 'Session ID copied',
     'sessionId.failed': 'Copy failed. Try again.',
     'tree.empty.none': 'No sessions yet',
+    'viewOptions.label': 'view options',
+    'viewOptions.heading': 'WorkSpace',
+    'viewOptions.groupTree': 'Workspace Tree',
+    'viewOptions.groupWorkspace': 'Workspace',
+    'viewOptions.groupFlat': 'In one list',
+    'viewOptions.orderManual': 'Manual',
+    'viewOptions.orderUpdated': 'Last updated',
+    'viewOptions.hideArchived': 'Hide archived',
+    'viewOptions.showArchived': 'All conversations (show archived)',
+    'viewOptions.onlyArchived': 'Archived only',
+    'tree.note.noPlugin': 'this profile does not load the workspace plugin',
+    'tree.note.predates': 'this server predates the workspace tree, so sessions are listed in one column',
+    'nav.registerFirst': 'register a workspace first — the + beside Workspaces',
+    'hero.chooseWorkspace': 'Choose workspace',
     'tree.empty.noneArchived': 'No archived sessions yet',
     'tree.empty.viewOthers': 'View other sessions',
     'tree.empty.noRoots': 'no workspace root yet \u2014 register one with the + above',
@@ -4692,6 +4706,20 @@ const MESSAGES = Object.freeze({
     'sessionId.copied': 'Session ID 已复制',
     'sessionId.failed': '复制失败，请重试',
     'tree.empty.none': '暂无会话',
+    'viewOptions.label': '视图选项',
+    'viewOptions.heading': '工作区',
+    'viewOptions.groupTree': '按工作区树',
+    'viewOptions.groupWorkspace': '按工作区',
+    'viewOptions.groupFlat': '单列表',
+    'viewOptions.orderManual': '手动排序',
+    'viewOptions.orderUpdated': '最近更新',
+    'viewOptions.hideArchived': '隐藏已归档',
+    'viewOptions.showArchived': '全部对话（显示已归档）',
+    'viewOptions.onlyArchived': '仅显示已归档',
+    'tree.note.noPlugin': '当前配置未加载工作区插件',
+    'tree.note.predates': '此服务器早于工作区树，会话以单列列出',
+    'nav.registerFirst': '请先注册一个工作区——点“工作区”旁的 +',
+    'hero.chooseWorkspace': '选择工作区',
     'tree.empty.noneArchived': '暂无已归档会话',
     'tree.empty.viewOthers': '查看其他会话',
     'tree.empty.noRoots': '还没有工作区根目录——用上方的 + 注册一个',
@@ -10160,7 +10188,7 @@ function reacquireBaselines() {
         await refreshSessions()
       } while (baselineAgain)
     } catch (error) {
-      setNote('could not read the workspaces: ' + (error && error.message))
+      setNote(t('settings.workspacesFailed', { reason: error && error.message }))
     } finally {
       baselineRead = null
     }
@@ -14683,9 +14711,9 @@ function viewOptionItems() {
    * names for one thing.
    */
   const archiveModes = [
-    ['hide', 'Hide archived'],
-    ['show', 'All conversations (show archived)'],
-    ['only', 'Archived only'],
+    ['hide', t('viewOptions.hideArchived')],
+    ['show', t('viewOptions.showArchived')],
+    ['only', t('viewOptions.onlyArchived')],
   ]
   return [
     /**
@@ -14693,9 +14721,9 @@ function viewOptionItems() {
      * pair (`Workspace Tree` / `In one list`), the ordering pair (`Manual` / `Last updated`), and the archive trio.
      * This menu carries all three groups under the one heading (the ordering pair since C17).
      */
-    { heading: 'WorkSpace' },
+    { heading: t('viewOptions.heading') },
     {
-      label: 'Workspace Tree',
+      label: t('viewOptions.groupTree'),
       glyph: 'tree',
       current: groupingMode === 'tree',
       run: async () => {
@@ -14709,7 +14737,7 @@ function viewOptionItems() {
      * it. Heddle keeps `Workspace Tree` as its default because roots here do nest and that was already this page's view.
      */
     {
-      label: 'Workspace',
+      label: t('viewOptions.groupWorkspace'),
       glyph: 'workspace',
       current: groupingMode === 'workspace',
       run: async () => {
@@ -14719,7 +14747,7 @@ function viewOptionItems() {
       },
     },
     {
-      label: 'In one list',
+      label: t('viewOptions.groupFlat'),
       glyph: 'list',
       current: groupingMode === 'list',
       run: async () => {
@@ -14733,8 +14761,8 @@ function viewOptionItems() {
      * freezes the order on screen, Last updated discards the saved one (`setOrderBy`, client.js:1279-1283); a drag
      * also selects Manual (C17, R-developer-eight-20).
      */
-    { label: 'Manual', glyph: 'chevrons-up-down', current: orderState.orderBy === 'manual', run: () => chooseOrder('manual') },
-    { label: 'Last updated', glyph: 'clock', current: orderState.orderBy !== 'manual', run: () => chooseOrder('updated') },
+    { label: t('viewOptions.orderManual'), glyph: 'chevrons-up-down', current: orderState.orderBy === 'manual', run: () => chooseOrder('manual') },
+    { label: t('viewOptions.orderUpdated'), glyph: 'clock', current: orderState.orderBy !== 'manual', run: () => chooseOrder('updated') },
     ...archiveModes.map(([mode, label]) => ({
       label,
       glyph: mode === 'hide' ? 'archive' : mode === 'show' ? 'archive-restore' : 'archive-only',
@@ -16236,7 +16264,7 @@ function paintConversationTarget() {
 async function startNewSession() {
   const workspace = newSessionWorkspace()
   if (workspace === null) {
-    setNote('register a workspace first — the + beside Workspaces')
+    setNote(t('nav.registerFirst'))
     return
   }
   await startSessionAt(workspace)
@@ -16339,11 +16367,12 @@ const HeroPicker = (() => {
    * with the first prompt, so with none open the chip names where that prompt will go; with nowhere to go it is the call
    * to action, and the composer is inert, as DSH's is.
    */
-  function label(state) {
+  /** `choose` is the call to action in the page language (#80), which the page passes; without it, DSH's English. */
+  function label(state, choose = CHOOSE) {
     if (typeof state.pending === 'string' && state.pending !== '') return state.pending
-    if (state.current !== null) return typeof state.owner === 'string' && state.owner !== '' ? state.owner : CHOOSE
+    if (state.current !== null) return typeof state.owner === 'string' && state.owner !== '' ? state.owner : choose
     if (typeof state.target === 'string' && state.target !== '') return state.target
-    return CHOOSE
+    return choose
   }
   return { CHOOSE, choices, ownerOf, isBlank, reusable, step, shown, label }
 })()
@@ -16369,6 +16398,9 @@ let heroAdding = false
 let heroAddFrom = null
 let heroAddSession = null
 
+/** The chip's call to action follows the language (#80); its painted key holds the text, so a new word repaints it. */
+window.addEventListener('heddle:locale', () => paintHeroWorkspace())
+
 function paintHeroWorkspace() {
   const hasContent = log.childElementCount > 0
   const known = current !== null && heroKnown.id === current ? heroKnown : null
@@ -16382,7 +16414,7 @@ function paintHeroWorkspace() {
    * tree, which is what knows the workspaces; this paint also runs while the page is still being built.
    */
   const target = current === null && firstTreeSettled ? (newConversationTarget()?.label ?? null) : null
-  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null, target })
+  const text = HeroPicker.label({ current, pending: heroPending?.label ?? null, owner: known?.label ?? null, target }, t('hero.chooseWorkspace'))
   const chosen = heroPending !== null || (current !== null && typeof known?.label === 'string') || (current === null && target !== null)
   const key = `${chosen}|${text}`
   if (heroChip.dataset.painted !== key) {
@@ -19186,10 +19218,11 @@ async function chooseOrder(mode) {
   await renderTree()
 }
 
-/** The View options control, rebuilt so its marks follow the order a drag selected. */
+/** The View options control, rebuilt so its marks follow the order a drag selected, and its words the language (#80). */
 function paintViewOptions() {
-  document.getElementById('view-options').replaceChildren(menuButton({ label: 'view options' }, viewOptionItems()))
+  document.getElementById('view-options').replaceChildren(menuButton({ label: t('viewOptions.label') }, viewOptionItems()))
 }
+window.addEventListener('heddle:locale', () => paintViewOptions())
 
 /**
  * Let one list's session rows be dragged onto each other — DSH's row drag (client.js:2285-2302, `commitSessionDrag`
@@ -21409,7 +21442,7 @@ async function renderTree() {
       workspaceRoutes = 'absent'
       treeList.replaceChildren()
       rowIndex.clear()
-      setNote('this profile does not load the workspace plugin')
+      setNote(t('tree.note.noPlugin'))
       paintConversationTarget()
       return
     }
@@ -21417,14 +21450,14 @@ async function renderTree() {
       workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
       await renderFlatList()
-      setNote('this server predates the workspace tree, so sessions are listed in one column')
+      setNote(t('tree.note.predates'))
       return
     }
     workspaceRoutes = 'served'
     workspaces = (await workspaceResponse.json()).workspaces ?? []
     sessions = sessionResponse.ok ? await sessionResponse.json() : []
   } catch (error) {
-    setNote('could not read the workspaces: ' + (error && error.message))
+    setNote(t('settings.workspacesFailed', { reason: error && error.message }))
     return
   }
   /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
