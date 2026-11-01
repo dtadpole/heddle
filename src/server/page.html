@@ -4219,7 +4219,8 @@ function triggerNotice(trigger, text) {
 /**
  * #84 UI presentation only: published credential formats in sent human/admitted steering text.
  * No message/model/copy/log rewriting; arbitrary password prose and assignments are not guessed.
- * Queues, /goal command inputs, composer drafts, triggers, tools and assistant text are follow-up scope.
+ * Queue previews/titles and /goal input/argument displays use the same full-text noninteractive projection.
+ * Composer drafts, goal results/bar, triggers, tools and assistant text remain outside this scope.
  * Scanner/mask tables adapted without semantic changes from installed
  * @deepseek-ai/dsh-client-ui-secret-mask 0.2.1-rc.2 (lib/client.js). MIT attribution follows.
  * The original scanner uses UTF16 offsets, code-point masks, bounded checks and memoized sticky runs.
@@ -4247,7 +4248,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
-const { scanUserCredentials, renderSentUserText } = (() => {
+const { scanUserCredentials, maskUserText, renderSentUserText } = (() => {
 const prefixed = (literal, shape, run, min, max = 0) => ({
 	literal,
 	kind: 2,
@@ -4807,6 +4808,18 @@ function scanUserCredentials(text) {
   return spans
 }
 
+/** Noninteractive projection: scan the full original before any caller truncates, flattens or sets a title. */
+function maskUserText(text) {
+  const parts = []
+  let from = 0
+  for (const node of scanUserCredentials(text)) {
+    parts.push(text.slice(from, node.start), node.data.masked)
+    from = node.end
+  }
+  parts.push(text.slice(from))
+  return parts.join('')
+}
+
 /** Sent human/admitted steering only. Every render and each occurrence starts hidden; no persistence or timeout. */
 function renderSentUserText(target, text, interactive = true) {
   const parts = []
@@ -4860,7 +4873,7 @@ function renderSentUserText(target, text, interactive = true) {
   for (const part of parts) target.append(part)
 }
 
-return { scanUserCredentials, renderSentUserText }
+return { scanUserCredentials, maskUserText, renderSentUserText }
 })()
 /* user-secrets:end */
 
@@ -9811,6 +9824,7 @@ const slashReady = import('/commands/menu.js')
         await startNewSession()
         return composerKey === QUEUE_KEY_NONE ? null : composerKey
       },
+      maskUserText,
       sendAsPrompt: (text, attachments = []) => submitText(text, attachments, 'enter'),
       pendingAttachments: () => pendingAttachments.length,
       takeAttachments: () => takeAttachments(),
@@ -10437,8 +10451,9 @@ function queueRow(item) {
   if (Array.isArray(item.attachments) && item.attachments.length > 0) row.append(queueAttachmentStrip(item.attachments))
   const preview = document.createElement('span')
   preview.className = 'preview'
-  preview.textContent = queuePreview(item.text)
-  preview.title = item.text
+  const masked = maskUserText(item.text)
+  preview.textContent = queuePreview(masked)
+  preview.title = masked
   row.append(preview)
   if (item.status === 'sending' || item.status === 'failed') {
     const status = document.createElement('span')
