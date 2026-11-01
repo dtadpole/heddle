@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T18:45:00Z
+modified: 2026-11-01T08:11:48Z
 level: L3
-version: 1.6.0
+version: 1.7.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -59,6 +59,16 @@ grounded_in:
   `RiskConfirmation`, supplied by primitives and shipped in `dsh-web-frontend/dist/assets/index-CN7NIWNw.js`:
   named export `RiskConfirmation` maps to `uA`, which calls `Modal` (`S_`), which calls focus hook `x_`.
   Heddle retains its existing custom card and initial/return focus, rather than redesigning it as a native dialog.
+- [`check-access-focus-delivered.mjs`](check-access-focus-delivered.mjs) — headless delivered-surface focus proof for
+  #103 through the actual built CLI, or the binary named by `HEDDLE_BIN`, on private port 0 with isolated HOME,
+  HEDDLE_HOME and workspace, a scripted offline session explicitly opened by id, and workspace-write configured
+  before startup. Real pointer/menu input opens the unchanged delivered risk card; native Tab and Shift+Tab cycle
+  three controls before Space acknowledgement and four after. Escape, native Enter on Cancel, and native Enter on
+  Close return focus to the access chip. Enable is never activated and no permission write is sent; a pass-through
+  browser fetch recorder asserts zero permission or Settings POSTs, and the actual status/session APIs still report
+  workspace-write after every dismissal. Startup, fetch including body, cleanup and test are bounded; the standard
+  `HEDDLE_VERIFY_UI=0` skip applies. This supplements the source fixture, does not mock page functions or responses,
+  and only proves the delivered build actually selected for that run, not an unrun second build or full accessibility.
 - [`check-workspaces.mjs`](check-workspaces.mjs) — the left column's workspace controls, add, rename and delete, at
   DSH parity: registering a folder over the API the dialog posts to, the refusals that keep the controls honest
   (a rename to another workspace's name is `409 workspace/name-conflict`), delete removing the registration while its
