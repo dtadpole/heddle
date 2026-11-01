@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { resolve, sep } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 
 /**
  * The path rules a workspace and a folder tree are both made of.
@@ -33,6 +33,33 @@ export function canonicalPath(path: string): string {
     return realpathSync.native(absolute)
   } catch {
     return absolute
+  }
+}
+
+/**
+ * Where a path is, or was: the `realpath` of its **deepest existing ancestor** with the missing tail put back.
+ *
+ * For a folder that exists this is {@link canonicalPath}. For one that is gone it is the spelling its record was stored
+ * under while it existed, which the lexical fallback above cannot give once a link sits on the way: a workspace
+ * registered at `/tmp/x/w` is stored as `/private/tmp/x/w` on macOS, and after the folder is deleted or moved the
+ * lexical `/tmp/x/w` names no record and no root (GitHub issue #141). `canonicalPath` keeps its own fallback, which
+ * `test/paths.test.ts` pins; this is for the questions about a folder that may be gone. The Rust build's
+ * `canonical_path_through_ancestors` (heddle-config) answers the same, and the sandbox already resolves a missing
+ * tail this way (heddle-sandbox `paths::canonical`).
+ */
+export function canonicalPathThroughAncestors(path: string): string {
+  const absolute = resolve(path)
+  const missing: string[] = []
+  let current = absolute
+  for (;;) {
+    try {
+      return join(realpathSync.native(current), ...missing.reverse())
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return absolute
+      missing.push(basename(current))
+      current = parent
+    }
   }
 }
 

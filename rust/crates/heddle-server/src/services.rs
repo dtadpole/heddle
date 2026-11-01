@@ -39,6 +39,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::selection::SessionSelection;
 
+/// Told about a title the session store wrote: `(session id, title now stored)` ([`SessionService::on_renamed`]). The
+/// same shape as `heddle_session::RenameListener`, so a store's listener is this one.
+pub type TitleListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// A failure a service reports, with an optional stable code a route maps to a status.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -226,6 +230,14 @@ pub trait SessionService: Send + Sync {
     /// Retitle; the empty string clears the title. `None` is an unknown session.
     fn rename(&self, id: &str, title: &str) -> Option<SessionMeta>;
 
+    /// Announce every title the store writes from now on to `listener`, with the session id and the title now stored
+    /// (`""` when cleared): a person's rename, the first message's fallback, a fork's name and the title model's answer
+    /// alike (#33). Answers whether this service announces titles at all. One that does not (the default) leaves the
+    /// rename route to push its own rename, which is then the only title the pages hear.
+    fn on_renamed(&self, _listener: TitleListener) -> bool {
+        false
+    }
+
     /// The id of the session whose definition lives in `folder`, if any.
     fn definition_id(&self, folder: &Path) -> Option<String>;
 
@@ -343,6 +355,14 @@ pub trait WorkspaceService: Send + Sync {
     fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
         let _ = before;
         Err(workspace_not_found(id))
+    }
+
+    /// [`WorkspaceService::insert_before`], saying whether anything moved (`reorder` in `src/workspace/service.ts`),
+    /// so the route pushes a move to every open page and nothing for a move that changes nothing (#136; DSH's
+    /// registry writes nothing then, dsh-workspace lib/index.js:484, :492). The default counts every answered move
+    /// as one, for doubles that do not model the order.
+    fn reorder(&self, id: &str, before: Option<&str>) -> Result<(Vec<String>, bool), ServiceError> {
+        self.insert_before(id, before).map(|order| (order, true))
     }
 
     /// First use — DSH's `workspace/initializeDefault`, `POST /api/workspaces/default`: the default workspace's

@@ -36,7 +36,7 @@ function harness(): Page {
   const waiting: ((sessions: unknown[]) => void)[] = []
   return runInNewContext(
     `
-    let searchIndex = null;
+    let searchIndex = null, searchEpoch = 0;
     let current = 'X', composerKey = 'X';
     const runningSessions = new Set();
     // The page keeps one queue per session; X holds one, so a recovery has something to pump.
@@ -55,6 +55,8 @@ function harness(): Page {
     async function renderSettledAnswers() {}
     async function pumpQueue(key) { pumped.push(key) }
     async function showSession() {}
+    // The detached turns' waits (#128) are judged in page-feed-share.test.ts; this read only has to reach them.
+    const turnVerdicts = { endIdle() {} };
     // What stack-2's refreshSessions also reads: subagents' listed records and composer lock, page-polish's header
     // notes, and row-status's unread completions. None of them decides which turn a read may end.
     const listedMetas = new Map();
