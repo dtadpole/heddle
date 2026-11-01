@@ -483,14 +483,14 @@ function runTurnHarness(answer: string) {
   const calls: string[] = []
   const harness = runInNewContext(
     `
-    let runningTick = 0, liveTurns = 0, liveRounds = 0, liveUsage, stopRequested = false, directTurnPending = 0, directPendingKey = null;
+    let runningTick = 0, liveRounds = 0, liveUsage, stopRequested = false, directTurnPending = 0, directPendingKey = null;
     let current = 'S', activeFolder = null;
     const QUEUE_KEY_NONE = '';
     const stopButton = { disabled: true };
     const runningSessions = new Set(['S']), runningSince = new Map();
     /** first-visit-2 (#142, #139): the turn-end bookkeeping and refusal rule the merged runTurn reads. */
     const turnRounds = new Map(), turnsEnded = new Set();
-    let unavailableSession = null, composerKey = 'S';
+    let composerKey = 'S';
     const field = { value: '' };
     function adoptLooseQueue() {}
     function rememberWorkspace() {}
@@ -501,7 +501,11 @@ function runTurnHarness(answer: string) {
     ${page.slice(page.indexOf('/* turn-failure:begin */'), page.indexOf('/* turn-failure:end */'))}
     const log = { append() {} };
     function updateStatusBar() {}
-    function selectionForTurn() { return {} }
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null;
+    const endpointOptions = [], endpointDefault = null, unavailableSession = null;
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set();
+    ${source('selectionForSeat')}
+    ${source('selectionForTurn')}
     async function refreshSessionStats() {}
     function add(kind, text) { calls.push(kind + ':' + text) }
     function lastTurnRow() { return null }

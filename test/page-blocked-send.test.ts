@@ -63,7 +63,8 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     let unavailableSession = null
     let activeFolder = null
     let workspaceRoutes = 'served'
-    let liveTurns = 0, liveRounds = (OPTIONS.running ?? {})[OPTIONS.open] ?? 0, liveUsage, liveRoundStartedAt = null
+    const liveTurns = new Map()
+    let liveRounds = (OPTIONS.running ?? {})[OPTIONS.open] ?? 0, liveUsage, liveRoundStartedAt = null
     let directTurnPending = 0, directPendingKey = null, stopRequested = false
     const stopButton = { disabled: true }
     const runningSessions = new Set(Object.keys(OPTIONS.running ?? {}))
@@ -128,6 +129,10 @@ function finish(options: { open: string | null; turn: string; payload: Record<st
     }
     /** #128: the page follows the stream before it sends, and a server without detach streams the turn. */
     const events = { whenOpen: async () => {} }
+    /** 4b2a0552 (#46): the seat a turn carries only into a session with no recorded selection. */
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set()
+    const selectionForSeat = () => ({})
     const sendTurn = async () => OPTIONS.detached ? detachedAnswer() : ({
       ok: true,
       headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) },

@@ -64,7 +64,8 @@ function flow(options: { before: string[]; after: string[]; front?: string; boot
     let unavailableSession = null
     let activeFolder = null
     let workspaceRoutes = 'served'
-    let liveTurns = 0, liveRounds = 0, liveUsage, liveRoundStartedAt = null
+    const liveTurns = new Map()
+    let liveRounds = 0, liveUsage, liveRoundStartedAt = null
     let directTurnPending = 0, directPendingKey = null, directPendingSince = null, pendingWatchdog = null, stopRequested = false
     let queueSeq = 0
     const queues = new Map()
@@ -119,6 +120,7 @@ function flow(options: { before: string[]; after: string[]; front?: string; boot
     /** #142: the page holds the stream's events for its own first turn while nothing is open (looseTurnEvents). */
     let looseTurnEvents = null
     const LOOSE_EVENTS_LIMIT = 2000
+    ${optional('countOwnSessionTurn')}
     ${optional('holdLooseTurn')}
     ${optional('holdLooseEvent')}
     ${optional('adoptLooseEvents')}
@@ -139,6 +141,10 @@ function flow(options: { before: string[]; after: string[]; front?: string; boot
     const frame = (name, data) => new TextEncoder().encode('event: ' + name + '\\ndata: ' + JSON.stringify(data) + '\\n\\n')
     /** #128: the page follows the stream before it sends, and a server without detach streams the turn. */
     const events = { whenOpen: async () => {} }
+    /** 4b2a0552 (#46): the seat a turn carries only into a session with no recorded selection. */
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set()
+    const selectionForSeat = () => ({})
     /** #128's detached answer: 202 {session, turn} at acceptance, and the verdict later on the event stream. */
     let runningTick = 0, turnSeq = 0
     ${verdicts}

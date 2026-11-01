@@ -76,7 +76,8 @@ function harness(): Page {
     const QUEUE_KEY_NONE = ''
     const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
     let current = null, composerKey = QUEUE_KEY_NONE, unavailableSession = null, activeFolder = null, workspaceRoutes = 'served'
-    let sessionLoading = null, liveTurns = 0, liveRounds = 0, liveUsage, liveRoundStartedAt = null, sessionStats = null
+    const liveTurns = new Map()
+    let sessionLoading = null, liveRounds = 0, liveUsage, liveRoundStartedAt = null, sessionStats = null
     let directTurnPending = 0, directPendingKey = null, stopRequested = false, runningTick = 0
     const stopButton = { disabled: true }
     const runningSessions = new Set(), runningSince = new Map(), pendingInteractions = new Map(), turnRounds = new Map(), turnsEnded = new Set()
@@ -95,6 +96,11 @@ function harness(): Page {
     }
     let listen
     const events = { whenOpen: async () => {}, addEventListener(name, handler) { if (name === 'session') listen = handler } }
+    /** 4b2a0552 (#46): the seat a turn carries only into a session with no recorded selection. */
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set(), serverSeats = new Map()
+    const selectionForSeat = () => ({})
+    const applySessionModel = () => {}
     const noop = () => {}
     let completions = 0, trees = 0
     const pumped = []
@@ -123,6 +129,7 @@ function harness(): Page {
     function queueOf() { return [] }
     let looseTurnEvents = null
     const LOOSE_EVENTS_LIMIT = 2000
+    ${optional('countOwnSessionTurn')}
     ${optional('holdLooseTurn')}
     ${optional('holdLooseEvent')}
     ${optional('adoptLooseEvents')}
@@ -177,7 +184,7 @@ const settle = async () => {
 }
 
 const foreignTurn = (page: Page) => {
-  page.stream(THEIRS, { type: 'message', text: 'their prompt' })
+  page.stream(THEIRS, { type: 'message', message: { role: 'user', content: [] }, text: 'their prompt' })
   page.stream(THEIRS, { type: 'model/request' })
   page.stream(THEIRS, { type: 'assistant/chunk', text: 'their answer' })
   page.stream(THEIRS, { type: 'turn/completed' })
@@ -185,7 +192,7 @@ const foreignTurn = (page: Page) => {
 
 test('with nothing open and no turn of its own, the page draws, settles and counts no other session\'s turn (#142)', async () => {
   const page = harness()
-  page.stream(THEIRS, { type: 'message', text: 'their prompt' })
+  page.stream(THEIRS, { type: 'message', message: { role: 'user', content: [] }, text: 'their prompt' })
   page.stream(THEIRS, { type: 'model/request' })
   assert.deepEqual(JSON.parse(page.top()).running, [THEIRS], 'the top half still follows them: their session is marked running, for the tree')
   page.stream(THEIRS, { type: 'assistant/chunk', text: 'their answer' })
@@ -205,8 +212,8 @@ test('a send refused before any session exists drops what was held and leaves th
   page.refuse()
   page.send(false)
   await settle()
-  page.stream(MINE, { type: 'message', text: 'mine' })
-  page.stream(THEIRS, { type: 'message', text: 'their prompt' })
+  page.stream(MINE, { type: 'message', message: { role: 'user', content: [] }, text: 'mine' })
+  page.stream(THEIRS, { type: 'message', message: { role: 'user', content: [] }, text: 'their prompt' })
   assert.equal(page.holding(), true, 'held while the send is on its way')
   page.named()
   await page.turn()
@@ -224,8 +231,8 @@ for (const detached of [false, true]) {
     page.send(detached)
     await settle()
     /** Before the turn names its session: its own prompt and first round, interleaved with another session's turn. */
-    page.stream(MINE, { type: 'message', text: 'mine' })
-    page.stream(THEIRS, { type: 'message', text: 'their prompt' })
+    page.stream(MINE, { type: 'message', message: { role: 'user', content: [] }, text: 'mine' })
+    page.stream(THEIRS, { type: 'message', message: { role: 'user', content: [] }, text: 'their prompt' })
     page.stream(MINE, { type: 'model/request' })
     page.stream(THEIRS, { type: 'assistant/chunk', text: 'their answer' })
     assert.deepEqual(Array.from(page.drawn()), [], 'nothing is drawn before the turn names its session')
@@ -247,7 +254,7 @@ test('when the boot opened another session before the turn named its own, the he
   const page = harness()
   page.send(false)
   await settle()
-  page.stream(MINE, { type: 'message', text: 'mine' })
+  page.stream(MINE, { type: 'message', message: { role: 'user', content: [] }, text: 'mine' })
   page.open(OPENED)
   page.named()
   await settle()
@@ -260,7 +267,7 @@ test('a fast first turn that completes while still held offers its answer\'s Bra
   page.send(true)
   await settle()
   /** The whole turn reaches the stream before the 202 names its session: the 202 answers at the first record or the end. */
-  page.stream(MINE, { type: 'message', text: 'mine', seq: 1 })
+  page.stream(MINE, { type: 'message', message: { role: 'user', content: [] }, text: 'mine', seq: 1 })
   page.stream(MINE, { type: 'assistant/chunk', text: 'answer', seq: 2 })
   page.stream(MINE, { type: 'turn/completed', seq: 3 })
   assert.deepEqual(Array.from(page.branchable()), [], 'nothing is offered while held')

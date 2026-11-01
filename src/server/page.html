@@ -7748,7 +7748,7 @@ function historyFailureText(status, statusText, failure) {
     failure !== null && typeof failure === 'object' && typeof failure.error === 'string' && failure.error.length > 0
       ? failure.error
       : statusText || 'no reason given'
-  return `Failed to load history: ${reason} (${status})`
+  return `Failed to load history: ${reason}${status > 0 ? ` (${status})` : ''}`
 }
 
 /* chat-scroll:begin */
@@ -7828,8 +7828,62 @@ let sessionFolder = null
  * late was appended under the newer session too. So every step after an await first checks that this is still the
  * latest open (`showGeneration`).
  */
+/* page-lifecycle:begin */
+/**
+ * The page's own leaving, for failHistory's write of the empty selection (#56; the union of first-visit-2 and 4b2a0552).
+ *
+ * A navigation (a reload, a link) stops the page's requests, and a history read rejects while the old page still runs.
+ * Writing the empty selection then emptied the saved selection of a session that could be read, and the next load
+ * restored nothing (check-chat-view's resize test, reloading twice in quick succession). So the write waits:
+ * - `beforeunload` and `pagehide` mark the page as leaving, with **one** expiry timer, replaced on each, so an earlier
+ *   timer never ends a newer leaving (developer-twelve's 10a6);
+ * - a failure's write that comes while the page is leaving is kept as pending, `{ id, generation }`, not dropped;
+ * - when the page turns out to stay, at `pageshow` or when the expiry fires (a canceled navigation, one that became a
+ *   download), the pending write is done if that same failure still shows: nothing current, the same unavailable
+ *   session, the same open generation (developer-twelve's 9a04). A page that really unloads runs neither, and writes
+ *   nothing.
+ * A page that is not leaving writes at once.
+ */
+const LEAVING_EXPIRY_MS = 10_000
+const pageLifecycle = (() => {
+  let leaving = false
+  let expiry = null
+  let pending = null
+  const stillShown = (failure) => current === null && unavailableSession === failure.id && showGeneration === failure.generation
+  const resume = () => {
+    leaving = false
+    if (expiry !== null) clearTimeout(expiry)
+    expiry = null
+    const failure = pending
+    pending = null
+    if (failure !== null && stillShown(failure)) rememberCurrent()
+  }
+  return {
+    leave() {
+      leaving = true
+      if (expiry !== null) clearTimeout(expiry)
+      expiry = setTimeout(resume, LEAVING_EXPIRY_MS)
+    },
+    resume,
+    /** failHistory's write of the empty selection for the failure of `id` in open `generation`. */
+    clearFailedSelection(id, generation) {
+      const failure = { id, generation }
+      if (leaving) {
+        pending = failure
+        return
+      }
+      if (stillShown(failure)) rememberCurrent()
+    },
+  }
+})()
+window.addEventListener('beforeunload', () => pageLifecycle.leave())
+window.addEventListener('pagehide', () => pageLifecycle.leave())
+window.addEventListener('pageshow', () => pageLifecycle.resume())
+/* page-lifecycle:end */
+
 async function showSession(id) {
   const generation = ++showGeneration
+  const superseded = () => generation !== showGeneration || current !== id
   /** Where the reader left the session being replaced, before anything below changes the view. */
   rememberChatScroll()
   sessionFolder = null
@@ -7848,7 +7902,6 @@ async function showSession(id) {
    */
   ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
   liveUsage = undefined
-  liveTurns = 0
   liveGenerationMs = 0
   liveDecodeTokens = 0
   updateStatusBar()
@@ -7882,7 +7935,7 @@ async function showSession(id) {
   adoptSession(id)
   await refreshSessions()
   /** A later open started while the list was read. That open empties and fills the log, so this one must not touch it. */
-  if (generation !== showGeneration) return false
+  if (superseded()) return false
   /**
    * Taken again after the read: it ends a turn whose end the page missed (the server says it no longer runs), and then
    * its rounds are the fold's, not live (developer-ten's N2). A round counted meanwhile is in both, so nothing is lost.
@@ -7890,7 +7943,7 @@ async function showSession(id) {
   ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
   syncSelectionToSession()
   if (view === 'trajectory') await showLedger(id)
-  if (generation !== showGeneration) return false
+  if (superseded()) return false
   /**
    * The log is cleared and refilled from the session's own history.
    *
@@ -7899,59 +7952,75 @@ async function showSession(id) {
    */
   sessionLoading = { id, generation, events: [] }
   log.replaceChildren()
+  /**
+   * A session that is no longer there is **not** the session being shown.
+   *
+   * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
+   * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
+   * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
+   *
+   * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
+   * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
+   * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
+   * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
+   * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
+   *
+   * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
+   * unlisted saved session is forgotten instead (`WorkspaceTree.restoreChoice`), as DSH's `restoreSelection` does,
+   * and the load then creates nothing (#142). The tree is read again here, so a row whose session is no longer
+   * listed goes, and the selection with it.
+   */
+  async function failHistory(status, statusText, failure) {
+    if (generation !== showGeneration || current !== id) return false
+    // Lifecycle state was processed on first delivery. A partial live tail is not history.
+    if (sessionLoading?.generation === generation) {
+      sessionLoading.events.length = 0
+      sessionLoading = null
+    }
+    unavailableSession = id
+    current = null
+    paintSessionHeading()
+    const branch = document.getElementById('session-branch')
+    if (branch !== null) branch.textContent = ''
+    const note = document.createElement('div')
+    note.className = 'turn denied load-error'
+    note.setAttribute('role', 'alert')
+    note.textContent = historyFailureText(status, statusText, failure)
+    log.append(note)
+    paintEmptyState()
+    applySessionAccess(null)
+    /**
+     * And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open
+     * to lock. It is written a task later, while this failure still shows, and never while the page is leaving
+     * (`pageLifecycle`): a page being navigated away stops its requests, and the read rejects while the old page still
+     * runs, so an immediate write emptied the selection of a session that could be read, and the next load restored
+     * nothing (check-chat-view's resize test). A page that stays writes it, at once or when it turns out to stay.
+     */
+    setTimeout(() => pageLifecycle.clearFailedSelection(id, generation), 0)
+    paintComposerAccess()
+    renderComposerState()
+    selectedPath = null
+    await renderTree()
+    markSelection()
+    jobsSessionChanged()
+    paintScheduleHeader()
+    return false
+  }
   try {
+    /** The seat's choice count when this view was asked for: a choice made after it outranks the view. */
+    const selectionAt = selectionSeq
     const response = await fetch('/api/sessions/' + encodeURIComponent(id))
-    if (generation !== showGeneration) return false
+    if (superseded()) return false
     if (!response.ok) {
-      if (sessionLoading?.generation === generation) sessionLoading = null
-      /**
-       * A session that is no longer there is **not** the session being shown.
-       *
-       * Measured: a remembered id whose log had been removed left `current` pointing at nothing — the header said
-       * "No session", the conversation column was empty, and the empty state stayed hidden because `current` still
-       * held an id. Giving the pointer back is what lets the panel say the truth: there is nothing open here.
-       *
-       * What it says follows DSH (#56; ported from developer-six's 4cd4cafb, R-developer-six-4): Chat's "Failed to load
-       * history: {message} ({code})" where the conversation would be, and a disabled composer that reads "Session
-       * unavailable". This branch used to paint the blank start page under "No session" with the composer enabled, which
-       * invited a message the server then answered with a 500, and showed the server's answer nowhere. The failure line
-       * is content, so it wins over the empty state (`paintEmptyState`) for a session the person opened.
-       *
-       * A page load never reaches this for a saved session that is gone: `restoreSelection` reads the list first, and an
-       * unlisted saved session is forgotten instead (`WorkspaceTree.restoreChoice`), as DSH's `restoreSelection` does,
-       * and the load then creates nothing (#142). The tree is read again here, so a row whose session is no longer
-       * listed goes, and the selection with it.
-       */
       const failure = await response.json().catch(() => ({}))
-      /** A later open replaced this one while the read was in flight: that session is the one shown, not this failure. */
-      if (generation !== showGeneration) return false
-      if (current !== id) return false
-      unavailableSession = id
-      current = null
-      paintSessionHeading()
-      const branch = document.getElementById('session-branch')
-      if (branch !== null) branch.textContent = ''
-      const note = document.createElement('div')
-      note.className = 'turn denied load-error'
-      note.setAttribute('role', 'alert')
-      note.textContent = historyFailureText(response.status, response.statusText, failure)
-      log.append(note)
-      paintEmptyState()
-      applySessionAccess(null)
-      /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
-      rememberCurrent()
-      paintComposerAccess()
-      renderComposerState()
-      selectedPath = null
-      await renderTree()
-      markSelection()
-      jobsSessionChanged()
-      paintScheduleHeader()
-      return false
+      return await failHistory(response.status, response.statusText, failure)
     }
     const body = await response.json()
-    /** The same check after the body is read: only the latest open appends its turns. */
-    if (generation !== showGeneration) return false
+    /** Only the latest open publishes; an away session may still retain its own model record. */
+    if (superseded()) {
+      if (current !== id) adoptViewSelection(id, body, selectionAt)
+      return false
+    }
     /** A session opened is where this browser works now: its workspace is the next visit's aim (#142). */
     rememberSessionWorkspace(id)
     /**
@@ -7959,9 +8028,13 @@ async function showSession(id) {
      * seat where it is, which is what lets a person pick a backend **before** the turn that creates the
      * session: the choice travels with the request and the server records it on the session it made.
      */
-    applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+    /** The view's selection, published only while this session is still shown and has no newer choice (#46). */
+    adoptViewSelection(id, body, selectionAt)
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
+    /** Its turns are in the fold now; a running turn's rounds are not, so they stay live (`liveRoundsOf`, N1). */
+    ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
+    liveTurns.delete(id)
     updateStatusBar()
     /** The session's own access mode, which is what the chip must show after a reload. */
     applySessionAccess(body.permission?.mode ?? null)
@@ -7991,7 +8064,9 @@ async function showSession(id) {
         holder.dataset.kind = 'command'
         holder.dataset.commandId = String(turn.commandId)
         log.append(holder)
-        void slashReady.then((commands) => commands?.drawTurn(turn))
+        void slashReady.then((commands) => {
+          if (generation === showGeneration && unavailableSession === null && current === id) commands?.drawTurn(turn)
+        })
         continue
       }
       try {
@@ -8009,16 +8084,16 @@ async function showSession(id) {
     restoreChatScroll(id)
   } catch (error) {
     /** An older open's failed read says nothing in the conversation a later open is drawing. */
-    if (generation !== showGeneration) return false
-    // A history that cannot be read must not empty the live view as well; the stream keeps appending.
-    drawKeptEvents(generation, null)
-    const note = document.createElement('div')
-    note.className = 'turn denied'
-    note.textContent = 'could not read this session: ' + (error && error.message)
-    log.append(note)
+    if (superseded()) return false
+    return await failHistory(0, '', { error: error && error.message })
   }
+  // History was drawn already. A same-session replacement still leaves this requested session shown,
+  // but the older generation must not perform any further panel updates.
+  if (superseded()) return current === id
   await refreshGoal()
+  if (superseded()) return current === id
   await refreshTodo()
+  if (superseded()) return current === id
   /**
    * The reminders: the transcript's turn tails get their cards, then both sources are re-read — the cards first, so the
    * catalog read is newer than their mount and a task deleted since the turn reads "Deleted".
@@ -8118,7 +8193,8 @@ function clearMain() {
   sessionStats = null
   liveRounds = 0
   liveUsage = undefined
-  liveTurns = 0
+  /** Turn counts are kept per session (#116); the one let go has nothing shown to add to. */
+  liveTurns.delete(left)
   liveGenerationMs = 0
   liveDecodeTokens = 0
   liveRoundStartedAt = null
@@ -8242,6 +8318,16 @@ let looseTurnEvents = null
 /** At most this many held events, oldest dropped first: a turn names its session with its first frame, so few are held. */
 const LOOSE_EVENTS_LIMIT = 2000
 
+/**
+ * A persisted user message that is not drawn is still a turn of its own session (#116): it counts under that session's
+ * id, never under the shown one, and that session's next fold read takes the count back (`liveTurns.delete`).
+ */
+function countOwnSessionTurn(payload) {
+  const event = payload.event
+  if (event?.type !== 'message' || event.message?.role !== 'user' || typeof payload.session !== 'string') return
+  liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
+}
+
 /** A turn with no session is being sent: hold what the stream brings until it names its session. */
 function holdLooseTurn() {
   if (looseTurnEvents === null) looseTurnEvents = []
@@ -8263,16 +8349,20 @@ function holdLooseEvent(payload) {
 function adoptLooseEvents(session, draw) {
   const held = looseTurnEvents ?? []
   looseTurnEvents = null
-  if (!draw) return
   for (const payload of held) {
-    if (payload.session !== session) continue
+    /** Not drawn here: a user message among them is still its own session's turn, counted under that id (#116). */
+    if (!draw || payload.session !== session) {
+      countOwnSessionTurn(payload)
+      continue
+    }
     if (sessionLoading !== null && payload.session === sessionLoading.id) sessionLoading.events.push(payload)
     else {
       drawSessionEvent(payload)
       /**
        * A fast first turn can complete while it is still held (the 202 answers at the first record or at the turn's end,
-       * whichever comes first). runTurn's `done` repeats the rest of the listener's settle half, but only the listener
-       * offers the answer's Branch action, so a held completion offers it here (developer-ten's N1 on #142).
+       * whichever comes first). runTurn's `done` repeats the rest of the settle half, but not the answer's Branch action,
+       * so a held completion offers it here (developer-ten's N1 on #142). Since the union with 4b2a0552 the settle half
+       * is drawSessionEvent's, which offers it too for the shown session; `markBranchable` adds the button only once.
        */
       if (payload.event?.type === 'turn/completed' && typeof payload.event.seq === 'number') markBranchable(payload.event.seq)
     }
@@ -9032,11 +9122,15 @@ events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
   /**
-   * The session the panel shows: the open one, or the one whose history could not be loaded (#56), under whose "Failed
-   * to load history" no other session's live turn may draw. With neither, the panel follows no other session's turn
-   * either: only this page's own first turn, held until it names its session (`looseTurnEvents`, #142).
+   * Another page (or this one) changed the shown session's model selection: the seat follows it, as every DSH
+   * client follows the session's `modelSelection` (#46).
    */
-  const shown = current ?? unavailableSession
+  if (event.type === 'model/selection' && typeof payload.session === 'string') {
+    recordedSelections.add(payload.session)
+    serverSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    heldSeats.set(payload.session, { endpoint: event.endpoint ?? null, model: event.model ?? null, effort: event.reasoningEffort ?? null })
+    if (payload.session === current && current !== null) applySessionModel(event.endpoint ?? null, event.model ?? null, event.reasoningEffort ?? null)
+  }
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
   /**
    * Whether a turn is running, read before the session filter below and for **every** session.
@@ -9089,13 +9183,10 @@ events.addEventListener('session', (message) => {
     turnsEnded.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
-    if (shown !== null && payload.session === shown) {
-      if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
-      settleChat()
-    }
     /**
      * A blocked end is the archived-session gate's, so the session is archived: if it is the open one, it is let go
      * now, as DSH lets an archived open session go (`clearArchivedCurrent`), rather than at the next list read (B1).
+     * The failure line and the settled rows are the drawing half's (`drawSessionEvent`), for the shown session only.
      */
     if (!TurnFailure.shows(event) && payload.session === current) clearMain()
     if (payload.session === composerKey) void pumpQueue()
@@ -9120,6 +9211,57 @@ events.addEventListener('session', (message) => {
      */
     if (queues.has(payload.session)) void pumpQueue(payload.session)
     renderComposerState()
+  }
+  // Keep all-session lifecycle bookkeeping above, but no transcript drawing while unavailable.
+  if (unavailableSession !== null) return
+  /**
+   * The session the panel shows. Under another session's "Failed to load history" (#56) nothing is drawn at all (above).
+   * With nothing open, the panel follows no session's turn but this page's own first one, held until it names its
+   * session (`looseTurnEvents`, #142); no other event is drawn. A user message is still a persisted turn of its own
+   * session (#116): one not held is counted under its own id now, a held one when it is drawn at adoption or, if it was
+   * not this page's, when it is let go (`adoptLooseEvents`), so each counts once.
+   */
+  const shown = current ?? unavailableSession
+  if (shown === null) {
+    if (!holdLooseEvent(payload)) countOwnSessionTurn(payload)
+    return
+  }
+  if (payload.session !== shown) {
+    // Retain other sessions' persisted facts without drawing them into this conversation (#116).
+    if (event.type === 'message' && event.message.role === 'user') {
+      liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
+    }
+    return
+  }
+  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
+  if (sessionLoading !== null && payload.session === sessionLoading.id) {
+    sessionLoading.events.push(payload)
+    return
+  }
+  drawSessionEvent(payload)
+})
+
+/**
+ * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
+ * the events kept aside while the session's history was read.
+ */
+function drawSessionEvent(payload) {
+  const event = payload.event
+  if (unavailableSession !== null) return
+  /** Only the shown session draws: with nothing shown, nothing does (#142), whoever replays the event. */
+  const shown = current ?? unavailableSession
+  if (shown === null || payload.session !== shown) return
+  if (event.type === 'turn/failed') {
+    /**
+     * The failure line and the settled rows, for the shown session only (`shown !== null && payload.session === shown`):
+     * here rather than in the listener, so the events kept while a history read ran, and this page's own held first
+     * turn, settle when they are replayed. The blocked end's `clearMain` is the listener's, once.
+     */
+    if (shown !== null && payload.session === shown) {
+      if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
+      settleChat()
+    }
+  } else if (event.type === 'turn/completed') {
     /**
      * And it is when the answer stops arriving, so the rows settle and the document is drawn.
      *
@@ -9142,29 +9284,11 @@ events.addEventListener('session', (message) => {
       void attachEditedFiles()
     }
   }
-  /** Nothing open: only this page's own first turn's events, held until it names its session; any other is dropped. */
-  if (shown === null) {
-    holdLooseEvent(payload)
-    return
-  }
-  if (payload.session !== shown) return
-  /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
-  if (sessionLoading !== null && payload.session === sessionLoading.id) {
-    sessionLoading.events.push(payload)
-    return
-  }
-  drawSessionEvent(payload)
-})
-
-/**
- * Draw one event of the panel's session: the stream listener's drawing half, which `drawKeptEvents` also replays for
- * the events kept aside while the session's history was read.
- */
-function drawSessionEvent(payload) {
-  const event = payload.event
   /** A slash command's row, whichever window ran it (src/commands/menu.js). */
   if (event.type === 'command/run' || event.type === 'command/done' || event.type === 'plan/mode') {
-    void slashReady.then((commands) => commands?.draw(event))
+    void slashReady.then((commands) => {
+      if (unavailableSession === null && (current === null || payload.session === current)) commands?.draw(event)
+    })
     return
   }
   /**
@@ -9228,6 +9352,10 @@ function drawSessionEvent(payload) {
       })
     }
   } else if (event.type === 'message' && event.message.role === 'user') {
+    // Count the same persisted fact as both backend folds, not a local send attempt (#116).
+    // An admitted prompt still counts if its provider fails or its acknowledgment is lost.
+    liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
+    updateStatusBar()
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
       attachments: contentAttachments(event.message.content, payload.session),
@@ -9259,7 +9387,7 @@ function drawSessionEvent(payload) {
 /**
  * Draw the events kept aside during a history read. When the answer said how far it reaches (`upTo`, its `seq`), only
  * the events past it are drawn; an event without a `seq` is a live-only fragment the history's card already covers.
- * Without a `seq` (a read that failed), every kept event is drawn, as the stream would have.
+ * Without a snapshot `seq`, every kept event is drawn. A failed read discards them instead.
  */
 function drawKeptEvents(generation, upTo) {
   if (sessionLoading === null || sessionLoading.generation !== generation) return
@@ -10475,6 +10603,8 @@ events.addEventListener('turn', (message) => {
 
 async function runTurn(text, key, attachments = [], onAccepted) {
   const target = key === QUEUE_KEY_NONE ? null : key
+  const seatAtSend = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  const shownAtSend = current
   /**
    * A message with no session starts one, and it starts it **where the page says** (#134): the workspace the hero chip
    * and the note name (`newConversationTarget`), read after boot has drawn the tree and run first use, so a message sent
@@ -10501,8 +10631,6 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   }
   /** A new turn on the session: its rounds count again, even if the stream never said the last one ended. */
   if (target !== null) turnsEnded.delete(target)
-  liveTurns += 1
-  updateStatusBar()
   /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
   await events.whenOpen(3000)
   /**
@@ -10511,27 +10639,39 @@ async function runTurn(text, key, attachments = [], onAccepted) {
    */
   if (target === null) holdLooseTurn()
   const startedAt = performance.now()
+  // Every record in flight, including one chosen while this turn waited, reaches the server before the turn does.
+  while (pendingSaves.size > 0) await Promise.all([...pendingSaves])
+  const held = target !== null ? heldSeats.get(target) : undefined
+  // An unknown queued session must not inherit another session's currently shown model.
+  const carrySeat = target === null || (!recordedSelections.has(target) && (held !== undefined || target === shownAtSend))
+  /** The target's own seat, as its records settled (a refusal restores it), else its seat shown at the send. */
+  const seat = held ?? seatAtSend
   const response = await sendTurn({
     /**
      * A session's turn names it, and the server resumes that session wherever it lives. A turn with no session names the
      * folder it starts in, above.
      *
-     * The endpoint and model named here are the composer's own choice, which is what makes the model seat
-     * more than a label: the turn asks the backend a person picked, and the server records it on the session
-     * so a reload comes back to it.
+     * The endpoint and model are named only for a session with no recorded selection: one this turn creates, or a
+     * blank one (New session, a folder) whose first turn must run on the seat's choice. A turn into a session that
+     * has a record names none and runs on the session's own selection: DSH's prompt carries no model, and the
+     * selection is session state every page follows (`model/selection`). Sending the seat with every turn let a
+     * second tab, still showing the model it opened with, silently switch the session back over another tab's
+     * choice (#46). A choice made here is recorded at once by `recordSelection`, so nothing is lost.
      */
     prompt: text,
     ...(attachments.length > 0 ? { attachments: attachments.map((item) => item.path) } : {}),
     session: target,
     folder,
     ...(fresh ? { new: true } : {}),
-    ...selectionForTurn(),
+    ...(carrySeat ? selectionForSeat(seat) : {}),
     /** Answer at acceptance; the verdict comes on the stream (#128). A server without it streams, read below. */
     detach: true,
   }).catch((error) => {
     if (target === null) adoptLooseEvents(null, false)
     throw error
   })
+  /** The server records the selection a turn carried, so the session now has one. */
+  if (carrySeat && target !== null && response.ok) recordedSelections.add(target)
   if (!response.ok) {
     if (target === null) adoptLooseEvents(null, false)
     /**
@@ -10574,7 +10714,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     if (name === 'session') {
       /**
        * A turn with no session starts one, and the panel follows it: the queue that was loose while the
-       * turn ran belongs to the session it created.
+       * turn ran belongs to the session it created. A history failure that took the panel meanwhile does not keep it:
+       * the created session is opened through `showSession` below, which ends the failure state and reads the session's
+       * own log (developer-ten's N1a, his ruling on the union with 4b2a0552); `current` is never pointed at it under
+       * another session's "Failed to load history".
        */
       if (target === null && adopted === null) {
         adopted = payload.session
@@ -10597,6 +10740,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
           void showSession(payload.session)
         } else {
           current = payload.session
+          updateStatusBar()
           rememberCurrent()
           chooseWorkspace(null)
           adoptSession(payload.session)
@@ -10934,11 +11078,12 @@ let sessionStats = null
 let liveRounds = 0
 let liveUsage = undefined
 /**
- * A turn this page started that the fold does not count yet. The reference's turn count moves when a prompt
- * is sent, not when the transcript has finished drawing; the durable count on its own therefore lags a fresh
- * turn, and counting rendered rows instead lags the other way. The sum is the figure a person expects.
+ * Persisted user messages delivered since the durable fold was read. The same facts count in both backend
+ * folds; a local submission or admission acknowledgment alone is not a message (#116). Keep each session's
+ * count even before a new turn adopts its id, without letting another session's messages contaminate its dock.
+ * History reads keep their events until the cutoff excludes facts already folded.
  */
-let liveTurns = 0
+const liveTurns = new Map()
 /**
  * The rate's halves for the round in flight: when its request opened, the time to its done frame, and the
  * output tokens that frame reported. Reset when the durable fold is re-read, so a finished turn is counted
@@ -11274,7 +11419,7 @@ function updateStatusBar() {
     statusBar.hidden = true
     return
   }
-  const turns = (sessionStats?.turns ?? 0) + liveTurns
+  const turns = (sessionStats?.turns ?? 0) + (liveTurns.get(current) ?? 0)
   const steps = (sessionStats?.steps ?? 0) + liveRounds
   const usage = addUsage(sessionStats?.usage, liveUsage)
   const cell = (name) => statusBar.querySelector(`[data-stat="${name}"]`)
@@ -11357,7 +11502,7 @@ async function refreshSessionStats() {
     liveUsage = undefined
     /** The fold has no rounds of a turn still running, so the open session's running turn keeps its own (N1). */
     ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
-    liveTurns = 0
+    liveTurns.delete(id)
     liveGenerationMs = 0
     liveDecodeTokens = 0
     updateStatusBar()
@@ -13118,6 +13263,67 @@ function closeAfterSelection() {
 }
 
 /**
+ * Sessions whose model selection the server has recorded, as far as this page knows: from a session's view, a
+ * `model/selection` event, a successful record, or a turn that carried the seat. A turn into any other session (a
+ * blank one opened from New session or a folder) carries the seat's choice, which the server then records (#46,
+ * developer-ten's B1); a turn into a recorded session carries none and runs on the session's own selection.
+ */
+const recordedSelections = new Set()
+/** Every record `recordSelection` has in flight; a turn waits until none is left. */
+const pendingSaves = new Set()
+/** The newest record, which the next one waits behind, so records reach the server in the order they were chosen. */
+let saveChain = Promise.resolve()
+/** Each choice's number, and each session's newest one: only the newest may roll the seat back. */
+let selectionSeq = 0
+const latestSelection = new Map()
+/** What the server is known to hold per session (its view, a model/selection event, an accepted record). */
+const serverSeats = new Map()
+/**
+ * The seat this page holds for each session: what its seat shows when the session is shown, kept per session so a turn
+ * sent into one session never reads the seat of another shown since (developer-twelve's review of 565d4847).
+ */
+const heldSeats = new Map()
+
+/** A turn's selection fields for a given seat, through the same rules as the shown seat's (synchronous). */
+function selectionForSeat(seat) {
+  const shown = [chosenEndpoint, chosenModel, chosenEffort]
+  chosenEndpoint = seat.endpoint
+  chosenModel = seat.model
+  chosenEffort = seat.effort
+  try {
+    return selectionForTurn()
+  } finally {
+    ;[chosenEndpoint, chosenModel, chosenEffort] = shown
+  }
+}
+
+/**
+ * A session's view arrived: record what the server holds for it, and publish its selection to the seat only while that
+ * session is still the one shown and no choice was made for it after the view was asked for (`selectionAt`). A late
+ * view of a session switched away from, or one overtaken by a newer choice, changes no seat.
+ */
+function adoptViewSelection(id, body, selectionAt) {
+  if (body === null || typeof body !== 'object') return
+  const endpoint = typeof body.endpoint === 'string' && body.endpoint.length > 0 ? body.endpoint : null
+  const newerChoice = (latestSelection.get(id) ?? 0) > (selectionAt ?? 0)
+  if (endpoint !== null) {
+    recordedSelections.add(id)
+    if (!newerChoice) {
+      const seat = { endpoint, model: body.model ?? null, effort: body.reasoningEffort ?? null }
+      serverSeats.set(id, seat)
+      heldSeats.set(id, seat)
+    }
+  } else if (!newerChoice) {
+    recordedSelections.delete(id)
+    serverSeats.delete(id)
+  }
+  if (current !== id || newerChoice) return
+  applySessionModel(body.endpoint ?? null, body.model ?? null, body.reasoningEffort ?? null)
+  // A blank session holds the seat it was opened with, which its first turn carries.
+  if (endpoint === null) heldSeats.set(id, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+}
+
+/**
  * Record one selection on the session.
  *
  * The local state is updated first so the seat answers at once — a control that waits for a round trip reads as
@@ -13129,17 +13335,50 @@ function closeAfterSelection() {
  * is shown, and the person is still standing where they can undo the choice.
  */
 async function recordSelection(selection) {
+  const previous = { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort }
+  const seq = ++selectionSeq
+  const recording = current
+  /**
+   * A refused or failed record puts the seat back (S1), but only when it is still this session's newest choice and
+   * this session is still shown: a later choice owns the seat, and after a switch the seat belongs to another session
+   * (developer-twelve's review of 1ebfcbc9). It goes back to what the server is known to hold for the session, else to
+   * the seat before this choice.
+   */
+  const restore = () => {
+    if (seq !== latestSelection.get(recording)) return
+    const known = serverSeats.get(recording) ?? previous
+    heldSeats.set(recording, { endpoint: known.endpoint, model: known.model, effort: known.effort })
+    if (current !== recording) return
+    chosenEndpoint = known.endpoint
+    chosenModel = known.model
+    chosenEffort = known.effort
+    renderModelSeat()
+  }
   chosenEndpoint = selection.endpoint
   chosenModel = selection.model ?? null
   chosenEffort = selection.reasoningEffort ?? null
   renderModelSeat()
-  if (current === null) return true
+  if (recording === null) return true
+  latestSelection.set(recording, seq)
+  heldSeats.set(recording, { endpoint: chosenEndpoint, model: chosenModel, effort: chosenEffort })
+  /**
+   * Records are sent one at a time, in the order they were chosen, so the server ends on the last one (a model, then
+   * an effort, picked in quick succession). Each is tracked by its own promise; a turn waits for every record in flight.
+   */
+  let release = () => {}
+  const saved = new Promise((resolve) => {
+    release = resolve
+  })
+  const before = saveChain
+  saveChain = saved
+  pendingSaves.add(saved)
   modelPending = true
   modelTrigger.setAttribute('aria-busy', 'true')
   modelSpinner.hidden = false
   if (!modelMenu.hidden) renderModelPane()
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(current)}/model`, {
+    await before
+    const response = await fetch(`/api/sessions/${encodeURIComponent(recording)}/model`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -13150,18 +13389,26 @@ async function recordSelection(selection) {
     })
     if (!response.ok) {
       const body = await response.json().catch(() => ({}))
-      setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      if (current === recording) setNote(body.error ?? `could not switch this session onto ${selection.endpoint}`)
+      restore()
       return false
     }
-    setNote('')
+    if (current === recording) setNote('')
+    recordedSelections.add(recording)
+    serverSeats.set(recording, { endpoint: selection.endpoint, model: selection.model ?? null, effort: selection.reasoningEffort ?? null })
     return true
   } catch (error) {
-    setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    if (current === recording) setNote(`could not switch this session onto ${selection.endpoint}: ${(error && error.message) || error}`)
+    restore()
     return false
   } finally {
-    modelPending = false
-    modelTrigger.setAttribute('aria-busy', 'false')
-    modelSpinner.hidden = true
+    pendingSaves.delete(saved)
+    release()
+    if (pendingSaves.size === 0) {
+      modelPending = false
+      modelTrigger.setAttribute('aria-busy', 'false')
+      modelSpinner.hidden = true
+    }
     if (!modelMenu.hidden) {
       renderModelPane()
       placeModelMenu()
@@ -14539,6 +14786,7 @@ async function selectSession(node) {
   if (view !== 'chat' && view !== 'trajectory') await showView('chat')
   renderRing('session')
   await showSession(node.session.id)
+  if (current !== node.session.id) return
   /**
    * The mark is put on the row that was **clicked**, and last, because `showSession` resynchronises the
    * selection to whichever row claims the session. Before the tree stopped showing a captured conversation
@@ -20472,6 +20720,7 @@ async function renderFlatList() {
         }
         /** A session that could not be loaded is not the open one, so no row is marked for it (#56). */
         if (!(await showSession(meta.id))) return
+        if (current !== meta.id) return
         for (const item of treeList.querySelectorAll('li[data-kind="session"]')) {
           item.setAttribute('aria-selected', item.dataset.sessionId === meta.id ? 'true' : 'false')
         }
