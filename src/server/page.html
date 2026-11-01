@@ -14596,7 +14596,10 @@ async function fillSettings() {
       const response = await fetch(path)
       if (response.ok) return { body: await response.json() }
       if (response.status === 404) return { missing: true }
-      return { failure: `the server answered ${response.status}`, status: response.status }
+      // The server's own sentence when it sent one (#165): the file, line and reason, not only the status.
+      const refusal = await response.json().catch(() => null)
+      const said = refusal !== null && typeof refusal.error === 'string' && refusal.error.length > 0 ? refusal.error : null
+      return { failure: said ?? `the server answered ${response.status}`, status: response.status }
     } catch (error) {
       return { failure: (error && error.message) || String(error) }
     }
@@ -14706,6 +14709,14 @@ function renderSettingsConfig(view, failure) {
   note.textContent = view.writable
     ? 'Changes are written to this profile\u2019s patch.'
     : 'This run has no profile patch to write (start it with --profile, or from a project without --patch); values are read-only.'
+  /**
+   * A hand edit that broke the patch (#165): the forms show the running configuration, as DSH's do, and the note says
+   * why a Save will be refused until the file is fixed, in the server's words (file, line, reason; none of the file).
+   */
+  if (typeof view.documentError === 'string' && view.documentError.length > 0) {
+    note.textContent = `The profile patch could not be read, so these values are the running configuration and Save is refused until the file is fixed: ${view.documentError}`
+    note.dataset.state = 'error'
+  } else delete note.dataset.state
   for (const entry of view.namespaces) host.append(settingsEntryForm(entry))
 }
 
