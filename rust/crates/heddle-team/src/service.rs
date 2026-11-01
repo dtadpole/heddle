@@ -354,6 +354,11 @@ impl TeamService {
             cwd: lead_meta.as_ref().and_then(|meta| meta.cwd.clone()),
             endpoint: lead_meta.as_ref().and_then(|meta| meta.endpoint.clone()),
             model: lead_meta.as_ref().and_then(|meta| meta.model.clone()),
+            // DSH's child inherits the parent's provider, model and reasoning effort (dsh-subagent
+            // `resolveChildAgentOptions`); a fresh teammate used to drop the effort and run at the model's default.
+            reasoning_effort: lead_meta
+                .as_ref()
+                .and_then(|meta| meta.reasoning_effort.clone()),
             parent_session: lead.clone(),
             origin: "subagent",
             delegation_depth: 1,
@@ -1044,6 +1049,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             endpoint: Some("scripted".to_owned()),
             model: Some("m".to_owned()),
+            reasoning_effort: None,
             team_id: None,
             preset: None,
         });
@@ -1103,6 +1109,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             endpoint: None,
             model: None,
+            reasoning_effort: None,
             parent_session: team.to_owned(),
             origin: "subagent",
             delegation_depth: 1,
@@ -1236,6 +1243,53 @@ mod tests {
                 member.name
             );
         }
+    }
+
+    /// Issue #174: a fresh teammate takes the Lead's reasoning effort with its endpoint and model, as DSH's child
+    /// inherits the parent's provider, model and effort; a Lead with no recorded effort gives none.
+    #[tokio::test]
+    async fn a_fresh_teammate_takes_its_leads_reasoning_effort() {
+        let h = harness();
+        let plain = h
+            .service
+            .spawn(&h.lead, spawn_request("plain", "go"))
+            .unwrap();
+        assert_eq!(
+            h.store.session(&plain.id).unwrap().meta.reasoning_effort,
+            None
+        );
+
+        let store = Arc::new(MemoryStore::new());
+        store.add_session(SessionMetaView {
+            id: "session-lead".to_owned(),
+            cwd: Some("/work".to_owned()),
+            endpoint: Some("scripted".to_owned()),
+            model: Some("m".to_owned()),
+            reasoning_effort: Some("low".to_owned()),
+            team_id: None,
+            preset: None,
+        });
+        let runner = Arc::new(RecordingRunner::new(Arc::clone(&store), None));
+        let service = TeamService::new(TeamDeps {
+            store: store.clone(),
+            runner,
+            live: None,
+            limits: TeamLimits::default(),
+            notify: None,
+            warn: None,
+            ids: Arc::new(SequentialIds::new()),
+        });
+        let fresh = service
+            .spawn(&"session-lead".to_owned(), spawn_request("scout", "go"))
+            .unwrap();
+        let meta = store.session(&fresh.id).unwrap().meta;
+        assert_eq!(meta.endpoint.as_deref(), Some("scripted"));
+        assert_eq!(meta.model.as_deref(), Some("m"));
+        assert_eq!(
+            meta.reasoning_effort.as_deref(),
+            Some("low"),
+            "the teammate runs at the Lead's effort, not the model's default"
+        );
     }
 
     #[tokio::test]
@@ -1477,6 +1531,7 @@ mod tests {
         h.store.add_session(SessionMetaView {
             id: "session-stray".to_owned(),
             cwd: Some("/work".to_owned()),
+            reasoning_effort: None,
             team_id: Some(h.lead.clone()),
             ..SessionMetaView::default()
         });
@@ -1803,6 +1858,7 @@ mod tests {
             cwd: Some("/work".to_owned()),
             endpoint: Some("scripted".to_owned()),
             model: Some("scripted".to_owned()),
+            reasoning_effort: None,
             team_id: None,
             preset: None,
         });
