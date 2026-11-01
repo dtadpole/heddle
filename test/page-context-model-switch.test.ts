@@ -1,15 +1,27 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync, realpathSync } from 'node:fs'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 import { test } from 'node:test'
 import { runInNewContext } from 'node:vm'
 
 // Run the same real page functions against an immutable baseline to prove the stale-pill failure.
 const root = join(import.meta.dirname, '..')
-const page = process.env.HEDDLE_TEST_PAGE_REV
-  ? execFileSync('git', ['show', `${process.env.HEDDLE_TEST_PAGE_REV}:src/server/page.html`], { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
-  : readFileSync(join(root, 'src/server/page.html'), 'utf8')
+function snapshotPage(file: string): string {
+  const scratch = realpathSync(join(root, '.heddle-tmp/context-harness-Q'))
+  const path = realpathSync(resolve(root, file))
+  const within = relative(scratch, path)
+  assert.ok(within && within !== '..' && !within.startsWith('../') && !isAbsolute(within),
+    'explicit page snapshots must belong to this worktree context harness scratch')
+  return readFileSync(path, 'utf8')
+}
+assert.ok(!(process.env.HEDDLE_TEST_PAGE_FILE && process.env.HEDDLE_TEST_PAGE_REV),
+  'select either an explicit snapshot or the original revision guard')
+const page = process.env.HEDDLE_TEST_PAGE_FILE
+  ? snapshotPage(process.env.HEDDLE_TEST_PAGE_FILE)
+  : process.env.HEDDLE_TEST_PAGE_REV
+    ? execFileSync('git', ['show', `${process.env.HEDDLE_TEST_PAGE_REV}:src/server/page.html`], { cwd: root, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+    : readFileSync(join(root, 'src/server/page.html'), 'utf8')
 function source(name: string): string {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
   assert.ok(start >= 0, `the page defines ${name}`)
