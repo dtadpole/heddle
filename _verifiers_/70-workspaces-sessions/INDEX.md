@@ -49,6 +49,11 @@ Since 1 Nov `check-failed-fragment.mjs` judges a turn whose provider stream brok
 the page still draws the partial with its failure line, while the next turn's request, a fork's first request and a
 `/compact` summary request carry the cut turn's prompt and not its fragment.
 
+Since 1 Nov `check-compact-restart.mjs` judges a `/compact` cut by a restart (#206): the server is killed while the
+summary is held, and after the restart the first read already draws the row as "Compaction cancelled." without writing,
+the next turn's write-open appends a stopped `compaction/failed` and the `command/done` before its prompt, a second
+restart appends nothing more, and a new `/compact` still compacts.
+
 ## Where it stands, 2026-10-11
 
 **22 checks, all passing — verdict `0`.** The tree group was written **before** the mechanism it judges,

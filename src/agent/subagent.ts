@@ -390,6 +390,10 @@ export class SubagentService {
    * its own: nothing would carry that turn's answer up the chain, and its own `interrupted` notice already goes up.
    * Every notice is made before any is written, so such a parent's closing message is its own. A child whose parent is
    * gone is left as it is. Deliveries are not awaited (a turn must not hold the server's start); `settle` waits for them.
+   *
+   * Only a cut TURN is reported: one whose closers end it with `turn/completed`. A child whose only open item was a
+   * command (a `/compact` the restart cut, #206) lost no answer, so its parent is not told it was interrupted; its
+   * closers are written at its next write-open, as any session's are.
    */
   reportInterrupted(handles: readonly SessionHandle[], now: number = Date.now()): number {
     const store = this.deps.store
@@ -402,7 +406,7 @@ export class SubagentService {
       const last = events.at(-1)
       // An unreadable time is outside the window, as it is in the Rust build.
       if (last === undefined || !(now - Date.parse(last.at) <= INTERRUPTED_REPORT_WINDOW_MS)) continue
-      if (interruptedTurnClosers(events).length === 0 || store.writerHeld(handle)) continue
+      if (!interruptedTurnClosers(events).some((event) => event.type === 'turn/completed') || store.writerHeld(handle)) continue
       const parent = store.open(meta.parentSession)
       if (parent === null) continue
       try {
