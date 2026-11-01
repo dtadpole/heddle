@@ -109,15 +109,38 @@ test('a host hit follows the tree: a subagent never, archived per the filter, an
   assert.deepEqual(ids(search.merge([], sessions, 'found', content, { archived: 'only' })), ['s-arch'])
 })
 
-test('twenty rows at most; more when the host said so, or when the merge ran past twenty', () => {
+test('twenty rows at most; more when twenty are shown and the host said so, or when the merge ran past twenty', () => {
   const sessions = Array.from({ length: 30 }, (_, index) => session(`s-${String(index).padStart(2, '0')}`, index, { title: index < 15 ? `capword ${index}` : `other ${index}` }))
   const content = { items: sessions.slice(10).map((meta) => ({ sessionId: meta.id, snippet: 'capword inside' })), hasMore: false }
   const merged = search.merge([], sessions, 'capword', content)
   assert.equal(merged.items.length, 20)
   assert.equal(merged.hasMore, true, '15 local plus 15 more from the host is more than twenty')
   assert.equal(merged.items[0]?.meta.id, 's-14', 'newest local first')
-  const flagged = search.merge([], sessions.slice(0, 2), 'capword', { items: [], hasMore: true })
-  assert.deepEqual([flagged.items.length, flagged.hasMore], [2, true], "the host's own hasMore carries through")
+  const twenty = sessions.slice(0, 20).map((meta) => ({ ...meta, title: 'capword' }))
+  const flagged = search.merge([], twenty, 'capword', { items: [], hasMore: true })
+  assert.deepEqual([flagged.items.length, flagged.hasMore], [20, true], "the host's own hasMore carries through when twenty rows are shown")
+})
+
+/**
+ * N2 (developer-ten's review of content-search-page): the host ranks every session with a `cwd`, a subagent's child and an
+ * archived session included, and the page filters after the host's twenty are cut. DSH does the same — its controller
+ * ranks every session with a `cwd` (dsh-api-session-controller lib/index.js:2016-2018, cut at 20 :2029-2084) and its
+ * client filters after (dsh-client-ui-workspace lib/client.js:1197-1200) yet keeps the host's `hasMore` (:1219) — so the
+ * wire stays DSH's. What changes is the sentence: "Showing the first 20 results" is said only when twenty are shown,
+ * never beside "No matching sessions" or beside a shorter list.
+ */
+test('the host\'s hasMore says "Showing the first 20" only when twenty rows are shown', () => {
+  const hidden = Array.from({ length: 20 }, (_, index) =>
+    session(`s-h${String(index).padStart(2, '0')}`, index, index % 2 === 0 ? { title: `a ${index}`, archived: true } : { title: `c ${index}`, origin: 'subagent' }),
+  )
+  const live = [session('s-live', 40, { title: 'unrelated' }), session('s-kept', 41, { title: 'unrelated too' })]
+  const filled = { items: hidden.map((meta) => ({ sessionId: meta.id, snippet: 'quokka' })), hasMore: true }
+  const none = search.merge([], [...hidden, ...live], 'quokka', filled)
+  assert.deepEqual([none.items.length, none.hasMore], [0, false], 'hidden sessions filled the twenty: nothing shown, and no "Showing the first 20" beside "No matching sessions"')
+  const some = search.merge([], [...hidden, ...live], 'quokka', { items: [...filled.items.slice(0, 18), { sessionId: 's-live', snippet: 'quokka' }, { sessionId: 's-kept', snippet: 'quokka' }], hasMore: true })
+  assert.deepEqual([some.items.length, some.hasMore], [2, false], 'two shown of the twenty: not "the first 20" either')
+  const shown = search.merge([], [...hidden, ...live], 'quokka', filled, { archived: 'show' })
+  assert.deepEqual([shown.items.length, shown.hasMore], [10, false], 'under Show archived the ten archived ones are shown, and ten is not twenty')
 })
 
 test('the page asks the host after the debounce, aborts a stale query, and shows DSH\'s pending status', () => {
