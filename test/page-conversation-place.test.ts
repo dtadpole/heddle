@@ -26,6 +26,7 @@ interface Place {
   note(): string
   painted(): number
   set(state: { current?: string | null; settled?: boolean; note?: string }): void
+  empty(): void
 }
 
 function harness(): Place {
@@ -36,9 +37,10 @@ function harness(): Place {
     let chosenWorkspace = null
     let selectedPath = null
     let painted = 0
-    const NEW_CONVERSATION_NOTE = 'a new conversation in '
-    const treeNote = { textContent: '', hidden: true }
-    function setNote(text) { treeNote.textContent = text ?? ''; treeNote.hidden = !text }
+    // The note's English, as the page's t() says it (#80); the note is marked as the new-conversation note.
+    const t = (key, vars = {}) => (key === 'tree.note.newConversation' ? 'a new conversation in ' + vars.place : key)
+    const treeNote = { textContent: '', hidden: true, dataset: {} }
+    function setNote(text) { delete treeNote.dataset.newConversation; treeNote.textContent = text ?? ''; treeNote.hidden = !text }
     function paintConversationTarget() { painted += 1 }
     function markSelection() {}
     const labels = { '/work/a': 'Alpha', '/work/b': 'Beta' }
@@ -46,6 +48,7 @@ function harness(): Place {
       const path = chosenWorkspace?.path ?? (selectedPath !== null && selectedPath.startsWith('/work/') ? selectedPath : '/work/a')
       return { path, label: labels[path] ?? path }
     }
+    ${source('setNewConversationNote')}
     ${source('paintNewConversationPlace')}
     ${source('chooseWorkspace')}
     ${source('chooseSelected')}
@@ -54,10 +57,15 @@ function harness(): Place {
       select: (path) => chooseSelected(path),
       note: () => treeNote.textContent,
       painted: () => painted,
+      empty: () => { treeNote.textContent = '' },
       set(state) {
         if ('current' in state) current = state.current
         if ('settled' in state) firstTreeSettled = state.settled
-        if ('note' in state) setNote(state.note)
+        if ('note' in state) {
+          const place = /^a new conversation in (.+)$/.exec(state.note ?? '')
+          if (place !== null) setNewConversationNote(place[1])
+          else setNote(state.note)
+        }
       },
     })
     `,
@@ -97,4 +105,13 @@ test('a note that says something else, an open session, or a tree not yet drawn 
 
 test('the note under the tree is a polite live region (N9)', () => {
   assert.match(page, /<p id="tree-note" class="meta" aria-live="polite" hidden><\/p>/)
+})
+
+test('a new-conversation note emptied since it was said is not said again, in any language (#80)', () => {
+  // The note is known by the text it was said with, not by its English prefix, so an emptied note stays empty.
+  const place = harness()
+  place.set({ note: 'a new conversation in Alpha' })
+  place.empty()
+  place.choose('/work/b')
+  assert.equal(place.note(), '', 'the emptied note is left empty')
 })

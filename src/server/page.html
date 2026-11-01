@@ -4692,6 +4692,10 @@ const MESSAGES = Object.freeze({
     'chat.usage.cacheRead': 'Cache read',
     'chat.usage.cacheWrite': 'Cache write',
     'chat.usage.output': 'Output',
+    'tree.note.newConversation': 'a new conversation in {place}',
+    'tree.note.newSessionFailed': 'New session failed: {message}',
+    'tree.note.serverRefused': 'the server refused it ({status})',
+    'shortcuts.note.selectSession': 'select a session first — the shortcut acts on the row the panel is showing',
     'header.thisSession': 'this session',
     'header.more': 'More actions',
     'header.download': 'Download session log',
@@ -5364,6 +5368,10 @@ const MESSAGES = Object.freeze({
     'chat.usage.cacheRead': '缓存读取',
     'chat.usage.cacheWrite': '缓存写入',
     'chat.usage.output': '输出',
+    'tree.note.newConversation': '将在“{place}”中开始新对话',
+    'tree.note.newSessionFailed': '新建会话失败：{message}',
+    'tree.note.serverRefused': '服务器拒绝了请求（{status}）',
+    'shortcuts.note.selectSession': '请先选择一个会话——快捷键作用于面板正在显示的那一行',
     'header.thisSession': '此会话',
     'header.more': '更多操作',
     'header.download': '下载会话日志',
@@ -15009,6 +15017,8 @@ function rememberExpanded() {
 }
 
 function setNote(text) {
+  // The new-conversation note's own text, for a repaint that only redraws that note (setNewConversationNote).
+  delete treeNote.dataset.newConversation
   treeNote.textContent = text ?? ''
   treeNote.hidden = text === undefined || text === null || text === ''
 }
@@ -16340,7 +16350,7 @@ async function startSessionAt(node) {
    * Before, a rejected `fetch` escaped every caller — the button, the chord, the row's `+` and its menu — as an unhandled
    * rejection, and nothing on screen changed (#59).
    */
-  const failed = (message) => setNote('New session failed: ' + message)
+  const failed = (message) => setNote(t('tree.note.newSessionFailed', { message }))
   let response
   let body
   try {
@@ -16355,7 +16365,7 @@ async function startSessionAt(node) {
     return
   }
   if (!response.ok) {
-    failed(body.error ?? `the server refused it (${response.status})`)
+    failed(body.error ?? t('tree.note.serverRefused', { status: response.status }))
     return
   }
   setNote('')
@@ -16445,8 +16455,20 @@ function composerAimless() {
   return newConversationTarget() === null
 }
 
-/** The note's words for where the next message starts a conversation while no session is open (#134). */
-const NEW_CONVERSATION_NOTE = 'a new conversation in '
+/**
+ * The note naming where the next message starts a conversation while no session is open (#134), in the page language
+ * (#80). Its text is kept beside it, so a repaint knows the note from one saying something else, or from one emptied
+ * since, as the English prefix let it know before; a language change redraws the tree, which says it again.
+ */
+function setNewConversationNote(place) {
+  if (place === null) {
+    setNote('')
+    return
+  }
+  const text = t('tree.note.newConversation', { place })
+  setNote(text)
+  treeNote.dataset.newConversation = text
+}
 
 /**
  * With no session open, repaint what names the new conversation's place once a person changed it: the hero chip and the
@@ -16458,9 +16480,8 @@ const NEW_CONVERSATION_NOTE = 'a new conversation in '
 function paintNewConversationPlace() {
   if (current !== null || !firstTreeSettled) return
   paintConversationTarget()
-  if (!treeNote.textContent.startsWith(NEW_CONVERSATION_NOTE)) return
-  const place = newConversationTarget()?.label ?? null
-  setNote(place === null ? '' : NEW_CONVERSATION_NOTE + place)
+  if (treeNote.dataset.newConversation === undefined || treeNote.dataset.newConversation !== treeNote.textContent) return
+  setNewConversationNote(newConversationTarget()?.label ?? null)
 }
 
 /**
@@ -17469,7 +17490,7 @@ document.addEventListener('keydown', (event) => {
   }
   const node = selectedNode()
   if (node === null || node.kind !== 'session' || node.session === undefined || node.session === null) {
-    setNote('select a session first — the shortcut acts on the row the panel is showing')
+    setNote(t('shortcuts.note.selectSession'))
     return
   }
   setNote('')
@@ -21760,7 +21781,7 @@ async function renderTree() {
      * reload, which forgets the folder the prompt box was aimed at, still names that workspace (#134).
      */
     const place = current === null ? (newConversationTarget()?.label ?? null) : activeFolder === null ? null : WorkspaceTree.folderLabel(treeTops, activeFolder)
-    setNote(place === null ? '' : NEW_CONVERSATION_NOTE + place)
+    setNewConversationNote(place)
   }
 
   /**

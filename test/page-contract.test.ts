@@ -239,7 +239,9 @@ test('Add workspace and New session say when their request fails, instead of lea
   }
   const start = body('async function startSessionAt(node) {')
   assert.match(start, /try \{\s*response = await fetch\('\/api\/sessions'/, 'the session request is guarded')
-  assert.match(start, /const failed = \(message\) => setNote\('New session failed: ' \+ message\)/, 'and a failure is said in DSH\'s words')
+  // In the page language (#80): the key, whose English is DSH's words.
+  assert.match(start, /const failed = \(message\) => setNote\(t\('tree\.note\.newSessionFailed', \{ message \}\)\)/, 'and a failure is said in DSH\'s words')
+  assert.match(page, /'tree\.note\.newSessionFailed': 'New session failed: \{message\}'/, 'whose English is DSH\'s toast.createFailed')
   const adopt = body('async function adoptWorkspace(path) {')
   assert.match(adopt, /try \{\s*response = await fetch\('\/api\/workspaces'/, 'the registration request is guarded')
   assert.match(adopt, /return 'could not register that folder: ' \+/, 'and its failure is a refusal the dialog shows')
