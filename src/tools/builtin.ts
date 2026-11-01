@@ -489,7 +489,9 @@ export function builtinTools(
           // does, rather than failing the whole listing with a raw `ENOENT: … stat` (issue #223).
           const stats = await stat(join(target, entry.name)).catch(() => undefined)
           if (stats === undefined) return entry.isDirectory() ? `${entry.name}/` : entry.isSymbolicLink() ? entry.name : `${entry.name} (0B)`
-          return `${entry.isDirectory() ? `${entry.name}/` : entry.name}${entry.isDirectory() ? '' : ` (${stats.size}B)`}`
+          // The followed `stat` decides, as DSH's probe and the Rust build's metadata do: a link to a folder is a folder,
+          // not a file of the folder's size, which the unfollowed directory entry made it (issue #230).
+          return stats.isDirectory() ? `${entry.name}/` : `${entry.name} (${stats.size}B)`
         }),
       )
       return { output: entries.join('\n'), data: { path: target, entries: entries.length } }
