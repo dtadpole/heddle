@@ -998,6 +998,24 @@ mod tests {
     }
 
     #[test]
+    fn actual_render_unknown_unicode_attribute_names_preserve_prose() {
+        // No anchors or footnotes: this isolates the sanitizer from the previously fixed anchor helper.
+        for name in ["é", "文字", "😀", "unknowné", "unknown文字", "unknown😀"] {
+            let source =
+                format!("normal **prose**\n\n<p {name}=\"x\">ok</p>\n\nfollowing *words*.");
+            let html = render_markdown(&source, MarkdownOptions::default());
+            assert!(
+                !html.contains("class=\"unrendered\""),
+                "unknown attribute {name} must not replace rendering with a fallback: {html}"
+            );
+            assert!(html.contains("normal <strong>prose</strong>"), "{html}");
+            assert!(html.contains("<p>ok</p>"), "{html}");
+            assert!(html.contains("following <em>words</em>."), "{html}");
+            assert!(!html.contains(&format!("{name}=\"x\"")), "{html}");
+        }
+    }
+
+    #[test]
     fn actual_render_unicode_author_anchor_before_href() {
         // ASCII attribute names with Unicode values pin the existing anchor helper, not an HTML grammar change.
         for value in ["é", "文字", "😀"] {

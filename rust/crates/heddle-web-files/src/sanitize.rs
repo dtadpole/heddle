@@ -583,6 +583,29 @@ mod tests {
     }
 
     #[test]
+    fn unknown_unicode_attribute_names_preserve_content() {
+        // Harmless unknown names exercise the scanner's UTF-8 cursor, not a broader attribute grammar.
+        for name in ["é", "文字", "😀", "unknowné", "unknown文字", "unknown😀"] {
+            assert_eq!(
+                sanitize_html(
+                    &format!("<p {name}=\"x\">ok</p>"),
+                    SanitizeOptions::default()
+                ),
+                "<p>ok</p>",
+                "unknown attribute {name} is dropped while its paragraph is kept"
+            );
+            assert_eq!(
+                sanitize_html(
+                    &format!("<p {name}=\"x\" title=\"文字 😀\" width=\"12\">ok</p>"),
+                    SanitizeOptions::default()
+                ),
+                "<p title=\"文字 😀\" width=\"12\">ok</p>",
+                "allowed attributes after {name} still retain their values"
+            );
+        }
+    }
+
+    #[test]
     fn a_url_attribute_is_decided_by_the_caller() {
         let url = |value: &str, _site: UrlSite<'_>| {
             value.starts_with("https://").then(|| value.to_string())

@@ -46,6 +46,19 @@ test('a link that would run script is refused, and the label survives', () => {
   }
 })
 
+test('actual render unknown Unicode attribute names preserve prose', () => {
+  // No anchors or footnotes: this control isolates the sanitizer from the anchor helper.
+  for (const name of ['é', '文字', '😀', 'unknowné', 'unknown文字', 'unknown😀']) {
+    const source = `normal **prose**\n\n<p ${name}="x">ok</p>\n\nfollowing *words*.`
+    const html = renderMarkdown(source)
+    assert.ok(!html.includes('class="unrendered"'), 'unknown names must not replace rendering with a fallback')
+    assert.ok(html.includes('normal <strong>prose</strong>'))
+    assert.ok(html.includes('<p>ok</p>'))
+    assert.ok(html.includes('following <em>words</em>.'))
+    assert.ok(!html.includes(`${name}="x"`))
+  }
+})
+
 test('actual render Unicode author anchor before href preserves rendering and strips unsafe URI', () => {
   // Control for the pre-existing Rust byte-index helper defect; ASCII attribute names, Unicode values only.
   for (const value of ['é', '文字', '😀']) {
