@@ -81,6 +81,30 @@ HEDDLE_FOOTNOTE_BROWSER=1 node --test _verifiers_/88-file-preview/check-footnote
 Run from the repository root. The optional browser test is a labelled skip unless requested;
 the default API test still judges the selected build.
 
+## Unicode author anchor attribute HTTP regression
+
+[`check-unicode-anchor-attributes.mjs`](check-unicode-anchor-attributes.mjs) needs **no browser**. Two
+synthetic Markdown fixtures, with and without a footnote, place `é`, `文字` and `😀` in ASCII-named
+raw author-anchor `id` and `title` values before `href`. Through the actual built CLI `/api/file`,
+the check requires rendered heading and ordinary prose emphasis, preserved author IDs, titles and
+safe fragment hrefs, readable unsafe labels with `java&#x09;script:` hrefs refused, and rendered
+notes when present. It rejects a source proxy and whole-document `unrendered` fallback.
+
+This pins the Rust helper's UTF-8 byte-scan regression. The preexisting helper panic was caught and
+returned fallback markup, **not** a server abort. It does not claim all sanitizer grammar or Unicode
+attribute-name coverage. The check honors `HEDDLE_BIN`, uses a private home and registered scratch
+workspace with port-zero token authentication, bounds startup, HTTP body size/time and child cleanup,
+and removes only its exact resolved fixture allocations after the child stops. No private payloads,
+model endpoint or browser are needed; the caller builds the selected CLI first.
+
+```bash
+node --test _verifiers_/88-file-preview/check-unicode-anchor-attributes.mjs
+HEDDLE_BIN=/path/to/heddle node --test _verifiers_/88-file-preview/check-unicode-anchor-attributes.mjs
+```
+
+Run from the repository root. Both commands judge the selected delivered server, not imported
+renderer modules. No before/after endpoint verdict is claimed by authoring this check.
+
 ## HTML base policy regression
 
 The HTML check in [`check.mjs`](check.mjs) uses a **headless browser** and reads its actual recorded console
