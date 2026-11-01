@@ -24,11 +24,15 @@ export interface CompactionOutcome {
   readonly busy?: boolean
   /** A summary was written and refused (it did not shrink the history), with the reason recorded in the log. */
   readonly refused?: string
+  /** The session's Stop cancelled the summary before anything was replaced (#140, #154). */
+  readonly cancelled?: boolean
 }
 
 /** DSH's `/compact` answers for an agent that is not idle and for a summary that was refused (dsh-command-compact). */
 export const COMPACT_BUSY = 'Compaction is unavailable because this process has an active compaction, or the agent is not idle.'
 export const COMPACT_REFUSED = 'Compaction could not produce a useful summary. The attempt is recorded in the session log.'
+/** DSH's answer when the command's signal fired (dsh-command-compact `cancelled`). */
+export const COMPACT_CANCELLED = 'Compaction cancelled.'
 
 /** The compaction `/compact` asks for: summarise the session's older history now. */
 export interface CompactionHost {
@@ -50,6 +54,7 @@ export function compactCommand(host: CompactionHost): CommandDefinition {
        * summary that could not be made smaller as an error (`summary`), not as "nothing to compact" (#132).
        */
       if (outcome.busy === true) return { kind: 'error', text: COMPACT_BUSY }
+      if (outcome.cancelled === true) return { kind: 'error', text: COMPACT_CANCELLED }
       if (outcome.refused !== undefined) return { kind: 'error', text: COMPACT_REFUSED }
       if (!outcome.compacted) return { kind: 'success', text: 'No compactable history yet.' }
       const items = outcome.items !== undefined ? `${outcome.items} history items` : 'older history'
