@@ -125,6 +125,10 @@ export interface CompactOptions {
    * same rule ("Cancellation stays authoritative throughout"): an abort mid-request throws, and no replacement lands. A
    * summary that had already returned when the Stop came is committed, as DSH's automatic compaction commits it; the
    * loop's own check then stops the turn before its model request.
+   *
+   * A Stop mid-stream does not always throw here: the streamed completion hands back the text read so far (or none) when
+   * its signal fires. So the signal is read again once the summariser returns, and a fired signal is a stop, whatever
+   * text came back. A cut summary is never committed, and an empty cut is not "the summariser returned nothing" (#200).
    */
   readonly signal?: AbortSignal
 }
@@ -280,6 +284,8 @@ export class CompactionEngine {
       if (options.signal?.aborted === true) return this.stopped(handle, plan, options)
       return this.refuse(handle, plan, options, `the summariser failed — ${(error as Error).message}`)
     }
+    // A streamed summary cut by a Stop returns what it had read; the signal, not the text, says it was cut (#200).
+    if (options.signal?.aborted === true) return this.stopped(handle, plan, options)
     if (summary.trim().length === 0) {
       return this.refuse(handle, plan, options, 'the summariser returned nothing')
     }
