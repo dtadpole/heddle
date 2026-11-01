@@ -7833,8 +7833,9 @@ function markRunning(id) {
 }
 
 async function refreshSessions() {
-  /** The search index is a cache of this answer, so this is where it goes stale. */
+  /** The search index is a cache of this answer, so this is where it goes stale, and a read already in flight with it. */
   searchIndex = null
+  searchEpoch += 1
   /** The newest running mark this read can know about; a mark after it outranks the read's silence. */
   const readTick = runningTick
   const response = await fetch('/api/sessions')
@@ -13937,6 +13938,8 @@ function showArchiveNotice(kind, node) {
         archiveMode = 'show'
         rememberArchived()
         await renderTree()
+        /** A standing search follows the filter, as View options' does (`deriveSearchResults` takes `archivedFilter`). */
+        await applySearch()
       }
     })
     parts.push(button)
@@ -16716,8 +16719,8 @@ const ContentSearch = (() => {
    *
    * The local name matches come first, newest first, as `WorkspaceTree.search` orders them; then the sessions only the
    * host found, in the host's order, under the same visibility and archive filter. A session appears once, and any row
-   * the host matched carries its snippet, local or not. Twenty rows at most, and more when the host said so or the merge
-   * ran past twenty. `content` is the host's answer for this query: `{ items: [{ sessionId, snippet }], hasMore }`.
+   * the host matched carries its snippet, local or not. Twenty rows at most, and more when twenty are shown and the host
+   * said so or the merge ran past twenty. `content` is the host's answer for this query: `{ items: [{ sessionId, snippet }], hasMore }`.
    */
   function merge(workspaces, sessions, query, content, options = {}) {
     const archived = options.archived === 'show' || options.archived === 'only' ? options.archived : 'hide'
@@ -16747,7 +16750,14 @@ const ContentSearch = (() => {
       items: ordered
         .slice(0, WorkspaceTree.SEARCH_LIMIT)
         .map((entry) => (snippets.has(entry.meta.id) ? { ...entry, snippet: snippets.get(entry.meta.id) } : entry)),
-      hasMore: content?.hasMore === true || ordered.length > WorkspaceTree.SEARCH_LIMIT,
+      /**
+       * "Showing the first 20" only when twenty rows are shown. The host ranks every session with a `cwd`, a subagent's
+       * child and an archived one included, and the rows are filtered after its twenty are cut — as DSH's are (its
+       * controller, dsh-api-session-controller lib/index.js:2016-2084; its client, `lib/client.js:1197-1200`). DSH keeps
+       * the host's `hasMore` whatever is left (`:1219`), so hidden sessions that filled the twenty drew "No matching
+       * sessions" beside "Showing the first 20 results". The wire stays DSH's; the sentence follows the rows shown.
+       */
+      hasMore: ordered.length >= WorkspaceTree.SEARCH_LIMIT && (content?.hasMore === true || ordered.length > WorkspaceTree.SEARCH_LIMIT),
     }
   }
 
@@ -18558,6 +18568,11 @@ async function toggle(node, li) {
 let searchIndex = null
 /** The last index whose reads all arrived, for a failed read to fall back to; `refreshSessions` does not drop it. */
 let heldIndex = null
+/**
+ * Which `refreshSessions` the index belongs to. A read that started before a refresh answers the list from before it
+ * (say, before an archive), so it may not land over a newer index or repaint the header with that older list.
+ */
+let searchEpoch = 0
 
 /** The tree's own rows as an index — what the reader sees beside the search box — or `null` when it draws none. */
 function treeIndex() {
@@ -18573,9 +18588,12 @@ function treeIndex() {
 
 async function loadSearchIndex() {
   if (searchIndex !== null) return searchIndex
+  const epoch = searchEpoch
   /** A body, `null` for an answer that is not 2xx, `undefined` for a request that got no answer. */
   const read = (url) => fetch(url).then((response) => (response.ok ? response.json() : null)).catch(() => undefined)
   const [sessions, treeBody, workspaceBody] = await Promise.all([read('/api/sessions'), read('/api/tree'), read('/api/workspaces')])
+  /** A refresh came while this read was out: it keeps nothing, and answers the newer index, read again if none landed. */
+  if (epoch !== searchEpoch) return searchIndex ?? loadSearchIndex()
   if (!Array.isArray(sessions) || treeBody === undefined || workspaceBody === undefined) return treeIndex() ?? heldIndex
   searchIndex = {
     /**
@@ -18708,8 +18726,8 @@ async function applySearch() {
       title.className = 'hit-title'
       /**
        * DSH's result row: the stored title, else `Untitled` (`dsh-client-ui-workspace` `lib/client.js:2199`; `sessionTitle`,
-       * `:998-999`, is empty for a blank), never the id (#24). Not `WorkspaceTree.sessionLabel`: its `New Session` names
-       * the open blank in the tree, and a hit can be a blank that is not open.
+       * `:998-999`), never the id (#24). `WorkspaceTree.sessionLabel` differs only by the `New Session` it gives the open
+       * blank in the tree, and no blank is a hit, open or not (`WorkspaceTree.search`; DSH skips `summary.blank`, `:1185`).
        */
       title.textContent = WorkspaceTree.storedTitle(meta) ?? 'Untitled'
       const place = document.createElement('span')
@@ -18857,8 +18875,11 @@ document.getElementById('session-search').maxLength = ContentSearch.QUERY_MAX_CO
 async function openSearchResult(id) {
   document.getElementById('session-search').value = ''
   await applySearch()
-  /** A session that could not be loaded, or an open a later one replaced, is not the open one: no row is revealed for it (#56). */
-  if (!(await showSession(id))) return
+  /**
+   * A session that could not be loaded, or an open a later one replaced, is not the open one: no row is revealed for it
+   * (#56). `showSession` can answer true for an open replaced after it drew, so the open session is asked as well.
+   */
+  if (!(await showSession(id)) || current !== id) return
   await revealSession(id)
 }
 
@@ -18866,6 +18887,9 @@ async function openSearchResult(id) {
  * Bring a session's row on screen: every group above it opened, its own group's watermark raised to reach it, the row
  * selected and scrolled into view — DSH's reveal (`lib/client.js:3081` opens the groups, `:2830` raises the watermark at
  * any depth, `:2269` scrolls with `block: 'nearest'`). The tree is re-read once when it does not draw the session yet.
+ *
+ * Only while the session is still the open one: a row the reader opened during a redraw or a group's opening is the
+ * selection, and a reveal that went on would select the other row beside it.
  */
 async function revealSession(id) {
   if (groupingMode === 'list') {
@@ -18874,6 +18898,7 @@ async function revealSession(id) {
     let li = drawn()
     if (li === undefined) {
       await renderTree()
+      if (current !== id) return
       li = drawn()
     }
     li?.querySelector(':scope > .row')?.scrollIntoView({ block: 'nearest' })
@@ -18882,6 +18907,7 @@ async function revealSession(id) {
   let chain = WorkspaceTree.chainTo(treeGroups, id)
   if (chain.length === 0) {
     await renderTree()
+    if (current !== id) return
     chain = WorkspaceTree.chainTo(treeGroups, id)
   }
   if (chain.length === 0) return
@@ -18892,6 +18918,7 @@ async function revealSession(id) {
     if (entry === undefined) return
     if (entry.li.dataset.open !== 'true') {
       await toggle(entry.node, entry.li)
+      if (current !== id) return
     } else if (group === owner) {
       const list = entry.li.querySelector(':scope > ul[role="group"]')
       if (list !== null) paintSessionRows(list, owner, Number(entry.li.style.getPropertyValue('--tree-depth') || '0') + 1)
@@ -18927,6 +18954,13 @@ async function renderFlatList() {
   const index = await loadSearchIndex()
   if (index === null) {
     setNote('could not read the sessions')
+    /**
+     * The redraw still ends as a drawn list's does: the new conversation's place repainted, and the keyboard place it
+     * took let go (`heldTreeFocus`), so no later redraw gives back a stale one. No empty-list placeholder: a read that
+     * failed is not a list with no sessions in it (#58).
+     */
+    paintConversationTarget()
+    restoreTreeFocus(focus, true)
     return
   }
   /**
