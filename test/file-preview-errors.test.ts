@@ -12,6 +12,7 @@ import { readFileText } from '../src/session/tree.ts'
  * A host that can still read mode 000 reports this permission test unjudged (skipped), never passing.
  */
 test('file preview permission refusal is named, path-free and distinct from nonfile/nontext', async (t) => {
+  mkdirSync(resolve('.heddle-tmp'), { recursive: true })
   const scratch = mkdtempSync(join(resolve('.heddle-tmp'), 'file-preview-errors-'))
   const workspace = join(scratch, 'workspace')
   mkdirSync(workspace)
