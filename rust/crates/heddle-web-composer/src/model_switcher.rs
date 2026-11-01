@@ -18,6 +18,7 @@
 //! | `400 {"error":"an endpoint is required"}` | `endpoint` missing or blank |
 //! | `400 {"error":"no endpoint named '<e>'; configured: <a, b>"}` | not one of [`ModelHost::endpoint_names`] |
 //! | `400 {"error":"<selectionProblem>"}` | the model or effort is not one the endpoint declares |
+//! | `409 {"error":…,"code":"session/agent-busy","reason":…}` | [`ModelHost::subagent_owned`]: a subagent's session (#175) |
 //! | `404 {"error":"no session <id>"}` | [`ModelHost::set_session_model`] found no session |
 //! | `200` the session's updated record, pretty | otherwise |
 
@@ -32,7 +33,7 @@ use axum::routing::{get, post};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::http::{error, is_session_id, json_pretty, read_json, trimmed_field};
+use crate::http::{error, is_session_id, json_compact, json_pretty, read_json, trimmed_field};
 use crate::session::SessionLookup;
 
 /// What the model switcher reads from and writes to the running harness.
@@ -62,6 +63,13 @@ pub trait ModelHost: SessionLookup {
     /// `ctx.session.setModel(id, choice)`: record the choice on the session's record and answer the updated
     /// record as JSON, or `None` when there is no such session. Omitted fields clear the session's override.
     fn set_session_model(&self, id: &str, choice: &ModelChoice) -> Option<Value>;
+
+    /// Whether the session is a subagent's (a teammate's included), whose model comes from its delegation, so a
+    /// person's switch is refused (issue #175). The default says no.
+    fn subagent_owned(&self, id: &str) -> bool {
+        let _ = id;
+        false
+    }
 }
 
 /// The endpoints the page may see (`describeEndpoints`' answer).
@@ -160,6 +168,18 @@ pub fn routes<H: ModelHost>(host: Arc<H>) -> axum::Router {
                 move |State(host): State<Arc<H>>, Path(id): Path<String>, body: Bytes| async move {
                     if !is_session_id(&id) {
                         return error(StatusCode::BAD_REQUEST, "not a session id");
+                    }
+                    // DSH's model command is unavailable for an addressed subagent session, and its selectModel
+                    // answers `session/agent-busy` for a session subagent routing owns (issue #175).
+                    if host.subagent_owned(&id) {
+                        return json_compact(
+                            StatusCode::CONFLICT,
+                            &json!({
+                                "error": format!("session \"{id}\" is owned by subagent routing"),
+                                "code": "session/agent-busy",
+                                "reason": "model selection is unavailable for addressed subagent sessions",
+                            }),
+                        );
                     }
                     let body = match read_json(&body) {
                         Ok(body) => body,
