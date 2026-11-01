@@ -8,7 +8,9 @@
 //! 2. **It is shown in a sandboxed iframe** with `allow-same-origin` and no `allow-scripts`, under
 //!    [`PREVIEW_CSP`].
 //! 3. **The server rewrites the document's relative resources** to the route that serves them
-//!    (`/api/raw?path=…`), before the sanitiser sees them.
+//!    (`/api/raw?path=…`), before the sanitiser sees them. The shared page injects no base (#40), as in DSH's
+//!    basic static HTML preview: `base-uri 'none'` stays enforced. CSS url()/@import dependency rewriting is
+//!    not supported; a filesystem-folder base never served those dependencies through the raw route either.
 //!
 //! The page holds the allow-lists itself; these constants are the server's copy of the same policy, kept so
 //! the two can be compared by a test rather than by eye.
@@ -445,6 +447,47 @@ mod tests {
             raw_route("/w/a~b!c(d).png"),
             "/api/raw?path=%2Fw%2Fa~b!c(d).png"
         );
+    }
+
+    #[test]
+    fn base_none_policy_matches_the_shared_preview_without_an_injected_base() {
+        let page = crate::page::PAGE_SOURCE;
+        let start = page.find("async function showHtml(").unwrap();
+        let end = page[start..].find("\n}").unwrap() + start;
+        let show_html = &page[start..end];
+        assert!(PREVIEW_CSP.contains("base-uri 'none'"));
+        for directive in [
+            "default-src 'none'",
+            "script-src 'none'",
+            "frame-src 'none'",
+            "form-action 'none'",
+        ] {
+            assert!(PREVIEW_CSP.contains(directive));
+        }
+        assert!(!ALLOWED_TAGS.contains(&"base"));
+        assert!(
+            show_html.contains("'select', 'base'"),
+            "source base is sanitized"
+        );
+        assert!(
+            !show_html.contains("<base"),
+            "the application must not contradict base-none"
+        );
+        assert!(show_html.contains("htmlView.setAttribute('sandbox', 'allow-same-origin')"));
+    }
+
+    #[test]
+    fn relative_stylesheet_and_images_do_not_require_a_base() {
+        let document = prepare_document(
+            Path::new("/w/docs/index.html"),
+            r#"<link rel="stylesheet" href="theme.css"><img src="a.png"><style>@import "nested.css"; p { background: url(bg.png) }</style>"#,
+            0,
+        );
+        assert!(document.html.contains(r#"href="/api/raw?path=%2Fw%2Fdocs%2Ftheme.css""#));
+        assert!(document.html.contains(r#"src="/api/raw?path=%2Fw%2Fdocs%2Fa.png""#));
+        // Full CSS dependency rewriting remains outside this preview contract.
+        assert!(document.html.contains(r#"@import "nested.css""#));
+        assert!(document.html.contains("url(bg.png)"));
     }
 
     #[test]
