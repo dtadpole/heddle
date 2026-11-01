@@ -254,12 +254,21 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
 fn file_read_error(error: FileReadError) -> Response {
     let (status, code) = match &error {
         FileReadError::Unreadable => (StatusCode::FORBIDDEN, Some("workspace-file/unreadable")),
-        FileReadError::ReadFailed => (StatusCode::INTERNAL_SERVER_ERROR, Some("workspace-file/read-failed")),
+        FileReadError::ReadFailed => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("workspace-file/read-failed"),
+        ),
         FileReadError::NotAFile(_) => (StatusCode::NOT_FOUND, None),
         FileReadError::NotText(_) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, None),
     };
     if let Some(code) = code {
-        json(status, &format!("{}\n", serde_json::json!({ "error": error.to_string(), "code": code })))
+        json(
+            status,
+            &format!(
+                "{}\n",
+                serde_json::json!({ "error": error.to_string(), "code": code })
+            ),
+        )
     } else {
         json_error(status, &error.to_string())
     }
@@ -711,16 +720,35 @@ mod tests {
     #[tokio::test]
     async fn named_read_failures_have_scoped_status_and_no_host_details() {
         for (error, status, code, message) in [
-            (FileReadError::Unreadable, Status::FORBIDDEN, "workspace-file/unreadable", "cannot read file: permission denied"),
-            (FileReadError::ReadFailed, Status::INTERNAL_SERVER_ERROR, "workspace-file/read-failed", "cannot read file: I/O error"),
+            (
+                FileReadError::Unreadable,
+                Status::FORBIDDEN,
+                "workspace-file/unreadable",
+                "cannot read file: permission denied",
+            ),
+            (
+                FileReadError::ReadFailed,
+                Status::INTERNAL_SERVER_ERROR,
+                "workspace-file/read-failed",
+                "cannot read file: I/O error",
+            ),
         ] {
             let response = file_read_error(error);
             assert_eq!(response.status(), status);
             let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), serde_json::json!({ "error": message, "code": code }));
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({ "error": message, "code": code })
+            );
         }
-        assert_eq!(file_read_error(FileReadError::NotAFile("nonfile".into())).status(), Status::NOT_FOUND);
-        assert_eq!(file_read_error(FileReadError::NotText("not text".into())).status(), Status::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            file_read_error(FileReadError::NotAFile("nonfile".into())).status(),
+            Status::NOT_FOUND
+        );
+        assert_eq!(
+            file_read_error(FileReadError::NotText("not text".into())).status(),
+            Status::UNSUPPORTED_MEDIA_TYPE
+        );
     }
 
     /// A host over a real temporary tree: the routes read bytes and text through it, and nothing touches the
