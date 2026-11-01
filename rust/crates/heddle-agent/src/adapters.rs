@@ -196,6 +196,7 @@ impl SessionPort for Sessions {
             endpoint: record.endpoint.clone(),
             model: record.model.clone(),
             reasoning_effort: record.reasoning_effort.clone(),
+            reasoning_effort_default: record.reasoning_effort_default,
             messages: record.messages as u64,
             tools: record.tools.clone(),
             estimated_tokens: Some(record.estimated_tokens),
@@ -396,6 +397,28 @@ impl SubagentStore for SessionSubagents {
             .map_err(port_error)?;
         Ok(event.seq)
     }
+
+    fn open(&self, id: &str) -> Option<SessionHandle> {
+        self.service.open(id)
+    }
+
+    fn close_interrupted(&self, session: &SessionHandle) -> Result<bool, PortError> {
+        // The store's own log, without the closers a read adds while no writer holds it: whether the turn is open
+        // is the question.
+        let store = self.service.store();
+        if store.writer_held(session) {
+            return Ok(false);
+        }
+        let events = store.read(session).map_err(port_error)?;
+        if heddle_session::interrupted_turn_closers(&events).is_empty() {
+            return Ok(false);
+        }
+        // A fresh write-open writes the closers (`SessionStore::claim`); letting go leaves the session as free
+        // as the process that died left it.
+        store.claim(session).map_err(port_error)?;
+        store.release(session);
+        Ok(true)
+    }
 }
 
 /// How the context service names a session, given the loop's handle.
@@ -463,6 +486,8 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
                 summarizer: None,
                 // An ordinary round: the trigger and the retained tail apply.
                 force: false,
+                // The turn's stop token reaches the summary call (#154).
+                cancel: options.cancel.as_ref(),
             };
             self.service
                 .prepare(&handle, &prepared)
@@ -533,6 +558,7 @@ impl<S: ContextStore + 'static> TurnHooks for ContextRecovery<S> {
                 endpoint: &payload.endpoint,
                 model: payload.model.as_deref(),
                 tools: &payload.tools,
+                cancel: payload.cancel.as_ref(),
             };
             match self.service.recover_overflow(&handle, &request).await {
                 Ok(heddle_context::RecoveryDecision::Retry) => Some(RequestErrorAction::Retry),
@@ -793,6 +819,7 @@ pub(crate) mod tests {
                 endpoint: "scripted".into(),
                 model: None,
                 reasoning_effort: None,
+                reasoning_effort_default: None,
                 messages: 3,
                 tools: vec!["read_file".into()],
                 estimated_tokens: 42,
@@ -924,6 +951,7 @@ pub(crate) mod tests {
             model: None,
             tools: Vec::new(),
             system: None,
+            cancel: None,
         }
     }
 
@@ -1098,6 +1126,7 @@ pub(crate) mod tests {
             model: None,
             cwd: std::env::temp_dir(),
             tools: Vec::new(),
+            cancel: None,
         }
     }
 

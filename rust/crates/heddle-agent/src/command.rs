@@ -219,6 +219,21 @@ async fn turn(
     // untitled, as the turn route's is (#68): its first message writes the fallback name and the session layer asks
     // the model for the title (heddle_session::title).
     let folder = context.cwd.to_string_lossy().into_owned();
+    // A new session that names neither an endpoint nor a model starts with the configured default selection (the
+    // model row's defaultModel and defaultEffort, checked against the default endpoint; DSH parity A104). It is
+    // recorded when the session is created, so a later change of default leaves this session as it is, and a session
+    // that already exists keeps what it had. The TypeScript build's `src/cli.ts`.
+    let known: std::collections::HashSet<String> = context
+        .sessions
+        .list()
+        .iter()
+        .map(|meta| meta.id().to_owned())
+        .collect();
+    let defaults = if args.endpoint.is_none() && args.model.is_none() && args.resume.is_none() {
+        context.models.default_selection()
+    } else {
+        heddle_llm::DefaultSelection::default()
+    };
     let handle = match &args.resume {
         Some(resume) => context.sessions.start(StartOptions {
             resume: Some(resume.clone()),
@@ -229,7 +244,8 @@ async fn turn(
             OpenAtOptions {
                 fresh: args.fresh,
                 endpoint: Some(endpoint.clone()),
-                model: args.model.clone(),
+                model: args.model.clone().or_else(|| defaults.model.clone()),
+                reasoning_effort: defaults.reasoning_effort.clone(),
                 ..OpenAtOptions::default()
             },
         ),
@@ -252,7 +268,14 @@ async fn turn(
 
     let mut options = RunTurnOptions::new(handle.clone(), endpoint.clone(), prompt);
     options.system = args.system.clone();
-    options.model = args.model.clone();
+    let created = !known.contains(&handle.id);
+    options.model = args
+        .model
+        .clone()
+        .or_else(|| created.then(|| defaults.model.clone()).flatten());
+    if created {
+        options.reasoning_effort = defaults.reasoning_effort.clone();
+    }
     if let Some(rounds) = args.max_rounds {
         options.max_rounds = RoundLimit::Rounds(rounds);
     }
