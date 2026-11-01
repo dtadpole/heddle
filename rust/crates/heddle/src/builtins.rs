@@ -448,6 +448,12 @@ pub trait Component: Send + Sync {
 pub trait Catalog {
     /// The component for `reference`, or `None` when it cannot be started (its row fails).
     fn component(&self, reference: &ComponentRef) -> Option<Box<dyn Component>>;
+
+    /// How boot judges a row before starting it, so a row the profile patch broke runs on the value
+    /// beneath the patch instead of failing with its dependants pending (#213); `None` judges nothing.
+    fn validation(&self) -> Option<&dyn heddle_config::ComponentCatalog> {
+        None
+    }
 }
 
 /// The binary's own catalog: an adapter per built-in, and the outside-process host for other paths.
@@ -547,6 +553,10 @@ impl Catalog for BuiltinCatalog {
             // is neither, names nothing this binary can start, and its row fails naming itself.
             ComponentRef::Outside(_) | ComponentRef::Unresolved(_) => None,
         }
+    }
+
+    fn validation(&self) -> Option<&dyn heddle_config::ComponentCatalog> {
+        Some(self)
     }
 }
 

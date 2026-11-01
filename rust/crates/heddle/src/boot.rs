@@ -115,6 +115,34 @@ pub fn boot(options: &BootOptions, catalog: &dyn Catalog) -> Result<Boot, BootEr
     layers.extend(options.overrides.iter().cloned());
     let rows = heddle_config::compose(&layers, &options.env)
         .map_err(|error| BootError(error.to_string()))?;
+    // A row the profile patch broke runs on the value beneath the patch instead of failing and leaving
+    // its dependants pending, and each refused row is named once on stderr (#213).
+    let rows = match catalog.validation() {
+        Some(judge) => {
+            let target = heddle_config::settings_target(&options.layers, &layers, &options.env)
+                .filter(|target| {
+                    layers
+                        .get(target.index)
+                        .is_some_and(|layer| std::path::Path::new(&layer.file) == target.path)
+                });
+            let beneath = target.as_ref().and_then(|target| {
+                heddle_config::layers_beneath_settings(&layers, target, &options.env)
+            });
+            let fallback = heddle_config::boot_fallback(
+                &layers,
+                rows,
+                beneath.as_deref(),
+                target.as_ref().map(|target| target.path.as_path()),
+                &options.env,
+                judge,
+            );
+            for note in &fallback.notes {
+                eprintln!("{note}");
+            }
+            fallback.rows
+        }
+        None => rows,
+    };
     // Relative row names resolve against the base layer's own directory, never the working
     // directory: measured in the TypeScript build, and the reason a fixture's `./alpha.ts` means the
     // file beside the layer that wrote it. A tree with no file layer at all has only the working
