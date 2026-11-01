@@ -4201,6 +4201,7 @@ const MESSAGES = Object.freeze({
     'stats.cacheWrite': 'Cache write',
     'stats.output': 'Output',
     'stats.context.used': 'of context used',
+    'stats.context.aria': '{percent} of context used',
     'stats.context.system': 'System prompt',
     'stats.context.tools': 'Tool definitions',
     'stats.context.messages': 'Messages',
@@ -4846,6 +4847,7 @@ const MESSAGES = Object.freeze({
     'stats.cacheWrite': '缓存写入',
     'stats.output': '输出',
     'stats.context.used': '上下文已用',
+    'stats.context.aria': '上下文已用 {percent}',
     'stats.context.system': '系统提示词',
     'stats.context.tools': '工具定义',
     'stats.context.messages': '对话消息',
@@ -12549,7 +12551,16 @@ function updateStatusBar() {
   const contextCell = cell('context')
   const contextGauge = statusBar.querySelector('[data-stat-pill="context"]')
   if (contextCell !== null) contextCell.textContent = percent === null ? '' : `${percent}%`
-  if (contextGauge !== null) contextGauge.hidden = percent === null
+  if (contextGauge !== null) {
+    contextGauge.hidden = percent === null
+    /**
+     * The gauge's name, and its hover tip, say what the figure is: DSH's context meter labels its button and tooltip
+     * "{percent} of context used" (dsh-client-ui-conversation `context.aria`); the figure alone read as a bare "42%".
+     */
+    const label = percent === null ? null : t('stats.context.aria', { percent: `${percent}%` })
+    contextGauge.ariaLabel = label
+    contextGauge.title = label ?? ''
+  }
   if (percent !== null) {
     const ring = cell('context-ring')
     if (ring !== null) {
