@@ -5,7 +5,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * A steer reaches a turn the server did not start (issue #176).
@@ -17,6 +17,11 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, s
  *
  * A Chat Completions double holds the round's first request until the check has steered, then asks for one bash call;
  * the round's next request must carry the steer. Every later request is held, so the goal driver cannot run on.
+ *
+ * A one-shot delegate child is the exception, as on the turn route: DSH's prompt, steer included, answers
+ * `session/agent-busy` for a session that subagent routing owns, before any steer gate (dsh-api-session-controller
+ * lib/index.js:128-142, 925-949). So a steer into a working delegate child is refused with that code, and nothing is
+ * written into the child's turn.
  */
 
 const CAPABILITY = 'the Web UI'
@@ -198,6 +203,55 @@ test('#176: a steer into a running goal round is accepted and reaches the roundâ
   } finally {
     server.kill()
     provider.close()
+    removeDir(home)
+    removeDir(work)
+  }
+})
+
+test('#176: a steer into a working one-shot delegate child is refused as session/agent-busy, as the turn route refuses it', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const home = isolatedHome('steer-delegate-child')
+  const work = fixtureDir('steer-delegate-child-work')
+  mkdirSync(work, { recursive: true })
+  const { config } = scriptedConfig({
+    home,
+    steps: [
+      { toolCall: { name: 'delegate', arguments: { prompt: 'child task' } } },
+      { text: 'parent started the child' },
+      { purpose: 'subagent', toolCall: { name: 'bash', arguments: { command: 'sleep 3; echo child-worked' } } },
+      { purpose: 'subagent', text: 'child answer' },
+      { purpose: 'subagent-notice', text: 'parent read the notice' },
+    ],
+  })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'parent prompt', folder: work, new: true }),
+    })
+    const parent = JSON.parse(/event: session\ndata: (.*)/.exec(await turn.text())?.[1] ?? '{}').session
+    assert.equal(typeof parent, 'string', 'the parent turn named its session')
+    let child
+    const end = Date.now() + 8_000
+    while (child === undefined && Date.now() < end) {
+      const listed = (await api(server.url, cookie, '/api/sessions')).body
+      child = (Array.isArray(listed) ? listed : []).find((entry) => entry.parentSession === parent)?.id
+      if (child === undefined) await sleep(100)
+    }
+    assert.equal(typeof child, 'string', 'the child session is listed under its parent')
+    const steered = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(child)}/steer`, { method: 'POST', body: JSON.stringify({ prompt: 'STEER-176 into the child' }) })
+    assert.equal(steered.status, 409, `the steer is refused\nsaw: ${steered.status} ${JSON.stringify(steered.body)}`)
+    assert.equal(steered.body.code, 'session/agent-busy', `with the turn route's code\nsaw: ${JSON.stringify(steered.body)}`)
+    const read = JSON.stringify((await api(server.url, cookie, `/api/sessions/${encodeURIComponent(child)}`)).body)
+    assert.ok(!read.includes('STEER-176 into the child'), 'and nothing was written into the child')
+  } finally {
+    server.kill()
     removeDir(home)
     removeDir(work)
   }
