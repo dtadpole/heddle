@@ -337,8 +337,19 @@ test('the approval card answers from the keyboard as DSH\'s does: Escape rejects
   assert.match(page, /if \(pending === null \|\| allow\.disabled\) return/, 'which sends one answer at a time')
   assert.match(page, /const card = document\.getElementById\('approval-card'\)\n\s+return card !== null && !card\.hidden/, 'the Esc Esc stop still yields to the card')
   /** The closed card hands the keyboard to the composer, as DSH's composer takes it back, and a held Enter sends once there. */
-  assert.match(page, /const keyboardWasInCard = approvalCard\.contains\(document\.activeElement\)\n\s+allow\.disabled = true/, 'where the keyboard was is read before the buttons go off')
+  assert.match(
+    page,
+    /const keyboardWasInCard = approvalCard\.contains\(document\.activeElement\)\n\s+const keyboardHome = keyboardWasInCard \? document\.activeElement : null\n\s+allow\.disabled = true/,
+    'where the keyboard was is read before the buttons go off',
+  )
   assert.match(page, /hideApproval\(keyboardWasInCard\)/, 'and an answer that lands closes the card with it')
   assert.match(page, /if \(keyboardWasInCard && keyboardLeftFree && !composer\.hidden && !field\.disabled\) field\.focus\(\{ preventScroll: true \}\)/, 'the composer takes the keyboard back')
   assert.match(page, /keyEvent\.preventDefault\(\)\n(?:\s+(?:\/\*\*|\*).*\n)*\s+if \(keyEvent\.repeat\) return\n\s+submitDraft\(/, 'the composer takes a held Enter\'s repeats without sending')
+  /** An answer that does not land gives the keyboard back to where the press came from, or to the composer, and keeps its note. */
+  assert.match(
+    page,
+    /if \(keyboardHome !== null && \(active === null \|\| active === document\.body\)\) \{\n\s+if \(approvalCard\.hidden\) hideApproval\(true\)\n\s+else \(approvalCard\.contains\(keyboardHome\) \? keyboardHome : document\.getElementById\('approval-body'\)\)\.focus\(\{ preventScroll: true \}\)/,
+    'an answer that does not land gives the keyboard back',
+  )
+  assert.match(page, /await refreshApprovals\(\)\n(?:\s+\/\*\*.*\n)?\s+note\.textContent = refusal\n\s+note\.hidden = false/, 'and the refusal\'s note is set after the card is drawn again')
 })

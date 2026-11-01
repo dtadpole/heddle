@@ -18,7 +18,10 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  *
  * When the card closes it hands the keyboard back to the composer, as DSH's composer takes the focus again when the
  * approval's takeover of its slot ends, and the composer takes a held Enter's repeats without sending, as DSH's keymap
- * does, so an Enter still held from the card cannot send the draft.
+ * does, so an Enter still held from the card cannot send the draft. An answer that does not land (the network fails,
+ * the server refuses it, another page answered first) leaves the keyboard on the element the press came from while the
+ * card still shows, or gives it to the composer when the card closed meanwhile, and the card keeps the note that says
+ * what happened.
  *
  * The keys go through the protocol's `Input.dispatchKeyEvent`, so the page receives them as it would from a keyboard,
  * Enter's keypress (a button's native activation) included. Every answer the page posts is recorded, so a key that
@@ -115,7 +118,7 @@ const settle = (ms = 400) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const CARD_SHOWN = 'document.getElementById("approval-card").hidden === false'
 
-test('the approval card answers from the keyboard: Escape rejects, Enter on its body allows once, a button keeps its Enter, and the keyboard returns to the composer', async (t) => {
+test('the approval card answers from the keyboard: Escape rejects, Enter on its body allows once, a button keeps its Enter, and the keyboard returns to the composer or stays in the card', async (t) => {
   if (!skipUnless(t, browserAvailable(), `needs ${CAPABILITY} and a browser`)) return
   const server = await startServer('main')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -123,14 +126,38 @@ test('the approval card answers from the keyboard: Escape rejects, Enter on its 
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
     await browser.waitFor('document.getElementById("composer-card") !== null', 20_000)
-    /** Record every answer the page posts, in order, by wrapping the fetch the card's answer goes through. */
+    /**
+     * Record every answer the page posts, in order, by wrapping the fetch the card's answer goes through. The wrapper
+     * can also make the next answer not land, once: `network` fails the request, `refused` answers 409 while the
+     * question still waits, and `answered-elsewhere` posts the answer for real (as another page would), waits for the
+     * server's settled push to close the card, and then answers this page 409. The first two take a round trip's time,
+     * as a real network does, so the page draws a frame with its buttons off before the answer comes back.
+     */
     await browser.evaluate(`(() => {
       window.__answers = []
+      window.__answerFault = null
       const original = window.fetch
+      const refusal = (error) => new Response(JSON.stringify({ error }), { status: 409, headers: { 'content-type': 'application/json' } })
+      const roundTrip = () => new Promise((resolve) => setTimeout(resolve, 200))
       window.fetch = function (input, init) {
         const url = String(input && input.url !== undefined ? input.url : input)
-        if (url.includes('/api/approvals/') && init && init.method === 'POST') window.__answers.push(JSON.parse(init.body).outcome)
-        return original.apply(this, arguments)
+        const args = arguments
+        if (url.includes('/api/approvals/') && init && init.method === 'POST') {
+          window.__answers.push(JSON.parse(init.body).outcome)
+          const fault = window.__answerFault
+          window.__answerFault = null
+          if (fault === 'network') return roundTrip().then(() => Promise.reject(new TypeError('the check cut the network')))
+          if (fault === 'refused') return roundTrip().then(() => refusal('the check refused this answer'))
+          if (fault === 'answered-elsewhere') {
+            return (async () => {
+              await original.apply(this, args)
+              const card = document.getElementById('approval-card')
+              for (let wait = 0; wait < 100 && !card.hidden; wait += 1) await new Promise((resolve) => setTimeout(resolve, 50))
+              return refusal('that question is no longer waiting')
+            })()
+          }
+        }
+        return original.apply(this, args)
       }
       return true
     })()`)
@@ -245,6 +272,47 @@ test('the approval card answers from the keyboard: Escape rejects, Enter on its 
         field.dispatchEvent(new Event('input', { bubbles: true }))
         return true
       })()`)
+    })
+
+    await t.test('an answer that does not land leaves the keyboard where the press came from, and the note says what happened', async () => {
+      await ask('write outside the workspace, fourth time')
+      const fault = (name) => browser.evaluate(`(() => { window.__answerFault = ${JSON.stringify(name)}; return true })()`)
+      const note = async () =>
+        JSON.parse(await browser.evaluate(`JSON.stringify((() => { const note = document.getElementById('approval-note'); return { shown: !note.hidden, text: note.textContent } })())`))
+      /** Settled: the page has posted `count` answers and has its buttons back, so its answer has run to the end. */
+      const answered = async (count) => {
+        assert.ok(
+          await browser.waitFor(`window.__answers.length === ${count} && document.getElementById('approval-allow').disabled === false`, 10_000),
+          `answer ${count} was posted and the buttons came back`,
+        )
+        await settle(800)
+      }
+
+      /** The network fails: the question still waits, and Reject, which the press came from, has the keyboard again. */
+      assert.equal(await focus('#approval-reject'), true, 'Reject has the focus')
+      await fault('network')
+      await press(browser, 'Escape')
+      await answered(1)
+      assert.equal(await browser.evaluate(CARD_SHOWN), true, 'a failed answer leaves the question waiting')
+      assert.deepEqual(await note(), { shown: true, text: 'could not answer the approval: the check cut the network' }, 'the note says the answer failed')
+      assert.equal(await keyboardAt(), 'approval-reject', 'and the keyboard is back on Reject, not on the page')
+
+      /** The server refuses while the question still waits: the card is drawn again and keeps the refusal's note. */
+      assert.equal(await focus('#approval-allow'), true, 'Allow once has the focus')
+      await fault('refused')
+      await press(browser, 'Escape')
+      await answered(2)
+      assert.equal(await browser.evaluate(CARD_SHOWN), true, 'a refused answer leaves the question waiting')
+      assert.deepEqual(await note(), { shown: true, text: 'the check refused this answer' }, 'the note says what the server said, after the card is drawn again')
+      assert.equal(await keyboardAt(), 'approval-allow', 'and the keyboard is back on Allow once')
+
+      /** Another page answers first: the card closes under the press, and the keyboard goes to the composer. */
+      await fault('answered-elsewhere')
+      await press(browser, 'Escape')
+      await settledTurn()
+      await answered(3)
+      assert.equal(await keyboardAt(), 'composer', 'the card that closed meanwhile hands the keyboard to the composer')
+      assert.deepEqual(await answers(), ['rejected', 'rejected', 'rejected'], 'every press rejected, once each')
     })
 
     await t.test('the keyboard reference lists the card\'s keys as "Approval area"', async () => {

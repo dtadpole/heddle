@@ -204,4 +204,17 @@ fn the_approval_card_answers_from_the_keyboard() {
         PAGE_SOURCE.contains("  if (keyEvent.repeat) return\n  submitDraft("),
         "a held Enter sends once"
     );
+    assert!(
+        PAGE_SOURCE
+            .contains("const keyboardHome = keyboardWasInCard ? document.activeElement : null"),
+        "an answer remembers the element the press came from"
+    );
+    assert!(
+        PAGE_SOURCE.contains("if (approvalCard.hidden) hideApproval(true)"),
+        "an answer that does not land gives the keyboard back, to the composer when the card closed"
+    );
+    assert!(
+        PAGE_SOURCE.contains("    note.textContent = refusal\n    note.hidden = false"),
+        "the refusal's note is set after the card is drawn again"
+    );
 }

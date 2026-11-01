@@ -20383,6 +20383,10 @@ function hideApproval(keyboardWasInCard = approvalCard.contains(document.activeE
  * question, an ask already timed out) is refused with 409, and hiding the card on that would leave the turn waiting
  * with no visible cause — the owner's "approved but still stuck". On a refusal the card is refreshed from the pending
  * list so it shows the question that is actually waiting, and the note says what happened.
+ *
+ * An answer that does not land leaves the keyboard where the press came from (#158): the buttons the answer turned off
+ * gave the focus to the page, so it goes back to the same element while the card still shows, or to the composer when
+ * the card closed meanwhile (another page answered first). An answer that lands has already handed it to the composer.
  */
 async function answerApproval(outcome) {
   const pending = approvalPending
@@ -20392,6 +20396,7 @@ async function answerApproval(outcome) {
   if (pending === null || allow.disabled) return
   /** Read before the buttons go off: a focused button that is disabled hands the focus to the page. */
   const keyboardWasInCard = approvalCard.contains(document.activeElement)
+  const keyboardHome = keyboardWasInCard ? document.activeElement : null
   allow.disabled = true
   reject.disabled = true
   const note = document.getElementById('approval-note')
@@ -20407,15 +20412,22 @@ async function answerApproval(outcome) {
       void refreshApprovals(false)
       return
     }
-    note.textContent = body.error ?? 'that answer did not land: the question is no longer waiting'
-    note.hidden = false
+    const refusal = body.error ?? 'that answer did not land: the question is no longer waiting'
     await refreshApprovals()
+    /** Said after the refresh: a card drawn again for the question still waiting clears the note it finds. */
+    note.textContent = refusal
+    note.hidden = false
   } catch (error) {
     note.textContent = `could not answer the approval: ${(error && error.message) || error}`
     note.hidden = false
   } finally {
     allow.disabled = false
     reject.disabled = false
+    const active = document.activeElement
+    if (keyboardHome !== null && (active === null || active === document.body)) {
+      if (approvalCard.hidden) hideApproval(true)
+      else (approvalCard.contains(keyboardHome) ? keyboardHome : document.getElementById('approval-body')).focus({ preventScroll: true })
+    }
   }
 }
 document.getElementById('approval-allow').addEventListener('click', () => void answerApproval('allowed-once'))
