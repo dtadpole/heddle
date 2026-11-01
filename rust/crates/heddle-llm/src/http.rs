@@ -662,6 +662,7 @@ mod tests {
     #[test]
     fn a_transport_error_says_its_whole_cause_chain_without_repeating_a_link() {
         // #217: reqwest says only "error sending request for url (...)"; the reason is in its sources.
+        // The chain a refused connection really has, and a last link that repeats the one before it.
         let chain = Link(
             "error sending request for url (http://127.0.0.1:9/v1/chat/completions)",
             Some(Box::new(Link(
@@ -669,7 +670,7 @@ mod tests {
                 Some(Box::new(Link(
                     "tcp connect error",
                     Some(Box::new(Link(
-                        "tcp connect error: Connection refused (os error 61)",
+                        "Connection refused (os error 61)",
                         Some(Box::new(Link("Connection refused (os error 61)", None))),
                     ))),
                 ))),
@@ -677,7 +678,7 @@ mod tests {
         );
         assert_eq!(
             cause_chain(&chain),
-            "error sending request for url (http://127.0.0.1:9/v1/chat/completions): client error (Connect): tcp connect error: tcp connect error: Connection refused (os error 61)"
+            "error sending request for url (http://127.0.0.1:9/v1/chat/completions): client error (Connect): tcp connect error: Connection refused (os error 61)"
         );
         assert_eq!(cause_chain(&Link("alone", None)), "alone");
         assert_eq!(
