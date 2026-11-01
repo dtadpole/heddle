@@ -1280,7 +1280,7 @@ mod tests {
             ids: Arc::new(SequentialIds::new()),
         });
         let fresh = service
-            .spawn(&"session-lead".to_owned(), spawn_request("scout", "go"))
+            .spawn("session-lead", spawn_request("scout", "go"))
             .unwrap();
         let meta = store.session(&fresh.id).unwrap().meta;
         assert_eq!(meta.endpoint.as_deref(), Some("scripted"));
