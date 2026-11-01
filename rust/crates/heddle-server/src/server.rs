@@ -63,7 +63,7 @@ use crate::runs::{RunRegistry, iso_time};
 use crate::selection::{SessionSelection, session_request_selection, turn_selection};
 use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
-    ServiceError, SessionMeta, StartSession,
+    ServiceError, SessionMeta, SessionService, StartSession,
 };
 use crate::stream::{self, EventHub, SseFrame, names, sse_response};
 use crate::terminals::{
@@ -259,6 +259,9 @@ struct Shared {
     port: u16,
     /// The page's interactive terminals, per session (#85).
     terminals: TerminalRegistry,
+    /// Whether the session service announces every title it writes, which this server pushes as `session/renamed`
+    /// (#33). When it does not, the rename route pushes its own rename.
+    renames_announced: bool,
 }
 
 impl AppState {
@@ -388,6 +391,21 @@ impl ServerBuilder {
             .token
             .clone()
             .unwrap_or_else(token::create_launch_token);
+        // Every title the session store writes reaches every page as `session/renamed` (#33). DSH records each title
+        // change and every view of the session follows (inventory-shell S16). That covers a person's rename, the first
+        // message's fallback and the title model's answer, so the push comes from the store, as `web.ts` hears its
+        // `session/renamed` event, not from the rename route alone.
+        let renames_announced = {
+            let hub = self.events.clone();
+            self.harness
+                .sessions
+                .on_renamed(Arc::new(move |session: &str, title: &str| {
+                    hub.push(
+                        "sessions",
+                        &json!({"type": "session/renamed", "session": session, "title": title}),
+                    );
+                }))
+        };
         let state = AppState {
             inner: Arc::new(Shared {
                 harness: self.harness,
@@ -399,6 +417,7 @@ impl ServerBuilder {
                 secret,
                 port,
                 terminals: TerminalRegistry::default(),
+                renames_announced,
             }),
         };
 
@@ -1552,10 +1571,16 @@ async fn title_session(
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
             }
-            state.events().push(
-                "sessions",
-                &json!({"type": "session/renamed", "session": id.as_str(), "title": title}),
-            );
+            // A store that announces its titles has pushed this one already (#33). Otherwise the push names the
+            // title cleaned as the store cleans what it keeps, as the announcing store and the TypeScript server do,
+            // not the raw body.
+            if !state.inner.renames_announced {
+                let kept = heddle_session::title_text::clean_session_title(&title);
+                state.events().push(
+                    "sessions",
+                    &json!({"type": "session/renamed", "session": id.as_str(), "title": kept}),
+                );
+            }
             respond::json(StatusCode::OK, &meta)
         }
     }
@@ -1668,6 +1693,28 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    // A folder that is gone (#141) is judged before it is read, as web.ts does: under a root it is `404` with DSH's
+    // `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the
+    // folder is gone instead of listing it empty; outside every root it is the `400` below. It is placed through
+    // the real path of what still exists, so a spelling through a link (`/tmp/x/w` for `/private/tmp/x/w`) is the
+    // same folder.
+    if let Some(raw) = query.get("path").filter(|path| !path.is_empty()) {
+        let located = heddle_config::canonical_path_through_ancestors(std::path::Path::new(raw));
+        if !located.exists() {
+            return if workspaces.owns(&located) {
+                respond::error_with_code(
+                    StatusCode::NOT_FOUND,
+                    format!("no entry at \"{}\"", located.display()),
+                    "workspace-file/not-found",
+                )
+            } else {
+                respond::error(
+                    StatusCode::BAD_REQUEST,
+                    format!("{} is not under any workspace root", located.display()),
+                )
+            };
+        }
+    }
     let path = query
         .get("path")
         .filter(|path| !path.is_empty())
@@ -1855,8 +1902,19 @@ async fn insert_workspace_before(State(state): State<AppState>, body: JsonBody) 
             );
         }
     };
-    match workspaces.insert_before(id, before) {
-        Ok(order) => respond::json(StatusCode::OK, &json!({"workspaceIds": order})),
+    match workspaces.reorder(id, before) {
+        Ok((order, moved)) => {
+            // Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an
+            // added, renamed or removed workspace is; a move that changes nothing is not announced, as DSH's
+            // registry writes nothing then (dsh-workspace lib/index.js:484, :492). web.ts pushes the same frame.
+            if moved {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/reordered", "workspaceIds": order}),
+                );
+            }
+            respond::json(StatusCode::OK, &json!({"workspaceIds": order}))
+        }
         Err(error) if error.code.as_deref() == Some("workspace/not-found") => {
             service_refusal(error, StatusCode::NOT_FOUND)
         }
@@ -2442,6 +2500,48 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let runner = state.harness().turns.clone();
     let sessions = state.harness().sessions.clone();
+    if body.bool("detach") == Some(true) {
+        // Detached (#128): the answer is `202 {session, turn}` once the turn's first event is in the log, normally
+        // its prompt, and the turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six
+        // connections per host, shared by every tab, and a turn that holds its own response open for minutes
+        // holds one of them, so five running turns stalled every other request of the page. Answering only after
+        // the first event keeps what the streamed answer's first frame meant: the page adopts a session it created
+        // from this answer and redraws the log from its history, so an earlier answer lost the person's message.
+        // The verdict goes through the hub's log after every event the turn published, so it is replayed to a page
+        // that reconnects and never arrives before the answer it closes. Without `detach` the response streams.
+        let turn_id = stream::new_client_id();
+        let hub = state.events().clone();
+        let mut first = Box::pin(state.events().subscribe().for_session(session.clone()));
+        let (ended, ended_signal) = tokio::sync::oneshot::channel::<()>();
+        let turn_session = session.clone();
+        let verdict_turn = turn_id.clone();
+        tokio::spawn(async move {
+            let outcome = runner.run_turn(request).await;
+            let _ = ended.send(());
+            drop(guard);
+            let (outcome_name, mut verdict, failure) =
+                turn_verdict(outcome, cancel.is_cancelled(), &turn_session, false);
+            verdict.insert("turn".into(), Value::String(verdict_turn));
+            verdict.insert("outcome".into(), Value::String(outcome_name.to_owned()));
+            hub.push(names::TURN, &Value::Object(verdict));
+            if let Some(message) = failure {
+                record_turn_failure(sessions.as_ref(), &turn_session, message);
+            }
+        });
+        // The first event, the turn's end, or 10 s behind another turn of the session, whichever comes first.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            use futures::StreamExt;
+            tokio::select! {
+                _ = first.next() => {}
+                _ = ended_signal => {}
+            }
+        })
+        .await;
+        return respond::json(
+            StatusCode::ACCEPTED,
+            &json!({"session": session, "turn": turn_id}),
+        );
+    }
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
@@ -2486,57 +2586,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         // stream had taken the text (16db838) made a page more likely to handle `done` mid-answer, which is
         // the window in which page.html's renderSettledAnswers overwrites a growing row (80 check-chat-view
         // #16): measured on a cold-browser harness, 5 failures in 200 with the wait and 1 in 200 without.
-        let stopped = || {
-            SseFrame::new(
-                names::CANCELLED,
-                &json!({"session": stream_session, "message": "stopped"}),
-            )
-        };
-        match outcome {
-            None => {}
-            Some(Ok(outcome)) => {
-                if cancel.is_cancelled() {
-                    let _ = sender.send(stopped());
-                } else {
-                    let mut done = Map::new();
-                    done.insert("session".into(), Value::String(stream_session));
-                    done.insert("text".into(), Value::String(outcome.text));
-                    done.insert("finishReason".into(), Value::String(outcome.finish_reason));
-                    done.insert("rounds".into(), Value::from(outcome.rounds));
-                    done.insert("denials".into(), Value::Array(outcome.denials));
-                    if let Some(ended) = outcome.ended {
-                        done.insert(
-                            "ended".into(),
-                            Value::Array(ended.into_iter().map(Value::String).collect()),
-                        );
-                    }
-                    if let Some(usage) = outcome.usage {
-                        done.insert("usage".into(), usage);
-                    }
-                    let _ = sender.send(SseFrame::new(names::DONE, &Value::Object(done)));
-                }
-            }
-            Some(Err(error)) => {
-                if cancel.is_cancelled() {
-                    let _ = sender.send(stopped());
-                } else {
-                    let _ = sender.send(SseFrame::new(
-                        names::ERROR,
-                        &json!({"session": stream_session, "message": error.message.clone()}),
-                    ));
-                    // Recorded as well, so the failure reaches every client and every later read
-                    // (R-developer-six-2, DSH's api-session/error); web.ts appends the same `turn/failed`.
-                    if let Err(failure) = sessions.record(
-                        &stream_session,
-                        "turn/failed",
-                        json!({"message": error.message}),
-                    ) {
-                        eprintln!(
-                            "heddle web: the failed turn could not be recorded: {}",
-                            failure.message
-                        );
-                    }
-                }
+        if let Some(outcome) = outcome {
+            let (name, frame, failure) =
+                turn_verdict(outcome, cancel.is_cancelled(), &stream_session, true);
+            let _ = sender.send(SseFrame::new(name, &Value::Object(frame)));
+            if let Some(message) = failure {
+                record_turn_failure(sessions.as_ref(), &stream_session, message);
             }
         }
     });
@@ -2544,6 +2599,60 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         receiver.recv().await.map(|frame| (frame, receiver))
     });
     sse_response(stream)
+}
+
+/// The frame a turn ends with, `(name, data, failure)`: `done` with what the loop returned, `cancelled` for a
+/// stopped turn (including a loop that noticed the abort and returned a result), or `error`, whose message
+/// comes back as `failure` for the caller to record as `turn/failed`. `with_text` is false for a detached
+/// turn's verdict on `/api/events`, which already carried the answer as the session's own events, so the
+/// stream's log does not keep a second copy (web.ts's `turnVerdict` is the same rule).
+fn turn_verdict(
+    outcome: Result<crate::services::TurnOutcome, ServiceError>,
+    cancelled: bool,
+    session: &str,
+    with_text: bool,
+) -> (&'static str, Map<String, Value>, Option<String>) {
+    let mut frame = Map::new();
+    frame.insert("session".into(), Value::String(session.to_owned()));
+    if cancelled {
+        frame.insert("message".into(), Value::String("stopped".into()));
+        return (names::CANCELLED, frame, None);
+    }
+    match outcome {
+        Ok(outcome) => {
+            if with_text {
+                frame.insert("text".into(), Value::String(outcome.text));
+            }
+            frame.insert("finishReason".into(), Value::String(outcome.finish_reason));
+            frame.insert("rounds".into(), Value::from(outcome.rounds));
+            frame.insert("denials".into(), Value::Array(outcome.denials));
+            if let Some(ended) = outcome.ended {
+                frame.insert(
+                    "ended".into(),
+                    Value::Array(ended.into_iter().map(Value::String).collect()),
+                );
+            }
+            if let Some(usage) = outcome.usage {
+                frame.insert("usage".into(), usage);
+            }
+            (names::DONE, frame, None)
+        }
+        Err(error) => {
+            frame.insert("message".into(), Value::String(error.message.clone()));
+            (names::ERROR, frame, Some(error.message))
+        }
+    }
+}
+
+/// Record a failed turn as `turn/failed`, so the failure reaches every client and every later read
+/// (R-developer-six-2, DSH's api-session/error); web.ts appends the same record.
+fn record_turn_failure(sessions: &dyn SessionService, session: &str, message: String) {
+    if let Err(failure) = sessions.record(session, "turn/failed", json!({"message": message})) {
+        eprintln!(
+            "heddle web: the failed turn could not be recorded: {}",
+            failure.message
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -3955,6 +4064,121 @@ mod tests {
         );
     }
 
+    /// A registry double that keeps an order and says whether a move moved it, as `heddle_workspace`'s
+    /// `reorder` does.
+    struct KeptOrder {
+        order: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::WorkspaceService for KeptOrder {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn reorder(
+            &self,
+            id: &str,
+            before: Option<&str>,
+        ) -> Result<(Vec<String>, bool), ServiceError> {
+            let mut order = self.order.lock().unwrap();
+            if before == Some(id) {
+                return Ok((order.clone(), false));
+            }
+            let mut moved: Vec<String> = order.iter().filter(|each| *each != id).cloned().collect();
+            let at = before
+                .and_then(|anchor| moved.iter().position(|each| each == anchor))
+                .unwrap_or(moved.len());
+            moved.insert(at, id.to_owned());
+            let changed = moved != *order;
+            *order = moved.clone();
+            Ok((moved, changed))
+        }
+    }
+
+    /// A move is pushed to every open page as a `workspace` frame naming the order (#136), as an added, renamed
+    /// or removed workspace is; a move that changes nothing pushes nothing, as DSH's registry writes nothing then
+    /// (dsh-workspace lib/index.js:484, :492).
+    #[tokio::test]
+    async fn a_workspace_move_is_pushed_and_a_move_that_moves_nothing_is_not() {
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(KeptOrder {
+            order: std::sync::Mutex::new(vec!["w-1".into(), "w-2".into(), "w-3".into()]),
+        }));
+        let (router, state) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-order-push")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let post = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            async move {
+                let (status, _) =
+                    post_json(&router, "/api/workspaces/insertBefore", &cookie, body).await;
+                status
+            }
+        };
+
+        assert_eq!(
+            post(r#"{"workspaceId":"w-3","beforeWorkspaceId":"w-1"}"#).await,
+            StatusCode::OK
+        );
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "workspace");
+        assert_eq!(
+            data,
+            json!({"type": "workspace/reordered", "workspaceIds": ["w-3", "w-1", "w-2"]})
+        );
+        assert!(id.is_some(), "numbered, so a reconnecting page is given it");
+
+        // Itself as the anchor, then the last one last: answered, and nothing pushed for either.
+        for body in [
+            r#"{"workspaceId":"w-2","beforeWorkspaceId":"w-2"}"#,
+            r#"{"workspaceId":"w-2"}"#,
+        ] {
+            assert_eq!(post(body).await, StatusCode::OK, "{body}");
+        }
+        assert_eq!(post(r#"{"workspaceId":"w-3"}"#).await, StatusCode::OK);
+        let (_, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            data["workspaceIds"],
+            json!(["w-1", "w-2", "w-3"]),
+            "the next frame is the next real move: the two that moved nothing pushed nothing"
+        );
+    }
+
     /// A registry with one root: it owns what is at or under that folder, and records every tree it
     /// is asked for, so a test can tell a refusal from a listing that was read and then dropped.
     struct OneRoot {
@@ -4079,6 +4303,119 @@ mod tests {
                 "{uri}"
             );
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A folder that is gone (#141): under a root it is web.ts's `404 workspace-file/not-found`, DSH's code
+    /// (dsh-api-workspace-files lib/index.js:568), however it is spelled — the stored path, or one through a link,
+    /// which the lexical fallback of `canonical_path` keeps once the folder is gone; behind a link out of every root,
+    /// or outside them, it is the `400` naming where it lands. Nothing is handed to the tree.
+    #[tokio::test]
+    async fn the_tree_route_says_a_folder_that_is_gone_is_not_found_under_its_root() {
+        let base = std::env::temp_dir().join(format!(
+            "heddle-tree-gone-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("real").join("root").join("inner")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("alias")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("elsewhere"),
+            base.join("real").join("root").join("way-out"),
+        )
+        .unwrap();
+        let canonical = std::fs::canonicalize(&base).unwrap();
+        let root = canonical.join("real").join("root");
+        let registry = Arc::new(OneRoot {
+            root: root.clone(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_root = harness();
+        with_root.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_root,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("tree-gone")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let tree = |path: &Path| format!("/api/tree?path={}", query_value(path));
+
+        for (what, asked, at) in [
+            (
+                "a folder never made inside the root",
+                root.join("never-made"),
+                root.join("never-made"),
+            ),
+            (
+                "the same spelled through a link",
+                base.join("alias").join("root").join("never-made"),
+                root.join("never-made"),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &tree(&asked), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{what}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"no entry at \\\"{}\\\"\",\"code\":\"workspace-file/not-found\"}}\n",
+                    at.display()
+                ),
+                "{what} gets DSH's code and web.ts's sentence"
+            );
+        }
+        for (what, asked, at) in [
+            (
+                "a folder that is gone behind a link out of the root",
+                root.join("way-out").join("never-made"),
+                canonical.join("elsewhere").join("never-made"),
+            ),
+            (
+                "a folder that is gone outside every root",
+                canonical.join("nowhere").join("deeper"),
+                canonical.join("nowhere").join("deeper"),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &tree(&asked), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{what}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"{} is not under any workspace root\"}}\n",
+                    at.display()
+                ),
+                "{what} is judged where it lands"
+            );
+        }
+        assert!(
+            registry.asked.lock().unwrap().is_empty(),
+            "a folder that is gone is never handed to the tree"
+        );
+
+        // The root's own folder, gone: still the root's, and not found.
+        std::fs::remove_dir_all(&root).unwrap();
+        let (status, _, bytes) = call(&router, Method::GET, &tree(&root), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("workspace-file/not-found"));
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -5086,6 +5423,177 @@ mod tests {
         assert!(!state.runs().is_running(&session));
     }
 
+    /// A turn runner that publishes one delta, then waits until the test releases it, so a detached turn can be
+    /// watched while it is still running (#128).
+    struct HeldTurns {
+        hub: Arc<std::sync::OnceLock<EventHub>>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl TurnRunner for HeldTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let hub = Arc::clone(&self.hub);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                let publish = |event: Value| {
+                    if let Some(hub) = hub.get() {
+                        hub.publish_session_event(&request.session, &event);
+                    }
+                };
+                publish(
+                    json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "held"}}),
+                );
+                release.notified().await;
+                publish(json!({"type": "turn/completed"}));
+                Ok(TurnOutcome {
+                    text: "held".into(),
+                    finish_reason: "stop".into(),
+                    rounds: 1,
+                    denials: vec![json!({"tool": "bash", "code": "denied", "message": "no"})],
+                    ended: Some(vec!["max-rounds".into()]),
+                    usage: None,
+                })
+            })
+        }
+    }
+
+    /// A browser allows six connections per host across all its tabs, so a turn that keeps its response open
+    /// holds one for as long as it runs (#128). Detached, the turn answers `202 {session, turn}` while it is
+    /// still running, and its verdict is a numbered `turn` frame on `/api/events`, after the turn's own events
+    /// and without the answer's text.
+    #[tokio::test]
+    async fn a_detached_turn_answers_at_acceptance_and_its_verdict_follows_its_events() {
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut held = harness();
+        held.turns = Arc::new(HeldTurns {
+            hub: Arc::clone(&hub),
+            release: Arc::clone(&release),
+        });
+        let builder = ServerBuilder::new(
+            held,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached")),
+                ..ServerOptions::default()
+            },
+        );
+        let _ = hub.set(builder.events());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, bytes) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            post_json(
+                &router,
+                "/api/turn",
+                &cookie,
+                r#"{"prompt":"go","detach":true}"#,
+            ),
+        )
+        .await
+        .expect("the answer came while the turn was still running");
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let session = body["session"].as_str().expect("the session").to_owned();
+        let turn = body["turn"].as_str().expect("the turn id").to_owned();
+        assert!(!turn.is_empty());
+        assert!(state.runs().is_running(&session), "accepted and running");
+        // The answer came after the turn's first event, which is already on the stream.
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            (event.as_str(), data["event"]["type"].as_str()),
+            ("session", Some("assistant/chunk")),
+            "the turn's first event precedes its 202"
+        );
+
+        release.notify_one();
+        let mut seen = Vec::new();
+        let verdict = loop {
+            let (event, data, id) = next_pushed(&mut pushed).await;
+            match event.as_str() {
+                "turn" => {
+                    assert!(id.is_some(), "numbered, so a reconnect replays it");
+                    break data;
+                }
+                "session" => seen.push(data["event"]["type"].as_str().unwrap_or("").to_owned()),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            seen,
+            vec!["turn/completed"],
+            "the verdict follows the turn's own events"
+        );
+        assert_eq!(verdict["turn"], json!(turn));
+        assert_eq!(verdict["outcome"], json!("done"));
+        assert_eq!(verdict["session"], json!(session));
+        assert_eq!(verdict["denials"][0]["tool"], json!("bash"));
+        assert_eq!(verdict["ended"], json!(["max-rounds"]));
+        assert!(verdict.get("text").is_none(), "{verdict}");
+        assert!(!state.runs().is_running(&session));
+    }
+
+    /// A detached turn that fails pushes an `error` verdict with the failure, and records `turn/failed` as the
+    /// streaming route does.
+    #[tokio::test]
+    async fn a_detached_turn_that_fails_pushes_an_error_verdict_and_is_recorded() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, state) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session, "detach": true}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let verdict = loop {
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            if event == "turn" {
+                break data;
+            }
+        };
+        assert_eq!(verdict["outcome"], json!("error"));
+        assert_eq!(verdict["session"], json!(session));
+        assert_eq!(verdict["message"], json!("upstream answered 502"));
+        for _ in 0..100 {
+            if !sessions.recorded.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            sessions.recorded.lock().unwrap().clone(),
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn a_stop_cancels_the_running_turn() {
         let (router, state) = app("stop");
@@ -5965,7 +6473,7 @@ mod tests {
             &router,
             &format!("/api/sessions/{session}/title"),
             &cookie,
-            r#"{"title":"renamed"}"#,
+            r#"{"title":"  renamed \u0007  "}"#,
         )
         .await;
         assert_eq!(status, StatusCode::OK);
@@ -5973,7 +6481,8 @@ mod tests {
         assert_eq!(event, "sessions");
         assert_eq!(
             data,
-            json!({"type": "session/renamed", "session": session, "title": "renamed"})
+            json!({"type": "session/renamed", "session": session, "title": "renamed"}),
+            "the push names the title cleaned as the store keeps it, not the raw body"
         );
         assert!(
             id.is_some(),
@@ -6335,6 +6844,33 @@ mod tests {
                 .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
             "{turns:?}"
         );
+
+        // #33: a store that announces its titles pushes a person's rename exactly once, as the store kept it
+        // (cleaned); the route adds no second push.
+        let mut renamed = state.events().subscribe();
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/title"),
+            &cookie,
+            r#"{"title":"  Loom   notes  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut pushed = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), renamed.next_frame()).await
+        {
+            if frame.event == "sessions"
+                && frame.data.contains("session/renamed")
+                && frame.data.contains("Loom")
+            {
+                pushed.push(frame.data);
+            }
+        }
+        assert_eq!(pushed.len(), 1, "one push per rename: {pushed:?}");
+        let data: Value = serde_json::from_str(&pushed[0]).unwrap();
+        assert_eq!(data["session"], id.as_str());
+        assert_eq!(data["title"], "Loom notes", "the title the store kept");
         std::fs::remove_dir_all(&scratch).ok();
     }
 

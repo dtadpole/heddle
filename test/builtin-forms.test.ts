@@ -47,3 +47,23 @@ test('the Rust build\'s embedded projections are exactly what the TypeScript sch
     "rust/crates/heddle-config/src/builtin_forms.json is stale: run HEDDLE_HOME='$HEDDLE_HOME' node src/config/builtin-forms.ts --write",
   )
 })
+
+test('every built-in row the project patch loads that declares a Config is listed, so neither build loses its form', async () => {
+  /**
+   * A row added to heddle.patch.yml with a Config but missing from BUILTIN_MODULES gets a form in TypeScript (read at
+   * run time) and none in Rust (read from builtin_forms.json), which check-settings-forms then catches on main. Found
+   * when questions/service arrived without a listing.
+   */
+  const { BUILTIN_MODULES } = await import('../src/config/builtin-forms.ts')
+  const { findSchema } = await import('../src/config/validate.ts')
+  const root = join(import.meta.dirname, '..')
+  const patch = readFileSync(join(root, 'heddle.patch.yml'), 'utf8') + readFileSync(join(root, 'cordis.yml'), 'utf8')
+  const modules = [...new Set([...patch.matchAll(/name: \.\/src\/([\w/-]+)\.ts/g)].map((match) => match[1]!))]
+  const missing: string[] = []
+  for (const module of modules) {
+    if ((BUILTIN_MODULES as readonly string[]).includes(module)) continue
+    const loaded = (await import(join(root, 'src', `${module}.ts`))) as Record<string, unknown>
+    if (findSchema(loaded) !== undefined) missing.push(module)
+  }
+  assert.deepEqual(missing, [], 'add these to BUILTIN_MODULES and regenerate builtin_forms.json')
+})
