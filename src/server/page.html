@@ -7600,6 +7600,10 @@ function renderTimeline(timeline_, data = {}) {
       return
     }
     if (trajectory.window !== undefined && index < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, index))
+    /**
+     * A folded turn opens to show the row, and stays open, by decision: a window's lit rows would otherwise be hidden in
+     * the fold, and the reader came for them (developer-ten's N2 on N8).
+     */
     if (rowFolded(trajectory.rows[index], trajectory.collapsedTurns, trajectory.expanded)) {
       trajectory.expanded.add(turn)
       renderRows()
@@ -7630,15 +7634,25 @@ function renderTimeline(timeline_, data = {}) {
     showRecord(turn, tick.dataset.lane, rank0, false)
   }
   /**
-   * A click that a pointer made was picked at its release (`onpointerup`), so only a click with no pointer is picked
-   * here: Enter or Space on the focused bar, which a button turns into a click, or a script's.
+   * A pointer's gesture is picked or committed at its release (`onpointerup`), which marks it here so the click that
+   * follows is not picked again; any other click is a pick: Enter or Space on the focused bar, which a button turns into
+   * a click, an assistive technology's press, or a script's (developer-ten's N1 on N8: a press need not come with a
+   * click count of 0). The mark is spent by that click wherever it lands, and a new press or key clears a stale one.
    */
+  let pickedByPointer = false
   wrapper.addEventListener('click', (clickEvent) => {
     const tick = tickOf(clickEvent.target)
     if (tick === null) return
     clickEvent.stopPropagation()
-    if (clickEvent.detail === 0) pickBar(tick)
+    if (pickedByPointer) {
+      pickedByPointer = false
+      return
+    }
+    pickBar(tick)
   })
+  timeline.onclick = () => {
+    pickedByPointer = false
+  }
   /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
   wrapper.addEventListener('pointerenter', (pointerEvent) => {
     const tick = pointerEvent.target?.classList?.contains('tr-tick') ? pointerEvent.target : null
@@ -7735,6 +7749,7 @@ function renderTimeline(timeline_, data = {}) {
     if (pointerEvent.button !== 0) return
     /** A press anywhere starts a drag, on a bar too, as on DSH's track; a release within 3 px of it is a click. */
     const tick = tickOf(pointerEvent.target)
+    pickedByPointer = false
     state.press = { x: pointerEvent.clientX, bar: tick === null ? null : { turn: tick.dataset.turn, lane: tick.dataset.lane, rank: Number(tick.dataset.rank0) } }
     state.drag = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     state.focus = { from: state.drag, to: state.drag }
@@ -7784,6 +7799,7 @@ function renderTimeline(timeline_, data = {}) {
      */
     if (press !== null && Math.abs(pointerEvent.clientX - press.x) < 3) {
       const tick = press.bar === null ? undefined : [...wrapper.querySelectorAll('.tr-tick')].find((each) => holds(each, press.bar))
+      pickedByPointer = true
       if (tick !== undefined) {
         pickBar(tick)
         return
@@ -7793,6 +7809,7 @@ function renderTimeline(timeline_, data = {}) {
       if (nearest !== -1) showRecord(placed[nearest].turn, placed[nearest].lane, rankOf[nearest], false)
       return
     }
+    pickedByPointer = true
     commitWindow(Math.min(start, x), Math.max(start, x))
   }
   /**
@@ -7805,6 +7822,7 @@ function renderTimeline(timeline_, data = {}) {
     if (tick !== null && tick.tabIndex !== 0) makeStop(tick)
   })
   wrapper.addEventListener('keydown', (keyEvent) => {
+    pickedByPointer = false
     if (keyEvent.altKey || keyEvent.ctrlKey || keyEvent.metaKey || keyEvent.isComposing) return
     if (keyEvent.key === 'Escape') {
       if (state.focus === null) return
