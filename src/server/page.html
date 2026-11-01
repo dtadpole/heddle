@@ -3889,18 +3889,18 @@
 -->
 <dialog id="shortcut-reference" class="ws-dialog" aria-labelledby="shortcut-reference-title">
   <div class="ws-head">
-    <h2 id="shortcut-reference-title">Keyboard shortcuts</h2>
-    <button type="button" class="ws-close" data-ws-close aria-label="Close">✕</button>
+    <h2 id="shortcut-reference-title" data-i18n="shortcuts.title">Keyboard shortcuts</h2>
+    <button type="button" class="ws-close" data-ws-close aria-label="Close" data-i18n-aria-label="shortcuts.close">✕</button>
   </div>
-  <input type="search" id="shortcut-reference-search" aria-label="Search shortcuts" placeholder="Search by action or key" spellcheck="false" autocomplete="off">
+  <input type="search" id="shortcut-reference-search" aria-label="Search shortcuts" placeholder="Search by action or key" data-i18n-aria-label="shortcuts.search" data-i18n-placeholder="shortcuts.searchPlaceholder" spellcheck="false" autocomplete="off">
   <div id="shortcut-reference-list" role="list"></div>
   <p id="shortcut-reference-status" role="status" aria-live="polite"></p>
   <div id="shortcut-reference-foot">
-    <button type="button" id="shortcut-restore-all">Restore all defaults <span id="shortcut-override-count" hidden></span></button>
+    <button type="button" id="shortcut-restore-all"><span data-i18n="shortcuts.restoreAll">Restore all defaults</span> <span id="shortcut-override-count" hidden></span></button>
     <div id="shortcut-restore-confirm" hidden>
-      <span>Restore every shortcut to its default?</span>
-      <button type="button" id="shortcut-restore-cancel">Cancel</button>
-      <button type="button" id="shortcut-restore-ok" class="ws-primary">Restore</button>
+      <span data-i18n="shortcuts.restoreTitle">Restore every shortcut to its default?</span>
+      <button type="button" id="shortcut-restore-cancel" data-i18n="shortcuts.cancel">Cancel</button>
+      <button type="button" id="shortcut-restore-ok" class="ws-primary" data-i18n="shortcuts.restore">Restore</button>
     </div>
   </div>
 </dialog>
@@ -4512,6 +4512,46 @@ const MESSAGES = Object.freeze({
     'composer.removeFile': 'Remove file {name}',
     'model.searchClear': 'Clear search',
     'shortcuts.remove': 'Remove',
+    'shortcuts.title': 'Keyboard shortcuts',
+    'shortcuts.close': 'Close',
+    'shortcuts.search': 'Search shortcuts',
+    'shortcuts.searchPlaceholder': 'Search by action or key',
+    'shortcuts.restoreAll': 'Restore all defaults',
+    'shortcuts.restoreTitle': 'Restore every shortcut to its default?',
+    'shortcuts.cancel': 'Cancel',
+    'shortcuts.restore': 'Restore',
+    'shortcuts.group.commands': 'Commands',
+    'shortcuts.group.input': 'Message input',
+    'shortcuts.label.shortcuts-reference': 'Keyboard shortcuts',
+    'shortcuts.label.new-session': 'New session',
+    'shortcuts.label.sidebar': 'Toggle sidebar',
+    'shortcuts.label.search': 'Search sessions',
+    'shortcuts.label.add-workspace': 'Add workspace',
+    'shortcuts.label.rename': 'Rename session',
+    'shortcuts.label.fork': 'Fork session',
+    'shortcuts.label.archive': 'Archive session',
+    'shortcuts.label.settings': 'Open settings',
+    'shortcuts.label.right-sidebar': 'Toggle right sidebar',
+    'shortcuts.label.browser-new': 'Browser',
+    'shortcuts.input.send': 'Send message',
+    'shortcuts.input.newline': 'Insert a new line',
+    'shortcuts.input.stop': 'Stop the current response',
+    'shortcuts.unbound': 'No shortcut',
+    'shortcuts.recording': 'Press a shortcut…',
+    'shortcuts.tryAnother': 'Try another',
+    'shortcuts.refuse.modMac': 'A shortcut starts with ⌘.',
+    'shortcuts.refuse.modCtrl': 'A shortcut starts with Ctrl.',
+    'shortcuts.refuse.key': 'That key cannot be part of a shortcut.',
+    'shortcuts.refuse.accent': 'That key starts an accent on this keyboard; choose another.',
+    'shortcuts.unreadable': "Keyboard shortcuts could not be read from this browser's storage ({key}); the defaults are active and editing is off until it is repaired.",
+    'shortcuts.notSaved': 'The shortcut was not saved: {message}',
+    'shortcuts.recordingFor': 'Recording a shortcut for {label}. Escape cancels.',
+    'shortcuts.recordingCancelled': 'Recording cancelled.',
+    'shortcuts.taken': '{keys} is already {label}.',
+    'shortcuts.nowBound': '{label} is now {keys}.',
+    'shortcuts.removed': '{label} has no shortcut now.',
+    'shortcuts.restoredOne': '{label} is back to its default.',
+    'shortcuts.restoredAll': 'Every shortcut is back to its default.',
     'shortcuts.restoreDefault': 'Restore default',
     'tree.files': 'Files',
     'tree.copyValue': 'Copy: {text}',
@@ -5117,6 +5157,46 @@ const MESSAGES = Object.freeze({
     'composer.removeFile': '移除文件 {name}',
     'model.searchClear': '清除搜索',
     'shortcuts.remove': '移除',
+    'shortcuts.title': '快捷键',
+    'shortcuts.close': '关闭',
+    'shortcuts.search': '搜索快捷键',
+    'shortcuts.searchPlaceholder': '按操作或按键搜索',
+    'shortcuts.restoreAll': '恢复全部默认',
+    'shortcuts.restoreTitle': '恢复全部默认快捷键？',
+    'shortcuts.cancel': '取消',
+    'shortcuts.restore': '恢复',
+    'shortcuts.group.commands': '应用操作',
+    'shortcuts.group.input': '消息输入',
+    'shortcuts.label.shortcuts-reference': '快捷键',
+    'shortcuts.label.new-session': '新建会话',
+    'shortcuts.label.sidebar': '展开／收起侧边栏',
+    'shortcuts.label.search': '搜索会话',
+    'shortcuts.label.add-workspace': '添加工作区',
+    'shortcuts.label.rename': '重命名会话',
+    'shortcuts.label.fork': '分叉会话',
+    'shortcuts.label.archive': '归档会话',
+    'shortcuts.label.settings': '打开设置',
+    'shortcuts.label.right-sidebar': '展开／收起右侧栏',
+    'shortcuts.label.browser-new': '浏览器',
+    'shortcuts.input.send': '发送消息',
+    'shortcuts.input.newline': '换行',
+    'shortcuts.input.stop': '停止生成',
+    'shortcuts.unbound': '暂无快捷键',
+    'shortcuts.recording': '按下快捷键…',
+    'shortcuts.tryAnother': '换一个试试',
+    'shortcuts.refuse.modMac': '快捷键须以 ⌘ 开头。',
+    'shortcuts.refuse.modCtrl': '快捷键须以 Ctrl 开头。',
+    'shortcuts.refuse.key': '暂不支持这个按键。',
+    'shortcuts.refuse.accent': '这个键在当前键盘上用于输入重音符号，请换一个。',
+    'shortcuts.unreadable': '无法从此浏览器的存储（{key}）读取快捷键；当前使用默认键位，修复前不能编辑。',
+    'shortcuts.notSaved': '快捷键未保存：{message}',
+    'shortcuts.recordingFor': '正在为「{label}」录制快捷键，按 Esc 取消。',
+    'shortcuts.recordingCancelled': '已取消录制。',
+    'shortcuts.taken': '{keys} 已被「{label}」占用。',
+    'shortcuts.nowBound': '「{label}」现在是 {keys}。',
+    'shortcuts.removed': '「{label}」现在没有快捷键。',
+    'shortcuts.restoredOne': '「{label}」已恢复默认。',
+    'shortcuts.restoredAll': '已恢复默认快捷键',
     'shortcuts.restoreDefault': '恢复默认',
     'tree.files': '文件',
     'tree.copyValue': '复制：{text}',
@@ -17335,9 +17415,9 @@ const SHORTCUT_LABELS = {
  */
 const PANEL_SHORTCUTS = ['right-sidebar', 'browser-new']
 const FIXED_INPUT_ACTIONS = [
-  { label: 'Send message', alias: 'submit', keys: 'Enter' },
-  { label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
-  { label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
+  { key: 'send', label: 'Send message', alias: 'submit', keys: 'Enter' },
+  { key: 'newline', label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
+  { key: 'stop', label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
 ]
 function chordText(shortcut, mac) {
   const glyph = keyForCode(shortcut.code).toUpperCase()
@@ -17354,18 +17434,34 @@ function subsequenceMatch(text, query) {
   }
   return true
 }
-function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides = {}, hidden = []) {
+function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides = {}, hidden = [], words = null) {
+  /**
+   * Labels, groups and "No shortcut" in the page language (#80), DSH's where DSH has them: through `words` when given,
+   * else the page's t(). Where neither exists, as when the unit test evaluates this function alone, every word is the
+   * English. A search also matches the English label, so a command can be found by the name the aliases go with.
+   */
+  const say = typeof words === 'function' ? words : typeof t === 'function' ? t : null
+  const word = (key, english, vars = {}) => {
+    const said = say === null ? undefined : say(key, vars)
+    return typeof said === 'string' && said !== key ? said : english
+  }
   const rows = []
   for (const action of Object.keys(SHORTCUT_LABELS)) {
     if (hidden.includes(action)) continue
     const shortcut = table.find((entry) => entry.action === action)
-    const [label, alias] = SHORTCUT_LABELS[action]
-    const keys = shortcut === undefined ? 'No shortcut' : chordText(shortcut, mac)
-    rows.push({ group: 'Commands', label, alias, keys, fixed: false, action, bound: shortcut !== undefined, overridden: Object.prototype.hasOwnProperty.call(overrides, action) })
+    const [english, alias] = SHORTCUT_LABELS[action]
+    const keys = shortcut === undefined ? word('shortcuts.unbound', 'No shortcut') : chordText(shortcut, mac)
+    rows.push({ group: word('shortcuts.group.commands', 'Commands'), label: word(`shortcuts.label.${action}`, english), english, alias, keys, fixed: false, action, bound: shortcut !== undefined, overridden: Object.prototype.hasOwnProperty.call(overrides, action) })
   }
-  for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: 'Message input', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
+  for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: word('shortcuts.group.input', 'Message input'), label: word(`shortcuts.input.${action.key}`, action.label), english: action.label, alias: action.alias, keys: action.keys, fixed: true })
   const wanted = String(query ?? '').trim()
-  return wanted === '' ? rows : rows.filter((row) => [row.label, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
+  return wanted === '' ? rows : rows.filter((row) => [row.label, row.english, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
+}
+/** A command's name in the page language (#80), for the recorder's status lines. */
+function shortcutLabel(action) {
+  const key = `shortcuts.label.${action}`
+  const said = t(key)
+  return said !== key ? said : SHORTCUT_LABELS[action]?.[0] ?? String(action)
 }
 /**
  * Draw the list. A repaint replaces the rows, and a focused row that is removed takes the focus with it to the page
@@ -17409,7 +17505,7 @@ function renderShortcutReference(keep = null) {
     item.tabIndex = 0
     if (recordingAction === row.action) {
       keys.dataset.recording = 'true'
-      keys.textContent = recordingError === null ? 'Press a shortcut…' : 'Try another'
+      keys.textContent = recordingError === null ? t('shortcuts.recording') : t('shortcuts.tryAnother')
       if (recordingError !== null) keys.dataset.error = 'true'
     }
     const actions = document.createElement('span')
@@ -17511,11 +17607,11 @@ function recordedChord(event, mac) {
   if (['Meta', 'Control', 'Alt', 'Shift', 'AltGraph', 'CapsLock', 'OS'].includes(event.key)) return { pending: true }
   const primary = mac ? event.metaKey : event.ctrlKey
   const other = mac ? event.ctrlKey : event.metaKey
-  if (!primary || other) return { error: mac ? 'A shortcut starts with ⌘.' : 'A shortcut starts with Ctrl.' }
-  if (!RECORDABLE_CODE.test(event.code)) return { error: 'That key cannot be part of a shortcut.' }
+  if (!primary || other) return { error: mac ? 'A shortcut starts with ⌘.' : 'A shortcut starts with Ctrl.', reason: mac ? 'modMac' : 'modCtrl' }
+  if (!RECORDABLE_CODE.test(event.code)) return { error: 'That key cannot be part of a shortcut.', reason: 'key' }
   /** A dead key never fires a chord (accent input stays protected), so it is not recorded either, except ⌥⌘N on a Mac. */
   if (event.key === 'Dead' && !(mac && event.code === 'KeyN' && event.altKey === true && event.shiftKey !== true)) {
-    return { error: 'That key starts an accent on this keyboard; choose another.' }
+    return { error: 'That key starts an accent on this keyboard; choose another.', reason: 'accent' }
   }
   return { chord: { code: event.code, alt: event.altKey === true, shift: event.shiftKey === true } }
 }
@@ -17549,7 +17645,7 @@ function shortcutStatus(text) {
   document.getElementById('shortcut-reference-status').textContent = text
 }
 function unreadableNotice() {
-  return `Keyboard shortcuts could not be read from this browser's storage (${KEYBINDINGS_KEY}); the defaults are active and editing is off until it is repaired.`
+  return t('shortcuts.unreadable', { key: KEYBINDINGS_KEY })
 }
 function writeKeybindings(overrides, done) {
   if (!keybindings.readable) {
@@ -17559,7 +17655,7 @@ function writeKeybindings(overrides, done) {
   try {
     localStorage.setItem(KEYBINDINGS_KEY, JSON.stringify({ version: 1, overrides }))
   } catch (error) {
-    shortcutStatus(`The shortcut was not saved: ${(error && error.message) || error}`)
+    shortcutStatus(t('shortcuts.notSaved', { message: (error && error.message) || error }))
     return false
   }
   keybindings = { readable: true, overrides }
@@ -17574,7 +17670,7 @@ function startRecording(action) {
   }
   recordingAction = action
   recordingError = null
-  shortcutStatus(`Recording a shortcut for ${SHORTCUT_LABELS[action][0]}. Escape cancels.`)
+  shortcutStatus(t('shortcuts.recordingFor', { label: shortcutLabel(action) }))
   renderShortcutReference({ action, control: null })
 }
 function stopRecording(message) {
@@ -17598,33 +17694,35 @@ shortcutReference.addEventListener(
     const result = recordedChord(event, SHORTCUTS_ON_MAC)
     if (result.inputMethod) return
     if (event.key === 'Tab') {
-      stopRecording('Recording cancelled.')
+      stopRecording(t('shortcuts.recordingCancelled'))
       return
     }
     event.preventDefault()
     event.stopPropagation()
     if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey) {
-      stopRecording('Recording cancelled.')
+      stopRecording(t('shortcuts.recordingCancelled'))
       return
     }
     if (event.repeat) return
     if (result.pending) return
-    const label = SHORTCUT_LABELS[recordingAction][0]
+    const label = shortcutLabel(recordingAction)
     if (result.error !== undefined) {
-      recordingError = result.error
-      shortcutStatus(result.error)
+      /** The refusal in the page language (#80); recordedChord keeps its English `error` for its unit test. */
+      const refusal = result.reason === undefined ? result.error : t(`shortcuts.refuse.${result.reason}`)
+      recordingError = refusal
+      shortcutStatus(refusal)
       renderShortcutReference({ action: recordingAction, control: null })
       return
     }
     const holder = bindingConflict(result.chord, recordingAction, activeShortcuts)
     if (holder !== null) {
       recordingError = 'taken'
-      shortcutStatus(`${chordText(result.chord, SHORTCUTS_ON_MAC)} is already ${SHORTCUT_LABELS[holder][0]}.`)
+      shortcutStatus(t('shortcuts.taken', { keys: chordText(result.chord, SHORTCUTS_ON_MAC), label: shortcutLabel(holder) }))
       renderShortcutReference({ action: recordingAction, control: null })
       return
     }
     const overrides = { ...keybindings.overrides, [recordingAction]: result.chord }
-    if (writeKeybindings(overrides, `${label} is now ${chordText(result.chord, SHORTCUTS_ON_MAC)}.`)) stopRecording()
+    if (writeKeybindings(overrides, t('shortcuts.nowBound', { label, keys: chordText(result.chord, SHORTCUTS_ON_MAC) }))) stopRecording()
   },
   true,
 )
@@ -17632,23 +17730,23 @@ shortcutReference.addEventListener(
 shortcutReference.addEventListener('cancel', (event) => {
   if (recordingAction === null) return
   event.preventDefault()
-  stopRecording('Recording cancelled.')
+  stopRecording(t('shortcuts.recordingCancelled'))
 })
 document.getElementById('shortcut-reference-list').addEventListener('click', (event) => {
   const target = event.target instanceof Element ? event.target : null
   const row = target?.closest('.shortcut-row[data-action]')
   if (row === null || row === undefined) return
   const action = row.dataset.action
-  const label = SHORTCUT_LABELS[action][0]
+  const label = shortcutLabel(action)
   const button = target.closest('button[data-binding-action]')
   if (button !== null) {
     const overrides = { ...keybindings.overrides }
     if (button.dataset.bindingAction === 'remove') {
       overrides[action] = null
-      writeKeybindings(overrides, `${label} has no shortcut now.`)
+      writeKeybindings(overrides, t('shortcuts.removed', { label }))
     } else {
       delete overrides[action]
-      writeKeybindings(overrides, `${label} is back to its default.`)
+      writeKeybindings(overrides, t('shortcuts.restoredOne', { label }))
     }
     renderShortcutReference({ action, control: button.dataset.bindingAction })
     return
@@ -17665,7 +17763,7 @@ document.getElementById('shortcut-restore-cancel').addEventListener('click', () 
 })
 document.getElementById('shortcut-restore-ok').addEventListener('click', () => {
   document.getElementById('shortcut-restore-confirm').hidden = true
-  writeKeybindings({}, 'Every shortcut is back to its default.')
+  writeKeybindings({}, t('shortcuts.restoredAll'))
   renderShortcutReference()
   document.getElementById('shortcut-restore-all').focus()
 })
@@ -17674,6 +17772,11 @@ window.addEventListener('storage', (event) => {
   if (event.key !== KEYBINDINGS_KEY) return
   keybindings = readStoredKeybindings()
   refreshShortcuts()
+})
+
+/** An open reference redraws its rows in the new language (#80); its fixed words follow data-i18n. */
+window.addEventListener('heddle:locale', () => {
+  if (shortcutReference.open) renderShortcutReference()
 })
 
 function toggleShortcutReference() {
