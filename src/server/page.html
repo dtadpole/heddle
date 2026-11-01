@@ -4140,6 +4140,29 @@ const MESSAGES = Object.freeze({
     'model.noEfforts': 'This model provides no reasoning effort levels.',
     'preview.imageLoading': 'Loading image\u2026',
     'preview.imageFailed': 'This image could not be displayed.',
+    'chat.viewChanges': 'View changes to {path}',
+    'composer.editQueued': 'Edit queued message',
+    'composer.saveQueued': 'Save queued message',
+    'composer.cancelEdit': 'Cancel edit',
+    'composer.steerQueued': 'Steer queued message',
+    'composer.removeQueued': 'Remove queued message',
+    'composer.removeFile': 'Remove file {name}',
+    'model.searchClear': 'Clear search',
+    'shortcuts.remove': 'Remove',
+    'shortcuts.restoreDefault': 'Restore default',
+    'tree.files': 'Files',
+    'tree.copyValue': 'Copy: {text}',
+    'nav.searchPending': 'Searching session history\u2026',
+    'jobs.list': 'Background jobs',
+    'jobs.running': 'Running',
+    'jobs.finished': 'Finished {count}',
+    'jobs.clear': 'Clear',
+    'dialog.noFolders': 'No folders here',
+    'browser.closeTab': 'Close tab',
+    'browser.navigation': 'Browser navigation',
+    'browser.address': 'Address',
+    'browser.addressPlaceholder': 'Enter an HTTP(S) address',
+    'browser.start': 'Enter an HTTP(S) address to start browsing',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
     'empty.title': 'Start a conversation',
     'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
@@ -4340,6 +4363,29 @@ const MESSAGES = Object.freeze({
     'model.noEfforts': '当前模型未提供推理等级。',
     'preview.imageLoading': '加载图片…',
     'preview.imageFailed': '此图片无法显示。',
+    'chat.viewChanges': '查看 {path} 的更改',
+    'composer.editQueued': '编辑排队消息',
+    'composer.saveQueued': '保存排队消息',
+    'composer.cancelEdit': '取消编辑',
+    'composer.steerQueued': '插话发送',
+    'composer.removeQueued': '删除排队消息',
+    'composer.removeFile': '移除文件 {name}',
+    'model.searchClear': '清除搜索',
+    'shortcuts.remove': '移除',
+    'shortcuts.restoreDefault': '恢复默认',
+    'tree.files': '文件',
+    'tree.copyValue': '复制：{text}',
+    'nav.searchPending': '正在搜索会话历史…',
+    'jobs.list': '后台任务',
+    'jobs.running': '进行中',
+    'jobs.finished': '已结束 {count}',
+    'jobs.clear': '清空',
+    'dialog.noFolders': '这里没有文件夹',
+    'browser.closeTab': '关闭标签页',
+    'browser.navigation': '浏览器导航',
+    'browser.address': '地址',
+    'browser.addressPlaceholder': '输入 HTTP(S) 地址',
+    'browser.start': '输入 HTTP(S) 地址开始浏览',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
     'empty.title': '开始对话',
     'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
@@ -5256,7 +5302,7 @@ function editedFilesPanel(files) {
     const row = document.createElement('button')
     row.type = 'button'
     row.className = 'changed-row'
-    row.setAttribute('aria-label', `View changes to ${file.path}`)
+    row.setAttribute('aria-label', t('chat.viewChanges', { path: file.path }))
     row.onclick = () => void openPath(file.path)
     const path = document.createElement('span')
     path.className = 'changed-path'
@@ -9849,25 +9895,25 @@ function queueActions(item, isEditing) {
     wrap.append(button)
   }
   if (isEditing) {
-    action(copiedIcon(), 'Save queued message', false, () => {
+    action(copiedIcon(), t('composer.saveQueued'), false, () => {
       const text = editing.text.trim()
       if (text === '') return
       item.text = text
       editing = null
       renderQueue()
     })
-    action(closeIcon(), 'Cancel edit', false, () => {
+    action(closeIcon(), t('composer.cancelEdit'), false, () => {
       editing = null
       renderQueue()
     })
     return wrap
   }
-  action(sendIcon(), 'Steer queued message', sending, () => void steerItem(item.id))
-  action(editIcon(), 'Edit queued message', sending, () => {
+  action(sendIcon(), t('composer.steerQueued'), sending, () => void steerItem(item.id))
+  action(editIcon(), t('composer.editQueued'), sending, () => {
     editing = { id: item.id, text: item.text }
     renderQueue()
   })
-  action('✕', 'Remove queued message', sending, () => removeItem(item.id))
+  action('✕', t('composer.removeQueued'), sending, () => removeItem(item.id))
   return wrap
 }
 
@@ -9912,7 +9958,7 @@ function queueRow(item) {
     const editor = document.createElement('textarea')
     editor.className = 'editor'
     editor.value = editing.text
-    editor.setAttribute('aria-label', 'Edit queued message')
+    editor.setAttribute('aria-label', t('composer.editQueued'))
     editor.oninput = () => {
       editing.text = editor.value
     }
@@ -11098,7 +11144,7 @@ function renderPendingAttachments() {
     const remove = document.createElement('button')
     remove.type = 'button'
     remove.className = 'attach-remove'
-    remove.setAttribute('aria-label', `Remove file ${item.name}`)
+    remove.setAttribute('aria-label', t('composer.removeFile', { name: item.name }))
     remove.textContent = '✕'
     remove.addEventListener('click', () => {
       pendingAttachments = pendingAttachments.filter((entry) => entry !== item)
@@ -11784,8 +11830,8 @@ function openBrowserTab(initialAddress) {
   const close = document.createElement('button')
   close.type = 'button'
   close.className = 'rs-tab-close'
-  close.setAttribute('aria-label', 'Close tab')
-  close.title = 'Close tab'
+  close.setAttribute('aria-label', t('browser.closeTab'))
+  close.title = t('browser.closeTab')
   close.textContent = '×'
   tab.tab.append(tab.button, close)
 
@@ -11796,7 +11842,7 @@ function openBrowserTab(initialAddress) {
   tab.panel.setAttribute('aria-labelledby', id)
   const bar = document.createElement('form')
   bar.className = 'browser-bar'
-  bar.setAttribute('aria-label', 'Browser navigation')
+  bar.setAttribute('aria-label', t('browser.navigation'))
   tab.back = browserButton('back', 'Back', 'M10 3.5 5.5 8l4.5 4.5')
   tab.forward = browserButton('forward', 'Forward', 'M6 3.5 10.5 8 6 12.5')
   tab.reload = browserButton('reload', 'Reload', 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
@@ -11804,8 +11850,8 @@ function openBrowserTab(initialAddress) {
   tab.address.type = 'text'
   tab.address.className = 'browser-address'
   tab.address.dataset.browser = 'address'
-  tab.address.setAttribute('aria-label', 'Address')
-  tab.address.placeholder = 'Enter an HTTP(S) address'
+  tab.address.setAttribute('aria-label', t('browser.address'))
+  tab.address.placeholder = t('browser.addressPlaceholder')
   tab.address.spellcheck = false
   tab.address.autocomplete = 'off'
   tab.address.setAttribute('autocapitalize', 'off')
@@ -11825,7 +11871,7 @@ function openBrowserTab(initialAddress) {
   tab.view.className = 'browser-view'
   tab.start = document.createElement('p')
   tab.start.className = 'browser-start'
-  tab.start.textContent = 'Enter an HTTP(S) address to start browsing'
+  tab.start.textContent = t('browser.start')
   tab.view.append(tab.start)
   tab.panel.append(bar, tab.notice, tab.view)
 
@@ -12274,7 +12320,7 @@ function modelSearchRow() {
     const clear = document.createElement('button')
     clear.type = 'button'
     clear.className = 'model-search-clear'
-    clear.setAttribute('aria-label', 'Clear search')
+    clear.setAttribute('aria-label', t('model.searchClear'))
     clear.textContent = '×'
     clear.addEventListener('click', (clickEvent) => {
       clickEvent.stopPropagation()
@@ -15746,14 +15792,14 @@ function renderShortcutReference(keep = null) {
       const remove = document.createElement('button')
       remove.type = 'button'
       remove.dataset.bindingAction = 'remove'
-      remove.textContent = 'Remove'
+      remove.textContent = t('shortcuts.remove')
       actions.append(remove)
     }
     if (keybindings.readable && row.overridden && recordingAction !== row.action) {
       const restore = document.createElement('button')
       restore.type = 'button'
       restore.dataset.bindingAction = 'restore'
-      restore.textContent = 'Restore default'
+      restore.textContent = t('shortcuts.restoreDefault')
       actions.append(restore)
     }
     actions.append(keys)
@@ -17912,7 +17958,7 @@ function paintGoneFolder(group, depth) {
   heading.className = 'tree-heading'
   heading.setAttribute('role', 'none')
   heading.style.setProperty('--tree-depth', String(depth + 1))
-  heading.textContent = 'Files'
+  heading.textContent = t('tree.files')
   const line = document.createElement('div')
   line.className = 'empty'
   line.dataset.filesRow = 'failed'
@@ -18804,7 +18850,7 @@ const rowHoverCard = (() => {
       card.dataset.copyText = model.copyText
       card.setAttribute('role', 'button')
       card.tabIndex = 0
-      card.setAttribute('aria-label', `Copy: ${model.copyText}`)
+      card.setAttribute('aria-label', t('tree.copyValue', { text: model.copyText }))
     } else {
       delete card.dataset.copyText
       card.removeAttribute('role')
@@ -19092,7 +19138,7 @@ async function loadChildren(node, li) {
       heading.className = 'tree-heading'
       heading.setAttribute('role', 'none')
       heading.style.setProperty('--tree-depth', String(depth + 1))
-      heading.textContent = 'Files'
+      heading.textContent = t('tree.files')
       group.append(heading)
       for (const child of files) group.append(nodeRow(child, depth + 1))
     }
@@ -19463,7 +19509,7 @@ function paintSearchPending(rows) {
     box = document.createElement('div')
     box.id = 'search-pending'
     box.setAttribute('role', 'status')
-    box.setAttribute('aria-label', 'Searching session history…')
+    box.setAttribute('aria-label', t('nav.searchPending'))
     document.getElementById('search-results').after(box)
   }
   box.hidden = rows === 0
@@ -20088,14 +20134,14 @@ function renderJobsMenu(live, settled) {
   const list = document.createElement('ul')
   list.id = 'jobs-list'
   list.className = 'jobs-menu-body'
-  list.setAttribute('aria-label', 'Background jobs')
+  list.setAttribute('aria-label', t('jobs.list'))
   const settledExpanded = jobsUi.settledOpen ?? live.length === 0
   if (live.length > 0) {
     const item = document.createElement('li')
     item.className = 'jobs-section'
     item.dataset.section = 'live'
     item.setAttribute('aria-hidden', 'true')
-    item.textContent = 'Running'
+    item.textContent = t('jobs.running')
     list.append(item)
   }
   for (const job of live) list.append(jobsItem(job))
@@ -20108,7 +20154,7 @@ function renderJobsMenu(live, settled) {
     toggle.className = 'jobs-section-toggle'
     toggle.dataset.jobsFocus = 'settled-toggle'
     toggle.setAttribute('aria-expanded', String(settledExpanded))
-    toggle.append(jobsIcon('chevron'), `Finished ${settled.length}`)
+    toggle.append(jobsIcon('chevron'), t('jobs.finished', { count: settled.length }))
     toggle.addEventListener('click', () => {
       jobsUi.settledOpen = !settledExpanded
       renderJobs()
@@ -20117,7 +20163,7 @@ function renderJobsMenu(live, settled) {
     clear.type = 'button'
     clear.className = 'jobs-section-clear'
     clear.dataset.jobsFocus = 'clear'
-    clear.textContent = 'Clear'
+    clear.textContent = t('jobs.clear')
     clear.addEventListener('click', () => {
       for (const job of settled) jobsUi.cleared.add(job.id)
       if (jobsUi.expandedKey !== undefined && settled.some((job) => job.id === jobsUi.expandedKey)) jobsUi.expandedKey = undefined
@@ -20586,7 +20632,7 @@ function drawPickerListing() {
   if ((listing.entries ?? []).filter((entry) => showHidden || !entry.hidden).length === 0) {
     const empty = document.createElement('li')
     empty.className = 'empty'
-    empty.textContent = 'No folders here'
+    empty.textContent = t('dialog.noFolders')
     rows.push(empty)
   }
   list.replaceChildren(...rows)
