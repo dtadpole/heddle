@@ -1229,10 +1229,11 @@
   .markdown .frontmatter h2 { font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; opacity: .6; }
   #timeline { position: relative; height: 1.6rem; margin: .1rem 0 .7rem; border-radius: .25rem; background: color-mix(in oklab, currentColor 7%, transparent); overflow: hidden; }
   #timeline:empty { display: none; }
-  #timeline button { position: absolute; top: 0; bottom: 0; padding: 0; border: none; border-right: 1px solid var(--line); background: color-mix(in oklab, #4b8bf5 45%, transparent); cursor: pointer; }
-  #timeline button[data-leading='assistant'] { background: color-mix(in oklab, #2fa36b 45%, transparent); }
-  #timeline button[data-leading='reasoning'] { background: color-mix(in oklab, #b7791f 45%, transparent); }
-  #timeline button[data-leading='tool'] { background: color-mix(in oklab, #8b5cf6 45%, transparent); }
+  /*
+   * The strip's old per-turn band rules (`#timeline button`, by data-leading) are gone: nothing sets data-leading any
+   * more, and their 1,0,1 specificity beat the lane strip's `.tr-tick` rules below, hiding the lane colours, moving the
+   * ticks to top 0 and resetting the TTFT split's gradient (developer-ten's review of S151).
+   */
   /**
    * The column's resize grips — DSH's own pair (`wSkVaW_widthHandle`).
    *
@@ -1264,8 +1265,6 @@
   .column-grip:hover::after, .column-grip:focus-visible::after, .column-grip[data-dragging='true']::after { opacity: 1; }
   .column-grip:focus-visible { outline: 1px solid color-mix(in oklab, currentColor 40%, transparent); outline-offset: 2px; border-radius: 4px; }
   .column-grip[data-dragging='true'] { z-index: 8; }
-  #timeline button[data-running='true'] { background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, color-mix(in oklab, currentColor 25%, transparent) 4px, color-mix(in oklab, currentColor 25%, transparent) 8px); }
-  #timeline button[aria-current='true'] { outline: 2px solid currentColor; outline-offset: -2px; }
   #timeline-legend { display: flex; gap: .75rem; font-size: .72rem; opacity: .6; margin: -.4rem 0 .7rem; }
   /**
    * The session header: DSH's shape — the name at the reading column's left edge, above the tabs, with the branch
@@ -2838,7 +2837,8 @@
     border-radius: 0;
     border-bottom: .5px solid var(--line);
     background: var(--surface);
-    overflow: hidden;
+    /* clip, not hidden: a hidden box is still a scroll container, so focusing a zoomed bar outside the view scrolled it. */
+    overflow: clip;
     padding: 2px 0 4px;
     cursor: crosshair;
   }
@@ -2870,7 +2870,20 @@
   .tr-tick[data-lane='model'] { background: color-mix(in oklab, #8b5cf6 55%, transparent); }
   .tr-tick[data-lane='tools'] { background: color-mix(in oklab, #b7791f 65%, transparent); }
   .tr-tick[data-running='true'] { opacity: .55; }
+  /** An answer's bar splits at its TTFT, as DSH's does: the wait for the first token lighter, the decoding darker. */
+  .tr-tick[data-split='true'] { background: linear-gradient(to right, color-mix(in oklab, #8b5cf6 25%, transparent) 0 var(--ttft), color-mix(in oklab, #8b5cf6 75%, transparent) var(--ttft) 100%); }
   .tr-tick:hover, .tr-tick[aria-current='true'] { outline: 1px solid var(--text-3); }
+  /** A focused bar's own ring, drawn inside the lane: the browser's default ring is clipped by the strip's overflow. */
+  .tr-tick:focus-visible { outline: 2px solid var(--text-2); outline-offset: 1px; }
+  /** A user record's attachment counts beside its text, and the inspector's attachment list (S151). */
+  .tr-attach-count { margin-left: .5rem; font-size: 11px; color: var(--text-3); white-space: nowrap; }
+  .tr-attachments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  .tr-attachments li { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
+  .tr-attach-thumb { width: 36px; height: 36px; padding: 0; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); cursor: zoom-in; overflow: hidden; }
+  .tr-attach-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .tr-attach-icon { width: 36px; text-align: center; }
+  .tr-attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tr-attach-detail { color: var(--text-3); white-space: nowrap; }
   .tr-focus {
     position: absolute;
     top: 0;
@@ -6306,6 +6319,8 @@ const trajectory = {
   expanded: new Set(),
   search: '',
   focus: null,
+  /** The overview's zoom (`zoomViewport`): null for the whole domain; kept across a live refetch of the same session. */
+  viewport: null,
   domainStart: undefined,
   domainEnd: undefined,
 }
@@ -6322,12 +6337,31 @@ function previewOf(record) {
   return record.label ?? record.kind
 }
 
-/** The ledger flattened into table rows, with turn and step boundaries on the rows themselves. */
+/* ledger-rows:begin */
+/**
+ * The ledger flattened into table rows, with turn and step boundaries on the rows themselves.
+ *
+ * A record outside every turn sits where it happened, in a Between turns section of its own (DSH's), placed by its
+ * `afterTurn`; the first row of each section heads it. A record without `afterTurn` follows the last turn.
+ */
 function rowsOf(data) {
   if (Array.isArray(data.rows)) return data.rows
   /** A server that does not send the projection still gets a table: flatten it here, the same way. */
+  const ledger = data.ledger ?? data
+  const turns = ledger.turns ?? []
+  const lastTurn = turns.length > 0 ? turns[turns.length - 1].index : 0
+  const between = new Map()
+  for (const record of ledger.loose ?? []) {
+    const after = record.afterTurn ?? lastTurn
+    between.set(after, [...(between.get(after) ?? []), record])
+  }
   const rows = []
-  for (const turn of data.turns ?? []) {
+  const section = (after) => {
+    ;(between.get(after) ?? []).forEach((record, index) => rows.push({ turn: 0, kind: record.kind, record, turnStart: index === 0, stepStart: false, loose: true }))
+    between.delete(after)
+  }
+  section(0)
+  for (const turn of turns) {
     for (const step of turn.steps ?? []) {
       ;(step.records ?? []).forEach((record, index) => {
         rows.push({
@@ -6341,10 +6375,51 @@ function rowsOf(data) {
         })
       })
     }
+    section(turn.index)
   }
-  for (const record of data.loose ?? []) rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true })
+  for (const after of [...between.keys()].sort((left, right) => left - right)) section(after)
   return rows
 }
+
+/** DSH's label for a section head: `Between turns` for records outside every turn, else `Turn N`. */
+function sectionLabel(row) {
+  return row.loose ? 'Between turns' : 'Turn ' + row.turn
+}
+
+/**
+ * Whether the turn fold hides a row. Only a turn's later rows fold behind its head; a Between turns section never
+ * folds, as DSH's fold skips records outside every turn.
+ */
+function rowFolded(row, collapsedTurns, expanded) {
+  return collapsedTurns && !row.loose && !row.turnStart && !expanded.has(row.turn)
+}
+/* ledger-rows:end */
+
+/* ledger-attachments:begin */
+/**
+ * A user record's attachment counts, as DSH's row shows them beside the text: the nonzero image and file counts, or ''
+ * when it carried none (S151). Pure, and fenced so test/page-ledger-attachments.test.ts judges it.
+ */
+function attachmentCounts(attachments) {
+  const list = Array.isArray(attachments) ? attachments : []
+  const images = list.filter((item) => item?.kind === 'image').length
+  const files = list.filter((item) => item?.kind === 'file').length
+  return [images > 0 ? images + (images === 1 ? ' image' : ' images') : '', files > 0 ? files + (files === 1 ? ' file' : ' files') : '']
+    .filter(Boolean)
+    .join(' · ')
+}
+
+/**
+ * One inspector row's words for an attachment, DSH's: its recorded name (an unnamed image, numbered among the images),
+ * then its size and type. A zero-byte file keeps its size.
+ */
+function attachmentLine(item, imageNumber) {
+  const name = typeof item?.name === 'string' && item.name !== '' ? item.name : item?.kind === 'image' ? 'Image ' + imageNumber : 'File'
+  const bytes = typeof item?.bytes === 'number' && Number.isFinite(item.bytes) ? item.bytes : 0
+  const size = bytes < 1024 ? bytes + ' B' : bytes < 1024 * 1024 ? (bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0) + ' KB' : (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  return { name, detail: [size, typeof item?.mimeType === 'string' && item.mimeType !== '' ? item.mimeType : null].filter(Boolean).join(' · ') }
+}
+/* ledger-attachments:end */
 
 function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   /**
@@ -6356,6 +6431,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.rows = rowsOf(data)
   trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
   trajectory.timeline = timeline_
+  if (trajectory.data?.id !== data.id) trajectory.viewport = null
   trajectory.data = data
   trajectory.tools = Array.isArray(data.tools) ? data.tools : []
   trajectory.selected = -1
@@ -6453,7 +6529,7 @@ function renderRows() {
       const haystack = [row.kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase()
       if (!haystack.includes(query)) continue
     }
-    if (trajectory.collapsedTurns && !row.turnStart && !trajectory.expanded.has(row.turn)) continue
+    if (rowFolded(row, trajectory.collapsedTurns, trajectory.expanded)) continue
     shown.push([row, index])
   }
   body.replaceChildren(...shown.map(([row, index]) => rowNode(row, index)))
@@ -6483,7 +6559,7 @@ function rowNode(row, index) {
     rail.className = 'tr-rail'
     const label = document.createElement('span')
     label.className = 'tr-turn-label'
-    label.textContent = row.loose ? 'between turns' : 'Turn ' + row.turn
+    label.textContent = sectionLabel(row)
     event.append(rail, label)
   }
   const tag = document.createElement('span')
@@ -6496,7 +6572,7 @@ function rowNode(row, index) {
   event.append(tag, when)
   const content = document.createElement('td')
   content.className = 'tr-content'
-  const collapsed = trajectory.collapsedTurns && row.turnStart && !trajectory.expanded.has(row.turn)
+  const collapsed = trajectory.collapsedTurns && row.turnStart && !row.loose && !trajectory.expanded.has(row.turn)
   if (collapsed) {
     const summary = document.createElement('span')
     summary.className = 'tr-text'
@@ -6509,11 +6585,20 @@ function rowNode(row, index) {
     text.className = 'tr-text'
     text.textContent = (row.preview ?? previewOf(record)) + (record.inFlight === true ? ' · running' : '')
     content.append(text)
+    /** A user record counts what it carried beside its text, as DSH's does, an attachment-only record included. */
+    const counts = attachmentCounts(record.attachments)
+    if (counts !== '') {
+      const badge = document.createElement('span')
+      badge.className = 'tr-attach-count'
+      badge.textContent = counts
+      content.append(badge)
+    }
   }
   tr.append(event, content)
   tr.tabIndex = 0
   tr.setAttribute('role', 'row')
-  if (row.turnStart) turnAnchors.set(row.turn, tr)
+  /** A Between turns head is no turn's anchor: every such section has turn 0, and a tick picks a numbered turn. */
+  if (row.turnStart && !row.loose) turnAnchors.set(row.turn, tr)
   tr.addEventListener('click', () => {
     if (collapsed) {
       trajectory.expanded.add(row.turn)
@@ -6622,7 +6707,7 @@ function renderDetails(row) {
   tag.textContent = KIND_LABEL[row.kind] ?? String(row.kind).toUpperCase()
   const where = document.createElement('span')
   where.className = 'tr-d-where'
-  where.textContent = [row.loose ? 'before any turn' : 'Turn ' + row.turn, row.step !== undefined ? 'Step ' + row.step : null].filter(Boolean).join(' · ')
+  where.textContent = [sectionLabel(row), row.step !== undefined ? 'Step ' + row.step : null].filter(Boolean).join(' · ')
   const close = document.createElement('button')
   close.type = 'button'
   close.className = 'tr-d-close'
@@ -6667,6 +6752,53 @@ function renderDetails(row) {
   show(0)
 }
 
+/**
+ * A user record's attachments in the inspector, DSH's ordered list after the message text (S151): each row a contained
+ * image thumbnail that opens the page's lightbox, or a file chip, then the recorded name, size and type. A long name
+ * ellipsizes and keeps the whole name in its tooltip. Each address is read for the open session, as the chat's cards are.
+ */
+function attachmentList(attachments) {
+  const list = document.createElement('ul')
+  list.className = 'tr-attachments'
+  let images = 0
+  for (const item of attachments) {
+    if (item?.kind === 'image') images += 1
+    const words = attachmentLine(item, images)
+    const url = typeof item?.url === 'string' && item.url !== '' ? item.url + (current === null ? '' : (item.url.includes('?') ? '&' : '?') + 'session=' + encodeURIComponent(current)) : null
+    const entry = document.createElement('li')
+    entry.dataset.kind = item?.kind === 'image' ? 'image' : 'file'
+    if (item?.kind === 'image' && url !== null) {
+      const open = document.createElement('button')
+      open.type = 'button'
+      open.className = 'tr-attach-thumb'
+      open.setAttribute('aria-label', 'open ' + words.name)
+      const picture = document.createElement('img')
+      picture.src = url
+      picture.alt = words.name
+      picture.loading = 'lazy'
+      open.append(picture)
+      open.addEventListener('click', () => openImagePreview(url, words.name))
+      entry.append(open)
+    } else {
+      const icon = document.createElement('span')
+      icon.className = 'tr-attach-icon'
+      icon.textContent = '📄'
+      icon.setAttribute('aria-hidden', 'true')
+      entry.append(icon)
+    }
+    const name = document.createElement('span')
+    name.className = 'tr-attach-name'
+    name.textContent = words.name
+    name.title = words.name
+    const detail = document.createElement('span')
+    detail.className = 'tr-attach-detail'
+    detail.textContent = words.detail
+    entry.append(name, detail)
+    list.append(entry)
+  }
+  return list
+}
+
 function summarySection(row, record, step) {
   /**
    * DSH's Summary is an **accordion**: Hierarchy, Status, Payload, Result, Schema and Timing, each an
@@ -6687,6 +6819,7 @@ function summarySection(row, record, step) {
   } else if (record.text !== undefined && String(record.text) !== '') {
     box.append(accOpen('Content', trPre(String(record.text))))
   }
+  if (Array.isArray(record.attachments) && record.attachments.length > 0) box.append(accOpen('Attachments', attachmentList(record.attachments)))
   box.append(accOpen('Timing', timingSection(record, trajectory.turns.get(row.turn), step)))
   if (record.note !== undefined) box.append(trEmpty(String(record.note)))
   return box
@@ -6751,6 +6884,11 @@ function timingSection(record, turn, step) {
 }
 
 /* timeline-tip:begin */
+/** A span of time in the strip's words: `840 ms`, `3.25 s`, `12.5 s`, `1m 15s`. One formatter for every figure in a tip. */
+function timelineDuration(lasted) {
+  return lasted < 1000 ? Math.round(lasted) + ' ms' : lasted < 60_000 ? (lasted / 1000).toFixed(lasted < 10_000 ? 2 : 1) + ' s' : Math.floor(lasted / 60_000) + 'm ' + Math.round((lasted % 60_000) / 1000) + 's'
+}
+
 /**
  * What an overview tick says when hovered: its turn and kinds, then the clock it started at and how long it lasted
  * (DSH's overview shows a span's exact clock and duration after a 500 ms hover). A running span shows only its start,
@@ -6760,7 +6898,7 @@ function timingSection(record, turn, step) {
 function timelineTickText(span, totalMs, startsAtMs) {
   const label = 'turn ' + span.turn + ' · ' + ((span.kinds ?? []).join(', ') || 'records')
   const lasted = Math.max(0, (span.end - span.start) * totalMs)
-  const duration = lasted < 1000 ? Math.round(lasted) + ' ms' : lasted < 60_000 ? (lasted / 1000).toFixed(lasted < 10_000 ? 2 : 1) + ' s' : Math.floor(lasted / 60_000) + 'm ' + Math.round((lasted % 60_000) / 1000) + 's'
+  const duration = timelineDuration(lasted)
   let clock = null
   if (Number.isFinite(startsAtMs)) {
     const at = new Date(startsAtMs + span.start * totalMs)
@@ -6772,6 +6910,99 @@ function timelineTickText(span, totalMs, startsAtMs) {
 }
 /* timeline-tip:end */
 
+/* overview-bars:begin */
+/**
+ * The overview's bars, as DSH's overview draws them: one per timed record, in its lane (S151, R-developer-eleven-21).
+ * A turn's records in one lane are drawn one by one when they are few and none is narrower than a pixel; otherwise they
+ * merge into one bar for that turn and lane, so a long session stays a few hundred nodes, not thousands. A bar carries
+ * the TTFT split only when the record does (the projections give it only when 0 <= ttftMs <= durationMs). Pure, and
+ * fenced so test/page-overview-bars.test.ts judges it.
+ *
+ * Layout and time are kept apart (developer-ten's review): `x0`/`x1` are where a record is drawn (its time in actual
+ * mode, its equal slot in the default mode) and decide the pixel test and the drawn extent; `start`/`end` stay its
+ * recorded time, which the tip's clock and duration read, so a bar says the same in both modes. A record without
+ * `x0`/`x1` is drawn at its time. A record with no measured width (instantaneous, or still running) is drawn at the
+ * floor width and does not force a merge, and a group of one never merges.
+ */
+function overviewBars(records, trackPx) {
+  const width = trackPx > 0 ? trackPx : 1000
+  const groups = new Map()
+  for (const record of records) {
+    const key = record.turn + '|' + record.lane
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push({ ...record, x0: record.x0 ?? record.start, x1: record.x1 ?? record.end })
+  }
+  const bars = []
+  for (const group of groups.values()) {
+    const subPixel = (record) => record.x1 > record.x0 && (record.x1 - record.x0) * width < 1
+    const drawable = group.length === 1 || (group.length <= 12 && !group.some(subPixel))
+    if (drawable) {
+      for (const record of group) bars.push({ ...record, kinds: [record.kind], merged: 1 })
+      continue
+    }
+    const first = group[0]
+    bars.push({
+      turn: first.turn,
+      lane: first.lane,
+      kinds: [...new Set(group.map((record) => record.kind))],
+      start: Math.min(...group.map((record) => record.start)),
+      end: Math.max(...group.map((record) => record.end)),
+      x0: Math.min(...group.map((record) => record.x0)),
+      x1: Math.max(...group.map((record) => record.x1)),
+      running: group.some((record) => record.running),
+      merged: group.length,
+    })
+  }
+  return bars
+}
+
+/** A bar's words: the tick's label and clock, then the TTFT split when it has one, or how many records it merges. */
+function timelineRecordText(bar, totalMs, startsAtMs) {
+  const text = timelineTickText(bar, totalMs, startsAtMs)
+  const label = bar.merged > 1 ? text.label + ' · ' + bar.merged + ' records' : text.label
+  const split = Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) ? ' · TTFT ' + timelineDuration(bar.ttftMs) + ' · decoding ' + timelineDuration(bar.decodingMs) : ''
+  return { label, when: text.when + split }
+}
+/* overview-bars:end */
+
+/* overview-viewport:begin */
+/**
+ * The overview's zoom, as DSH's: a viewport `{ from, to }` over the strip's full domain (fractions 0 to 1), or `null` for
+ * the whole of it. A wheel zooms about the pointer (`zoomViewport`: the domain point under the pointer stays under it,
+ * the span scales by e^(deltaY * 0.0015), no narrower than `minSpan`, and a span that reaches the whole domain is `null`
+ * again); a right-button drag pans a zoomed viewport (`panViewport`: dragging right shows earlier time); and a point on
+ * the screen maps to the domain through the viewport (`viewportDomain`). Pure, and fenced so
+ * test/page-overview-viewport.test.ts judges it.
+ */
+function zoomViewport(viewport, anchor, deltaY, minSpan) {
+  const from = viewport?.from ?? 0
+  const span = viewport === null || viewport === undefined ? 1 : viewport.to - viewport.from
+  const floor = Math.min(1, Math.max(minSpan, 1e-6))
+  const next = Math.min(1, Math.max(floor, span * Math.exp(deltaY * 0.0015)))
+  if (next >= 0.999) return null
+  const point = from + Math.min(Math.max(anchor, 0), 1) * span
+  const start = Math.min(Math.max(point - anchor * next, 0), 1 - next)
+  return { from: start, to: start + next }
+}
+
+function panViewport(viewport, anchorFrom, deltaFraction) {
+  if (viewport === null || viewport === undefined) return null
+  const span = viewport.to - viewport.from
+  const start = Math.min(Math.max(anchorFrom - deltaFraction * span, 0), 1 - span)
+  return { from: start, to: start + span }
+}
+
+/** The narrowest zoom, as DSH's: 20 ms of recorded time, or four records in the equal mode; 1 means it cannot zoom. */
+function viewportMinSpan(durationActual, totalMs, records) {
+  return durationActual ? Math.min(1, 20 / Math.max(totalMs, 1)) : Math.min(1, 4 / Math.max(records, 1))
+}
+
+function viewportDomain(viewport, screenFraction) {
+  if (viewport === null || viewport === undefined) return screenFraction
+  return viewport.from + screenFraction * (viewport.to - viewport.from)
+}
+/* overview-viewport:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   timeline.replaceChildren()
@@ -6780,12 +7011,22 @@ function renderTimeline(timeline_, data = {}) {
   const total = timeline_?.durationMs ?? 0
   const startsAtMs = Date.parse(timeline_?.startsAt ?? '')
   const lanes = ['input', 'model', 'tools']
+  const records = timeline_?.records ?? []
+  /**
+   * DSH draws per-record bars in both modes: with actual durations each bar sits on its recorded time; in the default
+   * equal mode each record takes one equal slot along the axis, in record order. An answer without records (an older
+   * server) keeps one tick per turn.
+   */
+  const placed = trajectory.durationActual
+    ? records
+    : records.map((record, index) => ({ ...record, x0: index / records.length, x1: (index + 0.9) / records.length }))
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
   const focusBox = document.createElement('div')
   focusBox.className = 'tr-focus'
   wrapper.append(focusBox)
   const equal = 1 / spans.length
+  const tracks = new Map()
   for (const lane of lanes) {
     const laneBox = document.createElement('div')
     laneBox.className = 'tr-lane'
@@ -6795,8 +7036,50 @@ function renderTimeline(timeline_, data = {}) {
     label.textContent = lane
     const track = document.createElement('div')
     track.className = 'tr-lane-track'
+    laneBox.append(label, track)
+    wrapper.append(laneBox)
+    tracks.set(lane, track)
+  }
+  /**
+   * The strip is in the page before its bars are laid out, so the pixel test reads the track's real width: an emptied
+   * strip is `display: none` (`#timeline:empty`) and measured 0, which always fell back to 1000 px (developer-ten's N1).
+   */
+  timeline.append(wrapper)
+  const bars = records.length > 0 ? overviewBars(placed, tracks.get('input')?.clientWidth ?? 0) : null
+  for (const lane of lanes) {
+    const track = tracks.get(lane)
+    /**
+     * With per-record data, the lane draws DSH's per-record bars; an answer from a server without records keeps one tick
+     * per turn. Bars are buttons like ticks, so Tab reaches them and Enter picks their turn; their listeners are the
+     * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time.
+     */
+    if (bars !== null) {
+      for (const bar of bars) {
+        if (bar.lane !== lane) continue
+        const element = document.createElement('button')
+        element.type = 'button'
+        element.className = 'tr-tick tr-bar'
+        element.dataset.lane = lane
+        element.dataset.turn = String(bar.turn)
+        element.dataset.kind = bar.kinds.join(' ')
+        element.dataset.x0 = String(bar.x0)
+        element.dataset.x1 = String(bar.x1)
+        element.style.left = (bar.x0 * 100).toFixed(3) + '%'
+        element.style.width = (Math.max(bar.x1 - bar.x0, 0.004) * 100).toFixed(3) + '%'
+        if (bar.running) element.dataset.running = 'true'
+        if (Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) && bar.ttftMs + bar.decodingMs > 0) {
+          element.dataset.split = 'true'
+          element.style.setProperty('--ttft', ((bar.ttftMs / (bar.ttftMs + bar.decodingMs)) * 100).toFixed(1) + '%')
+        }
+        const text = timelineRecordText(bar, total, startsAtMs)
+        element.dataset.tipLabel = text.label
+        element.dataset.tipWhen = text.when
+        element.setAttribute('aria-label', text.label + ' · ' + text.when)
+        track.append(element)
+      }
+      continue
+    }
     spans.forEach((span, index) => {
-      const kinds = span.kinds ?? []
       if (!(span.lanes ?? []).includes(lane)) return
       const tick = document.createElement('button')
       tick.type = 'button'
@@ -6815,17 +7098,51 @@ function renderTimeline(timeline_, data = {}) {
       tick.dataset.tipLabel = text.label
       tick.dataset.tipWhen = text.when
       tick.setAttribute('aria-label', text.label + ' · ' + text.when)
-      tick.addEventListener('click', (clickEvent) => {
-        clickEvent.stopPropagation()
-        const anchor = turnAnchors.get(span.turn)
-        if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
-      })
+      tick.dataset.turn = String(span.turn)
       track.append(tick)
     })
-    laneBox.append(label, track)
-    wrapper.append(laneBox)
   }
-  timeline.append(wrapper)
+  /**
+   * The zoom draws the lanes' tracks wider than the strip and shifted, so every bar keeps its domain position and the
+   * strip shows only the viewport (DSH's projected domain); the strip's overflow clips the rest. The narrowest zoom is
+   * DSH's: 20 ms of recorded time, or four records in the equal mode.
+   */
+  const minSpan = viewportMinSpan(trajectory.durationActual, total, records.length)
+  let focusDomain = null
+  const drawFocus = () => {
+    const viewport = trajectory.viewport
+    const span = viewport === null ? 1 : viewport.to - viewport.from
+    if (focusDomain === null) {
+      focusBox.style.display = 'none'
+      return
+    }
+    const left = (focusDomain.from - (viewport?.from ?? 0)) / span
+    const right = (focusDomain.to - (viewport?.from ?? 0)) / span
+    if (right <= 0 || left >= 1) {
+      focusBox.style.display = 'none'
+      return
+    }
+    focusBox.style.display = 'block'
+    focusBox.style.left = (Math.max(left, 0) * 100).toFixed(2) + '%'
+    focusBox.style.width = (Math.max(Math.min(right, 1) - Math.max(left, 0), 0) * 100).toFixed(2) + '%'
+  }
+  const applyViewport = () => {
+    const viewport = trajectory.viewport
+    const span = viewport === null ? 1 : viewport.to - viewport.from
+    for (const track of tracks.values()) {
+      track.style.left = viewport === null ? '' : ((-viewport.from / span) * 100).toFixed(3) + '%'
+      track.style.width = viewport === null ? '' : ((1 / span) * 100).toFixed(3) + '%'
+      track.style.right = viewport === null ? '' : 'auto'
+    }
+    wrapper.dataset.zoomed = viewport === null ? 'false' : 'true'
+    /** Only a bar inside the viewport is a tab stop, so Tab never lands on a bar the strip does not show. */
+    for (const bar of wrapper.querySelectorAll('.tr-bar')) {
+      const inside = viewport === null || (Number(bar.dataset.x1) >= viewport.from && Number(bar.dataset.x0) <= viewport.to)
+      bar.tabIndex = inside ? 0 : -1
+    }
+    drawFocus()
+  }
+  applyViewport()
   /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
   const tip = document.createElement('div')
   tip.id = 'timeline-tip'
@@ -6837,64 +7154,121 @@ function renderTimeline(timeline_, data = {}) {
     tipTimer = null
     tip.hidden = true
   }
-  for (const tick of wrapper.querySelectorAll('.tr-tick')) {
-    tick.addEventListener('pointerenter', () => {
-      hideTip()
-      tipTimer = setTimeout(() => {
-        tipTimer = null
-        tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
-        const strip = timeline.getBoundingClientRect()
-        const at = tick.getBoundingClientRect()
-        tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
-        tip.hidden = false
-      }, 500)
-    })
-    tick.addEventListener('pointerleave', hideTip)
-    tick.addEventListener('pointerdown', hideTip)
-  }
-  /** Drag across the strip to focus a time window; rows outside it dim, as DSH does. */
+  /**
+   * One set of listeners for the whole strip (developer-ten's condition 1): a bar or tick picks its turn, and 500 ms of
+   * hovering one shows its tip. Delegated, so a session of hundreds of bars adds no listener per bar.
+   */
+  const tickOf = (target) => target?.closest?.('.tr-tick') ?? null
+  wrapper.addEventListener('click', (clickEvent) => {
+    const tick = tickOf(clickEvent.target)
+    if (tick === null) return
+    clickEvent.stopPropagation()
+    const anchor = turnAnchors.get(Number(tick.dataset.turn))
+    if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  })
+  /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
+  wrapper.addEventListener('pointerenter', (pointerEvent) => {
+    const tick = pointerEvent.target?.classList?.contains('tr-tick') ? pointerEvent.target : null
+    if (tick === null) return
+    hideTip()
+    tipTimer = setTimeout(() => {
+      tipTimer = null
+      tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+      const strip = timeline.getBoundingClientRect()
+      const at = tick.getBoundingClientRect()
+      tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
+      tip.hidden = false
+    }, 500)
+  }, true)
+  wrapper.addEventListener('pointerleave', (pointerEvent) => {
+    if (pointerEvent.target?.classList?.contains('tr-tick')) hideTip()
+  }, true)
+  wrapper.addEventListener('pointerdown', (pointerEvent) => {
+    if (tickOf(pointerEvent.target) !== null) hideTip()
+  })
+  /**
+   * Drag across the strip to focus a time window; rows outside it dim, as DSH does. The window is kept in domain
+   * fractions, so a zoom or a pan redraws it where its time is. The right button is DSH's other gesture: a click clears
+   * the window, and a drag pans a zoomed strip (dragging right shows earlier time). The wheel zooms about the pointer.
+   */
   let dragging = false
   let startX = 0
+  let pan = null
   const fractionAt = (clientX) => {
     const bounds = timeline.getBoundingClientRect()
     return Math.min(Math.max((clientX - bounds.left) / Math.max(bounds.width, 1), 0), 1)
   }
   const setWindow = (from, to) => {
-    if (to - from < 0.01) {
-      focusBox.style.display = 'none'
+    if (to - from < 0.01 * (trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from)) {
+      focusDomain = null
       trajectory.focus = null
     } else {
-      focusBox.style.display = 'block'
-      focusBox.style.left = (from * 100).toFixed(2) + '%'
-      focusBox.style.width = ((to - from) * 100).toFixed(2) + '%'
+      focusDomain = { from, to }
       const start = trajectory.domainStart
       const end = trajectory.domainEnd
       trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
     }
+    drawFocus()
     renderRows()
   }
-  timeline.onpointerdown = (pointerEvent) => {
-    if (pointerEvent.target.closest('.tr-tick') !== null) return
-    dragging = true
-    startX = fractionAt(pointerEvent.clientX)
-    focusBox.style.display = 'block'
-    focusBox.style.left = (startX * 100).toFixed(2) + '%'
-    focusBox.style.width = '0%'
+  timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
+  timeline.onwheel = (wheelEvent) => {
+    /** A wheel that cannot zoom (no vertical delta, a pinch with Ctrl, a domain too short to zoom) is the page's. */
+    if (wheelEvent.deltaY === 0 || wheelEvent.ctrlKey || minSpan >= 0.999) return
+    wheelEvent.preventDefault()
+    trajectory.viewport = zoomViewport(trajectory.viewport, fractionAt(wheelEvent.clientX), wheelEvent.deltaY, minSpan)
+    applyViewport()
+  }
+  const capture = (pointerEvent) => {
     try {
       timeline.setPointerCapture?.(pointerEvent.pointerId)
     } catch {
-      // A synthetic pointer cannot be captured; the drag still works from the listeners below.
+      // A synthetic pointer cannot be captured; the gesture still works from the listeners below.
     }
   }
+  timeline.onpointerdown = (pointerEvent) => {
+    if (pointerEvent.button === 2) {
+      pan = { x: pointerEvent.clientX, from: trajectory.viewport?.from ?? 0, viewport: trajectory.viewport, moved: false }
+      capture(pointerEvent)
+      return
+    }
+    if (pointerEvent.button !== 0 || pointerEvent.target.closest('.tr-tick') !== null) return
+    dragging = true
+    startX = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
+    focusDomain = { from: startX, to: startX }
+    drawFocus()
+    capture(pointerEvent)
+  }
+  const endGestures = () => {
+    pan = null
+    dragging = false
+  }
+  timeline.onpointercancel = endGestures
+  timeline.onlostpointercapture = endGestures
   timeline.onpointermove = (pointerEvent) => {
+    if (pan !== null && (pointerEvent.buttons & 2) === 0) pan = null
+    if (pan !== null) {
+      if (Math.abs(pointerEvent.clientX - pan.x) >= 3) pan.moved = true
+      if (pan.viewport === null) return
+      const width = Math.max(timeline.getBoundingClientRect().width, 1)
+      trajectory.viewport = panViewport(pan.viewport, pan.from, (pointerEvent.clientX - pan.x) / width)
+      applyViewport()
+      return
+    }
     if (!dragging) return
-    const x = fractionAt(pointerEvent.clientX)
+    const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     setWindow(Math.min(startX, x), Math.max(startX, x))
   }
   timeline.onpointerup = (pointerEvent) => {
+    if (pan !== null) {
+      const moved = pan.moved || Math.abs(pointerEvent.clientX - pan.x) >= 3
+      pan = null
+      if (!moved) setWindow(0, 0)
+      return
+    }
     if (!dragging) return
     dragging = false
-    const x = fractionAt(pointerEvent.clientX)
+    const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     setWindow(Math.min(startX, x), Math.max(startX, x))
   }
   const legend = document.createElement('div')
@@ -6915,7 +7289,11 @@ function wireTrajectoryToolbar() {
     button.addEventListener('click', () => {
       trajectory[key] = !trajectory[key]
       button.setAttribute('aria-pressed', trajectory[key] ? 'true' : 'false')
-      if (key === 'durationActual') renderTimeline(trajectory.timeline, trajectory.data)
+      if (key === 'durationActual') {
+        /** Record slots and recorded time are different domains, with different floors: a zoom does not carry over. */
+        trajectory.viewport = null
+        renderTimeline(trajectory.timeline, trajectory.data)
+      }
       else renderRows()
     })
   }
@@ -13730,13 +14108,25 @@ async function archiveSession(node) {
  * a row's menu only decides which of the two it is changing. Answers `{ ok, status, body }`; a refusal the caller
  * handles itself (`options.quiet`) is not written to the tree's note, and `options.applied` runs once the server took the
  * change, before the redraw (a pin under Manual fronts the session in its saved orders, C17).
+ *
+ * A request that fails in flight answers `{ ok: false, status: 0, body: {}, error }` and says so in the note, as DSH's
+ * pin says "Pin failed. Try again later." (`dsh-client-ui-workspace` `lib/client.js:5085-5094`) rather than leaving the
+ * rejection to the console: the row and menu buttons that call this do not catch (#91). Whether the server applied it
+ * anyway is the next read's to show, which the stream's reconnect or the browser's return online makes
+ * (`StreamBaseline`); `options.applied` does not run for it.
  */
 async function setSessionFlags(node, patch, extra = {}, options = {}) {
-  const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
-  })
+  let response
+  try {
+    response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/flags', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...patch, ...extra, ...(definitionFolder(node) !== undefined ? { folder: definitionFolder(node) } : {}) }),
+    })
+  } catch (error) {
+    if (typeof options.quiet !== 'function' || !options.quiet(0, {})) setNote('could not change that session: ' + (error && error.message))
+    return { ok: false, status: 0, body: {}, error }
+  }
   const body = await response.json().catch(() => ({}))
   /**
    * The route refuses an archive while the session still has work the page did not know about — a background job
@@ -13828,7 +14218,8 @@ document.getElementById('session-archive-confirm').addEventListener('click', asy
     const result = await setSessionFlags(target.node, { archived: true }, { stop: true }, { quiet: () => true })
     settle(false)
     if (!result.ok) {
-      dialogError('session-archive-error', result.body?.error ?? 'could not stop and archive that session')
+      const failed = result.error !== undefined ? 'could not stop and archive that session: ' + (result.error && result.error.message) : null
+      dialogError('session-archive-error', failed ?? result.body?.error ?? 'could not stop and archive that session')
       return
     }
     stopArchiveTarget = null
@@ -17158,6 +17549,64 @@ const WorkspaceDrag = (() => {
 })()
 /* workspace-drag:end */
 
+/* workspace-folder:begin */
+/**
+ * A workspace whose folder was deleted or moved (#141), as plain rules so test/workspace-missing-folder.test.ts loads them
+ * out of the page.
+ *
+ * DSH keeps such a workspace and names it by its id: its dialogs call `renameWorkspace(workspaceId, title)` and
+ * `deleteWorkspace(workspaceId)` (dsh-client-ui-workspace lib/client.js:3784, :3818, :5192-5197; workspace.delete,
+ * dsh-workspace lib/index.js:461-471). Its `status()` says `missing-dir` (lib/index.js:154-160), which
+ * `GET /api/workspaces` carries as each workspace's `status`, and its file tree draws a level whose directory is gone as
+ * one failed line in its own words (dsh-client-ui-sidebar-files lib/client.js:483-489, :564-569; en words at :770).
+ */
+const WorkspaceFolder = (() => {
+  /** DSH's code for a directory that is not there (dsh-api-workspace-files lib/index.js:568). */
+  const NOT_FOUND = 'workspace-file/not-found'
+  /** DSH's `error.notFound` (dsh-client-ui-sidebar-files lib/client.js:770). */
+  const GONE_LINE = 'That directory is gone. It may have been moved or deleted.'
+
+  /** Whether a drawn workspace group's folder is gone, by the list's `status`; a server that does not say is not read as gone. */
+  function gone(group) {
+    return group !== null && typeof group === 'object' && group.workspace !== null && typeof group.workspace === 'object' && group.workspace.status === 'missing-dir'
+  }
+
+  /**
+   * What Rename and Delete workspace put in `/api/workspaces/<key>`: the workspace's id — the one the server lists for
+   * the row's path, else the drawn row's own (another client may have removed it, #49) — and its path only when nothing
+   * names an id. A path is resolved through the file system, which a folder that is gone cannot be.
+   */
+  function routeKey(node, workspaces) {
+    const listed = (Array.isArray(workspaces) ? workspaces : []).find((workspace) => workspace !== null && typeof workspace === 'object' && workspace.path === node.path)
+    if (listed !== undefined && typeof listed.id === 'string' && listed.id.length > 0) return listed.id
+    const drawn = node.group?.workspace?.id
+    return typeof drawn === 'string' && drawn.length > 0 ? drawn : node.path
+  }
+
+  return { NOT_FOUND, GONE_LINE, gone, routeKey }
+})()
+/* workspace-folder:end */
+
+/**
+ * A workspace group whose folder is gone, opened: its child workspaces and sessions as usual, then its `Files` heading
+ * over the one line DSH draws for a directory that is not there — the shape of the failed line a folder the server may
+ * not read gets (`data-files-row="failed"`, with the code), never "nothing inside", and no tree read that could only fail.
+ */
+function paintGoneFolder(group, depth) {
+  const heading = document.createElement('li')
+  heading.className = 'tree-heading'
+  heading.setAttribute('role', 'none')
+  heading.style.setProperty('--tree-depth', String(depth + 1))
+  heading.textContent = 'Files'
+  const line = document.createElement('div')
+  line.className = 'empty'
+  line.dataset.filesRow = 'failed'
+  line.dataset.filesCode = WorkspaceFolder.NOT_FOUND
+  line.textContent = WorkspaceFolder.GONE_LINE
+  group.append(heading, line)
+  markSelection()
+}
+
 /** The workspace being dragged, with the level it may land at; null while no workspace drag is under way. */
 let workspaceDragging = null
 
@@ -18311,6 +18760,8 @@ async function loadChildren(node, li) {
     paintSessionRows(group, node.group, depth + 1)
     let files = []
     if (node.kind === 'workspace') {
+      /** Its folder was deleted or moved (#141): said in DSH's words under the Files heading, without a read. */
+      if (WorkspaceFolder.gone(node.group)) return paintGoneFolder(group, depth)
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
         if (!response.ok) throw new Error('the tree answered ' + response.status)
@@ -20025,6 +20476,8 @@ async function openRenameWorkspace(node) {
   const workspaces = await currentWorkspaces()
   const own = workspaces.find((workspace) => workspace.path === node.path)
   renameTarget = {
+    /** By id, as DSH renames (#141): a path is resolved through the file system, which a folder that is gone cannot be. */
+    key: WorkspaceFolder.routeKey(node, workspaces),
     path: node.path,
     stored: own?.title ?? node.label,
     others: workspaces.filter((workspace) => workspace.path !== node.path && workspace.origin !== 'auto').map((workspace) => workspace.title),
@@ -20059,7 +20512,7 @@ async function confirmRename() {
   renameTarget.busy = true
   button.disabled = true
   try {
-    const response = await fetch('/api/workspaces/' + encodeURIComponent(renameTarget.path), {
+    const response = await fetch('/api/workspaces/' + encodeURIComponent(renameTarget.key), {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title }),
@@ -20122,7 +20575,8 @@ async function openDeleteWorkspace(node) {
     above = candidate.parent ?? null
   }
   const name = workspaceDisplayTitle(own?.title ?? node.label)
-  deleteTarget = { path: node.path, busy: false }
+  /** By id, as DSH's `deleteWorkspace(workspaceId)` (#141): a workspace whose folder is gone is still removed. */
+  deleteTarget = { key: WorkspaceFolder.routeKey(node, workspaces), path: node.path, busy: false }
   document.getElementById('workspace-delete-desc').textContent =
     `This removes “${name}” from the workspace list. The folder and session logs will be kept. ` +
     (heir === null ? 'Its sessions will appear under Ungrouped.' : `Its sessions will appear under “${workspaceDisplayTitle(heir.title)}”.`)
@@ -20139,7 +20593,7 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
   document.getElementById('workspace-delete-status').hidden = false
   dialogError('workspace-delete-error', '')
   try {
-    const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.path), { method: 'DELETE' })
+    const response = await fetch('/api/workspaces/' + encodeURIComponent(deleteTarget.key), { method: 'DELETE' })
     const body = await response.json().catch(() => ({}))
     if (!response.ok) {
       document.getElementById('workspace-delete-status').hidden = true

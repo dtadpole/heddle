@@ -1,0 +1,17 @@
+[
+  {
+    "text": "what is in these",
+    "attachments": [
+      { "kind": "image", "name": "screen shot.png", "mimeType": "image/png", "bytes": 2048, "url": "/api/uploads/1a2b-screen%20shot.png" },
+      { "kind": "file", "name": "notes.txt", "bytes": 0, "url": "/api/uploads/3c4d-notes.txt" },
+      { "kind": "image", "name": "5e6f.jpg", "mimeType": "image/jpeg", "bytes": 512, "url": "/api/uploads/5e6f.jpg" },
+      { "kind": "image", "name": "screen shot.png", "mimeType": "image/png", "bytes": 2048, "url": "/api/uploads/1a2b-screen%20shot.png" }
+    ]
+  },
+  {
+    "text": "",
+    "attachments": [
+      { "kind": "file", "name": "only.pdf", "bytes": 4096, "url": "/api/uploads/7a8b-only.pdf" }
+    ]
+  }
+]
