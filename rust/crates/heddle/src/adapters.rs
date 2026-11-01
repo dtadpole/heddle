@@ -1373,6 +1373,7 @@ impl heddle_context::ModelAccess for ContextModels {
             let messages = bridge(&request.messages).map_err(|error| {
                 heddle_context::SummarizeError(format!("the summary request: {error}"))
             })?;
+            let endpoint = request.endpoint.clone();
             let generated = self
                 .service
                 .generate(heddle_llm::GenerateRequest {
@@ -1385,6 +1386,12 @@ impl heddle_context::ModelAccess for ContextModels {
                 })
                 .await
                 .map_err(|error| heddle_context::SummarizeError(error.to_string()))?;
+            // A summary cut at its output limit, or ended early any other way, is no checkpoint (#207).
+            if let Some(incomplete) =
+                heddle_llm::types::summary_finish_failure(&endpoint, &generated.finish_reason)
+            {
+                return Err(heddle_context::SummarizeError(incomplete.to_string()));
+            }
             Ok(generated.text)
         })
     }
