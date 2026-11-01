@@ -4140,6 +4140,7 @@ const MESSAGES = Object.freeze({
     'model.noEfforts': 'This model provides no reasoning effort levels.',
     'preview.imageLoading': 'Loading image\u2026',
     'preview.imageFailed': 'This image could not be displayed.',
+    'preview.imageAlt': 'Image preview: {name}',
     'chat.viewChanges': 'View changes to {path}',
     'composer.editQueued': 'Edit queued message',
     'composer.saveQueued': 'Save queued message',
@@ -4363,6 +4364,7 @@ const MESSAGES = Object.freeze({
     'model.noEfforts': '当前模型未提供推理等级。',
     'preview.imageLoading': '加载图片…',
     'preview.imageFailed': '此图片无法显示。',
+    'preview.imageAlt': '图片预览：{name}',
     'chat.viewChanges': '查看 {path} 的更改',
     'composer.editQueued': '编辑排队消息',
     'composer.saveQueued': '保存排队消息',
@@ -13626,7 +13628,7 @@ async function showFile(node) {
       status.textContent = t('preview.imageLoading')
       status.setAttribute('role', 'status')
       const image = document.createElement('img')
-      image.alt = 'Image preview: ' + (body.name ?? body.path)
+      image.alt = t('preview.imageAlt', { name: (body.name ?? body.path) })
       image.referrerPolicy = 'no-referrer'
       image.decoding = 'async'
       image.draggable = false
