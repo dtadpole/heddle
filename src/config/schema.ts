@@ -195,7 +195,7 @@ export function readLayerText(
   try {
     parsed = yaml.load(text, { schema })
   } catch (error) {
-    throw new ConfigError([`${absolute} is not valid YAML: ${(error as Error).message}`])
+    throw new ConfigError([`${absolute} is not valid YAML: ${yamlProblem(error)}`])
   }
   if (parsed === null || parsed === undefined) return []
   if (!Array.isArray(parsed)) {
@@ -479,4 +479,18 @@ export function defaultLayers(options: {
     layers.push({ layer: path, file: path, entries: readLayer(path, { env }) })
   }
   return layers
+}
+
+/**
+ * A YAML parse failure as reason and position only (#165). js-yaml's message appends a code frame of the file's lines,
+ * and a profile patch can hold a credential, so the frame is dropped: the line and column are enough to find it,
+ * as the Rust build's message gives.
+ */
+export function yamlProblem(error: unknown): string {
+  const failure = error as { reason?: unknown; mark?: { line?: unknown; column?: unknown }; message?: unknown }
+  if (typeof failure.reason === 'string' && typeof failure.mark?.line === 'number' && typeof failure.mark.column === 'number') {
+    return `${failure.reason} (line ${failure.mark.line + 1}, column ${failure.mark.column + 1})`
+  }
+  const message = typeof failure.message === 'string' ? failure.message : String(error)
+  return message.split('\n')[0] ?? message
 }

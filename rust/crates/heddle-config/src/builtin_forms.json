@@ -994,5 +994,52 @@
         }
       }
     }
+  },
+  "questions/service": {
+    "uid": 5,
+    "refs": {
+      "1": {
+        "type": "const",
+        "meta": {
+          "required": true
+        },
+        "value": "legacy"
+      },
+      "2": {
+        "type": "const",
+        "meta": {
+          "required": true
+        },
+        "value": "timed"
+      },
+      "3": {
+        "type": "union",
+        "meta": {
+          "default": "legacy",
+          "description": "legacy waits for an answer; timed may release the model at a deadline"
+        },
+        "list": [
+          1,
+          2
+        ]
+      },
+      "4": {
+        "type": "number",
+        "meta": {
+          "default": 120,
+          "description": "default foreground wait of a timed call, in seconds; -1 waits indefinitely"
+        }
+      },
+      "5": {
+        "type": "object",
+        "meta": {
+          "default": {}
+        },
+        "dict": {
+          "mode": 3,
+          "timeout": 4
+        }
+      }
+    }
   }
 }
