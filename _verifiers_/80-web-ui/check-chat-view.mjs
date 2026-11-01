@@ -233,21 +233,33 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
   )
   const browser = await openBrowser()
   try {
-    await browser.goto(child.url)
+    /**
+     * The turn below is posted by another client into the session the page has open, so the page sees it only through
+     * its event stream. The session is made first and opened by name: a page with nothing open follows no session's turn
+     * but its own first one (#142, developer-ten's finding on first-visit-2; DSH's new-session screen draws no other
+     * session's transcript), and this check used to post a session-less turn at a blank page and read it there.
+     */
+    const cookie = await cookieFor(child.url)
+    const write = (path, body) => fetch(new URL(path, child.url), { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify(body) })
+    const registered = await write('/api/workspaces', { path: work })
+    assert.equal(registered.status, 200, `the folder is registered as a workspace (${registered.status})`)
+    const made = await write('/api/sessions', { branch: work })
+    const session = (await made.json().catch(() => ({}))).session
+    assert.equal(typeof session, 'string', `a session is made in it (${made.status})`)
+    await browser.gotoSession(child.url, session)
     assert.ok(await browser.waitFor('document.getElementById("log") !== null', 20_000), 'the panel is up')
     /**
-     * The turn below is posted by another client, so the page sees it only through its event stream: it is posted once
-     * that stream is open. Posted as the page loaded, it raced the stream's opening. Main won by about 10 ms, and #128's
-     * shared stream, which opens once its tab holds the lock, lost: its source was made 9 ms after the turn was posted
-     * and received none of the turn's frames.
+     * It is posted once that stream is open. Posted as the page loaded, it raced the stream's opening. Main won by about
+     * 10 ms, and #128's shared stream, which opens once its tab holds the lock, lost: its source was made 9 ms after the
+     * turn was posted and received none of the turn's frames.
      */
     assert.ok(await browser.waitFor("document.body.dataset.connection === 'open'", 20_000), 'the page follows the event stream')
-    const cookie = await cookieFor(child.url)
+    assert.ok(await browser.waitFor(`localStorage.getItem('heddle.sessions.current')?.includes(${JSON.stringify(session)}) === true`, 20_000), 'with the session open')
 
     const turn = await fetch(new URL('/api/turn', child.url), {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ prompt: 'show me markdown' }),
+      body: JSON.stringify({ prompt: 'show me markdown', session }),
     })
     assert.equal(turn.status, 200, 'the turn ran')
     await turn.text()
