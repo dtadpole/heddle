@@ -410,7 +410,12 @@ impl SubagentStore for SessionSubagents {
             return Ok(false);
         }
         let events = store.read(session).map_err(port_error)?;
-        if heddle_session::interrupted_turn_closers(&events).is_empty() {
+        // Only a cut turn counts: a command left open alone (a `/compact` a restart cut, #206) lost no answer, and
+        // its closers are written at the session's next write-open.
+        if !heddle_session::interrupted_turn_closers(&events)
+            .iter()
+            .any(|event| event.kind == "turn/completed")
+        {
             return Ok(false);
         }
         // A fresh write-open writes the closers (`SessionStore::claim`); letting go leaves the session as free
