@@ -3722,27 +3722,27 @@
   -->
   <div id="question-card" role="dialog" aria-labelledby="question-title" hidden>
     <div class="head">
-      <span class="dot" aria-hidden="true"></span><span id="question-title">Question</span>
+      <span class="dot" aria-hidden="true"></span><span id="question-title" data-i18n="question.title">Question</span>
       <span id="question-badge" class="badge" hidden></span>
       <span class="pager" id="question-pager" hidden>
-        <button type="button" id="question-prev" aria-label="Previous question">‹</button>
+        <button type="button" id="question-prev" aria-label="Previous question" data-i18n-aria-label="question.prev">‹</button>
         <span id="question-position"></span>
-        <button type="button" id="question-next" aria-label="Next question">›</button>
+        <button type="button" id="question-next" aria-label="Next question" data-i18n-aria-label="question.next">›</button>
       </span>
     </div>
     <p id="question-text"></p>
-    <div id="question-options" role="group" aria-label="Choices"></div>
-    <p id="question-skipped" hidden>Skipped</p>
+    <div id="question-options" role="group" aria-label="Choices" data-i18n-aria-label="question.choices"></div>
+    <p id="question-skipped" data-i18n="question.skipped" hidden>Skipped</p>
     <!-- A single-line field, not a textarea: the page's composer is the document's first textarea, and checks and tools
          that find it that way must keep finding the composer while a question is open. -->
-    <input type="text" id="question-custom" placeholder="Type another answer" aria-label="Your own answer" autocomplete="off">
+    <input type="text" id="question-custom" placeholder="Type another answer" aria-label="Your own answer" data-i18n-placeholder="question.customPlaceholder" data-i18n-aria-label="question.custom" autocomplete="off">
     <p id="question-note" hidden></p>
     <div class="actions">
       <span id="question-countdown" hidden></span>
-      <button type="button" id="question-take-time" hidden>Take time</button>
-      <button type="button" id="question-skip">Skip</button>
-      <button type="button" id="question-close" hidden>Close</button>
-      <button type="button" id="question-submit">Submit</button>
+      <button type="button" id="question-take-time" data-i18n="question.takeTime" hidden>Take time</button>
+      <button type="button" id="question-skip" data-i18n="question.skip">Skip</button>
+      <button type="button" id="question-close" data-i18n="question.close" hidden>Close</button>
+      <button type="button" id="question-submit" data-i18n="question.submit">Submit</button>
     </div>
   </div>
   <!--
@@ -4141,6 +4141,28 @@ const MESSAGES = Object.freeze({
     'preview.imageLoading': 'Loading image\u2026',
     'preview.imageFailed': 'This image could not be displayed.',
     'preview.imageAlt': 'Image preview: {name}',
+    'question.title': 'Question',
+    'question.prev': 'Previous question',
+    'question.next': 'Next question',
+    'question.choices': 'Choices',
+    'question.skipped': 'Skipped',
+    'question.customPlaceholder': 'Type another answer',
+    'question.custom': 'Your own answer',
+    'question.takeTime': 'Take time',
+    'question.skip': 'Skip',
+    'question.close': 'Close',
+    'question.submit': 'Submit',
+    'question.answered': 'Answered',
+    'question.answerLater': 'Answer later',
+    'question.position': '{index} of {total}',
+    'question.wentOn': 'The turn went on without this answer; your answer will be sent to the model as a message.',
+    'question.held': 'Taking time: the model waits for your answer',
+    'question.countdown': 'Continues without an answer in {time}',
+    'question.notLanded': 'that answer did not land',
+    'question.sendFailed': 'could not send the answer: {reason}',
+    'question.open': 'Open question',
+    'panel.noContext': 'No context figures yet \u2014 send a message to start measuring.',
+    'panel.noStats': 'No statistics yet \u2014 send a message to start measuring.',
     'chat.viewChanges': 'View changes to {path}',
     'composer.editQueued': 'Edit queued message',
     'composer.saveQueued': 'Save queued message',
@@ -4365,6 +4387,28 @@ const MESSAGES = Object.freeze({
     'preview.imageLoading': '加载图片…',
     'preview.imageFailed': '此图片无法显示。',
     'preview.imageAlt': '图片预览：{name}',
+    'question.title': '问题',
+    'question.prev': '上一题',
+    'question.next': '下一题',
+    'question.choices': '选项',
+    'question.skipped': '已跳过',
+    'question.customPlaceholder': '输入其他答案',
+    'question.custom': '你的答案',
+    'question.takeTime': '慢慢回答',
+    'question.skip': '跳过',
+    'question.close': '关闭',
+    'question.submit': '提交',
+    'question.answered': '已回答',
+    'question.answerLater': '稍后回答',
+    'question.position': '{index} / {total}',
+    'question.wentOn': '这一轮已在没有此回答的情况下继续；你的回答会作为一条消息发送给模型。',
+    'question.held': '慢慢回答：模型会一直等你回答',
+    'question.countdown': '{time} 后将在没有回答的情况下继续',
+    'question.notLanded': '回答未送达',
+    'question.sendFailed': '无法发送回答：{reason}',
+    'question.open': '打开问题',
+    'panel.noContext': '还没有上下文数据——发送一条消息即开始统计。',
+    'panel.noStats': '还没有统计数据——发送一条消息即开始统计。',
     'chat.viewChanges': '查看 {path} 的更改',
     'composer.editQueued': '编辑排队消息',
     'composer.saveQueued': '保存排队消息',
@@ -10662,7 +10706,7 @@ function renderStatPopover() {
     if (percentRow === undefined && usedRow === undefined && sections === undefined) {
       const empty = document.createElement('div')
       empty.className = 'stat-panel-empty'
-      empty.textContent = 'No context figures yet — send a message to start measuring.'
+      empty.textContent = t('panel.noContext')
       popover.append(empty)
       positionStatPopover()
       return
@@ -10766,7 +10810,7 @@ function renderStatPopover() {
   if (list.children.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'stat-panel-empty'
-    empty.textContent = 'No statistics yet — send a message to start measuring.'
+    empty.textContent = t('panel.noStats')
     popover.append(empty)
   }
   positionStatPopover()
@@ -24036,12 +24080,12 @@ function renderQuestion() {
   questionCard.dataset.state = readOnly ? 'answered' : request.state
   questionCard.dataset.readOnly = String(readOnly)
   questionCard.dataset.id = request.id
-  document.getElementById('question-title').textContent = question.header || 'Question'
+  document.getElementById('question-title').textContent = question.header || t('question.title')
   const badge = document.getElementById('question-badge')
   badge.hidden = !readOnly && request.state !== 'pending' && request.state !== 'continued'
-  badge.textContent = readOnly ? 'Answered' : 'Answer later'
+  badge.textContent = readOnly ? t('question.answered') : t('question.answerLater')
   document.getElementById('question-pager').hidden = total < 2
-  document.getElementById('question-position').textContent = `${draft.index + 1} of ${total}`
+  document.getElementById('question-position').textContent = t('question.position', { index: draft.index + 1, total })
   document.getElementById('question-prev').disabled = draft.index === 0
   document.getElementById('question-next').disabled = draft.index === total - 1
   document.getElementById('question-text').textContent = question.question
@@ -24077,7 +24121,7 @@ function renderQuestion() {
   questionCustom.hidden = readOnly && !answer.custom
   const note = document.getElementById('question-note')
   if (!readOnly && (request.state === 'pending' || request.state === 'continued')) {
-    note.textContent = 'The turn went on without this answer; your answer will be sent to the model as a message.'
+    note.textContent = t('question.wentOn')
     note.hidden = false
   } else if (note.dataset.kind !== 'error') note.hidden = true
   document.getElementById('question-skip').hidden = readOnly
@@ -24095,14 +24139,14 @@ function renderQuestionClock() {
   const live = shown !== null && !shown.readOnly && shown.request.state === 'waiting' && shown.request.timed
   if (!live) { countdown.hidden = true; take.hidden = true; return }
   if (shown.request.held || shown.request.deadline === null) {
-    countdown.textContent = 'Taking time: the model waits for your answer'
+    countdown.textContent = t('question.held')
     countdown.hidden = false
     take.hidden = true
     return
   }
   const tick = () => {
     const left = Math.max(0, Math.round((Date.parse(shown.request.deadline) - Date.now()) / 1000))
-    countdown.textContent = `Continues without an answer in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
+    countdown.textContent = t('question.countdown', { time: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` })
     if (left === 0) { clearInterval(questionTimer); void refreshQuestions() }
   }
   tick()
@@ -24169,7 +24213,7 @@ async function questionSubmit() {
   try {
     const { response, body } = await questionPost('/api/questions/' + encodeURIComponent(shown.request.id), { session: shown.request.session, answers: questionBatch() })
     if (!response.ok || body.answered !== true) {
-      note.textContent = body.error ?? 'that answer did not land'
+      note.textContent = body.error ?? t('question.notLanded')
       note.dataset.kind = 'error'
       note.hidden = false
       await refreshQuestions()
@@ -24188,7 +24232,7 @@ async function questionSubmit() {
       else void sendNow(body.message)
     }
   } catch (error) {
-    note.textContent = `could not send the answer: ${(error && error.message) || error}`
+    note.textContent = t('question.sendFailed', { reason: (error && error.message) || error })
     note.dataset.kind = 'error'
     note.hidden = false
   } finally {
@@ -24264,7 +24308,7 @@ function questionToolButton(node) {
   const button = document.createElement('button')
   button.type = 'button'
   button.className = 'question-open'
-  button.textContent = 'Open question'
+  button.textContent = t('question.open')
   button.addEventListener('click', (event) => {
     event.preventDefault()
     event.stopPropagation()
@@ -24293,7 +24337,7 @@ function questionAnswerText(text) {
     return record.questions.map((question) => {
       const answer = (record.answers ?? []).find((entry) => entry.id === question.id) ?? { selected: [] }
       const given = [...(answer.selected ?? []), ...(answer.custom ? [answer.custom] : [])].join(', ')
-      return `${question.question}\n→ ${given || 'Skipped'}`
+      return `${question.question}\n→ ${given || t('question.skipped')}`
     }).join('\n')
   } catch {
     return null
