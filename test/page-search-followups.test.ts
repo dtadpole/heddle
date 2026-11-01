@@ -702,3 +702,33 @@ test('#151: a hit that leaves is taken out, a new one comes in, and the hits tha
   await run.applySearch()
   assert.equal(results.children.length, 0)
 })
+
+/**
+ * #151's check found the archived hit's Unarchive button laid out past its row's right edge (the row 12-340, the button
+ * at 342-362), so the point at its centre was another element and no press reached it. The workspace label was
+ * `flex: none` with no cap, so a long workspace name — the verifiers' fixture folders are `<label>-<pid>-<token>-<n>` —
+ * pushed the row's controls out; main has had that rule since the search first named its hits. DSH caps its label
+ * (`searchResultWorkspace`: one line, `max-width: 40%`, cut with an ellipsis, dsh-client-ui-workspace lib/client.js:1741)
+ * and keeps its row actions `flex: none`, so they stay inside the row.
+ */
+test('#151: a search hit keeps its Unarchive button inside the row: the workspace label is capped and cut as DSH cuts it', () => {
+  const rule = (selector: string) => {
+    const at = page.indexOf(`${selector} {`)
+    assert.ok(at > 0, `the page styles ${selector}`)
+    const body = page.slice(page.indexOf('{', at) + 1, page.indexOf('}', at))
+    return Object.fromEntries(
+      body
+        .split(';')
+        .map((part) => part.trim())
+        .filter((part) => part.includes(':'))
+        .map((part) => [part.slice(0, part.indexOf(':')).trim(), part.slice(part.indexOf(':') + 1).trim()]),
+    ) as Record<string, string>
+  }
+  const label = rule('#search-results .hit-workspace')
+  assert.equal(label['max-width'], '40%', "DSH's cap on the workspace label")
+  assert.deepEqual([label.overflow, label['text-overflow'], label['white-space']], ['hidden', 'ellipsis', 'nowrap'], 'one line, cut with an ellipsis')
+  const title = rule('#search-results .hit-title')
+  assert.equal(title['min-width'], '0', 'the title gives way first')
+  assert.match(String(title.flex), /^1 1 /, 'and shrinks')
+  assert.equal(rule('#search-results .hit-unarchive').flex, 'none', 'the button keeps its size, so it stays whole inside the row')
+})

@@ -151,7 +151,10 @@
   #search-results .hit { display: flex; align-items: baseline; gap: .4rem; width: 100%; text-align: left; padding: .3rem .5rem; font: inherit; color: inherit; background: none; border: 0; border-radius: 12px; cursor: pointer; }
   #search-results .hit:hover, #search-results .hit:focus-visible { background: color-mix(in oklab, currentColor 8%, transparent); outline: none; }
   #search-results .hit-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #search-results .hit-workspace { flex: none; font-size: .78rem; opacity: .55; }
+  /* DSH's workspace label (`searchResultWorkspace`, dsh-client-ui-workspace lib/client.js:1741): one line, at most 40% of
+     the row, cut with an ellipsis. Uncapped, a long workspace name pushed an archived hit's Unarchive button past the row's
+     right edge, where no press reached it (#151). */
+  #search-results .hit-workspace { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .78rem; opacity: .55; }
   /** DSH's `searchStatus`: tertiary, 12px, the row inset — a sentence under the list, not another row. */
   #search-more { margin: 0; padding: 10px 12px; font-size: 12px; line-height: 18px; color: var(--text-3); }
   /**
