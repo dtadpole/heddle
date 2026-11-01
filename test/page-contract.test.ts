@@ -99,7 +99,7 @@ test("the collapse chord is DSH's Alt+Meta+B, and the search chord opens the pan
    * The search field is put away while the sidebar is a rail, so its chord has to open the panel before focusing —
    * otherwise `Alt+Meta+K` focuses something a reader cannot see and appears to do nothing.
    */
-  assert.match(page, /\{ key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table')
+  assert.match(page, /\{ code: 'KeyB', key: 'b', alt: true, action: 'sidebar' \}/, 'the chord is in the table, by its physical key')
   assert.match(page, /if \(action === 'sidebar'\) \{/, 'and the handler acts on it')
   assert.match(page, /if \(sidebarCollapsed\(\)\) openSidebar\(\)/, 'search opens the panel first')
 })
@@ -160,21 +160,22 @@ test('the panel has DSH\'s primary action, and it starts a session where the rea
   assert.match(page, /function newSessionWorkspace\(/, 'the target is chosen in one place')
   /**
    * The order itself lives in the tree's pure block since #134 (`WorkspaceTree.newSessionWorkspace`), where
-   * test/workspace-tree.test.ts judges it case by case; the page hands it the reader's context.
+   * test/workspace-tree.test.ts judges it case by case; the page hands it the reader's context and, for the open
+   * session's workspace, the whole index (#119).
    */
   assert.match(
     page,
-    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{ chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder \}\)/,
-    'the page asks it with the rows the tree drew and the reader\'s context',
+    /return WorkspaceTree\.newSessionWorkspace\(treeTops, \{\s*chosen: chosenWorkspace,\s*current,\s*selected: selectedPath,\s*active: activeFolder,\s*remembered: lastWorkspace,\s*workspaces: knownWorkspaces,\s*sessions: \[\.\.\.sessionMetas\.values\(\)\],\s*\}\)/,
+    'the page asks it with the rows the tree drew, the reader\'s context, this browser\'s last workspace (#142) and the whole index',
   )
   assert.match(
     page,
-    /if \(chosen !== null && typeof chosen === 'object' && chosen\.during === current\) \{[\s\S]*?const byChoice = list\.find[\s\S]*?if \(current !== null\) \{[\s\S]*?const byCurrent = list\.find/,
-    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace',
+    /if \(chosen !== null && typeof chosen === 'object' && chosen\.during === current\) \{[\s\S]*?const byChoice = list\.find[\s\S]*?if \(current !== null\) \{\s*const home = sessionWorkspace\(workspaces, sessions, current\)[\s\S]*?const byCurrent = list\.find/,
+    'from the workspace the person opened or added since the open session was chosen, then the open session\'s workspace from the whole index (#119)',
   )
   assert.match(page, /if \(typeof selected === 'string' && !selected\.startsWith\('session:'\)\) \{[\s\S]*?const bySelection = owner\(selected\)/, 'then from the selected row\'s workspace')
   assert.match(page, /await startSessionAt\(workspace\)/, 'and the act is the same path a workspace row uses')
-  assert.match(page, /\{ key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
+  assert.match(page, /\{ code: 'KeyN', key: 'n', alt: true, action: 'new-session' \}/, 'with DSH\'s chord in the table')
   assert.match(page, /if \(action === 'new-session'\) \{/, 'and a handler that acts on it')
 })
 
@@ -295,7 +296,7 @@ test('the panel ends with a Settings entry, and the Settings surface never rende
   assert.match(page, /Credentials are never shown here/, 'and the line that says credentials are never rendered')
   assert.match(page, /settingsDialog\.showModal\(\)/, 'shown modally, so Escape and focus containment are the platform\'s')
   assert.match(page, /if \(clickEvent\.target === settingsDialog\) settingsDialog\.close\(\)/, 'and the backdrop dismisses it')
-  assert.match(page, /\{ key: ',', alt: true, action: 'settings' \}/, 'with the reference\'s chord in the table')
+  assert.match(page, /\{ code: 'Comma', key: ',', alt: true, action: 'settings' \}/, 'with the reference\'s chord in the table')
   assert.match(page, /endpoint\.credential === 'set' \? 'credential set' : 'no credential'/, 'the credential is reported as set or not, never printed')
 })
 

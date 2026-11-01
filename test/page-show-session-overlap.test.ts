@@ -51,6 +51,9 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     let current = null, unavailableSession = null, selectedPath = null, view = 'chat';
     let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
     let showGeneration = 0;
+    // The running turns' rounds per session (the dock's guard): none is running here.
+    const runningSessions = new Set();
+    const turnRounds = new Map();
     const schedState = { drawer: null };
     const unreadSessions = new Set();
     const sessionMetas = new Map();
@@ -79,6 +82,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function chooseWorkspace() {}
     function paintEmptyState() {}
     function rememberCurrent() {}
+    function rememberSessionWorkspace() {}
     function paintComposerAccess() {}
     function paintRunningMarks() {}
     function jobsSessionChanged() {}
@@ -107,6 +111,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function drawSessionEvent() {}
     ${source('keptToDraw')}
     ${source('drawKeptEvents')}
+    ${source('liveRoundsOf')}
     ${source('showSession')}
     ({
       show: showSession,
@@ -235,14 +240,17 @@ function booting(saved: string | null): Restoring & Pick<Page, 'release' | 'wait
   const restoring = runInNewContext(
     `
     let current = null;
+    let lastWorkspace = null;
     const opened = [], started = [];
     const WorkspaceTree = {
       SELECTION_KEY: 'heddle.sessions.current',
+      LAST_WORKSPACE_KEY: 'heddle.workspace.last',
       savedSelection: (raw) => raw,
+      savedWorkspace: () => null,
       restoreChoice: (saved, workspaces, sessions) =>
-        saved !== null && sessions.some((meta) => meta.id === saved) ? { kind: 'saved', id: saved } : { kind: 'start', path: '/work' },
+        saved !== null && sessions.some((meta) => meta.id === saved) ? { kind: 'saved', id: saved } : { kind: 'aim', path: '/work' },
     };
-    const localStorage = { getItem: () => saved };
+    const localStorage = { getItem: (key) => (key === 'heddle.sessions.current' ? saved : null) };
     async function showSession(id) { current = id; opened.push(id); return true }
     async function startSessionAt(node) { started.push(node.path); current = 'session-fresh' }
     async function refreshSessions() {}

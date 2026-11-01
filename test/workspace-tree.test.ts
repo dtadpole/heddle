@@ -71,8 +71,17 @@ interface Tree {
   SELECTION_KEY: string
   selectionRecord: (id: string | null) => string
   savedSelection: (raw: unknown) => string | null
-  recentWorkspace: (workspaces: unknown[], sessions: unknown[]) => { id: string; path: string } | undefined
-  restoreChoice: (saved: string | null, workspaces: unknown[], sessions: unknown[]) => { kind: 'saved' | 'start' | 'none'; id?: string; path?: string; forget?: boolean }
+  LAST_WORKSPACE_KEY: string
+  workspaceRecord: (path: string | null) => string
+  savedWorkspace: (raw: unknown) => string | null
+  aimedWorkspace: (workspaces: unknown[], remembered: string | null) => { id: string; path: string } | undefined
+  restoreChoice: (
+    saved: string | null,
+    workspaces: unknown[],
+    sessions: unknown[],
+    remembered?: string | null,
+  ) => { kind: 'saved' | 'aim' | 'none'; id?: string; path?: string; forget?: boolean }
+  sessionWorkspace: (workspaces: unknown[], sessions: unknown[], id: string | null) => { id: string; path: string } | undefined
   newSessionWorkspace: (tops: unknown, state?: Record<string, unknown>) => { path: string; label: string } | null
   newConversationTarget: (tops: unknown, state?: Record<string, unknown>) => { path: string; label: string } | null
   folderLabel: (tops: unknown, path: unknown) => string
@@ -404,6 +413,105 @@ test('a group knows whether it, or a group under it, holds the open session', ()
   assert.deepEqual(tree.flatten([root]).map((group) => group.key), ['w-root', 'w-child'], 'flatten lists parents before children')
 })
 
+/** The workspace rows the page keeps from one drawing under an archive filter (`treeTops`), as `renderTree` makes them. */
+function drawnRows(workspaces: unknown[], sessions: unknown[], options: Record<string, unknown>) {
+  return tree
+    .flatten(tree.deriveGroups(workspaces, sessions, { grouping: 'tree', ...options }))
+    .filter((group) => group.workspace !== null)
+    .map((group) => ({ kind: 'workspace', path: group.path, label: group.label, group }))
+}
+
+test('New session starts in the open session\'s workspace even when its row is archived and not drawn, never in the last remembered folder (#119)', () => {
+  /**
+   * #119: under Hide archived an open archived session is in no drawn group, so the page's lookup among drawn groups
+   * missed and New session started in `activeFolder`, the folder of a session that was no longer open — on a shared
+   * server another person's project. DSH finds the open session's workspace in its whole workspace list
+   * (dsh-client-ui-workspace lib/client.js:1503-1508), where an archived session keeps its account slot (dsh-workspace
+   * lib/index.js:232-233, :502-503; README "Archive filtering alone changes neither saved positions nor account membership").
+   * The order is still #134's one `newSessionWorkspace`; only its open-session step reads the whole index.
+   */
+  const workspaces = [
+    workspace('w-a', '/work/a', { sessionIds: ['s-a-new'] }),
+    workspace('w-b', '/work/b', { sessionIds: ['s-b-archived'], title: 'Beta' }),
+  ]
+  const sessions = [
+    session('s-a-new', 9, { cwd: '/work/a' }),
+    session('s-b-archived', 1, { cwd: '/work/b', archived: true }),
+  ]
+  const rows = drawnRows(workspaces, sessions, { archived: 'hide', current: 's-b-archived' })
+  assert.equal(rows.some((row) => tree.containsSession(row.group, 's-b-archived', false)), false, 'the precondition: under Hide archived no drawn group holds the open archived session')
+  assert.deepEqual(rows.map((row) => row.path), ['/work/a', '/work/b'], 'A is drawn first')
+  const state = { current: 's-b-archived', chosen: null, selected: 'session:s-a-new', active: '/work/a' }
+  assert.equal(tree.newSessionWorkspace(rows, state)?.path, '/work/a', 'without the index the drawn groups miss it, which was #119')
+
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-b-archived')?.id, 'w-b', 'the whole index still knows the archived session\'s workspace')
+  const indexed = { ...state, workspaces, sessions }
+  const picked = tree.newSessionWorkspace(rows, indexed)
+  assert.equal(picked?.path, '/work/b', 'New session starts in B, where the open session lives, not in the remembered folder A nor the first drawn workspace A')
+  assert.equal(picked, rows[1], 'as the row the tree drew for B')
+  assert.equal(tree.newSessionWorkspace(drawnRows(workspaces, sessions, { archived: 'show', current: 's-b-archived' }), indexed)?.path, '/work/b', 'show: the same answer')
+  const only = drawnRows(workspaces, [session('s-b-archived', 1, { cwd: '/work/b', archived: true })], { archived: 'only', current: 's-b-archived' })
+  assert.deepEqual(tree.newSessionWorkspace(only.filter((row) => row.path !== '/work/b'), indexed), { kind: 'workspace', path: '/work/b', label: 'Beta' }, 'a workspace the filter left undrawn is still the answer, by its path and display title')
+  assert.equal(tree.newSessionWorkspace(rows, { ...indexed, current: 's-a-new' })?.path, '/work/a', 'an open session in A starts in A')
+  assert.equal(
+    tree.newSessionWorkspace(rows, { ...indexed, chosen: { path: '/work/a', during: 's-b-archived' } })?.path,
+    '/work/a',
+    'a workspace row the person opened beside the open session still wins over the open session\'s (#25)',
+  )
+  assert.equal(tree.newSessionWorkspace(rows, { ...indexed, chosen: { path: '/work/a', during: 's-a-new' } })?.path, '/work/b', 'but not a choice made beside another session')
+  assert.equal(tree.newConversationTarget(rows, { chosen: null, selected: 'session:s-a-new', active: '/work/a' })?.path, '/work/a', 'with no session open the composer\'s place is #134\'s, unchanged')
+})
+
+test('the open session\'s workspace is the registered one that accounts for it: nested, adopted, or by its cwd when no workspace names it yet (#119)', () => {
+  const workspaces = [
+    workspace('w-app', '/repo/packages/app', { parent: 'w-repo', sessionIds: ['s-app'] }),
+    workspace('w-repo', '/repo', { sessionIds: ['s-repo'] }),
+    workspace('w-scratch', '/repo/scratch', { origin: 'auto', parent: 'w-repo', sessionIds: ['s-scratch'] }),
+    workspace('w-loose', '/tmp/loose', { origin: 'auto', sessionIds: ['s-loose'] }),
+  ]
+  const sessions = [
+    session('s-app', 4, { cwd: '/repo/packages/app', archived: true }),
+    session('s-repo', 3, { cwd: '/repo' }),
+    session('s-scratch', 2, { cwd: '/repo/scratch' }),
+    session('s-loose', 1, { cwd: '/tmp/loose' }),
+    session('s-new', 5, { cwd: '/repo/packages/app/src' }),
+    session('s-repository', 6, { cwd: '/repository' }),
+  ]
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-app')?.id, 'w-app', 'the nested workspace, not the one above it')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-scratch')?.id, 'w-repo', 'an adopted root counts for the registered workspace above it, where the tree draws it')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-new')?.id, 'w-app', 'a session no workspace names yet: the deepest registered workspace containing its cwd')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-repository'), undefined, 'a sibling folder whose name only starts the same is not inside')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-loose'), undefined, 'an Ungrouped session has no workspace')
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, 's-unknown'), undefined)
+  assert.equal(tree.sessionWorkspace(workspaces, sessions, null), undefined)
+  const rows = drawnRows(workspaces, sessions, { archived: 'hide', current: 's-app' })
+  assert.deepEqual(rows.map((row) => row.path).sort(), ['/repo', '/repo/packages/app'])
+  assert.equal(tree.newSessionWorkspace(rows, { workspaces, sessions, current: 's-app', active: '/repo' })?.path, '/repo/packages/app')
+  assert.equal(
+    tree.newSessionWorkspace(rows, { workspaces, sessions, current: 's-loose', active: '/repo/packages/app/x' })?.path,
+    '/repo/packages/app',
+    'an open session no registered workspace holds: the remembered folder\'s workspace, as before',
+  )
+})
+
+test('the page asks newSessionWorkspace with the whole index, kept before the archive filter draws (#119)', () => {
+  const body = (start: string) => {
+    const from = page.indexOf(start)
+    assert.ok(from > 0, `${start} is in the page`)
+    return page.slice(from, page.indexOf('\n}\n', from))
+  }
+  const decide = body('function newSessionWorkspace() {')
+  assert.match(decide, /WorkspaceTree\.newSessionWorkspace\(treeTops, \{/, 'the page hands its state to #134\'s one order')
+  assert.match(decide, /workspaces: knownWorkspaces,/, 'with every workspace')
+  assert.match(decide, /sessions: \[\.\.\.sessionMetas\.values\(\)\],/, 'and every listed session, archived included')
+  const aim = body('function newConversationTarget() {')
+  assert.match(aim, /workspaces: knownWorkspaces/, 'the composer\'s place with no session open reads the whole registry, which "the only workspace" counts (#142)')
+  assert.match(aim, /remembered: lastWorkspace/, 'and this browser\'s memory of its last workspace (#142)')
+  assert.match(body('async function renderTree() {'), /if \(Array\.isArray\(workspaces\)\) \{\s*knownWorkspaces = workspaces[^}]*\}\n\s*rowIndex\.clear\(\)/, 'the tree keeps the whole answer before it filters')
+  assert.match(body('async function restoreSelection() {'), /knownWorkspaces = workspaceBody\.workspaces/, 'and so does a load')
+  assert.match(body('async function startNewSession() {'), /const workspace = newSessionWorkspace\(\)/, 'the header and the Automation tasks page\'s New both ask it')
+})
+
 /**
  * The sidebar search, DSH's local half (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169`): a
  * case-insensitive substring of the session's **title or its workspace's name**, newest first, at most
@@ -719,21 +827,24 @@ test('a reload reopens the saved session, and with nothing saved never opens a h
   assert.deepEqual(tree.restoreChoice('s-alpha', workspaces, sessions), { kind: 'saved', id: 's-alpha' }, 'the saved session, though three are newer')
   assert.deepEqual(
     tree.restoreChoice(null, workspaces, sessions),
-    { kind: 'start', path: '/w' },
-    'with nothing saved, a fresh session in the workspace: not the hidden child, not the archived session, not the newest row (#17)',
+    { kind: 'aim', path: '/w' },
+    'with nothing saved, the composer is aimed at the only workspace: not the hidden child, not the archived session, not the newest row (#17), and nothing is started (#142)',
   )
   assert.deepEqual(tree.restoreChoice('s-child', workspaces, sessions), { kind: 'saved', id: 's-child' }, 'a child the person opened is theirs to come back to (DSH restores a saved subagent view, :1607-1609)')
-  assert.deepEqual(tree.restoreChoice(null, workspaces, [sessions[0]]), { kind: 'start', path: '/w' }, 'a store holding only a child opens none of it')
-  assert.deepEqual(tree.restoreChoice(null, workspaces, []), { kind: 'start', path: '/w' })
-  assert.deepEqual(tree.restoreChoice(null, [], sessions), { kind: 'none' }, 'with no registered workspace to start in, nothing opens')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, [sessions[0]]), { kind: 'aim', path: '/w' }, 'a store holding only a child opens none of it')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, []), { kind: 'aim', path: '/w' })
+  assert.deepEqual(tree.restoreChoice(null, [], sessions), { kind: 'none' }, 'with no registered workspace to aim at, nothing opens')
 })
 
-test('with nothing saved a load starts a fresh session in the most recently active workspace, and never opens one already there (#17)', () => {
+test('a first visit starts nothing and aims where this browser last worked, else at the only workspace, else nowhere: never by another person\'s activity (#142)', () => {
   /**
-   * DSH's restoreSelection with no saved session: no summary, so the target is recentWorkspace and connectWorkspace
-   * creates a fresh Session there (dsh-client-ui-workspace lib/client.js:1611-1613, :1620, :1626, :1406, :1694-1710). It
-   * never opens an existing session on its own. #17: on a shared server the page opened the newest session in the store,
-   * another person's, and a message sent without looking went into their conversation.
+   * DSH's restoreSelection with no saved session ranks its workspaces by their latest session (`recentWorkspace`,
+   * dsh-client-ui-workspace lib/client.js:1694-1710) and creates a Session there at once (`:1620`, `connectWorkspace`
+   * `:1626` -> `connectBlank` `:1403-1406`). DSH is single-user, so that is the person's own workspace. #142: on heddle's
+   * shared server the same ranking named whoever was active last, so every first visit left a blank session in another
+   * person's workspace and aimed the composer at their folder. Now nothing is created on load (the first message creates
+   * the session, #134's path), and the place is this browser's own memory, else the only registered workspace (the
+   * single-user Default workspace), else none, where the composer is DSH's inert one.
    */
   const workspaces = [
     workspace('w-mine', '/mine', { sessionIds: ['s-mine'] }),
@@ -746,15 +857,48 @@ test('with nothing saved a load starts a fresh session in the most recently acti
   ]
   for (const saved of [null, '']) {
     const choice = tree.restoreChoice(saved, workspaces, sessions)
-    assert.deepEqual(choice, { kind: 'start', path: '/theirs' }, `a first visit (${JSON.stringify(saved)}) starts a fresh session, as DSH's does`)
+    assert.deepEqual(choice, { kind: 'none' }, `a first visit (${JSON.stringify(saved)}) with two workspaces and no memory aims nowhere: not at the workspace active last on the server`)
     assert.equal(choice.id, undefined, 'and names no existing session to open: not the newest, not another client\'s blank')
   }
-  assert.deepEqual(tree.restoreChoice('s-mine', workspaces, sessions), { kind: 'saved', id: 's-mine' }, 'a saved session is still reopened')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, sessions, '/mine'), { kind: 'aim', path: '/mine' }, 'the workspace this browser last worked in, though another is more recently active')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, sessions, '/theirs'), { kind: 'aim', path: '/theirs' }, 'the memory decides, whichever it names')
+  assert.deepEqual(tree.restoreChoice(null, workspaces, sessions, '/removed'), { kind: 'none' }, 'a remembered workspace that is no longer registered is no place')
+  assert.deepEqual(tree.restoreChoice('s-mine', workspaces, sessions, '/theirs'), { kind: 'saved', id: 's-mine' }, 'a saved session is still reopened, whatever the memory says')
+  assert.deepEqual(tree.restoreChoice('s-gone', workspaces, sessions), { kind: 'none', forget: true }, 'a saved one that is gone is forgotten, then as a first visit')
+  assert.deepEqual(tree.restoreChoice('s-gone', workspaces, sessions, '/mine'), { kind: 'aim', path: '/mine', forget: true })
   assert.deepEqual(
-    tree.restoreChoice('s-gone', workspaces, sessions),
-    { kind: 'start', path: '/theirs', forget: true },
-    'a saved one that is gone starts fresh the same way, and the stale entry is emptied',
+    tree.restoreChoice(null, [workspace('w-default', '/h/default-workspace', { title: 'default-workspace' })], []),
+    { kind: 'aim', path: '/h/default-workspace' },
+    'one workspace, the single-user case: it is the place with no memory at all',
   )
+})
+
+test('the workspace this browser last worked in is kept beside the open session, and only an entry this page wrote is read back (#142)', () => {
+  assert.equal(tree.LAST_WORKSPACE_KEY, 'heddle.workspace.last')
+  assert.equal(tree.workspaceRecord('/mine'), '{"path":"/mine"}')
+  assert.equal(tree.workspaceRecord(null), '{}')
+  assert.equal(tree.savedWorkspace(tree.workspaceRecord('/mine')), '/mine')
+  assert.equal(tree.savedWorkspace('{}'), null)
+  assert.equal(tree.savedWorkspace(null), null, 'a first visit has no entry')
+  assert.equal(tree.savedWorkspace('not json'), null, 'a damaged entry is no memory rather than an error')
+  assert.equal(tree.savedWorkspace('{"path":7}'), null)
+  assert.equal(tree.savedWorkspace('"/mine"'), null)
+})
+
+test('the aimed workspace is the remembered registered one, else the only registered one, never ranked by activity (#142)', () => {
+  const made = (id: string, path: string, createdAt: string, options: Parameters<typeof workspace>[2] = {}) => ({ ...workspace(id, path, options), createdAt })
+  const a = made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] })
+  const b = made('w-b', '/b', '2026-10-28T11:00:00.000Z', { sessionIds: ['s-b'] })
+  const auto = made('w-auto', '/a/scratch', '2026-10-28T00:00:00.000Z', { origin: 'auto', parent: 'w-a' })
+  assert.equal(tree.aimedWorkspace([a, b], '/a')?.id, 'w-a', 'the remembered one')
+  assert.equal(tree.aimedWorkspace([a, b], null), undefined, 'two and no memory: none, though B is newer and busier')
+  assert.equal(tree.aimedWorkspace([a, b], '/a/scratch'), undefined, 'a path that is not a registered workspace is no memory')
+  assert.equal(tree.aimedWorkspace([a, auto, b], '/a/scratch'), undefined, 'nor an adopted root')
+  assert.equal(tree.aimedWorkspace([a, auto], null)?.id, 'w-a', 'an adopted root does not count: A is the only registered workspace')
+  assert.equal(tree.aimedWorkspace([b], '/gone')?.id, 'w-b', 'a stale memory falls back to the only workspace')
+  assert.equal(tree.aimedWorkspace([], '/a'), undefined)
+  assert.equal(tree.aimedWorkspace(undefined as unknown as unknown[], null), undefined)
+  assert.equal('recentWorkspace' in tree, false, 'nothing ranks workspaces by the latest activity on the server any more')
 })
 
 test('a New session placeholder offers no row actions, and Fork without a completed turn says so in DSH\'s words, never with an id (#79)', () => {
@@ -803,11 +947,12 @@ test('a saved New session placeholder is reopened by its own id, never replaced 
   assert.deepEqual(tree.restoreChoice('s-blank', workspaces, sessions), { kind: 'saved', id: 's-blank' })
 })
 
-test('a saved session that is gone starts a fresh one in the most recently active workspace; an archived one is not reopened', () => {
+test('a saved session that is gone, or archived, is forgotten and the load is a first visit: it aims, never starts (#142)', () => {
   /**
    * DSH: no listed summary, so no workspace of its own; the target is recentWorkspace and connectWorkspace creates a
    * session there (lib/client.js:1620, :1626, :1406). An archived current is cleared at once (:1578, :1638-1650), which
-   * leaves the load with nothing saved, and that starts fresh too (#17).
+   * leaves the load with nothing saved (#17). heddle forgets the entry the same way and then does what a first visit does:
+   * it creates nothing and aims at this browser's last workspace, else the only one, else none (#142).
    */
   const workspaces = [
     workspace('w-old', '/old', { sessionIds: ['s-old'] }),
@@ -815,51 +960,15 @@ test('a saved session that is gone starts a fresh one in the most recently activ
     workspace('w-empty', '/empty'),
   ]
   const sessions = [session('s-recent', 30, { title: 'recent' }), session('s-old', 10, { title: 'old', archived: true })]
-  assert.deepEqual(tree.restoreChoice('session-gone', workspaces, sessions), { kind: 'start', path: '/recent', forget: true })
-  assert.deepEqual(tree.restoreChoice('s-old', workspaces, sessions), { kind: 'start', path: '/recent', forget: true }, 'archived: forgotten, then as a load with nothing saved')
-  assert.deepEqual(tree.restoreChoice('session-gone', [], sessions), { kind: 'none', forget: true }, 'no registered workspace to start in, and still no session opened on its own')
+  assert.deepEqual(tree.restoreChoice('session-gone', workspaces, sessions), { kind: 'none', forget: true }, 'three workspaces and no memory: nowhere, not the most recently active one')
+  assert.deepEqual(tree.restoreChoice('s-old', workspaces, sessions), { kind: 'none', forget: true }, 'archived: forgotten, then as a load with nothing saved')
+  assert.deepEqual(tree.restoreChoice('s-old', workspaces, sessions, '/old'), { kind: 'aim', path: '/old', forget: true }, 'with the memory of where this browser worked, there')
+  assert.deepEqual(tree.restoreChoice('session-gone', [], sessions), { kind: 'none', forget: true }, 'no registered workspace to aim at, and still no session opened on its own')
   assert.deepEqual(
-    tree.restoreChoice('session-gone', [workspace('w-auto', '/auto', { origin: 'auto', sessionIds: ['s-recent'] })], sessions),
+    tree.restoreChoice('session-gone', [workspace('w-auto', '/auto', { origin: 'auto', sessionIds: ['s-recent'] })], sessions, '/auto'),
     { kind: 'none', forget: true },
     'an adopted root is not a place a session starts',
   )
-})
-
-test('the most recently active workspace is DSH\'s recentWorkspace', () => {
-  /** lib/client.js:1694-1710: the latest session update, else the workspace's creation, a tie kept in registry order. */
-  const made = (id: string, path: string, createdAt: string, options: Parameters<typeof workspace>[2] = {}) => ({ ...workspace(id, path, options), createdAt })
-  const sessions = [session('s-a', 20), session('s-b', 40), session('s-in-auto', 50)]
-  assert.equal(
-    tree.recentWorkspace([made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] }), made('w-b', '/b', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-b'] })], sessions)?.id,
-    'w-b',
-    'the workspace written last',
-  )
-  assert.equal(
-    tree.recentWorkspace(
-      [made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] }), made('w-new', '/new', '2026-10-28T11:00:00.000Z')],
-      sessions,
-    )?.id,
-    'w-new',
-    'a workspace with no session counts from its creation',
-  )
-  assert.equal(
-    tree.recentWorkspace(
-      [
-        made('w-b', '/b', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-b'] }),
-        made('w-a', '/a', '2026-10-28T00:00:00.000Z', { sessionIds: ['s-a'] }),
-        made('w-auto', '/a/scratch', '2026-10-28T00:00:00.000Z', { origin: 'auto', parent: 'w-a', sessionIds: ['s-in-auto'] }),
-      ],
-      sessions,
-    )?.id,
-    'w-a',
-    'an adopted root\'s session counts for the registered workspace above it',
-  )
-  assert.equal(
-    tree.recentWorkspace([made('w-1', '/1', '2026-10-28T00:00:00.000Z'), made('w-2', '/2', '2026-10-28T00:00:00.000Z')], [])?.id,
-    'w-1',
-    'a tie keeps registry order',
-  )
-  assert.equal(tree.recentWorkspace([], sessions), undefined)
 })
 
 test('the page asks those rules where it acts: a load opens no session on its own, and the blank row and Fork follow DSH (#17, #79)', () => {
@@ -877,7 +986,7 @@ test('the page asks those rules where it acts: a load opens no session on its ow
   const restore = body('async function restoreSelection() {')
   assert.doesNotMatch(restore, /'newest'/, 'a load has no newest-session branch left')
   assert.match(restore, /if \(choice\.kind === 'saved'\) \{\s*await showSession\(choice\.id\)/, 'it reopens only what was saved')
-  assert.match(restore, /startSessionAt\(\{ path: choice\.path, reveal: false, boot: true \}\)/, 'and otherwise starts a fresh session, keeping the folds')
+  assert.doesNotMatch(restore, /startSessionAt\(|method: 'POST'/, 'and otherwise creates nothing: the first message does (#142)')
   assert.match(body('function sessionNode(meta) {'), /WorkspaceTree\.rowOffersActions\(meta\) \? \{\} : \{ blank: true \}/, 'a session node knows it is the blank')
   assert.match(body('function menuItemsFor(node) {'), /if \(node\.kind === 'session' && node\.session && node\.blank !== true\) \{/, 'the blank gets no menu')
   assert.equal((body('function nodeRow(node, depth = 0) {').match(/node\.kind === 'session' && node\.session && node\.blank !== true/g) ?? []).length, 2, 'nor a double-click rename or the hover buttons')
@@ -941,23 +1050,38 @@ function tops(workspaces: unknown[], sessions: unknown[] = []) {
     .map((group) => ({ kind: 'workspace', path: group.path, label: group.label, group }))
 }
 
-test('New session starts where the reader acted: the chosen row, the open session\'s, the selection\'s, the aimed folder\'s, else the first drawn', () => {
-  const rows = tops(
-    [
-      workspace('w-a', '/a', { sessionIds: ['s-a'] }),
-      workspace('w-b', '/b', { sessionIds: ['s-b'] }),
-      workspace('w-c', '/c'),
-    ],
-    [session('s-a', 1), session('s-b', 2)],
-  )
+test('New session starts where the reader acted: the chosen row, the open session\'s, the selection\'s, the aimed folder\'s, else this browser\'s last workspace, else the only one (#142)', () => {
+  const workspaces = [
+    workspace('w-a', '/a', { sessionIds: ['s-a'] }),
+    workspace('w-b', '/b', { sessionIds: ['s-b'] }),
+    workspace('w-c', '/c'),
+  ]
+  const rows = tops(workspaces, [session('s-a', 1), session('s-b', 2)])
   const pick = (state: Record<string, unknown>) => tree.newSessionWorkspace(rows, state)?.path ?? null
-  assert.equal(pick({}), '/a', 'nothing to go on: the first workspace the tree draws')
+  /**
+   * #142: the last step was the first workspace the tree draws. On a shared server that is whoever registered first, so a
+   * press with nothing to go on started a session in a workspace this browser never used. It is now this browser's own
+   * memory, else the only registered workspace, else nowhere: DSH's `startSession` asks the same `recent` its startup does
+   * (dsh-client-ui-workspace lib/client.js:1503-1508) and clears the view when there is none (:1509-1518).
+   */
+  assert.equal(pick({}), null, 'nothing to go on and three workspaces: nowhere, not the first one drawn')
+  assert.equal(pick({ remembered: '/c' }), '/c', 'the workspace this browser last worked in')
+  assert.equal(pick({ remembered: '/c', workspaces }), '/c', 'read the same way with the whole index')
+  assert.deepEqual(
+    tree.newSessionWorkspace(rows.filter((row) => row.path !== '/c'), { remembered: '/c', workspaces }),
+    { kind: 'workspace', path: '/c', label: 'c' },
+    'a remembered workspace the filter left undrawn is found in the index, by its path and display title',
+  )
+  assert.equal(tree.newSessionWorkspace(rows.slice(0, 1), { workspaces }), null, 'the index counts three registered workspaces though one is drawn: not "the only one"')
+  assert.equal(pick({ remembered: '/gone' }), null, 'a memory of a workspace no longer registered is no place')
+  assert.equal(tree.newSessionWorkspace(tops([workspaces[1]]), {})?.path, '/b', 'one workspace: it')
   assert.equal(pick({ current: 's-b' }), '/b', 'the open session\'s own workspace')
+  assert.equal(pick({ current: 's-b', remembered: '/c' }), '/b', 'which wins over the memory')
   assert.equal(pick({ current: 's-b', chosen: { path: '/c', during: 's-b' } }), '/c', 'a workspace opened beside the open session wins (#25)')
   assert.equal(pick({ current: 's-a', chosen: { path: '/c', during: 's-b' } }), '/a', 'a choice made beside another session is forgotten')
-  assert.equal(pick({ selected: '/c/notes' }), '/c', 'the selected row\'s workspace')
-  assert.equal(pick({ selected: 'session:s-b' }), '/a', 'a session row is not a place')
-  assert.equal(pick({ active: '/b/sub' }), '/b', 'the folder the prompt box was aimed at, by the workspace that owns it')
+  assert.equal(pick({ selected: '/c/notes', remembered: '/a' }), '/c', 'the selected row\'s workspace, over the memory')
+  assert.equal(pick({ selected: 'session:s-b' }), null, 'a session row is not a place')
+  assert.equal(pick({ active: '/b/sub', remembered: '/a' }), '/b', 'the folder the prompt box was aimed at, by the workspace that owns it, over the memory')
   assert.equal(tree.newSessionWorkspace([], {}), null, 'no workspace drawn: nowhere')
 })
 
@@ -972,7 +1096,7 @@ test('with no session open, the first message goes to the Default workspace afte
   assert.deepEqual(
     tree.newConversationTarget(rows, {}),
     { path: `${home}/default-workspace`, label: 'Default workspace' },
-    'a reload, with nothing chosen and nothing aimed at: the first workspace the tree draws, by its display title',
+    'a reload, with nothing chosen and nothing aimed at: the only workspace, by its display title',
   )
   assert.deepEqual(
     tree.newConversationTarget(rows, { chosen: { path: `${home}/default-workspace`, during: null }, active: `${home}/default-workspace` }),
@@ -981,7 +1105,14 @@ test('with no session open, the first message goes to the Default workspace afte
   )
   const two = tops([workspace('w-a', '/a'), workspace('w-b', '/b', { title: 'Beta' })])
   assert.equal(tree.newConversationTarget(two, { chosen: { path: '/b', during: null } })?.label, 'Beta', 'a workspace row opened with no session open')
-  assert.equal(tree.newConversationTarget(two, { chosen: { path: '/b', during: 's-gone' } })?.path, '/a', 'a choice made beside a session is not one made with none open')
+  assert.equal(tree.newConversationTarget(two, { chosen: { path: '/b', during: 's-gone' } }), null, 'a choice made beside a session is not one made with none open, and with two workspaces nothing else names one (#142)')
+  assert.deepEqual(tree.newConversationTarget(two, { remembered: '/b' }), { path: '/b', label: 'Beta' }, 'the workspace this browser last worked in, by its display title (#142)')
+  assert.deepEqual(
+    tree.newConversationTarget(two.slice(0, 1), { remembered: '/b', workspaces: [workspace('w-a', '/a'), workspace('w-b', '/b', { title: 'Beta' })] }),
+    { path: '/b', label: 'Beta' },
+    'found in the whole index when the filter left it undrawn',
+  )
+  assert.equal(tree.newConversationTarget(two, { remembered: '/b', active: '/a' })?.path, '/a', 'the folder the prompt box was aimed at in this page wins over the memory')
   assert.deepEqual(tree.newConversationTarget([], { active: '/srv/loose' }), { path: '/srv/loose', label: 'loose' }, 'no workspace drawn: the folder the prompt box was aimed at')
   assert.equal(tree.newConversationTarget([], {}), null, 'no workspace and no folder: nowhere, so nothing is sent')
   assert.equal(tree.newConversationTarget(undefined, { active: '' }), null)
@@ -1009,7 +1140,7 @@ test('the page aims a message with no session where the hero says, as a new conv
   assert.match(run, /throw new Error\(NO_WORKSPACE_REFUSAL\)/, 'and with nowhere to go it sends nothing')
   assert.doesNotMatch(run, /folder: activeFolder,/, 'the folder is no longer whatever the prompt box last held')
   const submit = body('function submitDraft(')
-  assert.match(submit, /if \(composerAimless\(\)\) \{\s*setNote\(NO_WORKSPACE_REFUSAL\)/, 'Enter with nowhere to send says DSH\'s Choose a workspace first.')
+  assert.match(submit, /if \(composerAimless\(\)\) \{\s*sayNote\(NO_WORKSPACE_REFUSAL\)/, 'Enter with nowhere to send says DSH\'s Choose a workspace first., again on a repeated press (N4)')
   assert.match(page, /const NO_WORKSPACE_REFUSAL = 'Choose a workspace first\.'/)
   assert.match(page, /const NO_WORKSPACE_PLACEHOLDER = 'Choose a workspace to start'/)
   const tree = body('async function renderTree() {')

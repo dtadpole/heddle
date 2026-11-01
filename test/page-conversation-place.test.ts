@@ -37,6 +37,7 @@ function harness(): Place {
     let selectedPath = null
     let painted = 0
     const NEW_CONVERSATION_NOTE = 'a new conversation in '
+    const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
     const treeNote = { textContent: '', hidden: true }
     function setNote(text) { treeNote.textContent = text ?? ''; treeNote.hidden = !text }
     function paintConversationTarget() { painted += 1 }

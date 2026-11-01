@@ -15,6 +15,7 @@ interface Rule {
   isRepeat: (last: { session: string; message: string; at: number } | null, session: string, message: string, now: number) => boolean
   text: (message: unknown) => string
   shows: (event: unknown) => boolean
+  endedPlacement: (done: unknown) => 'answer' | 'row' | null
 }
 
 const rule = new Function(`${page.slice(begin, end)}\nreturn TurnFailure`)() as Rule
@@ -79,4 +80,24 @@ test('a turn the archived-session gate blocked is no failure: nothing is drawn l
   assert.deepEqual(blocked, transcriptTurns(answered as never), 'a reload shows the session as if the blocked turn left no row')
   assert.equal(blocked.at(-1)?.ended, undefined, 'and the previous answer carries no failure')
   assert.deepEqual(transcriptTurns([{ seq: 0, at, type: 'turn/failed', reason: { kind: 'blocked' } }] as never), [], 'a blocked turn alone draws nothing')
+})
+
+test('the page\'s own blocked turn says why in its own row, never under the previous answer (#139 live vs reload, B1)', () => {
+  /**
+   * A turn the gate blocked before its first step ends with a `done` frame that carries `ended: [ARCHIVED_BLOCKED]`,
+   * `finishReason: 'blocked'` and no round. runTurn hung that notice under the last assistant row, the previous turn's
+   * answer, which a reload does not show (developer-ten's follow-up 2 review); f0442783 then drew no notice at all, and
+   * the message, already cleared from the field and never written as one, vanished without a word (B1). The notice is
+   * now its own row. A turn blocked at a later step has rounds and an answer record of its own carrying the reason, so
+   * its notice stays on that answer, as on a reload.
+   */
+  const blockedAtOnce = { finishReason: 'blocked', rounds: 0, ended: ['blocked: an archived session runs no model step until it is unarchived'] }
+  assert.equal(rule.endedPlacement(blockedAtOnce), 'row', 'blocked before any step: its own row')
+  assert.equal(rule.endedPlacement({ ...blockedAtOnce, rounds: 2 }), 'answer', 'blocked at a later step: on its answer, as a reload draws it')
+  assert.equal(rule.endedPlacement({ finishReason: 'length', rounds: 8, ended: ['stopped after the round limit of 8'] }), 'answer', 'any other early end, on its answer')
+  assert.equal(rule.endedPlacement({ finishReason: 'stop', rounds: 1 }), null, 'a turn that did not end early has none')
+  assert.equal(rule.endedPlacement({ finishReason: 'stop', rounds: 1, ended: [] }), null)
+  assert.equal(rule.endedPlacement(null), null)
+  const run = page.slice(page.indexOf('async function runTurn('), page.indexOf('\n}\n', page.indexOf('async function runTurn(')))
+  assert.match(run, /const placement = TurnFailure\.endedPlacement\(payload\)/, 'runTurn asks the rule before it draws the notice')
 })

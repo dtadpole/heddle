@@ -59,7 +59,7 @@ test('a session that cannot be loaded shows the failure line, is not kept, and l
   assert.match(refused, /current = null/, 'and it is not the open session (the stack-1 404 branch)')
   assert.match(refused, /historyFailureText\(response\.status/, 'the failure line is written')
   assert.match(refused, /log\.append\(note\)[\s\S]*paintEmptyState\(\)/, 'into the conversation before the empty state is judged, so the line wins over it')
-  assert.match(refused, /rememberCurrent\(\)/, 'the saved selection is emptied, so a reload starts a fresh session (restoreSelection)')
+  assert.match(refused, /rememberCurrent\(\)/, 'the saved selection is emptied, so a reload does not reopen it (restoreSelection)')
   assert.match(refused, /selectedPath = null[\s\S]*await renderTree\(\)[\s\S]*markSelection\(\)/, 'the tree is read again and the selection dropped')
   assert.match(refused, /return false/, 'and the caller is told the session did not open')
   assert.match(show, /if \(unavailableSession !== null\) \{\n\s+unavailableSession = null/, 'opening any session clears the state')
@@ -210,6 +210,8 @@ test('with no session and no workspace to start one in, the composer is inert in
       composerAimless: () => aimless,
       NO_WORKSPACE_REFUSAL: 'Choose a workspace first.',
       setNote: (text: string) => notes.push(text),
+      /** A person's refusal is said through sayNote, which says it again on a repeated press (N4). */
+      sayNote: (text: string) => notes.push(text),
       heroRow: { hidden: false },
       heroMenu: { hidden: true },
       openHeroMenu: () => {

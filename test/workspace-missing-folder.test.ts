@@ -115,6 +115,7 @@ interface WorkspaceFolderBlock {
   NOT_FOUND: string
   GONE_LINE: string
   gone: (group: unknown) => boolean
+  levelFailure: (body: unknown) => { code: string; line: string } | null
   routeKey: (node: { path: string; group?: { workspace?: { id?: string } | null } }, workspaces: { id: string; path: string }[]) => string
 }
 
@@ -204,7 +205,8 @@ function childrenPage(reply: { status: number; body: unknown }) {
     const folderRows = (children) => children
     const nodeRow = (child) => Object.assign(document.createElement('li'), { textContent: child.label })
     ${pageFunction('paintGoneFolder')}
-    ${pageFunction('paintGoneLine')}
+    ${pageFunction('failedLevel')}
+    ${pageFunction('failedLevelLine')}
     ${pageFunction('loadChildren')}
     return loadChildren`,
   )(env) as (node: unknown, li: FakeNode) => Promise<void>
@@ -234,6 +236,25 @@ test("N1: a workspace whose folder went after the list was read says DSH's gone 
   await load({ kind: 'workspace', path: '/work/w', label: 'w', group }, li)
   assert.deepEqual(shown(li.children[0]), ['Files', 'failed:workspace-file/not-found:That directory is gone. It may have been moved or deleted.'], 'the shape a folder the list calls gone is drawn with')
   assert.deepEqual(notes, [])
+})
+
+test("a failed level is DSH's failureLine by code: gone, outside, not a directory, and any other code says Read failed with its message", () => {
+  const folder = new Function(`${block('workspace-folder')}\nreturn WorkspaceFolder`)() as WorkspaceFolderBlock
+  assert.deepEqual(folder.levelFailure({ error: 'no entry at "/w/gone"', code: 'workspace-file/not-found' }), {
+    code: 'workspace-file/not-found',
+    line: 'That directory is gone. It may have been moved or deleted.',
+  }, 'dsh-client-ui-sidebar-files lib/client.js:770, the answer\'s own sentence not shown')
+  assert.deepEqual(folder.levelFailure({ code: 'workspace-file/not-found' }), { code: 'workspace-file/not-found', line: folder.GONE_LINE }, 'with or without a message')
+  assert.equal(folder.levelFailure({ code: 'workspace-file/outside-workspace', error: 'x' })?.line, 'That directory is outside the workspace, so the sidebar will not read it.', ':771')
+  assert.equal(folder.levelFailure({ code: 'workspace-file/not-directory', error: 'x' })?.line, 'That is not a directory.', ':772')
+  assert.deepEqual(folder.levelFailure({ error: 'cannot list "locked": permission denied', code: 'workspace-file/unreadable' }), {
+    code: 'workspace-file/unreadable',
+    line: 'Read failed: cannot list "locked": permission denied',
+  }, "a code DSH's tree does not name is error.unavailable, :773 (#106)")
+  assert.equal(folder.levelFailure({ code: 'workspace-file/unreadable' }), null, 'which needs the message it repeats')
+  assert.equal(folder.levelFailure({ error: '/x is not under any workspace root' }), null, 'an answer with no code is the note\'s')
+  assert.equal(folder.levelFailure(null), null)
+  assert.equal(folder.levelFailure('not json'), null)
 })
 
 test('N1: any other failure still says what the tree answered', async () => {

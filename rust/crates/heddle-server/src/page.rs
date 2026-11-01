@@ -372,15 +372,22 @@ mod tests {
     /// binary embeds keeps a subagent's child out of the flat list and the search as well as the tree
     /// (dsh-client-ui-workspace `sessionVisible`), reopens the saved session on a reload instead of `sessions[0]`
     /// (`restoreSelection`, the tree block's `restoreChoice`), and gives a one-shot child DSH's read-only record in
-    /// place of the composer (dsh-client-ui-subagent `SubagentReadOnlyComposer`). The rules themselves are judged in
-    /// `test/session-rules.test.ts` and `test/workspace-tree.test.ts`.
+    /// place of the composer (dsh-client-ui-subagent `SubagentReadOnlyComposer`). With nothing to reopen, a load
+    /// creates no session and aims by this browser's last workspace (#142). The rules themselves are judged in
+    /// `test/session-rules.test.ts`, `test/workspace-tree.test.ts` and `test/page-first-visit.test.ts`.
     #[test]
     fn the_served_page_hides_subagents_restores_the_selection_and_locks_one_shot() {
         let served = page();
         assert!(served.contains("sessions: SessionRules.sidebarSessions(sessions),"));
-        assert!(served.contains("WorkspaceTree.restoreChoice(saved, workspaces, sessions)"));
+        assert!(
+            served.contains(
+                "WorkspaceTree.restoreChoice(saved, workspaces, sessions, lastWorkspace)"
+            )
+        );
         assert!(!served.contains("const select = sessions[0]?.id ?? null"));
+        assert!(!served.contains("startSessionAt({ path: choice.path"));
         assert!(served.contains("const SELECTION_KEY = 'heddle.sessions.current'"));
+        assert!(served.contains("const LAST_WORKSPACE_KEY = 'heddle.workspace.last'"));
         assert!(served.contains("<div id=\"subagent-readonly\" role=\"status\" hidden><strong>One-shot subagent record</strong><span>One-shot tasks do not accept follow-ups; review the full execution record here.</span></div>"));
     }
 

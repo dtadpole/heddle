@@ -145,7 +145,13 @@ export interface WebServerOptions {
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
    */
   readonly settings?: SettingsService
-  /** Exact Browser opt-in captured at server startup (D-068). */
+  /**
+   * Exact Browser opt-in captured at server startup (D-068): the page policy then allows HTTP(S) frames, and
+   * `/api/status` reports it so the page offers its Browser tab (#86), which frames those pages beside the conversation.
+   *
+   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
+   * The server never fetches, proxies or probes a page.
+   */
   readonly browser?: boolean
 }
 
@@ -434,6 +440,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
+  /** Whether the operator enabled Browser framing and the page's Browser tab (`HEDDLE_WEB_BROWSER=1`; D-068, #86). */
   readonly browser: boolean
   /** The settings surface, when the server was started with one. */
   readonly settings?: SettingsService
@@ -2540,13 +2547,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * reports while no session is open. A session that switched does not appear here — its own mode travels
    * with `GET /api/sessions/<id>`, because a server-wide answer would misreport every session that chose
    * otherwise.
+   *
+   * `browser: true` appears only when the operator enabled the page's Browser tab, so a default server's answer is
+   * the same bytes it always was.
    */
   if (url.pathname === '/api/status' && request.method === 'GET') {
     respond(
       response,
       200,
       'application/json',
-      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot })}\n`,
+      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot, ...(state.browser ? { browser: true } : {}) })}\n`,
     )
     return
   }
