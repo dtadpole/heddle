@@ -1467,3 +1467,120 @@ test("a zoom splits a busy turn's merged bar into its calls and keeps the keyboa
     await server.close()
   }
 })
+
+/** N8: a real mouse click and a real Enter, through the browser's input, so a button's own click and the strip's capture take part. */
+const mouseClick = async (browser, x, y) => {
+  await browser.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'none' })
+  await browser.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 })
+  await browser.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 })
+}
+const pressEnter = async (browser) => {
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' })
+  await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 })
+}
+/** The selected row, whether the inspector shows, and the focus window with the rows it lights by turn. */
+const pickState = (browser) => browser.evaluate(`JSON.stringify((() => {
+  const selected = document.querySelector('#tr-table tbody tr[data-selected="true"]')
+  const details = document.getElementById('tr-details')
+  const focus = document.querySelector('#timeline .tr-focus')
+  const byTurn = {}
+  for (const tr of document.querySelectorAll('#tr-table tbody tr[data-turn]')) {
+    const turn = byTurn[tr.dataset.turn] ?? (byTurn[tr.dataset.turn] = { lit: 0, dimmed: 0 })
+    if (tr.dataset.focus === 'outside') turn.dimmed += 1
+    else turn.lit += 1
+  }
+  const box = focus.getBoundingClientRect()
+  return { turn: selected?.dataset.turn ?? null, kind: selected?.dataset.kind ?? null, details: details !== null && !details.hidden, window: getComputedStyle(focus).display, windowLeft: box.left, windowRight: box.right, byTurn }
+})())`).then(JSON.parse)
+const boxOf = (browser, selector) => browser.evaluate(`JSON.stringify((() => { const box = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, x: box.left + box.width / 2, y: box.top + box.height / 2 } })())`).then(JSON.parse)
+
+test("a click or Enter on a record's bar selects its row and opens its inspector, and a click on the empty track centres DSH's narrowest window, as DSH's overview does", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * N8 (developer-ten): a click on DSH's span selects its record (onRecordSelect) and clears the window; a click on the
+   * empty track commits DSH's narrowest window centred there and shows the nearest record (onRecordFocus). A bar's
+   * click only scrolled to its turn, and a click on the track drew nothing.
+   */
+  const { browser, close } = await openOverview('overview-pick')
+  try {
+    const tool = await boxOf(browser, '#timeline .tr-bar[data-turn="2"][data-lane="tools"]')
+    await mouseClick(browser, tool.x, tool.y)
+    const clicked = await pickState(browser)
+    assert.deepEqual([clicked.turn, clicked.kind, clicked.details], ['2', 'tool', true], `a click on the middle turn's call selects that call's row and opens its inspector (${JSON.stringify(clicked)})`)
+    assert.equal(clicked.window, 'none', 'and leaves no window')
+
+    await browser.evaluate(`document.querySelector('#timeline .tr-bar[data-turn="3"][data-lane="model"]').focus()`)
+    await pressEnter(browser)
+    const entered = await pickState(browser)
+    assert.deepEqual([entered.turn, entered.kind, entered.details], ['3', 'assistant', true], `Enter on the last answer's bar selects its row, as its click does (${JSON.stringify(entered)})`)
+
+    /** Below the bars, in a lane's empty track: the middle of the strip. */
+    const strip = await boxOf(browser, '#timeline .tr-lanes')
+    const lane = await boxOf(browser, '#timeline .tr-lane[data-lane="model"]')
+    const bars = await browser.evaluate(`document.querySelectorAll('#timeline .tr-bar').length`)
+    await mouseClick(browser, strip.x, lane.bottom - 3)
+    const empty = await pickState(browser)
+    assert.equal(empty.window, 'block', `a click on the empty track draws a window (${JSON.stringify(empty)})`)
+    const width = (strip.right - strip.left) / bars
+    assert.ok(Math.abs((empty.windowLeft + empty.windowRight) / 2 - strip.x) <= 2 && Math.abs(empty.windowRight - empty.windowLeft - width) <= 3, `one record's share of the strip wide (${width.toFixed(1)} px), centred on the click (${JSON.stringify({ x: strip.x, left: empty.windowLeft, right: empty.windowRight })})`)
+    const lit = Object.values(empty.byTurn).reduce((sum, turn) => sum + turn.lit, 0)
+    const dimmed = Object.values(empty.byTurn).reduce((sum, turn) => sum + turn.dimmed, 0)
+    assert.ok(lit > 0 && dimmed > 0, `and lights the rows of the record it covers, dimming the rest (${JSON.stringify(empty.byTurn)})`)
+  } finally {
+    await close()
+  }
+})
+
+test("a click or Enter on a merged bar windows its records, lighting their rows: heddle's reading of a group, where DSH merges nothing", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** N8 (developer-ten): a merged bar's click only scrolled to its turn. Thirty quick calls, a 6 s pause, a second turn. */
+  const server = await startServer('overview-group', (work) => [
+    ...Array.from({ length: 30 }, () => ({ toolCall: { name: 'list_dir', arguments: { path: work } } })),
+    { text: 'thirty calls' },
+    { text: 'two' },
+  ])
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    for (const [prompt, pause] of [['busy', 6_000], ['two', 0]]) {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `turn ${prompt} ran (${turn.status})`)
+      await turn.text()
+      await new Promise((resolve) => setTimeout(resolve, pause))
+    }
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0 && document.querySelector(\'#tr-table tbody tr[data-turn="2"]\') !== null', 20_000), 'the overview drew its bars and the ledger both turns')
+    await browser.evaluate(`document.getElementById('tr-duration').click()`)
+    const group = '#timeline .tr-bar[data-turn="1"][data-lane="tools"]'
+    assert.match(await browser.evaluate(`document.querySelector(${JSON.stringify(group)}).getAttribute('aria-label')`), / · 30 records/, 'the thirty calls are one merged bar')
+    const bar = await boxOf(browser, group)
+    await mouseClick(browser, bar.x, bar.y)
+    const clicked = await pickState(browser)
+    assert.equal(clicked.window, 'block', `a click on the merged bar draws a window (${JSON.stringify(clicked)})`)
+    assert.ok(clicked.windowLeft <= bar.left + 2 && clicked.windowRight >= bar.right - 2, `over the bar's records (${JSON.stringify({ bar, clicked })})`)
+    assert.ok(clicked.byTurn['1']?.lit >= 30 && clicked.byTurn['2']?.lit === 0, `which lights the busy turn's call rows and dims the second turn (${JSON.stringify(clicked.byTurn)})`)
+    assert.equal(clicked.turn, null, 'and selects no row')
+
+    await browser.evaluate(`(() => { document.querySelector(${JSON.stringify(group)}).focus(); document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })); return true })()`)
+    assert.equal((await pickState(browser)).window, 'none', 'Escape cleared it')
+    await pressEnter(browser)
+    const entered = await pickState(browser)
+    assert.ok(entered.window === 'block' && entered.byTurn['2']?.lit === 0 && entered.byTurn['1']?.lit >= 30, `Enter on the merged bar draws the same window (${JSON.stringify(entered)})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
