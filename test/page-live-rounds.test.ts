@@ -55,7 +55,8 @@ function harness(options: { onRefresh?: (running: Set<string>, rounds: Map<strin
   return runInNewContext(
     `
     let current = null, composerKey = '__none__', unavailableSession = null, selectedPath = null, view = 'chat';
-    let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
+    const liveTurns = new Map();
+    let sessionStats = null, liveRounds = 0, liveUsage, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
     let showGeneration = 0;
     let sessionLoading = null;
     const runningSessions = new Set();
@@ -103,6 +104,9 @@ function harness(options: { onRefresh?: (running: Set<string>, rounds: Map<strin
     function markSelection() {}
     function paintScheduleHeader() {}
     function applySessionModel() {}
+    /** 4b2a0552 (#46): the seat's choice count, and the view's selection an open publishes. */
+    let selectionSeq = 0
+    function adoptViewSelection() {}
     async function refreshGoal() {}
     async function refreshTodo() {}
     function renderScheduleCards() {}
@@ -210,7 +214,8 @@ test('a re-read of the open session\'s statistics keeps its running turn\'s roun
   const reread = (running: boolean) =>
     runInNewContext(
       `
-      let current = M, sessionStats = null, liveRounds = 3, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = 5
+      const liveTurns = new Map()
+      let current = M, sessionStats = null, liveRounds = 3, liveUsage, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = 5
       const runningSessions = new Set(RUNNING ? [M] : [])
       const turnRounds = new Map(RUNNING ? [[M, { rounds: 3, startedAt: 5 }]] : [])
       function updateStatusBar() {}

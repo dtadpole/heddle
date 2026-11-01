@@ -68,7 +68,8 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
     const QUEUE_KEY_NONE = ''
     const NO_WORKSPACE_REFUSAL = 'Choose a workspace first.'
     let current = null, composerKey = QUEUE_KEY_NONE, unavailableSession = null, activeFolder = null, workspaceRoutes = 'served'
-    let sessionStats = null, liveTurns = 0, liveRounds = 0, liveUsage, liveRoundStartedAt = null, liveGenerationMs = 0, liveDecodeTokens = 0
+    const liveTurns = new Map()
+    let sessionStats = null, liveRounds = 0, liveUsage, liveRoundStartedAt = null, liveGenerationMs = 0, liveDecodeTokens = 0
     let directTurnPending = 0, directPendingKey = null, stopRequested = false
     const stopButton = { disabled: true }
     const runningSessions = new Set(), runningSince = new Map(), pendingInteractions = new Map(), turnRounds = new Map(), stoppedQueues = new Set(), turnsEnded = new Set()
@@ -102,6 +103,7 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
     /** #142: the page holds the stream's events for its own first turn while nothing is open (looseTurnEvents). */
     let looseTurnEvents = null
     const LOOSE_EVENTS_LIMIT = 2000
+    ${optional('countOwnSessionTurn')}
     ${optional('holdLooseTurn')}
     ${optional('holdLooseEvent')}
     ${optional('adoptLooseEvents')}
@@ -154,6 +156,10 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
     ]
     /** #128: the page follows the stream before it sends, and a server without detach streams the turn. */
     const events = { whenOpen: async () => {} }
+    /** 4b2a0552 (#46): the seat a turn carries only into a session with no recorded selection. */
+    let chosenEndpoint = null, chosenModel = null, chosenEffort = null
+    const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set()
+    const selectionForSeat = () => ({})
     const sendTurn = async () => ({ ok: true, headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) }, body: { getReader() { return { read: async () => (steps.length === 0 ? { done: true } : { done: false, value: await steps.shift()() }) } } } })
     ${source('runTurn')}
     const settle = async () => { for (let round = 0; round < 10; round += 1) await new Promise((resolve) => setImmediate(resolve)) }
