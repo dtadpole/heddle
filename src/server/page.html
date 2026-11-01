@@ -4252,6 +4252,70 @@ const MESSAGES = Object.freeze({
     'schedule.status.active': 'Enabled',
     'schedule.delete.close': 'Close deletion confirmation',
     'schedule.delete.cancel': 'Cancel',
+    'schedule.time.locale': 'en',
+    'schedule.frequency.once': 'Once',
+    'schedule.frequency.every': 'Every {value} {unit}',
+    'schedule.frequency.daily': 'Daily at {time} ({timeZone})',
+    'schedule.frequency.dailyLocal': 'Daily at {time}',
+    'schedule.frequency.weekly': 'Weekly on {weekdays} at {time} ({timeZone})',
+    'schedule.frequency.weeklyLocal': 'Weekly on {weekdays} at {time}',
+    'schedule.frequency.cron': 'Cron {expression} ({timeZone})',
+    'schedule.frequency.cronLocal': 'Cron {expression}',
+    'schedule.frequency.cronRule': '{rule} ({timeZone})',
+    'schedule.frequency.weekday.join': ', ',
+    'schedule.frequency.weekday.1': 'Mon',
+    'schedule.frequency.weekday.2': 'Tue',
+    'schedule.frequency.weekday.3': 'Wed',
+    'schedule.frequency.weekday.4': 'Thu',
+    'schedule.frequency.weekday.5': 'Fri',
+    'schedule.frequency.weekday.6': 'Sat',
+    'schedule.frequency.weekday.7': 'Sun',
+    'schedule.unit.day.one': 'day',
+    'schedule.unit.day.other': 'days',
+    'schedule.unit.hour.one': 'hour',
+    'schedule.unit.hour.other': 'hours',
+    'schedule.unit.minute.one': 'minute',
+    'schedule.unit.minute.other': 'minutes',
+    'schedule.unit.second.one': 'second',
+    'schedule.unit.second.other': 'seconds',
+    'schedule.relative.future': 'in {value} {unit}',
+    'schedule.relative.overdue': '{value} {unit} overdue',
+    'schedule.cron.time.everyMinute': 'Every minute',
+    'schedule.cron.time.everyMinutes': 'Every {step} minutes',
+    'schedule.cron.time.hourlyAt': 'Every hour at minute {minutes}',
+    'schedule.cron.weekdaysAt': 'Monday to Friday at {time}',
+    'schedule.cron.monthlyAt': 'Monthly on day {day} at {time}',
+    'schedule.cron.everyNHoursAt': 'Every {count} hours at minute {minutes}',
+    'schedule.list.nextRun': 'Next run',
+    'schedule.detail.nextRun': 'Next run',
+    'schedule.list.open': 'Open reminder details: {title}',
+    'schedule.delete.label': 'Delete reminder: {title}',
+    'schedule.mark.aria': '{count} scheduled tasks',
+    'schedule.hover.more': '{count} more',
+    'schedule.card.openLabel': 'Open task details: {title}',
+    'schedule.list.loadingTasks': 'Loading automation tasks',
+    'schedule.delivery.loading': 'Loading delivery records\u2026',
+    'schedule.delivery.list': 'Delivery records',
+    'schedule.delivery.retentionBounds': 'Each task keeps up to {records} delivery records from the last {days} days.',
+    'schedule.detail.delete': 'Delete task',
+    'schedule.rule.weekday': 'Weekday',
+    'schedule.rule.weekdayOption': 'Weekday {weekday}',
+    'schedule.rule.invalidTitle': 'Enter a task name of at most 120 characters.',
+    'schedule.rule.invalidPrompt': 'Enter a task instruction.',
+    'schedule.rule.invalidWeekdays': 'Choose at least one day.',
+    'schedule.rule.cronInvalid': 'Enter a five-field cron expression, for example 0 9 * * 1-5.',
+    'schedule.timing.unit.hour': 'hours',
+    'schedule.timing.unit.minute': 'minutes',
+    'schedule.timing.unit.second': 'seconds',
+    'schedule.timing.invalidInterval.hour': 'Enter an interval of at least 1 hour.',
+    'schedule.timing.invalidInterval.minute': 'Enter an interval of at least 1 minute.',
+    'schedule.timing.invalidInterval.second': 'Enter an interval of at least 60 seconds.',
+    'schedule.timing.invalidZone': 'Enter a valid IANA time zone, for example Asia/Shanghai.',
+    'schedule.timing.conflict': 'This task changed while you were editing. Your draft is retained. Cancel and reopen after refresh to edit the latest rule.',
+    'schedule.timing.notFound': 'This task is no longer available. Your draft is retained; cancel to close the editor.',
+    'schedule.timing.error': 'Could not confirm the timing update. Your draft is retained. Check the task before retrying.',
+    'schedule.timing.zoneRecent': 'Recent',
+    'schedule.timing.zoneAll': 'All time zones',
     'chat.viewChanges': 'View changes to {path}',
     'composer.editQueued': 'Edit queued message',
     'composer.saveQueued': 'Save queued message',
@@ -4590,6 +4654,70 @@ const MESSAGES = Object.freeze({
     'schedule.status.active': '已开启',
     'schedule.delete.close': '关闭删除确认',
     'schedule.delete.cancel': '取消',
+    'schedule.time.locale': 'zh-CN',
+    'schedule.frequency.once': '单次',
+    'schedule.frequency.every': '{value}{unit}一次',
+    'schedule.frequency.daily': '每天 {time}（{timeZone}）',
+    'schedule.frequency.dailyLocal': '每天 {time}',
+    'schedule.frequency.weekly': '每周{weekdays} {time}（{timeZone}）',
+    'schedule.frequency.weeklyLocal': '每周{weekdays} {time}',
+    'schedule.frequency.cron': 'Cron {expression}（{timeZone}）',
+    'schedule.frequency.cronLocal': 'Cron {expression}',
+    'schedule.frequency.cronRule': '{rule}（{timeZone}）',
+    'schedule.frequency.weekday.join': '、',
+    'schedule.frequency.weekday.1': '一',
+    'schedule.frequency.weekday.2': '二',
+    'schedule.frequency.weekday.3': '三',
+    'schedule.frequency.weekday.4': '四',
+    'schedule.frequency.weekday.5': '五',
+    'schedule.frequency.weekday.6': '六',
+    'schedule.frequency.weekday.7': '日',
+    'schedule.unit.day.one': '天',
+    'schedule.unit.day.other': '天',
+    'schedule.unit.hour.one': '小时',
+    'schedule.unit.hour.other': '小时',
+    'schedule.unit.minute.one': '分钟',
+    'schedule.unit.minute.other': '分钟',
+    'schedule.unit.second.one': '秒',
+    'schedule.unit.second.other': '秒',
+    'schedule.relative.future': '{value}{unit}后',
+    'schedule.relative.overdue': '已逾期 {value}{unit}',
+    'schedule.cron.time.everyMinute': '每分钟',
+    'schedule.cron.time.everyMinutes': '每 {step} 分钟',
+    'schedule.cron.time.hourlyAt': '每小时的第 {minutes} 分钟',
+    'schedule.cron.weekdaysAt': '周一至周五 {time}',
+    'schedule.cron.monthlyAt': '每月 {day} 日 {time}',
+    'schedule.cron.everyNHoursAt': '每 {count} 小时的第 {minutes} 分钟',
+    'schedule.list.nextRun': '下次运行',
+    'schedule.detail.nextRun': '下次运行',
+    'schedule.list.open': '打开提醒详情：{title}',
+    'schedule.delete.label': '删除提醒：{title}',
+    'schedule.mark.aria': '{count} 个自动化任务',
+    'schedule.hover.more': '另有 {count} 个任务',
+    'schedule.card.openLabel': '打开任务详情：{title}',
+    'schedule.list.loadingTasks': '正在加载自动化任务',
+    'schedule.delivery.loading': '正在加载任务运行记录…',
+    'schedule.delivery.list': '任务运行记录',
+    'schedule.delivery.retentionBounds': '每个任务最多保留近 {days} 天内的 {records} 条运行记录。',
+    'schedule.detail.delete': '删除',
+    'schedule.rule.weekday': '星期',
+    'schedule.rule.weekdayOption': '星期{weekday}',
+    'schedule.rule.invalidTitle': '请输入不超过 120 个字符的任务名称',
+    'schedule.rule.invalidPrompt': '请输入任务内容',
+    'schedule.rule.invalidWeekdays': '请至少选择一天',
+    'schedule.rule.cronInvalid': '请输入 5 字段的 cron 表达式，例如 0 9 * * 1-5',
+    'schedule.timing.unit.hour': '小时',
+    'schedule.timing.unit.minute': '分钟',
+    'schedule.timing.unit.second': '秒',
+    'schedule.timing.invalidInterval.hour': '请输入至少 1 小时的间隔',
+    'schedule.timing.invalidInterval.minute': '请输入至少 1 分钟的间隔',
+    'schedule.timing.invalidInterval.second': '请输入至少 60 秒的间隔',
+    'schedule.timing.invalidZone': '请输入有效的 IANA 时区，例如 Asia/Shanghai',
+    'schedule.timing.conflict': '编辑期间任务已变化，草稿已保留。请在刷新后取消并重新打开编辑器，以修改最新规则',
+    'schedule.timing.notFound': '此任务当前不可用，草稿已保留。请取消以关闭编辑器',
+    'schedule.timing.error': '无法确认时间修改是否已保存。草稿已保留，请在重试前检查任务',
+    'schedule.timing.zoneRecent': '最近使用',
+    'schedule.timing.zoneAll': '全部时区',
     'chat.viewChanges': '查看 {path} 的更改',
     'composer.editQueued': '编辑排队消息',
     'composer.saveQueued': '保存排队消息',
@@ -21428,9 +21556,9 @@ function scheduleUnits() {
   ]
 }
 
-/** DSH's English unit word for one integral magnitude (`unit.<name>.one` / `.other`). */
+/** DSH's unit word for one integral magnitude (`unit.<name>.one` / `.other`), in the page language. */
 function scheduleUnitLabel(unit, value) {
-  return value === 1 ? unit : `${unit}s`
+  return t(`schedule.unit.${unit}.${value === 1 ? 'one' : 'other'}`)
 }
 
 /** DSH's `clockLabel`: a stored `HH:MM:SS(.fff)` without its fraction, then without a trailing `:00`. */
@@ -21438,10 +21566,10 @@ function scheduleClockLabel(time) {
   return String(time).replace(/\.\d+$/, '').replace(/:00$/, '')
 }
 
-/** DSH's English weekday list for stored ISO weekdays, joined with `, ` — `Mon, Wed`. */
+/** DSH's `formatWeekdays`: stored ISO weekdays by their short names, joined — `Mon, Wed`, or 一、三 in Chinese. */
 function scheduleWeekdayList(weekdays) {
-  const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  return (Array.isArray(weekdays) ? weekdays : []).map((weekday) => names[weekday - 1] ?? names[0]).join(', ')
+  const name = (weekday) => t(`schedule.frequency.weekday.${weekday >= 1 && weekday <= 7 ? weekday : 1}`)
+  return (Array.isArray(weekdays) ? weekdays : []).map(name).join(t('schedule.frequency.weekday.join'))
 }
 
 /** The browser's IANA zone: the one zone the Automation page's and the detail's frequency leave unnamed. */
@@ -21481,7 +21609,7 @@ function scheduleZoneLabel(zone, at = Date.now()) {
     offset = `UTC${minutes < 0 ? '-' : '+'}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`
   }
   try {
-    const name = new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'longGeneric' })
+    const name = new Intl.DateTimeFormat(t('schedule.time.locale'), { timeZone: zone, timeZoneName: 'longGeneric' })
       .formatToParts(at)
       .find((part) => part.type === 'timeZoneName')?.value
     if (offset === undefined) return name ?? String(zone)
@@ -21492,9 +21620,9 @@ function scheduleZoneLabel(zone, at = Date.now()) {
 }
 
 /**
- * DSH's `formatScheduleFrequency`, in English: `Once` for `after`/`at`; `Every {value} {unit}` with the largest of day,
- * hour, minute or second that divides the interval; `Daily at {time} ({timeZone})`; `Weekly on {weekdays} at {time}
- * ({timeZone})`; `Cron {expression} ({timeZone})`.
+ * DSH's `formatScheduleFrequency`, in the page language (its `frequency.*` copy): `Once` for `after`/`at`; `Every
+ * {value} {unit}` with the largest of day, hour, minute or second that divides the interval; `Daily at {time}
+ * ({timeZone})`; `Weekly on {weekdays} at {time} ({timeZone})`; `Cron {expression} ({timeZone})`.
  *
  * The transcript card, the header popover and the sidebar hover card always name the zone (DSH calls the formatter
  * there without a zone context). The Automation page and the task detail pass `{ omitLocalZone: true }`, DSH's
@@ -21504,26 +21632,28 @@ function scheduleZoneLabel(zone, at = Date.now()) {
  * (`scheduleCronSentence`) and keeps the raw expression form, DSH's own fallback, for everything else.
  */
 function scheduleFrequency(record, options = {}) {
-  const named = (text) => {
-    if (options.omitLocalZone === true && record.timeZone === scheduleBrowserZone()) return text
-    return `${text} (${scheduleZoneLabel(record.timeZone)})`
-  }
+  /** The `…Local` form leaves the zone unnamed; the other names it. */
+  const local = options.omitLocalZone === true && record.timeZone === scheduleBrowserZone()
+  const named = (key, params) => (local ? t(`${key}Local`, params) : t(key, { ...params, timeZone: scheduleZoneLabel(record.timeZone) }))
   switch (record.kind) {
     case 'after':
     case 'at':
-      return 'Once'
+      return t('schedule.frequency.once')
     case 'every': {
       const seconds = Number(record.everySeconds)
       const selected = scheduleUnits().find((candidate) => seconds % candidate.seconds === 0) ?? { unit: 'second', seconds: 1 }
       const value = seconds / selected.seconds
-      return `Every ${value} ${scheduleUnitLabel(selected.unit, value)}`
+      return t('schedule.frequency.every', { value, unit: scheduleUnitLabel(selected.unit, value) })
     }
     case 'daily':
-      return named(`Daily at ${scheduleClockLabel(record.time)}`)
+      return named('schedule.frequency.daily', { time: scheduleClockLabel(record.time) })
     case 'weekly':
-      return named(`Weekly on ${scheduleWeekdayList(record.weekdays)} at ${scheduleClockLabel(record.time)}`)
-    case 'cron':
-      return named(scheduleCronSentence(record.expression) ?? `Cron ${record.expression}`)
+      return named('schedule.frequency.weekly', { weekdays: scheduleWeekdayList(record.weekdays), time: scheduleClockLabel(record.time) })
+    case 'cron': {
+      const rule = scheduleCronSentence(record.expression)
+      if (rule === undefined) return named('schedule.frequency.cron', { expression: record.expression })
+      return local ? rule : t('schedule.frequency.cronRule', { rule, timeZone: scheduleZoneLabel(record.timeZone) })
+    }
     default:
       return ''
   }
@@ -21546,7 +21676,8 @@ function scheduleCronWeekdays(field) {
 /**
  * A cron expression read as a sentence for the simple shapes — a fixed time every day, on weekdays, on chosen days or
  * on one day of the month, and the plain minute and hour steps — else `undefined`, and the caller keeps DSH's raw
- * `Cron {expression}` fallback.
+ * `Cron {expression}` fallback. The English is heddle's; the Chinese is what DSH's `cronPreview` says for each shape
+ * (每天 09:00, 周一至周五 09:00, 每月 5 日 09:00, 每 15 分钟, 每小时的第 30 分钟).
  */
 function scheduleCronSentence(expression) {
   const fields = String(expression ?? '').trim().split(/\s+/)
@@ -21562,41 +21693,45 @@ function scheduleCronSentence(expression) {
   const h = whole(hour, 23)
   if (m !== undefined && h !== undefined) {
     const clock = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`
-    if (day === '*' && weekday === '*') return `Daily at ${clock}`
+    if (day === '*' && weekday === '*') return t('schedule.frequency.dailyLocal', { time: clock })
     if (day === '*') {
       const days = scheduleCronWeekdays(weekday)
       if (days === undefined) return undefined
-      if (days.length === 7) return `Daily at ${clock}`
-      if (days.join(',') === '1,2,3,4,5') return `Monday to Friday at ${clock}`
-      return `Weekly on ${scheduleWeekdayList(days)} at ${clock}`
+      if (days.length === 7) return t('schedule.frequency.dailyLocal', { time: clock })
+      if (days.join(',') === '1,2,3,4,5') return t('schedule.cron.weekdaysAt', { time: clock })
+      return t('schedule.frequency.weeklyLocal', { weekdays: scheduleWeekdayList(days), time: clock })
     }
     const date = whole(day, 31)
-    if (weekday === '*' && date !== undefined && date >= 1) return `Monthly on day ${date} at ${clock}`
+    if (weekday === '*' && date !== undefined && date >= 1) return t('schedule.cron.monthlyAt', { day: date, time: clock })
     return undefined
   }
   if (day !== '*' || weekday !== '*') return undefined
-  if (minute === '*' && hour === '*') return 'Every minute'
-  if (m !== undefined && hour === '*') return `Every hour at minute ${m}`
+  if (minute === '*' && hour === '*') return t('schedule.cron.time.everyMinute')
+  if (m !== undefined && hour === '*') return t('schedule.cron.time.hourlyAt', { minutes: m })
   const minutes = step(minute)
-  if (minutes !== undefined && hour === '*') return minutes === 1 ? 'Every minute' : `Every ${minutes} minutes`
+  if (minutes !== undefined && hour === '*') return minutes === 1 ? t('schedule.cron.time.everyMinute') : t('schedule.cron.time.everyMinutes', { step: minutes })
   const hours = step(hour)
-  if (m !== undefined && hours !== undefined) return hours === 1 ? `Every hour at minute ${m}` : `Every ${hours} hours at minute ${m}`
+  if (m !== undefined && hours !== undefined) return hours === 1 ? t('schedule.cron.time.hourlyAt', { minutes: m }) : t('schedule.cron.everyNHoursAt', { count: hours, minutes: m })
   return undefined
 }
 
 /**
- * DSH's `formatScheduleAbsolute` for English: short month, day and year with a 24-hour `HH:mm`, in the reader's zone
- * (the instant is the same one, and the reader compares it with their own clock). An unparsable value is shown raw.
+ * DSH's `formatScheduleAbsolute`: short month and day with a 24-hour `HH:mm`, in the reader's zone (the instant is the
+ * same one, and the reader compares it with their own clock), in the page language. English states the year and
+ * Chinese reads month and day only (DSH's `statesYear`). An unparsable value is shown raw.
  */
 function scheduleAbsolute(scheduledAt) {
   const at = Date.parse(scheduledAt)
   if (Number.isNaN(at)) return String(scheduledAt)
-  return new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
+  const locale = t('schedule.time.locale')
+  const year = locale.toLowerCase().startsWith('zh') ? {} : { year: 'numeric' }
+  return new Intl.DateTimeFormat(locale, { ...year, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
 }
 
 /**
  * DSH's `formatScheduleRelative`: the largest unit the distance reaches, `in {value} {unit}` rounded **up** for a future
- * target, `{value} {unit} overdue` rounded **down** for a past one (never below 1), and `Due now` at exactly zero.
+ * target, `{value} {unit} overdue` rounded **down** for a past one (never below 1), and `Due now` at exactly zero, in
+ * the page language (`{value}{unit}后`, `已逾期 {value}{unit}`, 现在到期).
  */
 function scheduleRelative(scheduledAt, now = Date.now()) {
   const difference = Date.parse(scheduledAt) - now
@@ -21606,8 +21741,7 @@ function scheduleRelative(scheduledAt, now = Date.now()) {
   const units = scheduleUnits()
   const selected = units.find((candidate) => seconds >= candidate.seconds) ?? units[units.length - 1]
   const value = Math.max(1, difference > 0 ? Math.ceil(seconds / selected.seconds) : Math.floor(seconds / selected.seconds))
-  const unit = scheduleUnitLabel(selected.unit, value)
-  return difference > 0 ? `in ${value} ${unit}` : `${value} ${unit} overdue`
+  return t(difference > 0 ? 'schedule.relative.future' : 'schedule.relative.overdue', { value, unit: scheduleUnitLabel(selected.unit, value) })
 }
 
 /** DSH's `nextRunParts`: the stamp and the parenthesised distance every next-run line states. */
@@ -21916,7 +22050,7 @@ function syncScheduleCard(card, model) {
     cover.addEventListener('click', open)
     card.prepend(cover)
   }
-  cover.setAttribute('aria-label', `Open task details: ${title}`)
+  cover.setAttribute('aria-label', t('schedule.card.openLabel', { title }))
   if (button === null) {
     button = document.createElement('button')
     button.type = 'button'
@@ -22134,7 +22268,7 @@ function scheduleCatalogRow(id) {
   const next = document.createElement('span')
   next.className = 'sched-next'
   const nextLabel = document.createElement('span')
-  nextLabel.textContent = 'Next run '
+  nextLabel.className = 'sched-next-label'
   const time = document.createElement('time')
   const relative = document.createElement('span')
   relative.className = 'sched-next-relative'
@@ -22157,8 +22291,9 @@ function syncScheduleCatalogRow(li, record, now) {
   li.classList.toggle('sched-overdue', overdue)
   const title = scheduleTaskTitle(record)
   scheduleSetText(li.querySelector('.sched-title'), title)
-  li.querySelector('.sched-open')?.setAttribute('aria-label', `Open reminder details: ${title}`)
+  li.querySelector('.sched-open')?.setAttribute('aria-label', t('schedule.list.open', { title }))
   scheduleSetText(li.querySelector('.sched-meta > span'), scheduleFrequency(record))
+  scheduleSetText(li.querySelector('.sched-next-label'), `${t('schedule.list.nextRun')} `)
   const parts = scheduleNextRunParts(record.scheduledAt, now)
   const time = li.querySelector('.sched-next time')
   if (time !== null && time.dateTime !== record.scheduledAt) time.dateTime = record.scheduledAt
@@ -22167,7 +22302,7 @@ function syncScheduleCatalogRow(li, record, now) {
   const pending = schedState.list.deleting.includes(record.id) || schedState.deleting.includes(record.id)
   const remove = li.querySelector('.sched-delete')
   if (remove !== null) {
-    remove.setAttribute('aria-label', `Delete reminder: ${title}`)
+    remove.setAttribute('aria-label', t('schedule.delete.label', { title }))
     remove.title = pending ? t('schedule.delete.pending') : t('schedule.delete.action')
     remove.disabled = pending
   }
@@ -22251,7 +22386,7 @@ function paintScheduleMarks() {
       existing?.remove()
       continue
     }
-    const text = `${records.length} scheduled tasks`
+    const text = t('schedule.mark.aria', { count: records.length })
     if (existing !== null) {
       scheduleSetText(existing.querySelector('.sched-visually-hidden'), text)
       continue
@@ -22318,7 +22453,7 @@ function showScheduleRowHover(row) {
   if (ordered.length > shown.length) {
     const omitted = document.createElement('div')
     omitted.className = 'sched-omitted'
-    omitted.textContent = `${ordered.length - shown.length} more`
+    omitted.textContent = t('schedule.hover.more', { count: ordered.length - shown.length })
     tasks.append(omitted)
   }
   card.replaceChildren(tasks)
@@ -22616,7 +22751,7 @@ function renderSchedulesPage() {
   if (!catalog.settled) {
     nodes.push(catalog.status === 'error'
       ? scheduleMessageState(t('schedule.catalogError'), t('schedule.list.retry'), () => void refreshScheduleCatalog())
-      : scheduleLoadingState('Loading automation tasks'))
+      : scheduleLoadingState(t('schedule.list.loadingTasks')))
   } else {
     if (catalog.status === 'error') nodes.push(scheduleNoticeState(t('schedule.catalogRefreshError'), t('schedule.list.retry'), () => void refreshScheduleCatalog()))
     const records = scheduleCatalogMatches()
@@ -22624,7 +22759,7 @@ function renderSchedulesPage() {
       nodes.push(scheduleMessageState(scheduleEmptyText(), t('schedule.empty.action'), () => void startNewSession()))
     } else {
       const list = document.createElement('ul')
-      list.setAttribute('aria-label', 'Automation tasks')
+      list.setAttribute('aria-label', t('schedule.title'))
       const now = Date.now()
       const binding = schedState.drawer
       const selected = binding === null ? null : scheduleRowKey(binding.sessionId, binding.id)
@@ -22645,12 +22780,15 @@ function tickSchedulesPage() {
 }
 
 /**
- * A language change redraws the copy the task views draw by script (the convention above `t()`): the header clock and
- * its open popover, the page's list, and an open task's detail. The popover keeps its rows by id, so its loading and
- * failure lines, written once when made, are dropped and made again. The detail is rebuilt from its draft, which holds
- * every field as typed, so an unsaved edit survives; the change is made in the Settings dialog, so no field has the caret.
+ * A language change redraws the copy the task views draw by script (the convention above `t()`): the sidebar marks, the
+ * transcript's task cards, the header clock and its open popover, the page's list, and an open task's detail. The
+ * popover keeps its rows by id, so its loading and failure lines, written once when made, are dropped and made again.
+ * The detail is rebuilt from its draft, which holds every field as typed, so an unsaved edit survives; the change is
+ * made in the Settings dialog, so no field has the caret.
  */
 window.addEventListener('heddle:locale', () => {
+  paintScheduleMarks()
+  renderScheduleCards()
   const menu = document.getElementById('schedule-catalog-menu')
   if (menu !== null) {
     menu.setAttribute('aria-label', t('schedule.list.aria'))
@@ -22812,9 +22950,10 @@ function scheduleIntervalProblem(draft) {
 /** DSH's local validation (UI:4996-5003): the first thing wrong with the draft, or `''`. */
 function scheduleDraftProblem(draft) {
   const title = draft.title.trim()
-  if (title.length < 1 || title.length > 120) return 'Enter a task name of 1 to 120 characters.'
-  if (draft.prompt.trim() === '') return 'Enter an instruction for the task.'
-  if (scheduleIntervalProblem(draft)) return 'At least 60 seconds.'
+  if (title.length < 1 || title.length > 120) return t('schedule.rule.invalidTitle')
+  if (draft.prompt.trim() === '') return t('schedule.rule.invalidPrompt')
+  /** DSH states the floor in the row's own unit (`INTERVAL_ERROR_KEYS`). */
+  if (scheduleIntervalProblem(draft)) return t(`schedule.timing.invalidInterval.${{ hours: 'hour', minutes: 'minute' }[draft.repeat] ?? 'second'}`)
   const timing = t('schedule.timing.invalid')
   const timeValid = /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(draft.time)
   switch (draft.repeat) {
@@ -22825,9 +22964,9 @@ function scheduleDraftProblem(draft) {
       return timeValid ? '' : timing
     case 'weekly':
       if (!timeValid) return timing
-      return draft.weekdays.length > 0 ? '' : 'Choose at least one day.'
+      return draft.weekdays.length > 0 ? '' : t('schedule.rule.invalidWeekdays')
     case 'custom':
-      return draft.expression.trim().split(/\s+/).length === 5 ? '' : 'Enter a five-field cron expression.'
+      return draft.expression.trim().split(/\s+/).length === 5 ? '' : t('schedule.rule.cronInvalid')
     default:
       return ''
   }
@@ -22837,21 +22976,21 @@ function scheduleDraftProblem(draft) {
 function scheduleUpdateMessage(code) {
   switch (code) {
     case 'schedule_conflict':
-      return 'This task changed while you were editing. Your draft is retained.'
+      return t('schedule.timing.conflict')
     case 'schedule_ended':
       return t('schedule.timing.inactive')
     case 'schedule_not_found':
-      return 'This task is no longer available. Your draft is retained; cancel to close the editor.'
+      return t('schedule.timing.notFound')
     case 'subagent_session':
       return t('schedule.timing.subagentSession')
     case 'not_future':
       return t('schedule.timing.notFuture')
     case 'invalid_time_zone':
-      return 'Choose a valid time zone.'
+      return t('schedule.timing.invalidZone')
     case 'frequency_too_high':
-      return 'The interval must be at least 60 seconds.'
+      return t('schedule.timing.invalidInterval.second')
     default:
-      return typeof code === 'string' && code.startsWith('invalid_') ? 'Enter a valid date and time, or check the timing fields.' : 'Could not confirm the timing update.'
+      return typeof code === 'string' && code.startsWith('invalid_') ? t('schedule.timing.invalid') : t('schedule.timing.error')
   }
 }
 
@@ -23091,7 +23230,7 @@ function scheduleDetailBar(detail) {
   remove.className = 'sched-danger'
   remove.id = 'schedule-detail-delete'
   remove.setAttribute('role', 'menuitem')
-  remove.append(scheduleTrashIcon(14), 'Delete task')
+  remove.append(scheduleTrashIcon(14), t('schedule.detail.delete'))
   remove.addEventListener('click', () => {
     closeScheduleDetailMenu(false)
     openScheduleDeleteDialog(detail.sessionId, detail.id)
@@ -23264,7 +23403,7 @@ function scheduleFillNext(node, task) {
     scheduleSetText(node, t('schedule.status.inactive'))
     return
   }
-  scheduleNextLine(node, 'Next run ', task.scheduledAt, Date.now())
+  scheduleNextLine(node, `${t('schedule.detail.nextRun')} `, task.scheduledAt, Date.now())
 }
 
 /** Repaint the next-run line in place (the 30-second tick and every re-read). */
@@ -23371,18 +23510,18 @@ function scheduleWeekdayRow(detail, readOnly) {
   group.className = 'sched-weekdays'
   group.id = 'schedule-weekdays'
   group.setAttribute('role', 'group')
-  group.setAttribute('aria-label', 'Weekdays')
-  const short = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  const long = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+  group.setAttribute('aria-label', t('schedule.rule.weekday'))
   for (let weekday = 1; weekday <= 7; weekday += 1) {
+    /** DSH's pill: the short name, and `Weekday {name}` (星期一) for its accessible name. */
+    const name = t(`schedule.frequency.weekday.${weekday}`)
     const pill = document.createElement('button')
     pill.type = 'button'
     pill.className = 'sched-pill'
     pill.dataset.weekday = String(weekday)
     pill.disabled = readOnly
     pill.setAttribute('aria-pressed', String(draft.weekdays.includes(weekday)))
-    pill.setAttribute('aria-label', long[weekday - 1])
-    pill.textContent = short[weekday - 1]
+    pill.setAttribute('aria-label', t('schedule.rule.weekdayOption', { weekday: name }))
+    pill.textContent = name
     pill.addEventListener('click', () => {
       const chosen = new Set(draft.weekdays)
       if (chosen.has(weekday)) chosen.delete(weekday)
@@ -23393,7 +23532,7 @@ function scheduleWeekdayRow(detail, readOnly) {
     })
     group.append(pill)
   }
-  return scheduleRuleRow('Days', group)
+  return scheduleRuleRow(t('schedule.rule.weekday'), group)
 }
 
 /** "Repeat every": a whole number, two steppers and the unit the Repeat choice names. */
@@ -23433,7 +23572,9 @@ function scheduleIntervalRow(detail, readOnly) {
   steppers.append(stepper(1, t('schedule.timing.intervalIncrease'), 'M4 10l4-4 4 4'), stepper(-1, t('schedule.timing.intervalDecrease'), 'M4 6l4 4 4-4'))
   const unit = document.createElement('span')
   unit.className = 'sched-interval-unit'
-  unit.textContent = draft.repeat
+  /** DSH's `timing.unit.*`: the plural unit word the Repeat choice names, not the choice's stored value. */
+  const unitName = { hours: 'hour', minutes: 'minute', seconds: 'second' }[draft.repeat]
+  unit.textContent = unitName === undefined ? '' : t(`schedule.timing.unit.${unitName}`)
   holder.append(input, steppers, unit)
   return scheduleRuleRow(t('schedule.timing.interval'), holder, 'schedule-interval')
 }
@@ -23510,23 +23651,24 @@ function scheduleZoneRow(detail, readOnly) {
   search.type = 'search'
   search.id = 'schedule-zone-search'
   search.placeholder = t('schedule.timing.zoneSearch')
-  search.setAttribute('aria-label', 'Search time zones')
+  search.setAttribute('aria-label', t('schedule.timing.zoneSearch'))
   search.autocomplete = 'off'
   search.spellcheck = false
   search.addEventListener('input', () => paintScheduleZoneOptions())
   const list = document.createElement('div')
   list.id = 'schedule-zone-options'
   list.setAttribute('role', 'listbox')
-  list.setAttribute('aria-label', 'Time zones')
+  list.setAttribute('aria-label', t('schedule.timing.zone'))
   popup.append(search, list)
   const row = scheduleMenuRow('schedule-zone', t('schedule.timing.zone'), scheduleZoneLabel(draft.timeZone), readOnly, popup, 'zone')
   row.querySelector('#schedule-zone')?.setAttribute('title', draft.timeZone)
   return row
 }
 
-/** Every zone the runtime names, with UTC, labelled once per page and searchable by offset, IANA id or city. */
+/** Every zone the runtime names, with UTC, labelled once per page language and searchable by offset, IANA id or city. */
 function scheduleZoneCatalog() {
-  if (Array.isArray(schedState.zoneCatalog)) return schedState.zoneCatalog
+  if (Array.isArray(schedState.zoneCatalog) && schedState.zoneCatalogLocale === activeLocale) return schedState.zoneCatalog
+  schedState.zoneCatalogLocale = activeLocale
   let zones = []
   try {
     zones = typeof Intl.supportedValuesOf === 'function' ? Intl.supportedValuesOf('timeZone') : []
@@ -23606,9 +23748,9 @@ function paintScheduleZoneOptions() {
   }
   const nodes = []
   if (query === '') {
-    nodes.push(heading('Recent'))
+    nodes.push(heading(t('schedule.timing.zoneRecent')))
     for (const zone of scheduleRecentZones()) nodes.push(option(byZone.get(zone) ?? { zone, label: scheduleZoneLabel(zone) }))
-    nodes.push(heading('All time zones'))
+    nodes.push(heading(t('schedule.timing.zoneAll')))
   }
   const matches = query === '' ? catalog : catalog.filter((entry) => entry.haystack.includes(query))
   for (const entry of matches) nodes.push(option(entry))
@@ -23698,7 +23840,7 @@ function paintScheduleSaveBar() {
     scheduleSetText(save, detail.saving ? t('schedule.rule.saving') : t('schedule.rule.save'))
   }
   if (cancel instanceof HTMLButtonElement) cancel.disabled = detail.saving
-  const message = detail.failure !== '' ? detail.failure : problem
+  const message = detail.failure !== '' ? scheduleUpdateMessage(detail.failure) : problem
   failure.textContent = message
   failure.hidden = message === '' || detail.tab !== 'rules'
   const hint = document.getElementById('schedule-interval-hint')
@@ -23742,7 +23884,7 @@ async function saveScheduleDetail() {
   }
   const task = scheduleTaskFor(detail.sessionId, detail.id)
   if (task === undefined) {
-    detail.failure = scheduleUpdateMessage('schedule_not_found')
+    detail.failure = 'schedule_not_found'
     paintScheduleSaveBar()
     return
   }
@@ -23775,7 +23917,8 @@ async function saveScheduleDetail() {
     return
   }
   const code = answer !== null && typeof answer === 'object' ? answer.code : undefined
-  detail.failure = scheduleUpdateMessage(code)
+  /** The code is kept, not its sentence, so a language change redraws the failure in the new language. */
+  detail.failure = typeof code === 'string' && code !== '' ? code : 'unknown'
   paintScheduleSaveBar()
   if (code === 'schedule_conflict' || code === 'schedule_not_found' || code === 'schedule_ended') invalidateSchedules()
 }
@@ -23931,16 +24074,16 @@ function scheduleOccurrenceLabel(at, task) {
   const zone = task !== undefined && (task.kind === 'daily' || task.kind === 'weekly' || task.kind === 'cron') ? task.timeZone : scheduleBrowserZone()
   const options = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }
   try {
-    return new Intl.DateTimeFormat('en', { ...options, timeZone: zone }).format(instant)
+    return new Intl.DateTimeFormat(t('schedule.time.locale'), { ...options, timeZone: zone }).format(instant)
   } catch {
-    return new Intl.DateTimeFormat('en', options).format(instant)
+    return new Intl.DateTimeFormat(t('schedule.time.locale'), options).format(instant)
   }
 }
 
 /** The Records tab's content for the history's state. */
 function scheduleRecordsContent(detail, task) {
   const history = detail.history
-  if (history === null || history.status === 'loading') return [scheduleLoadingState('Loading delivery records')]
+  if (history === null || history.status === 'loading') return [scheduleLoadingState(t('schedule.delivery.loading'))]
   if (history.status === 'error') return [scheduleMessageState(t('schedule.delivery.error'), t('schedule.delivery.retry'), () => void loadScheduleHistory(false))]
   if (history.status === 'missing') return [scheduleMessageState(t('schedule.delivery.notFound'))]
   const nodes = []
@@ -23951,7 +24094,7 @@ function scheduleRecordsContent(detail, task) {
     list.className = 'sched-deliveries'
     list.id = 'schedule-records'
     list.setAttribute('role', 'list')
-    list.setAttribute('aria-label', 'Delivery records')
+    list.setAttribute('aria-label', t('schedule.delivery.list'))
     for (const record of history.records) list.append(scheduleDeliveryRow(history, task, record))
     nodes.push(list)
   }
@@ -24050,7 +24193,7 @@ function scheduleRetentionNote(history) {
   const sentence = document.createElement('p')
   const records = history.retention?.records ?? 200
   const days = history.retention?.days ?? 30
-  sentence.textContent = `Each task keeps up to ${records} delivery records from the last ${days} days.`
+  sentence.textContent = t('schedule.delivery.retentionBounds', { records, days })
   rule.append(sentence)
   info.addEventListener('click', () => {
     history.retentionOpen = !history.retentionOpen
