@@ -80,9 +80,11 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, the `Workspace` grouping
-  drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id and no title in the
-  header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written;
+  starting in the workspace row the person opened rather than the open session's, and in the open session's own
+  workspace when that session is archived and its row is not drawn, not in the last remembered folder (#119), the
+  `Workspace` grouping drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id
+  and no title in the header, then the row, the header and the window title (`<title> — Heddle`) following its title
+  as it is written;
   and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
   workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
   new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh
@@ -100,10 +102,13 @@ grounded_in:
   session started; and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
   placeholder *No archived sessions yet* with its *View other sessions* action (not the no-roots note), the action
   setting *Hide archived* back and drawing the rows again (#107); a session in the nested workspace named after
-  that workspace, not the root above it, in a search hit and in an `In one list` row (#57); and its search matching a
+  that workspace, not the root above it, in a search hit and in an `In one list` row (#57); its search matching a
   title or a workspace name, never a New session placeholder, twenty at most, revealing a chosen hit, and, while
   `/api/sessions` fails, listing the rows the tree holds rather than "No matching sessions", then reading again on the
-  next search (#58). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  next search (#58); and a folder the server may not read (`chmod 000`) opening to DSH's one line *Read failed: cannot
+  list "locked": permission denied* with no rows, never *nothing inside*, a readable sibling still listing its file,
+  and a workspace whose own folder it may not read keeping its session and its *Files* heading over the same line
+  (#106). The page opens no session on its own, so a check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
@@ -160,6 +165,13 @@ grounded_in:
   DSH's Web chords drive it (S38, S42): Mod+Shift+B shows and hides it, the same tab coming back, and Mod+Alt+T opens
   another tab, from the composer and not behind a dialog; the keyboard reference lists both last; a default server
   takes neither key and lists neither.
+- [`check-reconnect.mjs`](check-reconnect.mjs) — a change that reached the server just before the connection dropped
+  shows once it is back, as DSH's re-acquired baselines show it (#91): a session rename and a nested workspace's
+  *Delete workspace* whose answers arrive only after the browser went offline (DevTools' Offline, through the
+  protocol) are drawn once it is back online — the new title, the workspace gone and its session under its parent —
+  and a rename answered just before the server went away is drawn once the page's stream reconnects to it on the same
+  port. Each time the tree's "could not read the workspaces" note goes, the Deleting… line is not left set, and no
+  unhandled rejection reaches the console.
 - [`check-shortcut-keys.mjs`](check-shortcut-keys.mjs) — the session shortcuts pressed through
   `Input.dispatchKeyEvent` with the `key` values Chrome delivers (on a Mac, ⌥⌘A arrives as `å` and ⌥⌘N as a dead
   key), matched on the physical key with DSH's `Mod`, Command on a Mac and Control elsewhere (R-developer-seven-7):

@@ -43,6 +43,7 @@ export const BUILTIN_MODULES = [
   'plugins/schedule',
   'plugins/jobs',
   'plugins/tools',
+  'questions/service',
 ] as const
 
 /** The placeholder a home-derived default is written with. */
