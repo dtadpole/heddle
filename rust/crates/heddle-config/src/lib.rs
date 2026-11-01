@@ -51,6 +51,7 @@ mod builtin_forms;
 pub mod command;
 mod component_schemas;
 mod compose;
+mod context_rule;
 mod endpoints;
 mod env;
 mod error;
@@ -78,6 +79,7 @@ pub use component_schemas::{
     context_schema, goal_schema, jobs_schema, schedule_schema, subagent_tool_schema, team_schema,
 };
 pub use compose::{ComponentName, ComposedRow, EntryRow, Provenance, compose, origin_of};
+pub use context_rule::{CONTEXT_BUDGET_RULE, context_budget_problems};
 pub use endpoints::{
     EndpointConfig, EndpointKind, EndpointPatch, EndpointsView, ModelEntry, ModelOption,
     PAGE_ENDPOINT_FIELDS, ReasoningLevel, ReasoningLevels, ReasoningValue, config_paths,

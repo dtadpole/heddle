@@ -30,24 +30,27 @@ fn count() -> Value {
 
 /// `src/context/service.ts` `Config`, against heddle-context's `ContextConfig`.
 pub fn context_schema() -> Option<Schema> {
+    let ratio = json!({ "type": "number", "minimum": 0, "maximum": 1 });
     let policy = json!({
         "type": "object",
         "required": ["endpoint"],
         "properties": {
             "endpoint": { "type": "string" },
-            "thresholdRatio": { "type": "number" },
-            "retainRatio": { "type": "number" },
+            "thresholdRatio": ratio,
+            "retainRatio": ratio,
             "thresholdTokens": count(),
             "retainTokens": count(),
         }
     });
+    // The budget across fields (the retained tail below the trigger) is judged by name once the fields fit (#212).
     schema(json!({
         "type": "object",
+        "x-heddle-rule": crate::context_rule::CONTEXT_BUDGET_RULE,
         "properties": {
             "system": { "type": "string" },
-            "contextWindow": { "type": "integer", "minimum": 0, "default": 1_048_576 },
-            "thresholdRatio": { "type": "number" },
-            "retainRatio": { "type": "number" },
+            "contextWindow": { "type": "integer", "minimum": 1, "default": 1_048_576 },
+            "thresholdRatio": ratio,
+            "retainRatio": ratio,
             "thresholdTokens": count(),
             "retainTokens": count(),
             "policies": { "type": "array", "items": policy, "default": [] },
@@ -169,6 +172,18 @@ mod tests {
             vec![
                 "contextWindow is not a number, which means the value in the layer could not be read as one"
             ]
+        );
+        assert_eq!(
+            problems(context_schema(), json!({ "contextWindow": 0 })),
+            vec!["contextWindow must be at least 1"]
+        );
+        assert_eq!(
+            problems(
+                context_schema(),
+                json!({ "retainRatio": 0.99, "thresholdRatio": 0.5 })
+            ),
+            vec!["retainRatio (0.99) must be less than the resolved thresholdRatio (0.5)"],
+            "the budget rule speaks once the fields fit (#212)"
         );
         assert_eq!(
             problems(jobs_schema(), json!({ "maxConcurrentJobsPerOwner": 0 })),
