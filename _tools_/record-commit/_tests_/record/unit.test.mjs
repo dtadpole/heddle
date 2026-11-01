@@ -101,7 +101,8 @@ function pushFrom(w, files, message = 'writer') {
   git(w.writer, ['push', '-q'])
 }
 
-function cli(w, args, extraEnv = {}) {
+// The tool as a seat runs it: by default it parks every record and never pushes main.
+function run(w, args, extraEnv = {}) {
   const r = spawnSync(process.execPath, [TOOL, '--repo', w.live, ...args], {
     cwd: w.root,
     encoding: 'utf8',
@@ -109,6 +110,10 @@ function cli(w, args, extraEnv = {}) {
   })
   return { ...r, output: `${r.stdout ?? ''}\n${r.stderr ?? ''}` }
 }
+
+// The tests written before parking became the default judge the direct push to main
+// (and its fallback to parking on a protected main), which now takes --main.
+const cli = (w, args, extraEnv = {}) => run(w, [...args, '--main'], extraEnv)
 
 const record = (w, path, message = 'docs(test): edit the note') => ['--message', message, '--file', path, '--validator', w.validator]
 
@@ -740,6 +745,89 @@ exit 0
   assert.equal(git(w.origin, ['show', `${sha}:_projects_/x/other.md`]), 'other run', 'the other run is kept')
   assert.equal(git(w.origin, ['show', `${sha}:_projects_/x/note.md`]), 'one\nmid-park')
   assert.equal(originRef(w, 'refs/heads/records/dev-one'), sha)
+})
+
+// 2026-11-01 15:24 PST: the owner froze reflection main for the KB cutover, and after it
+// main takes pull requests only. A seat must never push main, even while its protection is
+// off, so parking became the default. This origin accepts main and logs every ref pushed.
+function logPushes(w) {
+  const log = join(w.root, 'pushed-refs')
+  const hook = join(w.origin, 'hooks', 'update')
+  writeFileSync(hook, `#!/bin/sh\necho "$1" >> '${log}'\nexit 0\n`)
+  chmodSync(hook, 0o755)
+  return () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [])
+}
+
+test('by default a record is parked on records/<seat> and main is never pushed, even when it would accept', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  const main = originRef(w, 'main')
+  write(w.live, '_projects_/x/note.md', 'one\nby default\n')
+  const r = run(w, ['--message', 'docs(test): a default record', '--file', '_projects_/x/note.md', '--validator', w.validator, '--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  const line = parkedLine(r, 'dev-one')
+  assert.ok(line, `the last line is 'parked on records/dev-one <sha>':\n${r.output}`)
+  assert.match(r.output, /main is not pushed: parking is the default \(--main would try a direct push first\)/)
+  assert.deepEqual(pushed(), ['refs/heads/records/dev-one'], 'the only ref pushed is the records branch; main was never attempted')
+  assert.equal(originRef(w, 'main'), main, 'main did not move')
+  assert.equal(originRef(w, `${line[1]}^`), main, 'the parked commit sits on origin/main')
+  assert.equal(git(w.origin, ['show', `${line[1]}:_projects_/x/note.md`]), 'one\nby default')
+  assert.equal(git(w.live, ['rev-parse', 'HEAD']), main, 'the live tree was not synced')
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('by default the seat is this session\'s TEAM.yaml key, and a second record appends', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/t/TEAM.yaml', 'members:\n  - key: dev-two\n    session_id: session-abc\n')
+  write(w.live, '_projects_/x/note.md', 'one\nfirst\n')
+  const args = (path) => ['--message', 'docs(test): a roster record', '--file', path, '--validator', w.validator]
+  const first = parkedLine(run(w, args('_projects_/x/note.md'), { DSH_SESSION_ID: 'session-abc' }), 'dev-two')
+  assert.ok(first)
+  write(w.live, '_projects_/x/other.md', 'other\nsecond\n')
+  const r = run(w, args('_projects_/x/other.md'), { DSH_SESSION_ID: 'session-abc' })
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, new RegExp(`appended to records/dev-two ${first[1].slice(0, 7)}`))
+  assert.match(r.output, /seat dev-two, the TEAM\.yaml key of session-abc/)
+  assert.ok(pushed().every((ref) => ref === 'refs/heads/records/dev-two'), `main was never attempted: ${pushed()}`)
+})
+
+test('by default no seat refuses the run before anything is committed or pushed', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/x/note.md', 'one\nno seat\n')
+  const r = run(w, ['--message', 'docs(test): no seat', '--file', '_projects_/x/note.md', '--validator', w.validator], { DSH_SESSION_ID: 'session-unknown' })
+  assert.equal(r.status, REFUSED, r.output)
+  assert.match(r.output, /refusing: no seat to park on; pass --seat NAME.*main is never pushed without --main/)
+  assert.doesNotMatch(r.output, /commit [0-9a-f]{7}/, 'nothing was committed')
+  assert.deepEqual(pushed(), [])
+  const bad = run(w, ['--message', 'docs(test): bad seat', '--file', '_projects_/x/note.md', '--validator', w.validator, '--seat', '../main'])
+  assert.equal(bad.status, REFUSED, bad.output)
+  assert.match(bad.output, /is not a branch-safe name\. Nothing was committed/)
+  assert.doesNotMatch(bad.output, /commit [0-9a-f]{7}/, 'refused before the commit, not after it')
+  assert.deepEqual(pushed(), [])
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('a default dry run names the records branch it would park on, and pushes nothing', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/x/note.md', 'one\ndry\n')
+  const r = run(w, ['--message', 'docs(test): dry', '--file', '_projects_/x/note.md', '--validator', w.validator, '--seat', 'dev-one', '--dry-run'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, /dry run: would commit 1 file\(s\) and park it on records\/dev-one, not pushing origin\/main/)
+  assert.deepEqual(pushed(), [])
+})
+
+test('--main pushes main directly when it accepts', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/x/note.md', 'one\ndirect\n')
+  const r = run(w, ['--message', 'docs(test): direct', '--file', '_projects_/x/note.md', '--validator', w.validator, '--main'])
+  assert.equal(r.status, OK, r.output)
+  assert.deepEqual(pushed(), ['refs/heads/main'])
+  assert.equal(originShow(w, '_projects_/x/note.md'), 'one\ndirect\n')
+  assert.doesNotMatch(r.output, /^parked on/m)
 })
 
 test('a refusal names the remote\'s reasons and the porcelain status, not only git\'s last line', () => {

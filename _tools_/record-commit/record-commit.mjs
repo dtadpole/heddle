@@ -11,7 +11,8 @@
 // commits in the live checkout: it fetches, creates a temporary worktree at the fetched
 // origin/main, copies only the staged files there, checks each one's base against
 // origin, unions append-only logs, runs the frontmatter validator over the whole tree,
-// commits with explicit paths, pushes to main, reads the pushed bytes back from
+// commits with explicit paths, and parks the commit on refs/heads/records/<seat>, read
+// back. With --main it pushes to main instead, reads the pushed bytes back from
 // origin/main, and only then fast-forwards the live tree with reflection-sync.
 //
 // Input (exactly one of):
@@ -31,15 +32,21 @@
 // there) refuses the whole run before anything is committed: silently committing the
 // rest is how two of three files once went missing with an exit 0.
 //
-// A protected main (GitHub GH006 or a ruleset's GH013) refuses every direct push, which
-// no replay can win. The same commit is then parked on refs/heads/records/<seat>, created
-// from origin/main or appended to; the seat is --seat, else the TEAM.yaml key of
-// $DSH_SESSION_ID. The last line is 'parked on records/<seat> <sha>', and the coordinator
-// gets the parked branches merged. The live tree is not synced: main lacks the record.
+// Parking is the default, and main is never pushed: reflection main takes pull requests
+// only, and a seat's direct push would land in the middle of the owner's work whenever
+// its protection is off. The commit goes to refs/heads/records/<seat>, created from
+// origin/main or appended to; the seat is --seat, else the TEAM.yaml key of
+// $DSH_SESSION_ID, and no seat refuses the run before anything is committed. The last
+// line is 'parked on records/<seat> <sha>', and the coordinator gets the parked branches
+// merged. The live tree is not synced: main lacks the record.
+//
+// --main tries the direct push first. A protected main (GitHub GH006 or a ruleset's
+// GH013) refuses every direct push, which no replay can win, and the same commit is then
+// parked as above.
 //
 //   0  committed, read back, live tree synced (or --no-sync); or parked and read back
 //   1  refused before the commit: a stale base on the first attempt, validator, bad
-//      arguments; or main is protected and no seat is known
+//      arguments; or no seat is known to park on
 //   2  the record would not carry every given file (refused, nothing committed: a file
 //      unchanged, or changed by another writer while this run was pushing), or the
 //      pushed commit does not carry it as expected
@@ -315,14 +322,14 @@ function cleanupWorktree(repo, root) {
   rmSync(root, { recursive: true, force: true })
 }
 
-// main refused the commit as protected: push it to refs/heads/records/<seat> instead.
-// A missing branch is created at the commit, which sits on origin/main. A branch that
+// Push the commit to refs/heads/records/<seat>: by default, or after a protected main
+// refused it under --main. A missing branch is created at the commit, which sits on origin/main. A branch that
 // origin/main already contains is fast-forwarded to it. Otherwise the commit is rebuilt
 // on the branch tip: a file takes the staged bytes, a log gets its own lines added. The
 // branch only ever moves forward; when another run moves it first, this one rebuilds.
-function park({ tmp, config, prepared, commit, builtOn, detail, report }) {
+function park({ tmp, config, prepared, commit, builtOn, why, report }) {
   const { remote, seat } = config
-  report.push(`  push rejected: ${config.branch} is protected (${detail}); no direct push can land, so the commit is parked`)
+  report.push(`  ${why}`)
   if (!seat) {
     report.push(`  refusing: no seat to park on; pass --seat NAME, or run in a session listed in a _projects_/*/TEAM.yaml of ${config.repo}. Nothing was pushed.`)
     return { code: REFUSED }
@@ -513,7 +520,8 @@ function attempt({ config, report, rebuild = false }) {
     }
 
     if (dryRun) {
-      report.push(`  dry run: would commit ${prepared.length} file(s) and push ${mainRef}`)
+      const then = config.main ? `push ${mainRef}` : `park it on records/${config.seat}, not pushing ${mainRef}`
+      report.push(`  dry run: would commit ${prepared.length} file(s) and ${then}`)
       return { code: OK, files: prepared, report, dryRun: true }
     }
 
@@ -539,12 +547,18 @@ function attempt({ config, report, rebuild = false }) {
     // kept losing to frequent pushes. When they touch a given file, the attempt is rebuilt
     // from a fresh origin, where a log is unioned and anything else is refused.
     let builtOn = originMain
+    if (!config.main) {
+      const why = `${branch} is not pushed: parking is the default (--main would try a direct push first)`
+      const parked = park({ tmp, config, prepared, commit, builtOn, why, report })
+      return { ...parked, files: prepared, report }
+    }
     for (let replays = 0; ; replays += 1) {
       const push = git(tmp, ['push', '--porcelain', remote, `HEAD:refs/heads/${branch}`], { allowFailure: true })
       if (push.status === 0) break
       const pushText = `${push.stdout ?? ''}${push.stderr ?? ''}`
       if (isProtectedRejection(pushText)) {
-        const parked = park({ tmp, config, prepared, commit, builtOn, detail: protectedDetail(pushText), report })
+        const why = `push rejected: ${branch} is protected (${protectedDetail(pushText)}); no direct push can land, so the commit is parked`
+        const parked = park({ tmp, config, prepared, commit, builtOn, why, report })
         return { ...parked, files: prepared, report }
       }
       git(tmp, ['fetch', '-q', remote], { allowFailure: true })
@@ -610,6 +624,18 @@ function runSync({ repo, remote, branch, report }) {
 
 export function recordCommit(config) {
   const report = []
+  if (!config.main) {
+    // Checked before anything is fetched or committed: by default every record is parked.
+    const problem = !config.seat
+      ? `no seat to park on; pass --seat NAME, or run in a session listed in a _projects_/*/TEAM.yaml of ${config.repo}`
+      : !SEAT_PATTERN.test(config.seat)
+        ? `the seat ${JSON.stringify(config.seat)} is not a branch-safe name`
+        : null
+    if (problem) {
+      report.push(`record-commit: refusing: ${problem}. Nothing was committed, and ${config.branch} is never pushed without --main.`)
+      return { code: REFUSED, lines: report }
+    }
+  }
   let last
   for (let tries = 0; tries <= (config.retries ?? 2); tries += 1) {
     last = attempt({ config, report, rebuild: tries > 0 })
@@ -657,6 +683,7 @@ function parseArgs(argv) {
     verbose: false,
     retries: 2,
     seat: null,
+    main: false,
     identity: IDENTITY,
     help: false,
   }
@@ -684,6 +711,7 @@ function parseArgs(argv) {
     else if (arg === '--verbose') args.verbose = true
     else if (arg === '--retries') args.retries = Number(value((i += 1), '--retries'))
     else if (arg === '--seat') args.seat = value((i += 1), '--seat')
+    else if (arg === '--main') args.main = true
     else if (arg === '--author') {
       const text = value((i += 1), '--author')
       const match = /^(.*)<([^>]+)>$/.exec(text)
@@ -704,9 +732,10 @@ const USAGE = `usage: record-commit.mjs --message TEXT (--file PATH ... | --stag
   --append PATH    treat PATH as append-only even if it is not a .jsonl log
   --validator PATH frontmatter validator (default: <tree>/shared/_tools/frontmatter-validator/validate-frontmatter.py)
   --python PATH    python with PyYAML (default: the first that imports yaml)
-  --seat NAME      park on records/NAME when main is protected (default: this session's TEAM.yaml key)
+  --seat NAME      park on records/NAME (default: this session's TEAM.yaml key)
+  --main           push main directly, parking only if main refuses as protected (default: always park, never push main)
   --no-validate / --no-sync / --dry-run / --verbose / --retries N
-  exit 0 committed and read back, or parked on records/<seat>; 1 refused, 2 read-back failed, 3 live tree not synced`
+  exit 0 parked on records/<seat> and read back, or with --main pushed and read back; 1 refused, 2 read-back failed, 3 live tree not synced`
 
 // Node runs the main module from its real path, so compare real paths: through a symlink
 // such as macOS /tmp the plain comparison was false and the command silently did nothing,

@@ -1,9 +1,9 @@
 ---
 title: What the record-commit tests cover
 created: 2026-10-24T05:00:49Z
-modified: 2026-11-01T21:12:46Z
+modified: 2026-11-01T23:50:00Z
 level: L2
-version: 1.1.0
+version: 1.2.0
 description: The cases the record-commit unit suite exercises, and one dry run against a scratch clone of the real record.
 status: unverified
 grounded_in:
@@ -32,6 +32,14 @@ is fast-forwarded. They also cover the seat taken from `$DSH_SESSION_ID`, no sea
 rejection that is not protection never parked, and a branch moved mid-park rebuilt on. Eight mutants of the new
 code were each caught. One more test checks that a refusal shows the remote's reasons and the porcelain `!` line,
 not only git's last line.
+
+## Parking by default
+
+Five tests use an origin that accepts main and logs every ref pushed to it. By default a record is parked and the
+only ref pushed is `records/<seat>`, so main is never even attempted. The seat comes from the roster, and a second
+record appends. No seat, or a seat that is not a branch name, refuses before anything is committed or pushed. A dry
+run names the branch it would park on, and `--main` pushes main. The tests written before this pass `--main`, so they
+still judge the direct push and its fallback to parking.
 
 ## A dry run against the real record
 
