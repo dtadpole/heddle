@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T18:45:00Z
+modified: 2026-11-01T02:33:57Z
 level: L3
-version: 1.6.0
+version: 1.7.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -36,6 +36,17 @@ grounded_in:
   not a historical rail-specific label.
 - [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report
   per session, its provenance, and the span a compaction stands in for.
+- [`check-context-model-refresh.mjs`](check-context-model-refresh.mjs) — a completed session's context gauge
+  immediately follows a model switch without another turn (#155). A private local double offers two models with
+  1000-token and 2000-token windows and reports 500 prompt tokens for one turn in the check's own named session.
+  A real headless browser opens that session by id, opens the context popover with a pointer, then selects the
+  larger model with real keyboard input so the popover stays open. The pill, SVG ring and open popover must all
+  change from 50% to 25%, and the popover denominator from 1K to 2K, without a reload or manual renderer call.
+  Browser request counts, the double's completion count and the unchanged transcript judge that no extra turn
+  supplied the refresh. It uses the caller's build through `heddleCommand` (`HEDDLE_BIN` supported), private
+  `HOME`, `HEDDLE_HOME`, config, workspace and port-zero listeners; test, startup, fetch and cleanup have explicit
+  bounds. `HEDDLE_VERIFY_UI=0` or no browser is the standard labelled unjudged skip, not a pass. This is a narrow
+  freshness regression and makes no full DSH-parity claim.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
   extension, and a file's own script tags shown rather than obeyed.
 - [`check-runtime-context.mjs`](check-runtime-context.mjs) — a mode change as a **trajectory fact**: the
