@@ -95,6 +95,7 @@ function harness(options: { onRefresh?: (running: Set<string>, rounds: Map<strin
     function applySessionAccess() {}
     function adoptSession(id) { composerKey = id }
     function syncSelectionToSession() {}
+    async function openCurrentGroup() {}
     async function showLedger() {}
     function paintSessionHeading() {}
     function historyFailureText() { return 'Failed to load history' }

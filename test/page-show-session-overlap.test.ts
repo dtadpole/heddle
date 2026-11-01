@@ -89,6 +89,7 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
     function applySessionAccess() {}
     function adoptSession() {}
     function syncSelectionToSession() {}
+    async function openCurrentGroup() {}
     async function showLedger() {}
     function paintSessionHeading() {}
     function historyFailureText() { return 'Failed to load history' }

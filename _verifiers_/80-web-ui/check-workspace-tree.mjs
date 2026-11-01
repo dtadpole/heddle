@@ -17,7 +17,7 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * selected session's workspace tints its folder; a workspace's `+` starts a session there; New session starts in the
  * open session's workspace even when that session is archived and its row is not drawn (#119); the `Workspace` grouping
  * draws every workspace as a sibling section; a reload reopens the session that was open, never a hidden subagent
- * child; a first visit opens no session and creates none, never the newest session someone else is in, and with two
+ * child, and opens its workspace and every ancestor unless a person folded one (C33); a first visit opens no session and creates none, never the newest session someone else is in, and with two
  * workspaces and nothing remembered aims the composer nowhere ("Choose a workspace to start"), while after a person
  * worked in A it is aimed at A (#142); a New session pressed at once opens a blank row, selected, that offers no
  * actions; and a session row whose session can no longer be read opens to DSH's "Failed to load history" line
@@ -926,6 +926,93 @@ test('a reload reopens the session that was open, never a hidden subagent child,
     browser.close()
     server.kill()
     for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('a reload into a nested workspace opens its way to the open session, and a fold the person made stays folded (C33)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * DSH's tree keeps one record per group, `groupExpansion[key]` true, false or absent (dsh-client-ui-workspace
+   * lib/client.js:1284-1285). With no record, a workspace another one nests in is open (`:3061-3063`; its README: "Ancestors
+   * start expanded unless a saved collapsed state exists"), and the current session's group is opened and saved open
+   * (`:3037-3046`), so a reload draws the open session's row however deep it is. A saved fold wins over both ("A saved
+   * collapse also hides the current Session; ancestor folder icons stay highlighted"). Before (R-developer-eight-2), a
+   * load with any saved expansion opened only what was saved, so a session in a nested workspace reopened with its row
+   * folded away under two closed folders.
+   */
+  const fixture = await seeded('ancestors')
+  const browser = await openBrowser()
+  try {
+    const appPath = fixture.inner.path
+    const repoPath = fixture.repo.path
+    const groupLi = (path) => `([...document.querySelectorAll('#tree li[data-kind="workspace"]')].find((li) => li.querySelector(':scope > .row')?.dataset.path === ${JSON.stringify(path)}) ?? null)`
+    const sessionLi = `document.querySelector('#tree li[data-session-id="${fixture.appSession}"]')`
+    const state = () =>
+      browser.evaluate(`JSON.stringify({
+        title: document.getElementById('session-title')?.textContent ?? null,
+        repo: (() => { const li = ${groupLi(repoPath)}; return li === null ? null : { open: li.dataset.open ?? null, tinted: li.dataset.containsCurrent ?? null } })(),
+        app: (() => { const li = ${groupLi(appPath)}; return li === null ? null : { open: li.dataset.open ?? null, tinted: li.dataset.containsCurrent ?? null } })(),
+        row: (() => { const li = ${sessionLi}; return li === null ? null : { selected: li.getAttribute('aria-selected') } })(),
+        expanded: localStorage.getItem('heddle.tree.expanded.v1'),
+        collapsed: localStorage.getItem('heddle.tree.collapsed.v1'),
+      })`)
+    const until = async (expression, what, timeoutMs = 15_000) => {
+      try {
+        await browser.waitFor(expression, timeoutMs)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nsaw: ${await state()}`)
+      }
+    }
+    const load = async () => {
+      await browser.goto(fixture.url)
+      await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+      await until(`document.getElementById('session-title')?.textContent === 'app session'`, 'the load reopens the saved session in the nested workspace')
+    }
+
+    /** A browser that has saved an expansion (none open) and has the nested workspace's session open: the reload. */
+    await browser.goto(fixture.url)
+    await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    await browser.evaluate(`(() => {
+      localStorage.setItem('heddle.sessions.current', ${JSON.stringify(JSON.stringify({ sessionId: fixture.appSession }))})
+      localStorage.setItem('heddle.tree.expanded.v1', '[]')
+      localStorage.removeItem('heddle.tree.collapsed.v1')
+      return true
+    })()`)
+    await load()
+    await until(
+      `${groupLi(repoPath)}?.dataset.open === 'true' && ${groupLi(appPath)}?.dataset.open === 'true' && ${sessionLi}?.getAttribute('aria-selected') === 'true'`,
+      'the open session\'s workspace and its ancestor open, and its row is drawn selected',
+    )
+    const saved = JSON.parse(await browser.evaluate(`localStorage.getItem('heddle.tree.expanded.v1')`))
+    assert.deepEqual([saved.includes(appPath), saved.includes(repoPath)], [true, false], `the session's workspace is saved open, as DSH saves it; the ancestor is open by default, not saved\nsaw: ${await state()}`)
+
+    /** The person folds the ancestor: the fold is saved, and a reload keeps it, hiding the open session behind a tinted folder. */
+    await browser.evaluate(`${groupLi(repoPath)}.querySelector(':scope > .row').click()`)
+    await until(`${groupLi(repoPath)}.dataset.open !== 'true'`, 'the ancestor folds')
+    await load()
+    await new Promise((done) => setTimeout(done, 1_000))
+    await until(
+      `(() => { const repo = ${groupLi(repoPath)}; return repo !== null && repo.dataset.open !== 'true' && repo.dataset.containsCurrent === 'true' && ${sessionLi} === null })()`,
+      'the folded ancestor stays folded across the reload, tinted, and the open session\'s row stays hidden',
+    )
+
+    /** Unfolding it shows the nested workspace as it was left: saved open, so open, with the session's row in it. */
+    await browser.evaluate(`${groupLi(repoPath)}.querySelector(':scope > .row').click()`)
+    await until(`${groupLi(appPath)}?.dataset.open === 'true' && ${sessionLi} !== null`, 'unfolding the ancestor opens the nested workspace saved open, and draws the session')
+
+    /** The person folds the session's own workspace: that fold wins over the open session's default on the next reload. */
+    await browser.evaluate(`${groupLi(appPath)}.querySelector(':scope > .row').click()`)
+    await until(`${groupLi(appPath)}.dataset.open !== 'true'`, 'the nested workspace folds')
+    await load()
+    await new Promise((done) => setTimeout(done, 1_000))
+    await until(
+      `(() => { const app = ${groupLi(appPath)}; return ${groupLi(repoPath)}?.dataset.open === 'true' && app !== null && app.dataset.open !== 'true' && app.dataset.containsCurrent === 'true' && ${sessionLi} === null })()`,
+      'the ancestor is open, and the folded workspace stays folded and tinted with the open session hidden in it',
+    )
+  } finally {
+    browser.close()
+    fixture.close()
   }
 })
 

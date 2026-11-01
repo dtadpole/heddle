@@ -201,6 +201,7 @@ function childrenPage(reply: { status: number; body: unknown }) {
     const archiveQuery = () => ''
     const markSelection = () => undefined
     const paintSessionRows = () => undefined
+    const reopenChildGroups = async () => undefined
     const groupRow = () => document.createElement('li')
     const folderRows = (children) => children
     const nodeRow = (child) => Object.assign(document.createElement('li'), { textContent: child.label })

@@ -236,7 +236,10 @@ and `role="group"` on the children. The whole row toggles; indentation is `depth
 **content** inset rather than its box — the row's paint spans the panel's width at every depth, so the highlight does
 not step inward with the tree. Expansion
 is persisted in `localStorage` under `heddle.tree.expanded.v1`, keyed by absolute path, pruned when a
-path disappears.
+path disappears. A person's fold is kept beside it under `heddle.tree.collapsed.v1`, so a workspace group has DSH's
+three states (C33): open, folded, or never touched. A never-touched group follows DSH's defaults — open when another
+workspace nests in it, and the open session's group is opened and saved open — so a reload draws the open session's row
+however deep it is; a fold always wins, and only a search result opens one.
 
 **The tree draws no list markers.** Every list inside it is a layout container: a node's children are
 built into a `<ul role="group">`, and a style rule that named only `ol` left the browser's own defaults

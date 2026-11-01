@@ -7619,6 +7619,8 @@ async function showSession(id) {
    */
   ;({ rounds: liveRounds, startedAt: liveRoundStartedAt } = liveRoundsOf(id))
   syncSelectionToSession()
+  /** Its workspace opens if nobody folded it (C33); not awaited, so the history below is not held up by a tree read. */
+  void openCurrentGroup().catch(() => {})
   if (view === 'trajectory') await showLedger(id)
   if (generation !== showGeneration) return false
   /**
@@ -12905,6 +12907,22 @@ function readExpanded() {
 const expanded = readExpanded()
 
 /**
+ * The groups a person folded, kept beside the open ones so a group has DSH's three states (C33): open, folded, or never
+ * touched — `groupExpansion[key]` true, false or absent (dsh-client-ui-workspace `lib/client.js:1284-1285`, read at
+ * `:3039` and `:3063`). A never-touched group follows DSH's defaults (`WorkspaceTree.openGroups`, `currentGroupToOpen`);
+ * a folded one stays folded until a person or a search opens it. A separate key, so `EXPANDED_KEY` keeps its shape.
+ */
+const COLLAPSED_KEY = 'heddle.tree.collapsed.v1'
+const collapsed = (() => {
+  try {
+    const stored = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? '[]')
+    return new Set(Array.isArray(stored) ? stored.filter((path) => typeof path === 'string') : [])
+  } catch (error) {
+    return new Set()
+  }
+})()
+
+/**
  * Whether sessions the owner archived are drawn.
  *
  * A reading preference, so it persists like the expansion set; `off` is the default because a row a person put
@@ -13040,8 +13058,11 @@ function viewOptionItems() {
 }
 
 function rememberExpanded() {
+  /** A group is open or folded, never both: whatever opened it last (a person, a search, New session) wins over a fold. */
+  for (const path of expanded) collapsed.delete(path)
   try {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expanded]))
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...collapsed]))
   } catch (error) {
     // A browser that refuses storage still gets the tree; only the memory of its shape is lost.
   }
@@ -13909,6 +13930,25 @@ function chooseSelected(path) {
   selectedPath = path
   markSelection()
   paintNewConversationPlace()
+}
+
+/**
+ * Open the open session's group when it has no saved state (C33), whatever opened the session: a row in the flat list, a
+ * link elsewhere on the page. DSH's tree does it on every change of the current session (`lib/client.js:3037-3046`), not
+ * only on a drawing, and saves the group open; `renderTree` does the same for a reload. A group a person folded stays
+ * folded, and one under a folded ancestor is saved open but not drawn until that ancestor opens.
+ */
+async function openCurrentGroup() {
+  if (groupingMode === 'list' || current === null) return
+  const id = current
+  const key = WorkspaceTree.currentGroupToOpen(treeGroups, { expanded, collapsed }, id)
+  if (key === null) return
+  expanded.add(key)
+  rememberExpanded()
+  const entry = rowIndex.get(key)
+  if (entry === undefined || !entry.li.isConnected || entry.li.dataset.open === 'true') return
+  await toggle(entry.node, entry.li, false)
+  if (current === id) syncSelectionToSession()
 }
 
 /** Move the mark to the row whose session is the one now shown, when that row is drawn at all. */
@@ -17148,6 +17188,46 @@ const WorkspaceTree = (() => {
     return []
   }
 
+  /** The key a group's expansion is kept under: the row's own path, its folder, or `#ungrouped` for the bucket. */
+  function groupKey(group) {
+    return group.workspace === null ? '#ungrouped' : group.path
+  }
+
+  /**
+   * The groups a drawing opens, DSH's `expandedGroups` (dsh-client-ui-workspace `lib/client.js:3061-3063`):
+   * `groupExpansion[key] ?? ancestorKeys.has(key)`. A group with a saved state keeps it, open (`saved.expanded`) or folded
+   * (`saved.collapsed`); one without starts open when another workspace nests in it, which only Workspace Tree draws
+   * (DSH's README: "Ancestors start expanded unless a saved collapsed state exists"). Keys are `groupKey`'s.
+   */
+  function openGroups(groups, saved = {}) {
+    const expanded = saved.expanded instanceof Set ? saved.expanded : new Set()
+    const collapsed = saved.collapsed instanceof Set ? saved.collapsed : new Set()
+    const open = new Set()
+    for (const group of flatten(Array.isArray(groups) ? groups : [])) {
+      const key = groupKey(group)
+      if (expanded.has(key)) open.add(key)
+      else if (!collapsed.has(key) && group.children.length > 0) open.add(key)
+    }
+    return open
+  }
+
+  /**
+   * The open session's group when it has no saved state yet, else `null`: DSH opens the current session's group and saves
+   * that, unless the group already has a saved state (`Object.hasOwn(groupExpansion, currentGroup)` then
+   * `setGroupExpanded(currentGroup, true)`, `lib/client.js:3037-3046`). So a fold a person made stays folded and hides the
+   * session, with the folder tinted (README: "A saved collapse also hides the current Session"), and a group under a
+   * folded ancestor is saved open but not drawn until the ancestor opens. Only search opens a fold (`revealSession`).
+   */
+  function currentGroupToOpen(groups, saved = {}, current = null) {
+    if (typeof current !== 'string' || current === '') return null
+    const chain = chainTo(Array.isArray(groups) ? groups : [], current)
+    if (chain.length === 0) return null
+    const key = groupKey(chain[chain.length - 1])
+    const expanded = saved.expanded instanceof Set ? saved.expanded : new Set()
+    const collapsed = saved.collapsed instanceof Set ? saved.collapsed : new Set()
+    return expanded.has(key) || collapsed.has(key) ? null : key
+  }
+
   /**
    * The watermark that draws a revealed row: raised to reach it at any depth — DSH's search reveal, which the automatic
    * fifty-row raise does not limit (`requiredWatermark`, `lib/client.js:2830`) — and never lowered. It counts
@@ -17286,6 +17366,9 @@ const WorkspaceTree = (() => {
     SEARCH_LIMIT,
     search,
     chainTo,
+    groupKey,
+    openGroups,
+    currentGroupToOpen,
     revealMark,
   }
 })()
@@ -19077,6 +19160,23 @@ function failedLevelLine(failure) {
 }
 
 /** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
+/**
+ * Open the child groups a drawing would open, once their parent is drawn open (C33): saved open, or open by DSH's
+ * defaults with no saved state (`WorkspaceTree.openGroups`). DSH derives every group's state from its one record, so
+ * unfolding a parent shows its children as they were left — the open session's workspace under a folded ancestor among
+ * them. This page draws one level at a time and drew them all folded until the next reload.
+ */
+async function reopenChildGroups(node) {
+  const children = node.group?.children ?? []
+  const open = WorkspaceTree.openGroups(children, { expanded, collapsed })
+  for (const child of children) {
+    const key = WorkspaceTree.groupKey(child)
+    const entry = rowIndex.get(key)
+    if (!open.has(key) || entry === undefined || !entry.li.isConnected || entry.li.dataset.open === 'true') continue
+    await toggle(entry.node, entry.li, false)
+  }
+}
+
 async function loadChildren(node, li) {
   const group = document.createElement('ul')
   group.setAttribute('role', 'group')
@@ -19127,6 +19227,7 @@ async function loadChildren(node, li) {
       group.append(empty)
     }
     markSelection()
+    await reopenChildGroups(node)
     return
   }
   let children = node.children
@@ -19189,7 +19290,12 @@ async function loadChildren(node, li) {
   markSelection()
 }
 
-async function toggle(node, li) {
+/**
+ * Open or fold a row. A fold is always a person's act here and is saved as one (`collapsed`, C33); an opening is saved
+ * unless `remember` is false, which a drawing passes for a group it opens by DSH's defaults — an ancestor, saved by
+ * nobody, follows the defaults again on the next drawing, as DSH derives it rather than writing it (`lib/client.js:3063`).
+ */
+async function toggle(node, li, remember = true) {
   const open = li.dataset.open === 'true'
   const entry = rowIndex.get(node.path)
   /**
@@ -19207,12 +19313,15 @@ async function toggle(node, li) {
     li.querySelector('ul[role=group]')?.remove()
     if (node.group !== undefined) resetWatermarks(node.group)
     expanded.delete(node.path)
+    collapsed.add(node.path)
     rememberExpanded()
     return
   }
   paint(true)
-  expanded.add(node.path)
-  rememberExpanded()
+  if (remember) {
+    expanded.add(node.path)
+    rememberExpanded()
+  }
   await loadChildren(node, li)
   applySearch()
 }
@@ -19889,14 +19998,27 @@ async function renderTree() {
   }
 
   /**
-   * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
-   * a deeper one is drawn by the time its turn comes, and each level is re-read rather than remembered.
+   * C33, DSH's expansion defaults: the open session's group opens and is saved open when it has no saved state
+   * (`WorkspaceTree.currentGroupToOpen`, dsh-client-ui-workspace `lib/client.js:3037-3046`), and a group another workspace
+   * nests in starts open unless a person folded it (`WorkspaceTree.openGroups`, `:3061-3063`). Together they draw the
+   * open session's row on a reload, whatever workspace it is in and however deep, unless a person folded its way.
    */
-  for (const path of [...expanded].sort((left, right) => left.split('/').length - right.split('/').length)) {
+  const ownGroup = WorkspaceTree.currentGroupToOpen(treeGroups, { expanded, collapsed }, current)
+  if (ownGroup !== null) {
+    expanded.add(ownGroup)
+    rememberExpanded()
+  }
+  const opening = new Set([...expanded, ...WorkspaceTree.openGroups(treeGroups, { expanded, collapsed })])
+  /**
+   * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
+   * a deeper one is drawn by the time its turn comes, and each level is re-read rather than remembered. A group under a
+   * folded one is not drawn, so it waits for its parent.
+   */
+  for (const path of [...opening].sort((left, right) => left.split('/').length - right.split('/').length)) {
     const entry = rowIndex.get(path)
     // A file is never in `expanded`; skipping it keeps a stray key from asking for a disclosure it has.
     if (entry === undefined || entry.node.kind === 'file' || entry.li.dataset.open === 'true') continue
-    await toggle(entry.node, entry.li)
+    await toggle(entry.node, entry.li, false)
   }
   if (selectedPath === null) syncSelectionToSession()
   /** The rows just drawn are what the new conversation's place is read from (#134). */
