@@ -7242,6 +7242,58 @@ function rescaleStretch(stretch, scale) {
 }
 /* overview-keep:end */
 
+/* overview-pick:begin */
+/**
+ * What a pick on the overview reaches (developer-ten's N8, DSH's TrajectoryTimeline clicks). Pure, and fenced so
+ * test/page-overview-pick.test.ts judges it.
+ *
+ * `overviewRecordRow`: the ledger row of a timeline record, named as the bars name it, by its turn, its lane and its
+ * rank among that turn's records in the lane. Both projections list a turn's timed records by start, ledger order
+ * breaking ties, and give a record its lane by kind (`laneOfKind`, ledger.ts laneOf, rows.rs lane_of); a row outside
+ * every turn is on no timeline. Returns the row's index, or -1.
+ */
+function laneOfKind(kind) {
+  if (kind === 'user' || kind === 'context' || kind === 'system') return 'input'
+  if (kind === 'tool') return 'tools'
+  return 'model'
+}
+
+function overviewRecordRow(rows, turn, lane, rank) {
+  const timed = []
+  rows.forEach((row, index) => {
+    if (row.loose || row.turn !== turn || laneOfKind(row.kind) !== lane) return
+    const at = Date.parse(row.record?.startedAt ?? '')
+    if (!Number.isNaN(at)) timed.push({ index, at })
+  })
+  timed.sort((left, right) => left.at - right.at)
+  return timed[rank]?.index ?? -1
+}
+
+/**
+ * DSH's narrowest window, `width` wide (one record's share of the domain, or the view if narrower) and centred on
+ * `center`, kept inside the domain.
+ */
+function centredWindow(center, width) {
+  const span = Math.min(1, Math.max(0, width))
+  const from = Math.min(Math.max(center - span / 2, 0), 1 - span)
+  return { from, to: from + span }
+}
+
+/** The item `{ x0, x1 }` nearest to the point `x`, as DSH's empty-track click finds it: 0 inside, else to its nearer edge. */
+function nearestItem(items, x) {
+  let best = -1
+  let distance = Infinity
+  items.forEach((item, index) => {
+    const away = x < item.x0 ? item.x0 - x : x > item.x1 ? x - item.x1 : 0
+    if (away < distance) {
+      best = index
+      distance = away
+    }
+  })
+  return best
+}
+/* overview-pick:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   /** A redraw (a live refetch, every 500 ms while a turn runs) keeps the keyboard where it was: on its bar, focused. */
@@ -7300,9 +7352,9 @@ function renderTimeline(timeline_, data = {}) {
   /**
    * With per-record data, the lanes draw DSH's per-record bars (`drawBars`, below, once the zoom is known); an answer from
    * a server without records keeps one tick per turn, drawn here. Bars are buttons like ticks, so the keyboard reaches
-   * them (the strip's one Tab stop, then the arrows) and Enter picks their turn; their listeners are the strip's own,
-   * below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time. Its records' ranks among its turn's
-   * records in the lane (`rank0`..`rank1`, a tick's are 0) name it across a redraw, merged or not.
+   * them (the strip's one Tab stop, then the arrows) and Enter or Space picks them (`pickBar`); their listeners are the
+   * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time. Its records' ranks among
+   * its turn's records in the lane (`rank0`..`rank1`, a tick's are 0) name it across a redraw, merged or not.
    */
   const makeBar = (bar) => {
     const element = document.createElement('button')
@@ -7374,11 +7426,12 @@ function renderTimeline(timeline_, data = {}) {
   /** The domain's unit: a session's first record turns turn slots into record slots, which no scale carries across. */
   const unit = trajectory.durationActual ? 'ms' : records.length > 0 ? 'records' : 'turns'
   const before = trajectory.overview
-  const state = { id: data.id, unit, size, focus: null, drag: null, pan: null }
+  const state = { id: data.id, unit, size, focus: null, drag: null, press: null, pan: null }
   if (before !== null && before.id === data.id && before.unit === unit && before.size > 0 && size > 0) {
     const scale = before.size / size
     state.focus = rescaleStretch(before.focus, scale)
     state.drag = before.drag === null ? null : Math.min(before.drag * scale, 1)
+    state.press = before.press
     if (before.pan !== null) {
       const viewport = rescaleStretch(before.pan.viewport, scale)
       state.pan = { ...before.pan, viewport, from: viewport?.from ?? 0 }
@@ -7523,22 +7576,68 @@ function renderTimeline(timeline_, data = {}) {
     tip.hidden = true
   }
   /**
-   * One set of listeners for the whole strip (developer-ten's condition 1): a bar or tick picks its turn, and 500 ms of
+   * One set of listeners for the whole strip (developer-ten's condition 1): a pick on a bar (`pickBar`), and 500 ms of
    * hovering one shows its tip. Delegated, so a session of hundreds of bars adds no listener per bar.
    */
   const tickOf = (target) => target?.closest?.('.tr-tick') ?? null
-  wrapper.addEventListener('click', (clickEvent) => {
-    const tick = tickOf(clickEvent.target)
-    if (tick === null) return
-    clickEvent.stopPropagation()
-    const turnIndex = Number(tick.dataset.turn)
-    /** A turn before the drawn window is drawn first: the overview covers the whole ledger, so its turns all reach a row. */
+  /** Take the reader to a turn's head, drawing it first if it is before the drawn window: an older server's tick pick. */
+  const showTurn = (turnIndex) => {
     if (!turnAnchors.has(turnIndex)) {
       const head = trajectory.rows.findIndex((row) => row.turn === turnIndex && row.turnStart && !row.loose)
       if (head !== -1) revealRows(head)
     }
-    const anchor = turnAnchors.get(turnIndex)
-    if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    turnAnchors.get(turnIndex)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+  /**
+   * Take the reader to a timeline record's row (`overviewRecordRow`), drawn first if it is before the drawn window or
+   * folded into its turn, and selected with its inspector open when `select` is set. A record with no row of its own
+   * falls back to its turn.
+   */
+  const showRecord = (turn, lane, rank, select) => {
+    const index = overviewRecordRow(trajectory.rows, turn, lane, rank)
+    if (index === -1) {
+      showTurn(turn)
+      return
+    }
+    if (trajectory.window !== undefined && index < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, index))
+    if (rowFolded(trajectory.rows[index], trajectory.collapsedTurns, trajectory.expanded)) {
+      trajectory.expanded.add(turn)
+      renderRows()
+    }
+    if (select) selectRow(index)
+    ledger.querySelector('#tr-table tbody tr[data-index="' + index + '"]')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }
+  /**
+   * A pick on a bar, from a click, Enter or Space (developer-ten's N8). A bar of one record does what a click on DSH's
+   * span does (onRecordSelect): the window goes, and the record's row is selected, its inspector opened, and shown. A
+   * merged bar (heddle-only: DSH merges nothing) windows its records, so their rows are lit, and shows the first of them.
+   * An older server's tick, which names no record, takes the reader to its turn, as before.
+   */
+  const pickBar = (tick) => {
+    hideTip()
+    const turn = Number(tick.dataset.turn)
+    if (!tick.classList.contains('tr-bar')) {
+      showTurn(turn)
+      return
+    }
+    const rank0 = Number(tick.dataset.rank0)
+    if (rank0 === Number(tick.dataset.rank1)) {
+      setWindow(0, 0)
+      showRecord(turn, tick.dataset.lane, rank0, true)
+      return
+    }
+    commitWindow(Number(tick.dataset.x0), Number(tick.dataset.x1))
+    showRecord(turn, tick.dataset.lane, rank0, false)
+  }
+  /**
+   * A click that a pointer made was picked at its release (`onpointerup`), so only a click with no pointer is picked
+   * here: Enter or Space on the focused bar, which a button turns into a click, or a script's.
+   */
+  wrapper.addEventListener('click', (clickEvent) => {
+    const tick = tickOf(clickEvent.target)
+    if (tick === null) return
+    clickEvent.stopPropagation()
+    if (clickEvent.detail === 0) pickBar(tick)
   })
   /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
   wrapper.addEventListener('pointerenter', (pointerEvent) => {
@@ -7579,14 +7678,9 @@ function renderTimeline(timeline_, data = {}) {
     const bounds = timeline.getBoundingClientRect()
     return Math.min(Math.max((clientX - bounds.left) / Math.max(bounds.width, 1), 0), 1)
   }
-  const setWindow = (from, to) => {
-    if (!isWindow(from, to)) {
-      state.focus = null
-      trajectory.focus = null
-    } else {
-      state.focus = { from, to }
-      trajectory.focus = focusWindowTime(from, to, slots, trajectory.durationActual, startsAtMs, total)
-    }
+  const applyWindow = (next) => {
+    state.focus = next
+    trajectory.focus = next === null ? null : focusWindowTime(next.from, next.to, slots, trajectory.durationActual, startsAtMs, total)
     timeline.dataset.window = state.focus === null ? 'false' : 'true'
     drawFocus()
     /** A focus window that reaches rows before the drawn window draws them first, so they can be lit or dimmed. */
@@ -7598,6 +7692,25 @@ function renderTimeline(timeline_, data = {}) {
     if (reach !== -1 && trajectory.window !== undefined && reach < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, reach))
     else renderRows()
   }
+  /** A drag's window as it is drawn; one under 1% of the view is none yet. */
+  const setWindow = (from, to) => applyWindow(isWindow(from, to) ? { from, to } : null)
+  /**
+   * A window as it is let go, as DSH commits one: no narrower than one record's share of the domain (or the view, if
+   * that is narrower), else that width centred on it.
+   */
+  const commitWindow = (from, to) => {
+    const view = trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from
+    const least = Math.min(view, 1 / Math.max(records.length > 0 ? records.length : spans.length, 1))
+    applyWindow(to - from < least ? centredWindow((from + to) / 2, least) : { from, to })
+  }
+  /** Each record's rank among its turn's records in its lane, as the bars name them, so a point finds its row. */
+  const ranks = new Map()
+  const rankOf = placed.map((record) => {
+    const key = record.turn + '|' + record.lane
+    const rank = ranks.get(key) ?? 0
+    ranks.set(key, rank + 1)
+    return rank
+  })
   timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
   timeline.onwheel = (wheelEvent) => {
     /** A wheel that cannot zoom (no vertical delta, a pinch with Ctrl, a domain too short to zoom) is the page's. */
@@ -7619,7 +7732,10 @@ function renderTimeline(timeline_, data = {}) {
       capture(pointerEvent)
       return
     }
-    if (pointerEvent.button !== 0 || pointerEvent.target.closest('.tr-tick') !== null) return
+    if (pointerEvent.button !== 0) return
+    /** A press anywhere starts a drag, on a bar too, as on DSH's track; a release within 3 px of it is a click. */
+    const tick = tickOf(pointerEvent.target)
+    state.press = { x: pointerEvent.clientX, bar: tick === null ? null : { turn: tick.dataset.turn, lane: tick.dataset.lane, rank: Number(tick.dataset.rank0) } }
     state.drag = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     state.focus = { from: state.drag, to: state.drag }
     drawFocus()
@@ -7628,6 +7744,7 @@ function renderTimeline(timeline_, data = {}) {
   const endGestures = () => {
     state.pan = null
     state.drag = null
+    state.press = null
   }
   timeline.onpointercancel = endGestures
   timeline.onlostpointercapture = endGestures
@@ -7656,13 +7773,31 @@ function renderTimeline(timeline_, data = {}) {
     }
     const start = state.drag
     if (start === null) return
+    const press = state.press
     state.drag = null
+    state.press = null
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    setWindow(Math.min(start, x), Math.max(start, x))
+    /**
+     * DSH's release: a click on a bar picks it (`pickBar`); a click on the empty track centres the narrowest window there
+     * and shows the nearest record's row (onRecordFocus); a drag of 3 px or more commits its window, widened to the
+     * narrowest if it is narrower.
+     */
+    if (press !== null && Math.abs(pointerEvent.clientX - press.x) < 3) {
+      const tick = press.bar === null ? undefined : [...wrapper.querySelectorAll('.tr-tick')].find((each) => holds(each, press.bar))
+      if (tick !== undefined) {
+        pickBar(tick)
+        return
+      }
+      commitWindow(start, start)
+      const nearest = nearestItem(placed.map((record) => ({ x0: record.x0 ?? record.start, x1: record.x1 ?? record.end })), start)
+      if (nearest !== -1) showRecord(placed[nearest].turn, placed[nearest].lane, rankOf[nearest], false)
+      return
+    }
+    commitWindow(Math.min(start, x), Math.max(start, x))
   }
   /**
    * The keyboard, from the strip's one Tab stop: the arrows, Home and End move it among the bars, a zoomed strip panning
-   * just far enough to show the bar (DSH's rule for its selected span); Enter picks the bar's turn, as a click does; and
+   * just far enough to show the bar (DSH's rule for its selected span); Enter or Space picks the bar, as a click does; and
    * Escape clears the focus window, as Escape on DSH's overview does. A bar the keyboard stands on stays the stop.
    */
   wrapper.addEventListener('focusin', (focusEvent) => {
