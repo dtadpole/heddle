@@ -3,7 +3,7 @@ title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
 modified: 2026-10-31T18:45:00Z
 level: L3
-version: 1.6.0
+version: 1.7.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -34,6 +34,23 @@ grounded_in:
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
   not a historical rail-specific label.
+- [`check-user-secret-mask.mjs`](check-user-secret-mask.mjs) — issue #84's sent human bubble, driven through the
+  delivered TypeScript CLI or `HEDDLE_BIN` Rust CLI with a private fixture home/workspace and a port-zero local
+  provider double. Two deterministic, non-provider-issued `FAKE` credentials use installed literal `sk-` and
+  `ghp_` prefixes, valid numeric suffix minimums and a digit for the `sk-` shape. Actual textarea/Send gestures
+  judge actual asterisks by default, two independent SVG icon toggles, reveal-one-not-the-other, hide, a real
+  session-switch remount and page reload returning masked. A second ordinary UI message makes the minimap
+  reachable; its first-user preview is judged masked when accessible, otherwise explicitly diagnosed as unavailable.
+  The provider's real request must contain the exact original prompt, and the real user Copy handler must give
+  a browser-local `writeText` recorder that same raw original. No OS/global clipboard is read. No newly introduced
+  raw attribute, title or aria value is allowed; the existing user-row raw Copy snapshot is explicitly excluded.
+  Named sessions avoid automatic title calls and a 1,000,000-token window avoids provider compaction calls.
+  Startup, fetch plus body consumption, provider request bodies and browser/CLI/provider cleanup have bounds;
+  `HEDDLE_VERIFY_UI=0` uses the standard labelled skip, not an environment assertion. Author-only product-source
+  pin is `659588`, with identical product source at `422c7d2a` as confirmed by the parent. This entry records no
+  executed result; source-owner-ten exact review and both actual TypeScript/Rust execution gates belong to the
+  parent. Queue/steering buffers, goal/automatic messages and assistant rendering are outside this check, as are
+  real keys and any claim that server logs, storage or provider transport redact secrets.
 - [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
