@@ -102,6 +102,12 @@ export interface GenerateRequest {
    * does not hold can never be displayed and silently not sent.
    */
   readonly reasoningEffort?: string
+  /**
+   * Set by `ModelService.resolve` when `reasoningEffort` is the model's declared default because the request named
+   * none (#157), as DSH's `prepareCall` records `adapterDefaults: { reasoningEffort: true }`: the level the call runs at,
+   * marked as a default rather than a person's choice.
+   */
+  readonly reasoningEffortDefault?: true
   /** Ask the transport to stream; adapters that must stream ignore `false`. */
   readonly stream?: boolean
   /** Opaque identity carried through the waterfall for logging and retries. */

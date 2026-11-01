@@ -1,6 +1,6 @@
 ---
 title: Verifier 1 — LLM Backends
-version: 1.1.0
+version: 1.2.0
 description: heddle connects to backend model servers and runs agent loops over them.
 grounded_in:
   - source: owner statement in the dsh session, 2026-10-11, listing the ten verifiers
@@ -27,6 +27,9 @@ a display or a window.
 - `check-messages-route.mjs` — a turn over Anthropic's own Messages API (`anthropic-messages`, `POST
   {baseUrl}/messages`, `x-api-key` and `anthropic-version` headers) against a double, and a configured Messages
   endpoint answering one short turn (or unjudged).
+- `check-window-refusal.mjs` — an Anthropic window refusal (`400 prompt is too long: … tokens > … maximum`) is read
+  as a window overflow on the Messages route, so recovery folds once and the retry is answered, and a refusal the
+  fold cannot fix fails with the provider's sentence and the way out rather than its JSON (#153).
 
 ## Running it
 
