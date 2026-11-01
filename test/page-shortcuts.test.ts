@@ -161,7 +161,7 @@ test('two Escape presses within 500 ms stop the running turn, as DSH does', () =
 test('Mod+/ opens DSH\'s keyboard reference: every command in product order, then the fixed input actions', () => {
   /** `dsh-client-ui-shortcuts`: one dialog, ordered commands with their chords, read-only input actions (S40). */
   assert.equal(shortcutFor(keydown({ code: 'Slash', key: '/', metaKey: true }), mac), 'shortcuts-reference')
-  const pieces = ['SESSION_SHORTCUTS', 'SHORTCUT_LABELS', 'FIXED_INPUT_ACTIONS', 'function keyForCode', 'function chordText', 'function subsequenceMatch', 'function shortcutReferenceRows']
+  const pieces = ['SESSION_SHORTCUTS', 'SHORTCUT_LABELS', 'FIXED_INPUT_ACTIONS', 'FIXED_APPROVAL_ACTIONS', 'function keyForCode', 'function chordText', 'function subsequenceMatch', 'function shortcutReferenceRows']
   const take = (start: string) => {
     const at = page.indexOf(start === 'SESSION_SHORTCUTS' ? 'const SESSION_SHORTCUTS' : start.startsWith('function') ? start : `const ${start}`)
     assert.ok(at !== -1, `${start} is in the page`)
@@ -176,7 +176,9 @@ test('Mod+/ opens DSH\'s keyboard reference: every command in product order, the
   assert.equal(plain.all.find((row) => row.label === 'New session')?.keys, '⌥⌘N')
   assert.equal(plain.all.find((row) => row.label === 'Fork session')?.keys, '⇧⌘F')
   assert.equal(plain.other.find((row) => row.label === 'Rename session')?.keys, 'Ctrl+Alt+G')
-  assert.deepEqual(plain.all.filter((row) => row.fixed).map((row) => row.label), ['Send message', 'Insert a new line', 'Stop the current response'])
+  assert.deepEqual(plain.all.filter((row) => row.fixed).map((row) => row.label), ['Send message', 'Insert a new line', 'Stop the current response', 'Allow once', 'Reject'])
+  /** DSH's reference groups (`dsh-client-ui-shortcuts`): the input actions, then the approval card's keys as "Approval area" (#158). */
+  assert.deepEqual(plain.all.filter((row) => row.fixed).map((row) => [row.group, row.keys]), [['Message input', 'Enter'], ['Message input', '⇧Enter'], ['Message input', 'Esc Esc'], ['Approval area', 'Enter'], ['Approval area', 'Esc']])
   assert.deepEqual(plain.byKey.map((row) => row.label), ['Rename session'], 'a key combination finds its command')
   assert.deepEqual(plain.byAlias.map((row) => row.label), ['Open settings'], 'an English alias finds it by subsequence')
   assert.match(page, /if \(front !== null && front\.id !== 'settings-dialog'\) return/, 'it opens over Settings or nothing else')
@@ -268,6 +270,7 @@ test('Mod+Shift+B toggles the right sidebar and Mod+Alt+T opens a Browser tab, w
     /const SHORTCUT_LABELS = \{[\s\S]*?\n\}/,
     /const PANEL_SHORTCUTS = [^\n]+/,
     /const FIXED_INPUT_ACTIONS = \[[\s\S]*?\n\]/,
+    /const FIXED_APPROVAL_ACTIONS = \[[\s\S]*?\n\]/,
     /function keyForCode\([^)]*\) \{[\s\S]*?\n\}/,
     /function chordText\([^)]*\) \{[\s\S]*?\n\}/,
     /function subsequenceMatch\([^)]*\) \{[\s\S]*?\n\}/,
@@ -296,4 +299,41 @@ JSON.stringify({ off, on: { table: availableShortcuts().map((entry) => entry.act
   assert.match(page, /browserOpen\.addEventListener\('click', \(\) => toggleRightSidebar\(\)\)/, 'the globe and the chord are one action')
   assert.match(page, /if \(action === 'right-sidebar' \|\| action === 'browser-new'\) \{\n\s+if \(document\.querySelector\('dialog\[open\]'\) !== null\) return\n\s+if \(action === 'right-sidebar'\) toggleRightSidebar\(\)\n\s+else openBrowserTab\(\)/, 'nothing happens behind a dialog')
   assert.match(page, /keybindings\.overrides, browserEnabled \? \[\] : PANEL_SHORTCUTS\)/, 'the reference leaves them out while the Browser is off')
+})
+
+test('the approval card answers from the keyboard as DSH\'s does: Escape rejects, Enter allows once (#158)', () => {
+  /**
+   * `dsh-client-ui-approval` `ApprovalFlow`: with focus in the card and not in a field, Escape answers `rejected` and
+   * Enter `allowed-once`, except on a button or link, which keeps its own Enter; a modifier is not the card's; a held
+   * repeat or a composing input method is taken without an answer. Live-testing #158 found the card took no key at all.
+   */
+  const source = /\/\* approval-keys:begin \*\/[\s\S]*?\/\* approval-keys:end \*\//.exec(page)
+  assert.ok(source, 'the page has the approval-keys rule')
+  const outcome = runInNewContext(`${source[0]}\napprovalKeyOutcome`) as (event: Record<string, unknown>, place: Record<string, boolean>) => string | null
+  const body = { inCard: true, inField: false, onButton: false }
+  const button = { inCard: true, inField: false, onButton: true }
+  const key = (name: string, fields: Record<string, unknown> = {}) => keydown({ key: name, code: name, ...fields })
+  assert.equal(outcome(key('Escape'), body), 'rejected', 'Escape on the body rejects')
+  assert.equal(outcome(key('Escape'), button), 'rejected', 'and on a focused button, Reject or Allow once')
+  assert.equal(outcome(key('Enter'), body), 'allowed-once', 'Enter on the body allows once')
+  assert.equal(outcome(key('Enter'), button), null, 'Enter on a button is the button\'s own activation')
+  assert.equal(outcome(key('Enter'), { ...body, inField: true }), null, 'a key typed into a field is not the card\'s')
+  assert.equal(outcome(key('Escape'), { ...body, inCard: false }), null, 'nor one whose focus is outside the card')
+  for (const modifier of ['metaKey', 'ctrlKey', 'altKey', 'shiftKey']) {
+    assert.equal(outcome(key('Enter', { [modifier]: true }), body), null, `Enter with ${modifier}`)
+    assert.equal(outcome(key('Escape', { [modifier]: true }), body), null, `Escape with ${modifier}`)
+  }
+  assert.equal(outcome(key('Enter', { repeat: true }), body), 'swallow', 'a held Enter is taken and answers nothing')
+  assert.equal(outcome(key('Escape', { isComposing: true }), body), 'swallow', 'so is a key an input method composes')
+  assert.equal(outcome(key('Enter', { keyCode: 229 }), body), 'swallow', 'and keyCode 229, its legacy signal')
+  assert.equal(outcome(key('Escape', { defaultPrevented: true }), body), null, 'a key already taken is left alone')
+  assert.equal(outcome(key(' '), body), null, 'Space is not one of the card\'s keys')
+  assert.equal(outcome(key('a'), body), null, 'nor a letter')
+
+  /** The wiring, as removal detectors: the body takes focus, the card listens, and one answer goes out at a time. */
+  assert.match(page, /<div id="approval-body" tabindex="0" role="group" aria-label="Approval details"><p id="approval-reason"><\/p><\/div>/, 'the card\'s body is focusable, so Enter has a target that is not a button')
+  assert.match(page, /approvalCard\.addEventListener\('keydown', \(event\) => \{/, 'the card listens for its keys')
+  assert.match(page, /if \(outcome !== 'swallow'\) void answerApproval\(outcome\)/, 'and answers through the buttons\' own path')
+  assert.match(page, /if \(pending === null \|\| allow\.disabled\) return/, 'which sends one answer at a time')
+  assert.match(page, /const card = document\.getElementById\('approval-card'\)\n\s+return card !== null && !card\.hidden/, 'the Esc Esc stop still yields to the card')
 })

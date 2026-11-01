@@ -256,7 +256,8 @@ test('the session shortcuts fire on the physical key, with the key values the br
         const dialog = document.getElementById('shortcut-reference')
         return dialog === null ? null : { open: dialog.open, rows: dialog.querySelectorAll('.shortcut-row').length, fixed: dialog.querySelectorAll('.shortcut-row[data-fixed]').length, title: dialog.querySelector('h2')?.textContent }
       })()`)
-      assert.deepEqual(opened, { open: true, rows: 12, fixed: 3, title: 'Keyboard shortcuts' })
+      /** Nine commands (the Browser is off), the three input actions and the approval card's two keys (#158). */
+      assert.deepEqual(opened, { open: true, rows: 14, fixed: 5, title: 'Keyboard shortcuts' })
       await browser.evaluate(`(() => { const field = document.getElementById('shortcut-reference-search'); field.value = 'rename'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
       assert.deepEqual(await browser.evaluate(`Array.from(document.querySelectorAll('#shortcut-reference .shortcut-row .label')).map((label) => label.textContent)`), ['Rename session'])
       await press(browser, CHORDS.reference, { onMac })

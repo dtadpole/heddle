@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T18:45:00Z
+modified: 2026-10-31T23:20:00Z
 level: L3
-version: 1.6.0
+version: 1.7.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -47,6 +47,12 @@ grounded_in:
   warning dot, a turn that ends off screen leaves a done dot until the session is opened, and a session below the
   fold of a long workspace comes into view while it waits and stays there after its turn ends (DSH's Show more
   watermark, raised by an attention-bearing row and never lowered on its own).
+- [`check-approval-keys.mjs`](check-approval-keys.mjs) — the approval card from the keyboard, with the browser's own
+  key events, at DSH parity (`ApprovalFlow`, #158): Escape in the card rejects, even with Allow once focused; Enter on
+  its focusable body (role group, *Approval details*) allows once and a second press posts nothing more; Enter on a
+  focused Reject is the button's own and rejects; Escape in the composer, two of them included, and Shift+Escape or
+  Shift+Enter answer nothing and stop nothing; and the keyboard reference lists *Allow once* (Enter) and *Reject* (Esc)
+  in an *Approval area* group after *Message input*.
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.

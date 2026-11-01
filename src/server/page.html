@@ -2327,6 +2327,10 @@
   #approval-card .head { display: flex; align-items: center; gap: .45rem; font-size: 13px; font-weight: 600; color: #e0b15c; }
   #approval-card .dot { width: 7px; height: 7px; border-radius: 50%; background: #e0b15c; }
   #approval-card p { margin: .45rem 0 .6rem; font-size: 13px; line-height: 1.5; color: var(--text-2); }
+  /** The question's body is focusable, as DSH's is, so Enter has a target that is not a button (#158). */
+  #approval-body { border-radius: 6px; }
+  #approval-body:focus { outline: none; }
+  #approval-body:focus-visible { outline: 1px solid color-mix(in oklab, var(--text) 45%, transparent); outline-offset: 2px; }
   #approval-card #approval-note { margin: -.2rem 0 .5rem; color: #d38b8b; font-size: 12px; }
   #approval-card .actions { display: flex; justify-content: flex-end; gap: .5rem; }
   #approval-card button { height: 32px; padding: 0 .8rem; font: inherit; font-size: 13px; border-radius: 10px; cursor: pointer; }
@@ -3723,7 +3727,8 @@
   -->
   <div id="approval-card" role="alertdialog" aria-labelledby="approval-title" hidden>
     <div class="head"><span class="dot" aria-hidden="true"></span><span id="approval-title">Waiting for approval</span></div>
-    <p id="approval-reason"></p>
+    <!-- DSH's focusable body (`dsh-client-ui-approval`: tabIndex 0, role group, "Approval details"): Enter there allows once. -->
+    <div id="approval-body" tabindex="0" role="group" aria-label="Approval details"><p id="approval-reason"></p></div>
     <p id="approval-note" hidden></p>
     <div class="actions">
       <button type="button" id="approval-reject">Reject</button>
@@ -15080,6 +15085,14 @@ const FIXED_INPUT_ACTIONS = [
   { label: 'Insert a new line', alias: 'newline', keys: SHORTCUTS_ON_MAC ? '⇧Enter' : 'Shift+Enter' },
   { label: 'Stop the current response', alias: 'cancel', keys: 'Esc Esc' },
 ]
+/**
+ * The approval card's keys, DSH's fixed `approval.allow` and `approval.reject` (`dsh-client-ui-approval`), drawn in
+ * the reference's "Approval area" group after the input actions. They carry no aliases, as DSH's do not (#158).
+ */
+const FIXED_APPROVAL_ACTIONS = [
+  { label: 'Allow once', alias: '', keys: 'Enter' },
+  { label: 'Reject', alias: '', keys: 'Esc' },
+]
 function chordText(shortcut, mac) {
   const glyph = keyForCode(shortcut.code).toUpperCase()
   if (mac) return `${shortcut.alt ? '⌥' : ''}${shortcut.shift ? '⇧' : ''}⌘${glyph}`
@@ -15105,6 +15118,7 @@ function shortcutReferenceRows(query, mac, table = SESSION_SHORTCUTS, overrides 
     rows.push({ group: 'Commands', label, alias, keys, fixed: false, action, bound: shortcut !== undefined, overridden: Object.prototype.hasOwnProperty.call(overrides, action) })
   }
   for (const action of FIXED_INPUT_ACTIONS) rows.push({ group: 'Message input', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
+  for (const action of FIXED_APPROVAL_ACTIONS) rows.push({ group: 'Approval area', label: action.label, alias: action.alias, keys: action.keys, fixed: true })
   const wanted = String(query ?? '').trim()
   return wanted === '' ? rows : rows.filter((row) => [row.label, row.alias, row.keys].some((text) => subsequenceMatch(text, wanted)))
 }
@@ -20358,9 +20372,10 @@ function hideApproval() {
  */
 async function answerApproval(outcome) {
   const pending = approvalPending
-  if (pending === null) return
   const allow = document.getElementById('approval-allow')
   const reject = document.getElementById('approval-reject')
+  /** One answer at a time: the buttons are off while one is in flight, and a key must not post a second (#158). */
+  if (pending === null || allow.disabled) return
   allow.disabled = true
   reject.disabled = true
   const note = document.getElementById('approval-note')
@@ -20389,6 +20404,40 @@ async function answerApproval(outcome) {
 }
 document.getElementById('approval-allow').addEventListener('click', () => void answerApproval('allowed-once'))
 document.getElementById('approval-reject').addEventListener('click', () => void answerApproval('rejected'))
+/* approval-keys:begin */
+/**
+ * What a key does on the approval card, DSH's `ApprovalFlow` keydown (`dsh-client-ui-approval`) as a plain rule
+ * (test/page-shortcuts.test.ts): `null` leaves the key to whatever else would take it, `'swallow'` takes it without
+ * answering, and an outcome answers. Escape rejects and Enter allows once; a key typed into a field, a key with a
+ * modifier, and Enter on a button or link (which keeps its own Enter) are not the card's. A held repeat and a key an
+ * input method is composing are taken but answer nothing, so holding Enter cannot answer twice (#158).
+ */
+function approvalKeyOutcome(event, place) {
+  if (event.defaultPrevented || !place.inCard || place.inField) return null
+  if (event.key !== 'Enter' && event.key !== 'Escape') return null
+  if (event.key === 'Enter' && place.onButton) return null
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return null
+  if (event.repeat || event.isComposing || event.keyCode === 229) return 'swallow'
+  return event.key === 'Enter' ? 'allowed-once' : 'rejected'
+}
+/* approval-keys:end */
+/**
+ * The card's own key handling, on the card and in the bubbling phase as DSH's is. The Esc Esc stop reads the same
+ * Escape first, in the capture phase, and `uiTakesEscape()` already breaks its sequence while the card shows, so an
+ * Escape that rejects never also counts toward a stop. A focused body or button is how the keyboard gets here.
+ */
+approvalCard.addEventListener('keydown', (event) => {
+  const target = event.target instanceof Element ? event.target : null
+  const outcome = approvalKeyOutcome(event, {
+    inCard: approvalCard.contains(document.activeElement),
+    inField: target !== null && target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]') !== null,
+    onButton: target !== null && target.closest('button, a[href], [role="button"]') !== null,
+  })
+  if (outcome === null) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (outcome !== 'swallow') void answerApproval(outcome)
+})
 events.addEventListener('approval', (message) => {
   try {
     const request = JSON.parse(message.data)
