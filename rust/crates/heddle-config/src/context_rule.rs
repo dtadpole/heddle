@@ -137,7 +137,7 @@ pub fn context_budget_problems(config: &Value) -> Vec<SchemaProblem> {
     }
 
     let window = field(config, "contextWindow").unwrap_or(DEFAULT_CONTEXT_WINDOW);
-    let mut problems = scope_problems("", &|name| field(config, name), window);
+    let mut problems = scope_problems("", None, &|name| field(config, name), window);
     for (index, entry) in policies.iter().enumerate() {
         if !entry.is_object() || !FIELDS.iter().any(|name| entry.get(*name).is_some()) {
             continue;
@@ -145,6 +145,7 @@ pub fn context_budget_problems(config: &Value) -> Vec<SchemaProblem> {
         let merged = |name: &str| field(entry, name).or_else(|| field(config, name));
         problems.extend(scope_problems(
             &format!("policies[{index}]."),
+            Some(entry),
             &merged,
             window,
         ));
@@ -155,6 +156,7 @@ pub fn context_budget_problems(config: &Value) -> Vec<SchemaProblem> {
 /// One scope's merged budget: the retained tail below its trigger.
 fn scope_problems(
     prefix: &str,
+    own: Option<&Value>,
     merged: &dyn Fn(&str) -> Option<f64>,
     window: f64,
 ) -> Vec<SchemaProblem> {
@@ -170,8 +172,27 @@ fn scope_problems(
     if !ratios_conflict && retain < threshold {
         return Vec::new();
     }
-    vec![retain_not_below(&RetainNotBelow {
+    let threshold_from = written_at(
         prefix,
+        own,
+        if threshold_tokens.is_some() {
+            "thresholdTokens"
+        } else {
+            "thresholdRatio"
+        },
+    );
+    let retain_from = written_at(
+        prefix,
+        own,
+        if retain_tokens.is_some() {
+            "retainTokens"
+        } else {
+            "retainRatio"
+        },
+    );
+    vec![retain_not_below(&RetainNotBelow {
+        threshold_from: &threshold_from,
+        retain_from: &retain_from,
         window_name: "contextWindow",
         window,
         threshold_tokens,
@@ -183,11 +204,22 @@ fn scope_problems(
     })]
 }
 
+/// Where a side's field was written: `policy_prefix` when the policy names that field, else `""` for the
+/// row or a default nobody wrote.
+pub fn written_at(policy_prefix: &str, policy: Option<&Value>, name: &str) -> String {
+    match policy {
+        Some(policy) if policy.get(name).is_some() => policy_prefix.to_owned(),
+        _ => String::new(),
+    }
+}
+
 /// A budget whose retained tail is not below its trigger, as [`retain_not_below`] names it.
 #[derive(Clone, Copy, Debug)]
 pub struct RetainNotBelow<'a> {
-    /// `""` for the row, `policies[i].` for an endpoint's policy.
-    pub prefix: &'a str,
+    /// Where the trigger's field was written: `""` for the row or the default, `policies[i].` for a policy.
+    pub threshold_from: &'a str,
+    /// Where the tail's field was written, the same way.
+    pub retain_from: &'a str,
     /// What the window is called: `contextWindow`, or `endpoint 'name' window` when the endpoint declares it.
     pub window_name: &'a str,
     /// The window the ratios were taken of.
@@ -211,7 +243,8 @@ pub struct RetainNotBelow<'a> {
 /// failure at a turn read alike. `src/config/budget-words.ts` is its twin, word for word.
 pub fn retain_not_below(budget: &RetainNotBelow<'_>) -> SchemaProblem {
     let RetainNotBelow {
-        prefix,
+        threshold_from: t,
+        retain_from: r,
         window_name,
         window,
         threshold_tokens,
@@ -224,9 +257,9 @@ pub fn retain_not_below(budget: &RetainNotBelow<'_>) -> SchemaProblem {
     match (threshold_tokens, retain_tokens) {
         (Some(threshold), Some(retain)) => {
             return problem(
-                format!("{prefix}retainTokens"),
+                format!("{r}retainTokens"),
                 format!(
-                    "({}) must be less than thresholdTokens ({})",
+                    "({}) must be less than {t}thresholdTokens ({})",
                     shown(retain),
                     shown(threshold)
                 ),
@@ -234,9 +267,9 @@ pub fn retain_not_below(budget: &RetainNotBelow<'_>) -> SchemaProblem {
         }
         (None, None) if retain_ratio >= threshold_ratio => {
             return problem(
-                format!("{prefix}retainRatio"),
+                format!("{r}retainRatio"),
                 format!(
-                    "({}) must be less than the resolved thresholdRatio ({})",
+                    "({}) must be less than the resolved {t}thresholdRatio ({})",
                     shown(retain_ratio),
                     shown(threshold_ratio)
                 ),
@@ -245,12 +278,9 @@ pub fn retain_not_below(budget: &RetainNotBelow<'_>) -> SchemaProblem {
         _ => {}
     }
     let (path, tail) = match retain_tokens {
-        Some(tokens) => (
-            format!("{prefix}retainTokens"),
-            format!("({})", shown(tokens)),
-        ),
+        Some(tokens) => (format!("{r}retainTokens"), format!("({})", shown(tokens))),
         None => (
-            format!("{prefix}retainRatio"),
+            format!("{r}retainRatio"),
             format!(
                 "({}) of {window_name} {} is {} tokens, which",
                 shown(retain_ratio),
@@ -260,9 +290,9 @@ pub fn retain_not_below(budget: &RetainNotBelow<'_>) -> SchemaProblem {
         ),
     };
     let trigger = match threshold_tokens {
-        Some(tokens) => format!("thresholdTokens ({})", shown(tokens)),
+        Some(tokens) => format!("{t}thresholdTokens ({})", shown(tokens)),
         None => format!(
-            "the threshold tokens ({} = thresholdRatio {} of {window_name} {})",
+            "the threshold tokens ({} = {t}thresholdRatio {} of {window_name} {})",
             shown(threshold),
             shown(threshold_ratio),
             shown(window)
@@ -384,8 +414,23 @@ mod tests {
                 json!({ "retainRatio": 0.9, "thresholdRatio": 0.95, "policies": [{ "endpoint": "a" }, { "endpoint": "b", "thresholdRatio": 0.5 }] })
             ),
             vec![
-                "policies[1].retainRatio (0.9) must be less than the resolved thresholdRatio (0.5)"
+                "retainRatio (0.9) must be less than the resolved policies[1].thresholdRatio (0.5)"
+            ],
+            "each side is named where it was written"
+        );
+        assert_eq!(
+            said(
+                json!({ "contextWindow": 1000, "policies": [{ "endpoint": "small", "thresholdTokens": 100 }] })
+            ),
+            vec![
+                "retainRatio (0.16) of contextWindow 1000 is 160 tokens, which must be less than policies[0].thresholdTokens (100)"
             ]
+        );
+        assert_eq!(
+            said(
+                json!({ "contextWindow": 2000, "thresholdTokens": 1000, "policies": [{ "endpoint": "small", "retainTokens": 2000 }] })
+            ),
+            vec!["policies[0].retainTokens (2000) must be less than thresholdTokens (1000)"]
         );
     }
 }

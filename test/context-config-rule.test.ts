@@ -37,7 +37,15 @@ test('a policy is judged over the row, and only when it names a budget field', (
   ])
   assert.deepEqual(
     contextConfigProblems({ retainRatio: 0.9, thresholdRatio: 0.95, policies: [{ endpoint: 'a' }, { endpoint: 'b', thresholdRatio: 0.5 }] }),
-    ['policies[1].retainRatio (0.9) must be less than the resolved thresholdRatio (0.5)'],
+    ['retainRatio (0.9) must be less than the resolved policies[1].thresholdRatio (0.5)'],
+    'each side is named where it was written: the tail by the row, the trigger by the policy',
+  )
+  assert.deepEqual(contextConfigProblems({ contextWindow: 1000, policies: [{ endpoint: 'small', thresholdTokens: 100 }] }), [
+    'retainRatio (0.16) of contextWindow 1000 is 160 tokens, which must be less than policies[0].thresholdTokens (100)',
+  ])
+  assert.deepEqual(
+    contextConfigProblems({ contextWindow: 2000, thresholdTokens: 1000, policies: [{ endpoint: 'small', retainTokens: 2000 }] }),
+    ['policies[0].retainTokens (2000) must be less than thresholdTokens (1000)'],
   )
 })
 
