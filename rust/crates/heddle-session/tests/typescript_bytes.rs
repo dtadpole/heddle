@@ -361,6 +361,7 @@ fn a_model_request_line_is_what_the_typescript_loop_writes() {
         endpoint: "scripted".to_string(),
         model: Some("m1".to_string()),
         reasoning_effort: Some("high".to_string()),
+        reasoning_effort_default: None,
         messages: 3,
         tools: vec!["read_file".to_string(), "write_file".to_string()],
         estimated_tokens: Some(1200),
