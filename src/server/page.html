@@ -11546,6 +11546,10 @@ function renderModelSeat() {
   const names = endpointOptions.map((option) => option.name)
   const wanted = currentEndpointName()
   chosenEndpoint = wanted
+  // Selection, session restore and catalogue reload all enter here. Repaint the dock and
+  // its open popover from this effective model/window, even on a missing-model early return.
+  // Keep the dependency one-way: status rendering must not call model rendering.
+  updateStatusBar()
   if (wanted === null) {
     modelLabel.textContent = 'no model'
     modelEffort.hidden = true
