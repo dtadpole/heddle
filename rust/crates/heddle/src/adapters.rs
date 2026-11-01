@@ -889,7 +889,13 @@ impl heddle_plan::QuestionAsker for PlanReviewAsker {
         Box::pin(async move {
             let timeout = options.timeout.map(Value::from);
             match service
-                .ask(&session, &questions, timeout.as_ref(), options.cancel)
+                .ask_with(
+                    &session,
+                    &questions,
+                    timeout.as_ref(),
+                    options.cancel,
+                    options.continuable,
+                )
                 .await
             {
                 Ok(heddle_questions::AskOutcome::Answered(answers)) => {
