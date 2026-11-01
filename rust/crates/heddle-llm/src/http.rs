@@ -13,8 +13,9 @@
 //!   read is replayed so a stream is at most one read behind.
 //! - **A forwarding proxy** is `http:` only, to an `http:` target, sent in the proxy's absolute form; anything else
 //!   is refused with `PROXY` by name rather than connecting somewhere nobody asked for.
-//! - **A non-2xx answer** is a [`ModelError`] carrying the status and the first 400 characters of the body, coded
-//!   by [`failure_code`].
+//! - **A non-2xx answer** is a [`ModelError`] carrying the status and the provider's own sentence
+//!   ([`provider_message`]: `error.message` of a JSON body, else the body, at most 400 characters), coded by
+//!   [`failure_code`]; a window refusal also names the way out ([`failure_message`]).
 
 use std::pin::Pin;
 
@@ -195,12 +196,7 @@ pub async fn wire(request: WireRequest) -> Result<WireResponse, ModelError> {
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let text = read_text(response, endpoint.clone(), idle).await;
-        let excerpt: String = text.chars().take(400).collect();
-        let message = if excerpt.is_empty() {
-            format!("'{endpoint}' answered {status}")
-        } else {
-            format!("'{endpoint}' answered {status} — {excerpt}")
-        };
+        let message = failure_message(&endpoint, status, &text);
         return Err(
             ModelError::new(message, endpoint, failure_code(status, &text)).with_status(status),
         );
@@ -405,18 +401,36 @@ pub fn title_case_headers(headers: &[(String, String)]) -> Vec<(String, String)>
 
 /// Whether a body says the request did not fit the model's window. The provider wordings differ, so the matching
 /// happens once, here, and everything above reads the code.
+///
+/// Anthropic says `prompt is too long: 352406 tokens > 200000 maximum` (a 400) and `request_too_large` (a 413).
+/// Without those two, every `anthropic-messages` and `anthropic-vertex` refusal was a plain HTTP failure and overflow
+/// recovery never ran (#153). DSH matches the same wordings: pi-ai's overflow list opens with
+/// `/prompt (?:is )?too long/i` and carries `request_too_large`, and `dsh-llm`'s `isContextWindowExceededError` adds
+/// "input/prompt/request is too long/large for this model".
 fn says_context_too_long(body: &str) -> bool {
     let body = body.to_lowercase();
-    const PHRASES: [&str; 6] = [
+    const PHRASES: [&str; 9] = [
         "context_length_exceeded",
         "context length exceeded",
         "maximum context length",
         "context window",
         "too many tokens",
         "reduce the length of the messages",
+        "prompt is too long",
+        "prompt too long",
+        "request_too_large",
     ];
     if PHRASES.iter().any(|phrase| body.contains(phrase)) {
         return true;
+    }
+    for subject in ["input", "prompt", "request"] {
+        for size in ["long", "large"] {
+            for model in ["this", "the"] {
+                if body.contains(&format!("{subject} is too {size} for {model} model")) {
+                    return true;
+                }
+            }
+        }
     }
     let mut rest = body.as_str();
     while let Some(at) = rest.find("exceeds the ") {
@@ -436,13 +450,63 @@ fn says_context_too_long(body: &str) -> bool {
 
 /// The code one failed response deserves (`failureCode`): `CONTEXT_WINDOW_EXCEEDED` for a `400`, `413` or `422`
 /// whose body says the request did not fit (OpenAI's `context_length_exceeded`, "maximum context length",
-/// "context window", "too many tokens", "reduce the length of the messages", "exceeds the model's context"),
+/// "context window", "too many tokens", "reduce the length of the messages", "exceeds the model's context",
+/// Anthropic's "prompt is too long" and `request_too_large`, "input/prompt/request is too long/large for this model"),
 /// otherwise `HTTP`. Case-insensitive.
 pub fn failure_code(status: u16, body: &str) -> &'static str {
     if matches!(status, 400 | 413 | 422) && says_context_too_long(body) {
         crate::error::CONTEXT_WINDOW_EXCEEDED
     } else {
         crate::error::code::HTTP
+    }
+}
+
+/// What a failed response says, in the provider's words rather than its JSON (`providerMessage`).
+///
+/// OpenAI and Anthropic both put the sentence at `error.message`, some gateways at a top-level `message` or as `error`
+/// itself. Live #153: the page showed `{"type": "error", "error": {…"prompt is too long: …"}}` where the sentence alone
+/// says it. A body that is not JSON, or JSON with no such field, is kept as it came; either way at most 400 characters.
+pub fn provider_message(body: &str) -> String {
+    let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
+    let said = parsed.as_ref().and_then(|value| {
+        let error = value.get("error");
+        error
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| error.and_then(serde_json::Value::as_str))
+            .or_else(|| value.get("message").and_then(serde_json::Value::as_str))
+    });
+    let text = match said {
+        Some(said) if !said.trim().is_empty() => said,
+        _ => body,
+    };
+    text.trim().chars().take(400).collect()
+}
+
+/// What a window refusal adds to the provider's sentence (#153); the TypeScript build says the same words
+/// (`WINDOW_REMEDY`).
+pub const WINDOW_REMEDY: &str = "The conversation is larger than this model's context window: switch to a model with a larger window, or run /compact with one before switching back.";
+
+/// The sentence a refused HTTP call fails with (`failureMessage`).
+///
+/// A window refusal names the way out as well (#153). The message reaches a person only when overflow recovery could
+/// not make the conversation fit — a refusal it fixed is retried and never shown — and in that case the conversation
+/// is larger than this model can take, so the remedy is a model with a larger window, or a `/compact` run on one before
+/// coming back.
+pub fn failure_message(endpoint: &str, status: u16, body: &str) -> String {
+    let said = provider_message(body);
+    let head = if said.is_empty() {
+        format!("'{endpoint}' answered {status}")
+    } else {
+        format!("'{endpoint}' answered {status} — {said}")
+    };
+    if failure_code(status, body) != crate::error::CONTEXT_WINDOW_EXCEEDED {
+        return head;
+    }
+    if head.ends_with(['.', '!', '?']) {
+        format!("{head} {WINDOW_REMEDY}")
+    } else {
+        format!("{head}. {WINDOW_REMEDY}")
     }
 }
 
@@ -511,6 +575,104 @@ mod tests {
             failure_code(400, "CONTEXT_LENGTH_EXCEEDED"),
             CONTEXT_WINDOW_EXCEEDED
         );
+    }
+
+    /// Live #153: Anthropic's own wordings, as conclave-claude answered them. Both were plain `HTTP`, so overflow
+    /// recovery logged "not a window overflow" and the turn failed.
+    #[test]
+    fn an_anthropic_window_refusal_is_recognised_too() {
+        assert_eq!(
+            failure_code(
+                400,
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 352406 tokens > 200000 maximum"}}"#
+            ),
+            CONTEXT_WINDOW_EXCEEDED
+        );
+        assert_eq!(
+            failure_code(
+                413,
+                r#"{"type":"error","error":{"type":"request_too_large","message":"Request exceeds the maximum size"}}"#
+            ),
+            CONTEXT_WINDOW_EXCEEDED
+        );
+        assert_eq!(
+            failure_code(400, "Prompt too long for the context"),
+            CONTEXT_WINDOW_EXCEEDED
+        );
+        assert_eq!(
+            failure_code(400, "input is too long for this model"),
+            CONTEXT_WINDOW_EXCEEDED
+        );
+        assert_eq!(
+            failure_code(400, "Request is too large for the model"),
+            CONTEXT_WINDOW_EXCEEDED
+        );
+        // The status still decides: an overloaded or failing gateway that echoes the sentence is not a refusal.
+        assert_eq!(failure_code(500, "prompt is too long"), "HTTP");
+        assert_eq!(failure_code(529, "request_too_large"), "HTTP");
+    }
+
+    #[test]
+    fn a_failure_says_the_providers_sentence_rather_than_its_json() {
+        assert_eq!(
+            provider_message(
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 352406 tokens > 200000 maximum"}}"#
+            ),
+            "prompt is too long: 352406 tokens > 200000 maximum"
+        );
+        assert_eq!(
+            provider_message(
+                r#"{"error":{"message":"Incorrect API key provided","code":"invalid_api_key"}}"#
+            ),
+            "Incorrect API key provided"
+        );
+        assert_eq!(
+            provider_message(r#"{"error":"rate limited"}"#),
+            "rate limited"
+        );
+        assert_eq!(
+            provider_message(r#"{"message":"no such model"}"#),
+            "no such model"
+        );
+        // JSON without a sentence, and a body that is not JSON, are kept as they came.
+        assert_eq!(
+            provider_message(r#"{"error":{"code":"context_length_exceeded"}}"#),
+            r#"{"error":{"code":"context_length_exceeded"}}"#
+        );
+        assert_eq!(provider_message(" Bad Gateway\n"), "Bad Gateway");
+        assert_eq!(provider_message(""), "");
+        assert_eq!(provider_message(&"x".repeat(1000)).len(), 400);
+    }
+
+    #[test]
+    fn a_window_refusal_names_the_way_out_and_any_other_failure_does_not() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 352406 tokens > 200000 maximum"}}"#;
+        assert_eq!(
+            failure_message("conclave-claude", 400, body),
+            format!(
+                "'conclave-claude' answered 400 — prompt is too long: 352406 tokens > 200000 maximum. {WINDOW_REMEDY}"
+            )
+        );
+        assert!(
+            !failure_message("conclave-claude", 400, body).contains(r#""type""#),
+            "no JSON"
+        );
+        // A sentence that already ends is not given a second full stop.
+        assert_eq!(
+            failure_message(
+                "chat",
+                400,
+                "This model's maximum context length is 8192 tokens."
+            ),
+            format!(
+                "'chat' answered 400 — This model's maximum context length is 8192 tokens. {WINDOW_REMEDY}"
+            )
+        );
+        assert_eq!(
+            failure_message("chat", 401, r#"{"error":{"message":"bad key"}}"#),
+            "'chat' answered 401 — bad key"
+        );
+        assert_eq!(failure_message("chat", 503, ""), "'chat' answered 503");
     }
 
     #[test]
@@ -653,6 +815,32 @@ mod tests {
         assert_eq!(error.code, CONTEXT_WINDOW_EXCEEDED);
         assert_eq!(error.status, Some(400));
         assert!(error.to_string().contains("answered 400"), "{error}");
+    }
+
+    /// Live #153, over the wire: Anthropic's refusal is recoverable, and what it fails with is the sentence and the way
+    /// out, not the JSON.
+    #[tokio::test]
+    async fn an_anthropic_window_refusal_over_the_wire_is_recoverable_and_readable() {
+        let server = Server::start(|_| {
+            reply(
+                "400 Bad Request",
+                Some("application/json"),
+                r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 352406 tokens > 200000 maximum"}}"#,
+            )
+        })
+        .await;
+        let error = wire(request(&format!("{}/messages", server.url)))
+            .await
+            .expect_err("fails");
+        assert_eq!(error.code, CONTEXT_WINDOW_EXCEEDED);
+        assert_eq!(error.status, Some(400));
+        let said = error.to_string();
+        assert!(
+            said.contains("answered 400 — prompt is too long: 352406 tokens > 200000 maximum."),
+            "{said}"
+        );
+        assert!(said.ends_with(WINDOW_REMEDY), "{said}");
+        assert!(!said.contains('{'), "{said}");
     }
 
     #[tokio::test]
