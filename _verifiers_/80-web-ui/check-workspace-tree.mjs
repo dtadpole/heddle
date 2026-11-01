@@ -26,7 +26,8 @@ import { fixtureDir, heddleCommand, isolatedHome, listFiles, removeDir, repoRoot
  * to is refused rather than run in the server's start folder (#134); Archived only with nothing archived says DSH's
  * "No archived sessions yet" with a View other sessions action, not that no workspace is registered (#107); and a
  * folder the server may not read, or a workspace whose folder it may not read, draws DSH's one failure line
- * ("Read failed: …"), never "nothing inside" (#106).
+ * ("Read failed: …"), never "nothing inside" (#106); and a tree refresh never takes the open workspace's session rows or
+ * the selected row off the page, so a click on a row during one lands on that row (#143).
  *
  * The data is judged over HTTP first (`GET /api/workspaces`, the route both servers serve for this), then the page in a
  * browser, because a correct answer drawn wrong is the failure this check exists for.
@@ -2148,5 +2149,180 @@ test('a folder the server may not read draws DSH\'s failure line, not "nothing i
       }
     }
     for (const dir of [home, work]) removeDir(dir)
+  }
+})
+
+test('a tree refresh never takes the open workspace\'s session rows or the selected row off the page, and a click on a row during one lands on that row (#143)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Every refresh (a message, an answer or a turn end anywhere on the server, a workspace or a rename pushed by another
+   * client) redrew the tree with every group folded, then reopened each remembered group one after another, a
+   * `GET /api/tree` apiece, and marked the selection last. So for a round trip or more, several times a turn, the open
+   * workspaces' session rows and the selected row were gone and the rows below moved up: developer-six measured a click
+   * aimed at a session row 0.5-1.3 s after another client's push landing on another row in 4 of 7 tries on each build.
+   * DSH's tree is a keyed React list (dsh-client-ui-workspace lib/client.js:3307, :3328) whose expansion is state
+   * (:1284-1286, derived at :3061-3068), so a refresh updates rows in place and `aria-selected` (:2257, :2278) stays on the
+   * open session.
+   *
+   * Here the open session lives in a workspace nested in another, so the page reads the outer workspace's folder before it
+   * reaches the inner one, and the page's `/api/tree` answers are held back (as check-content-search holds back its search
+   * for #151) so each refresh's reads stay out long enough to see. Refreshes come from another client renaming a session in
+   * the outer workspace. A MutationObserver and a 25 ms poll record every moment the inner workspace's rows or the selected
+   * row are missing; then a real press and release go to a row's centre while a refresh's reads are out.
+   */
+  const home = isolatedHome('tree-steady')
+  const root = fixtureDir('tree-steady-repo')
+  const inner = join(root, 'packages', 'inner')
+  mkdirSync(inner, { recursive: true })
+  writeFileSync(join(root, 'README.md'), 'the outer workspace\n')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    for (const path of [root, inner]) {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+    }
+    const make = async (branch, title) => {
+      const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch, title }) })
+      assert.equal(made.status, 200, `created ${title} (${JSON.stringify(made.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+      return made.body.session
+    }
+    const other = await make(root, 'steady other')
+    const one = await make(inner, 'steady one')
+    const open = await make(inner, 'steady open')
+    const target = await make(inner, 'steady target')
+    const four = await make(inner, 'steady four')
+    const innerIds = [one, open, target, four]
+
+    browser = await openBrowser({ width: 1280, height: 900 })
+    await browser.gotoSession(server.url, open)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    const allDrawn = `(() => { const tree = document.getElementById('tree'); return ${JSON.stringify(innerIds)}.every((id) => tree.querySelector('li[data-kind="session"][data-session-id="' + id + '"]') !== null) && tree.querySelector('li[aria-selected="true"]')?.dataset.sessionId === ${JSON.stringify(open)} })()`
+    assert.ok(await browser.waitFor(allDrawn, 15_000), 'the inner workspace\'s sessions are drawn, with the open one selected')
+    await new Promise((done) => setTimeout(done, 1_000))
+
+    /**
+     * The recorder, and the page's `/api/tree` answers held back `__treeDelay` ms. `draws` counts the tree's list reads
+     * (`/api/workspaces`, one per redraw), `inFlight` the folder reads out now; each gap is a moment the inner workspace's
+     * rows or the selected row were missing, with what was missing and what was selected.
+     */
+    await browser.evaluate(`(() => {
+      const ids = ${JSON.stringify(innerIds)}
+      const open = ${JSON.stringify(open)}
+      const real = window.fetch.bind(window)
+      const state = { samples: 0, gaps: [], draws: 0, inFlight: 0, maxInFlight: 0, events: [], expect: [open] }
+      window.__steady = state
+      window.__treeDelay = 700
+      window.fetch = (input, init) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href)
+        if (url.pathname === '/api/workspaces' && (init?.method ?? 'GET') === 'GET') state.draws += 1
+        if (url.pathname !== '/api/tree') return real(input, init)
+        state.inFlight += 1
+        state.maxInFlight = Math.max(state.maxInFlight, state.inFlight)
+        return new Promise((done) => setTimeout(done, window.__treeDelay)).then(() => real(input, init)).finally(() => { state.inFlight -= 1 })
+      }
+      const tree = document.getElementById('tree')
+      const check = (why) => {
+        state.samples += 1
+        const missing = ids.filter((id) => tree.querySelector('li[data-kind="session"][data-session-id="' + id + '"]') === null)
+        const selected = [...tree.querySelectorAll('li[aria-selected="true"]')].map((li) => li.dataset.sessionId ?? li.dataset.rowKey)
+        if (missing.length > 0 || selected.length !== 1 || !state.expect.includes(selected[0])) {
+          if (state.gaps.length < 40) state.gaps.push({ at: Math.round(performance.now()), why, missing, selected, inFlight: state.inFlight })
+        }
+      }
+      new MutationObserver(() => check('mutation')).observe(tree, { subtree: true, childList: true, attributes: true, attributeFilter: ['aria-selected', 'data-open'] })
+      state.timer = setInterval(() => check('poll'), 25)
+      const describe = (node) => { const li = node instanceof Element ? node.closest('li') : null; return li === null ? (node instanceof Element ? node.tagName.toLowerCase() : String(node)) : (li.dataset.sessionId ?? li.dataset.rowKey ?? li.className) }
+      for (const type of ['mousedown', 'mouseup', 'click']) document.addEventListener(type, (event) => state.events.push({ type, on: describe(event.target) }), true)
+      return true
+    })()`)
+    const record = async () => browser.evaluate('JSON.stringify({ ...window.__steady, timer: undefined })')
+    const rename = async (title) => {
+      const renamed = await api(server.url, cookie, `/api/sessions/${other}/title`, { method: 'POST', body: JSON.stringify({ title }) })
+      assert.equal(renamed.status, 200, `another client renamed the outer workspace's session (${JSON.stringify(renamed.body)})`)
+    }
+    const settled = async (draws, what) => {
+      try {
+        await browser.waitFor(`window.__steady.draws >= ${draws} && window.__steady.inFlight === 0`, 15_000)
+      } catch (error) {
+        assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nrecord: ${await record()}`)
+      }
+      await new Promise((done) => setTimeout(done, 300))
+    }
+
+    /** Three refreshes pushed by another client's renames, each with its folder reads held back. */
+    for (let round = 1; round <= 3; round += 1) {
+      const before = await browser.evaluate('window.__steady.draws')
+      await rename(`steady other ${round}`)
+      await settled(before + 1, `the rename pushed a redraw that read its folders (round ${round})`)
+    }
+    const seen = JSON.parse(await record())
+    assert.ok(seen.draws >= 3, `three redraws ran (${seen.draws})`)
+    assert.ok(seen.samples > 50, `and the recorder sampled the tree throughout (${seen.samples} samples)`)
+    assert.deepEqual(seen.gaps, [], `while each redraw's folder reads were out, the inner workspace's rows and the selected row never left the page\nrecord: ${JSON.stringify(seen)}`)
+    assert.equal(seen.maxInFlight >= 2, true, `the open workspaces' folders were read at once, not one after another (at most ${seen.maxInFlight} at a time)`)
+
+    /**
+     * A person clicks a row while a refresh's reads are out: a real press and release at the target row's centre, sent
+     * once the redraw is reading its folders (held back 1.5 s, so the press lands inside the window).
+     */
+    const centre = JSON.parse(
+      await browser.evaluate(`JSON.stringify((() => { const row = document.querySelector('#tree li[data-session-id="${target}"] > .row'); if (row === null) return null; row.scrollIntoView({ block: 'nearest' }); const box = row.getBoundingClientRect(); return { x: Math.round(box.left + Math.min(box.width / 2, 80)), y: Math.round(box.top + box.height / 2) } })())`),
+    )
+    assert.ok(centre !== null, 'the target row is drawn')
+    await browser.evaluate('(() => { window.__treeDelay = 1500; window.__steady.events = []; window.__steady.gaps = []; return true })()')
+    const before = await browser.evaluate('window.__steady.draws')
+    await rename('steady other clicked')
+    try {
+      await browser.waitFor(`window.__steady.draws > ${before} && window.__steady.inFlight > 0`, 10_000)
+    } catch (error) {
+      assert.fail(`the rename pushed a redraw that is reading its folders\n${error instanceof Error ? error.message : String(error)}\nrecord: ${await record()}`)
+    }
+    const under = await browser.evaluate(`(() => { const node = document.elementFromPoint(${centre.x}, ${centre.y}); const li = node?.closest('li'); return li?.dataset.sessionId ?? li?.dataset.rowKey ?? (node === null ? 'nothing' : node.tagName) })()`)
+    /** From the press on, either the open session or the one clicked is the selected row, and always exactly one. */
+    await browser.evaluate(`(() => { window.__steady.expect = ${JSON.stringify([open, target])}; return true })()`)
+    const pointer = (type) =>
+      browser.send('Input.dispatchMouseEvent', {
+        type,
+        x: centre.x,
+        y: centre.y,
+        button: type === 'mouseMoved' ? 'none' : 'left',
+        buttons: type === 'mousePressed' ? 1 : 0,
+        ...(type === 'mouseMoved' ? {} : { clickCount: 1 }),
+      })
+    await pointer('mouseMoved')
+    await pointer('mousePressed')
+    await pointer('mouseReleased')
+    const inWindow = await browser.evaluate('window.__steady.inFlight > 0')
+    try {
+      await browser.waitFor(
+        `document.getElementById('session-title')?.textContent === 'steady target' && document.querySelector('#tree li[aria-selected="true"]')?.dataset.sessionId === ${JSON.stringify(target)}`,
+        10_000,
+      )
+    } catch (error) {
+      assert.fail(
+        `the click during the refresh lands on the row aimed at, and opens its session (under the pointer at the press: ${under}; the redraw still reading at the release: ${inWindow})\n${error instanceof Error ? error.message : String(error)}\nrecord: ${await record()}\ntitle: ${await browser.evaluate(`JSON.stringify(document.getElementById('session-title')?.textContent ?? null)`)}`,
+      )
+    }
+    assert.equal(under, target, `the target row was under the pointer while the redraw read its folders\nrecord: ${await record()}`)
+    await settled(before + 1, 'the redraw after the click lands')
+    const after = JSON.parse(await record())
+    assert.deepEqual(after.gaps, [], `through the click and the redraw around it, the inner workspace's rows stayed and exactly one row was selected\nrecord: ${JSON.stringify(after)}`)
+    assert.deepEqual(
+      after.events.map((event) => `${event.type}:${event.on}`),
+      [`mousedown:${target}`, `mouseup:${target}`, `click:${target}`],
+      `the press, the release and the click all landed on the target row\nrecord: ${JSON.stringify(after)}`,
+    )
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
   }
 })

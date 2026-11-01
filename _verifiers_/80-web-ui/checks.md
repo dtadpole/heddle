@@ -107,7 +107,10 @@ grounded_in:
   next search (#58); and a folder the server may not read (`chmod 000`) opening to DSH's one line *Read failed: cannot
   list "locked": permission denied* with no rows, never *nothing inside*, a readable sibling still listing its file,
   and a workspace whose own folder it may not read keeping its session and its *Files* heading over the same line
-  (#106). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  (#106); and, with the page's `/api/tree` answers held back and another client's renames pushing refreshes, a nested
+  workspace's session rows and the one selected row never leaving the page (a MutationObserver and a 25 ms poll), both
+  workspaces' folders read at once, and a real press and release on a row while a refresh's reads are out landing on
+  that row and opening its session (#143). The page opens no session on its own, so a check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
