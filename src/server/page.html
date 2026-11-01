@@ -3509,7 +3509,7 @@
       The Browser tab's entry point (#86): hidden unless the server was started with the Browser enabled, because
       DSH's Web profile ships its Browser off too. It shows or hides the right sidebar, opening a first tab.
     -->
-    <button type="button" id="browser-open" aria-label="Browser" title="Browser" aria-controls="right-sidebar" aria-expanded="false" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c1.8 1.9 2.7 4 2.7 6.5S9.8 12.6 8 14.5M8 1.5C6.2 3.4 5.3 5.5 5.3 8s.9 4.6 2.7 6.5"/></svg></button>
+    <button type="button" id="browser-open" aria-label="Browser" title="Browser" data-i18n-aria-label="browser.label" data-i18n-title="browser.label" aria-controls="right-sidebar" aria-expanded="false" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c1.8 1.9 2.7 4 2.7 6.5S9.8 12.6 8 14.5M8 1.5C6.2 3.4 5.3 5.5 5.3 8s.9 4.6 2.7 6.5"/></svg></button>
   </header>
   <!--
     The ring is a **tablist**, which is what DSH uses for the same control and what this control actually is: one of
@@ -3873,11 +3873,11 @@
   so far is the Browser, drawn by `openBrowserTab()`; the tabs are this page's, not the session's, so they stay open
   across a session switch and are gone after a reload.
 -->
-<section id="right-sidebar" aria-label="Right sidebar" hidden>
+<section id="right-sidebar" aria-label="Right sidebar" data-i18n-aria-label="rightSidebar.label" hidden>
   <header id="rs-head">
-    <div id="rs-tabs" role="tablist" aria-label="Right sidebar tabs"></div>
-    <button type="button" id="rs-new" aria-label="New browser tab" title="New browser tab">+</button>
-    <button type="button" id="rs-close" aria-label="Hide the right sidebar" title="Hide">✕</button>
+    <div id="rs-tabs" role="tablist" aria-label="Right sidebar tabs" data-i18n-aria-label="rightSidebar.tabs"></div>
+    <button type="button" id="rs-new" aria-label="New browser tab" title="New browser tab" data-i18n-aria-label="browser.newTab" data-i18n-title="browser.newTab">+</button>
+    <button type="button" id="rs-close" aria-label="Hide the right sidebar" title="Hide" data-i18n-aria-label="rightSidebar.hide" data-i18n-title="rightSidebar.hideTitle">✕</button>
   </header>
   <div id="rs-body"></div>
 </section>
@@ -4593,6 +4593,21 @@ const MESSAGES = Object.freeze({
     'browser.back': 'Back',
     'browser.forward': 'Forward',
     'browser.reload': 'Reload',
+    'browser.label': 'Browser',
+    'browser.newTab': 'New browser tab',
+    'browser.go': 'Go',
+    'browser.external': 'Open in system browser',
+    'browser.refused.empty': 'Enter an address.',
+    'browser.refused.invalid': 'That address is invalid or too long.',
+    'browser.refused.protocol': 'Only HTTP and HTTPS addresses are supported; open local files from the workspace tree.',
+    'browser.refused.credentials': 'Addresses cannot contain a username or password.',
+    'browser.refused.application-origin': 'The browser tab cannot open this application itself.',
+    'browser.unknown': 'The page navigated; this tab cannot read its new URL.',
+    'browser.failed': 'The page could not load; reload or open it in the system browser.',
+    'rightSidebar.label': 'Right sidebar',
+    'rightSidebar.tabs': 'Right sidebar tabs',
+    'rightSidebar.hide': 'Hide the right sidebar',
+    'rightSidebar.hideTitle': 'Hide',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
     'empty.title': 'Start a conversation',
     'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
@@ -5239,6 +5254,21 @@ const MESSAGES = Object.freeze({
     'browser.back': '后退',
     'browser.forward': '前进',
     'browser.reload': '重新加载',
+    'browser.label': '浏览器',
+    'browser.newTab': '新建浏览器标签页',
+    'browser.go': '前往',
+    'browser.external': '在系统浏览器中打开',
+    'browser.refused.empty': '请输入地址。',
+    'browser.refused.invalid': '这个地址无效或过长。',
+    'browser.refused.protocol': '只支持 HTTP 和 HTTPS 地址；本地文件请从工作区文件树打开。',
+    'browser.refused.credentials': '地址不能包含用户名或密码。',
+    'browser.refused.application-origin': '不能在浏览器标签页中打开本应用自身。',
+    'browser.unknown': '页面已跳转；此标签页无法读取新的 URL。',
+    'browser.failed': '页面加载失败；请刷新重试或在系统浏览器中打开。',
+    'rightSidebar.label': '右侧边栏',
+    'rightSidebar.tabs': '右侧边栏标签页',
+    'rightSidebar.hide': '收起右侧边栏',
+    'rightSidebar.hideTitle': '收起',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
     'empty.title': '开始对话',
     'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
@@ -13228,15 +13258,17 @@ async function loadStatus() {
 const BROWSER_SANDBOX = 'allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox'
 const BROWSER_MAX_ADDRESS = 16384
 const BROWSER_MAX_HISTORY = 100
+/**
+ * A refusal's words by its reason, in the page language (#80): DSH's `error.*` copy, where the protocol sentence points
+ * at the workspace tree and the origin sentence names this application rather than DSH's.
+ */
 const BROWSER_REFUSALS = {
-  empty: 'Enter an address.',
-  invalid: 'That address is invalid or too long.',
-  protocol: 'Only HTTP and HTTPS addresses are supported; open local files from the workspace tree.',
-  credentials: 'Addresses cannot contain a username or password.',
-  'application-origin': 'The browser tab cannot open this application itself.',
+  empty: 'browser.refused.empty',
+  invalid: 'browser.refused.invalid',
+  protocol: 'browser.refused.protocol',
+  credentials: 'browser.refused.credentials',
+  'application-origin': 'browser.refused.application-origin',
 }
-const BROWSER_UNKNOWN = 'The page navigated; this tab cannot read its new URL.'
-const BROWSER_FAILED = 'The page could not load; reload or open it in the system browser.'
 const BROWSER_LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const rightSidebar = document.getElementById('right-sidebar')
 const rsTabs = document.getElementById('rs-tabs')
@@ -13303,12 +13335,15 @@ function browserIcon(d) {
   return svg
 }
 
-function browserButton(name, label, d) {
+/** A toolbar button named by the string `key`, which `applyLocale` says again when the language changes. */
+function browserButton(name, key, d) {
   const button = document.createElement('button')
   button.type = 'button'
   button.dataset.browser = name
-  button.setAttribute('aria-label', label)
-  button.title = label
+  button.setAttribute('aria-label', t(key))
+  button.title = t(key)
+  button.dataset.i18nAriaLabel = key
+  button.dataset.i18nTitle = key
   button.append(browserIcon(d))
   return button
 }
@@ -13324,13 +13359,13 @@ function renderBrowserTab(tab) {
   tab.external.disabled = target === undefined || unknown
   tab.address.dataset.address = target === undefined ? 'empty' : unknown ? 'unknown' : nav.status
   tab.address.setAttribute('aria-invalid', nav.refusal === null ? 'false' : 'true')
-  const message = nav.refusal !== null ? BROWSER_REFUSALS[nav.refusal] : nav.failed ? BROWSER_FAILED : unknown ? BROWSER_UNKNOWN : ''
+  const message = nav.refusal !== null ? t(BROWSER_REFUSALS[nav.refusal]) : nav.failed ? t('browser.failed') : unknown ? t('browser.unknown') : ''
   tab.notice.textContent = message
   tab.notice.dataset.kind = nav.refusal !== null || nav.failed ? 'error' : 'info'
   tab.notice.hidden = message === ''
   tab.panel.setAttribute('aria-busy', String(nav.status === 'loading' && !nav.failed))
-  tab.label.textContent = target === undefined ? 'Browser' : target.title
-  tab.button.title = target === undefined ? 'Browser' : target.url
+  tab.label.textContent = target === undefined ? t('browser.label') : target.title
+  tab.button.title = target === undefined ? t('browser.label') : target.url
 }
 
 /** Frame the current entry under a new revision, so a late `load` from an older frame is not mistaken for this one. */
@@ -13491,6 +13526,8 @@ function openBrowserTab(initialAddress) {
   close.className = 'rs-tab-close'
   close.setAttribute('aria-label', t('browser.closeTab'))
   close.title = t('browser.closeTab')
+  close.dataset.i18nAriaLabel = 'browser.closeTab'
+  close.dataset.i18nTitle = 'browser.closeTab'
   close.textContent = '×'
   tab.tab.append(tab.button, close)
 
@@ -13502,15 +13539,18 @@ function openBrowserTab(initialAddress) {
   const bar = document.createElement('form')
   bar.className = 'browser-bar'
   bar.setAttribute('aria-label', t('browser.navigation'))
-  tab.back = browserButton('back', t('browser.back'), 'M10 3.5 5.5 8l4.5 4.5')
-  tab.forward = browserButton('forward', t('browser.forward'), 'M6 3.5 10.5 8 6 12.5')
-  tab.reload = browserButton('reload', t('browser.reload'), 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
+  bar.dataset.i18nAriaLabel = 'browser.navigation'
+  tab.back = browserButton('back', 'browser.back', 'M10 3.5 5.5 8l4.5 4.5')
+  tab.forward = browserButton('forward', 'browser.forward', 'M6 3.5 10.5 8 6 12.5')
+  tab.reload = browserButton('reload', 'browser.reload', 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
   tab.address = document.createElement('input')
   tab.address.type = 'text'
   tab.address.className = 'browser-address'
   tab.address.dataset.browser = 'address'
   tab.address.setAttribute('aria-label', t('browser.address'))
   tab.address.placeholder = t('browser.addressPlaceholder')
+  tab.address.dataset.i18nAriaLabel = 'browser.address'
+  tab.address.dataset.i18nPlaceholder = 'browser.addressPlaceholder'
   tab.address.spellcheck = false
   tab.address.autocomplete = 'off'
   tab.address.setAttribute('autocapitalize', 'off')
@@ -13518,8 +13558,9 @@ function openBrowserTab(initialAddress) {
   const go = document.createElement('button')
   go.type = 'submit'
   go.dataset.browser = 'go'
-  go.textContent = 'Go'
-  tab.external = browserButton('external', 'Open in system browser', 'M9 3h4v4M13 3 7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5')
+  go.textContent = t('browser.go')
+  go.dataset.i18n = 'browser.go'
+  tab.external = browserButton('external', 'browser.external', 'M9 3h4v4M13 3 7.5 8.5M11.5 9.5V13h-8.5V4.5H6.5')
   bar.append(tab.back, tab.forward, tab.reload, tab.address, go, tab.external)
   tab.notice = document.createElement('p')
   tab.notice.className = 'browser-notice'
@@ -13531,6 +13572,7 @@ function openBrowserTab(initialAddress) {
   tab.start = document.createElement('p')
   tab.start.className = 'browser-start'
   tab.start.textContent = t('browser.start')
+  tab.start.dataset.i18n = 'browser.start'
   tab.view.append(tab.start)
   tab.panel.append(bar, tab.notice, tab.view)
 
@@ -13597,6 +13639,13 @@ function toggleRightSidebar() {
 }
 
 browserOpen.addEventListener('click', () => toggleRightSidebar())
+/**
+ * A language change (#80): `applyLocale` has already said every marked control again; what a tab draws from its state —
+ * its notice and the name of a tab with no page yet — is drawn again here, so an open refusal reads in the new language.
+ */
+window.addEventListener('heddle:locale', () => {
+  for (const tab of sidebarTabs) renderBrowserTab(tab)
+})
 document.getElementById('rs-new').addEventListener('click', () => openBrowserTab())
 document.getElementById('rs-close').addEventListener('click', () => {
   showRightSidebar(false)
