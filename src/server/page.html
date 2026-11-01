@@ -4520,6 +4520,29 @@ const MESSAGES = Object.freeze({
     'jobs.running': 'Running',
     'jobs.finished': 'Finished {count}',
     'jobs.clear': 'Clear',
+    'jobs.count.live.one': '{count} background job running',
+    'jobs.count.live.other': '{count} background jobs running',
+    'jobs.count.idle.one': '{count} background job',
+    'jobs.count.idle.other': '{count} background jobs',
+    'jobs.status.running': 'running',
+    'jobs.status.stopping': 'stopping',
+    'jobs.status.completed': 'completed',
+    'jobs.status.failed': 'failed',
+    'jobs.status.killed': 'cancelled',
+    'jobs.duration.hours': '{hours}h {minutes}m',
+    'jobs.duration.minutes': '{minutes}m {seconds}s',
+    'jobs.duration.seconds': '{seconds}s',
+    'jobs.duration.live': 'Running for {duration}',
+    'jobs.duration.done': 'Took {duration}',
+    'jobs.row.expand': 'Show live output of {label}',
+    'jobs.row.collapse': 'Hide live output of {label}',
+    'jobs.kill.stop': 'Stop task {label}',
+    'jobs.kill.confirm': 'Click again to confirm',
+    'jobs.kill.failed': 'Stop failed',
+    'jobs.kill.confirmAction': 'Confirm stop',
+    'jobs.output.empty': '(no output)',
+    'jobs.output.gap': '… earlier output dropped …',
+    'jobs.output.error': 'live output stream interrupted: {error}',
     'dialog.noFolders': 'No folders here',
     'browser.closeTab': 'Close tab',
     'browser.navigation': 'Browser navigation',
@@ -5102,6 +5125,29 @@ const MESSAGES = Object.freeze({
     'jobs.running': '进行中',
     'jobs.finished': '已结束 {count}',
     'jobs.clear': '清空',
+    'jobs.count.live.one': '{count} 个后台任务运行中',
+    'jobs.count.live.other': '{count} 个后台任务运行中',
+    'jobs.count.idle.one': '{count} 个后台任务',
+    'jobs.count.idle.other': '{count} 个后台任务',
+    'jobs.status.running': '运行中',
+    'jobs.status.stopping': '正在停止',
+    'jobs.status.completed': '已完成',
+    'jobs.status.failed': '已失败',
+    'jobs.status.killed': '已取消',
+    'jobs.duration.hours': '{hours}小时{minutes}分',
+    'jobs.duration.minutes': '{minutes}分{seconds}秒',
+    'jobs.duration.seconds': '{seconds}秒',
+    'jobs.duration.live': '已运行 {duration}',
+    'jobs.duration.done': '耗时 {duration}',
+    'jobs.row.expand': '展开 {label} 的实时输出',
+    'jobs.row.collapse': '收起 {label} 的实时输出',
+    'jobs.kill.stop': '停止任务 {label}',
+    'jobs.kill.confirm': '再次点击确认停止',
+    'jobs.kill.failed': '停止失败',
+    'jobs.kill.confirmAction': '确认停止',
+    'jobs.output.empty': '（无输出）',
+    'jobs.output.gap': '……较早的输出已丢弃……',
+    'jobs.output.error': '实时输出流中断：{error}',
     'dialog.noFolders': '这里没有文件夹',
     'browser.closeTab': '关闭标签页',
     'browser.navigation': '浏览器导航',
@@ -21650,10 +21696,9 @@ function jobDotState(status) {
   if (status === 'failed') return 'error'
   return 'warning'
 }
-/** DSH's English status words (:583-587). */
+/** DSH's status words (:583-587) in the page language (#80): `status.*`, 运行中 / 正在停止 / 已完成 / 已失败 / 已取消; an unknown one as sent. */
 function jobStatusWord(status) {
-  if (status === 'killed') return 'cancelled'
-  return status === 'running' || status === 'stopping' || status === 'completed' || status === 'failed' ? status : String(status)
+  return ['running', 'stopping', 'completed', 'failed', 'killed'].includes(status) ? t(`jobs.status.${status}`) : String(status)
 }
 /** At most two adjacent units, hours the widest (:129-143, :588-590). */
 function formatJobDuration(elapsedMs) {
@@ -21661,9 +21706,10 @@ function formatJobDuration(elapsedMs) {
   const seconds = total % 60
   const minutes = Math.floor(total / 60) % 60
   const hours = Math.floor(total / 3600)
-  if (hours > 0) return `${hours}h ${minutes}m`
-  if (minutes > 0) return `${minutes}m ${seconds}s`
-  return `${seconds}s`
+  /** DSH's `duration.*` in the page language (#80): `{hours}h {minutes}m` / {hours}小时{minutes}分, and so on. */
+  if (hours > 0) return t('jobs.duration.hours', { hours, minutes })
+  if (minutes > 0) return t('jobs.duration.minutes', { minutes, seconds })
+  return t('jobs.duration.seconds', { seconds })
 }
 /** Live rows first by start, then settled rows newest first, ties by start (:172-180). */
 function jobsOrdered(jobs) {
@@ -21677,8 +21723,9 @@ function jobsOrdered(jobs) {
 }
 /** The trigger's text and name (:408, :569-572). */
 function jobsCountLabel(liveCount, visibleCount) {
-  if (liveCount > 0) return `${liveCount} background ${liveCount === 1 ? 'job' : 'jobs'} running`
-  return `${visibleCount} background ${visibleCount === 1 ? 'job' : 'jobs'}`
+  /** DSH's `count.live.*` / `count.idle.*` in the page language (#80). */
+  if (liveCount > 0) return t(liveCount === 1 ? 'jobs.count.live.one' : 'jobs.count.live.other', { count: liveCount })
+  return t(visibleCount === 1 ? 'jobs.count.idle.one' : 'jobs.count.idle.other', { count: visibleCount })
 }
 
 function jobsIcon(kind, size = 12) {
@@ -21788,6 +21835,9 @@ async function refreshJobs() {
   if (rows !== null) jobsUi.rows = rows
   renderJobs()
 }
+
+/** A language change redraws the control: the trigger's count, and the open list's rows, statuses and actions (#80). */
+window.addEventListener('heddle:locale', () => renderJobs())
 
 function renderJobs() {
   const host = document.getElementById('session-jobs')
@@ -21958,7 +22008,7 @@ function jobsItem(job) {
     row.type = 'button'
     row.dataset.jobsFocus = `row:${job.id}`
     row.setAttribute('aria-expanded', String(expanded))
-    row.setAttribute('aria-label', `${expanded ? 'Hide' : 'Show'} live output of ${job.label}`)
+    row.setAttribute('aria-label', t(expanded ? 'jobs.row.collapse' : 'jobs.row.expand', { label: job.label }))
     row.addEventListener('click', () => {
       jobsUi.expandedKey = jobsUi.expandedKey === job.id ? undefined : job.id
       renderJobs()
@@ -21973,7 +22023,7 @@ function jobsItem(job) {
   line.append(row)
   if (job.status === 'running') {
     const state = jobsUi.kill?.key === job.id ? jobsUi.kill.state : 'idle'
-    const title = state === 'armed' ? 'Click again to confirm' : state === 'failed' ? 'Stop failed' : `Stop task ${job.label}`
+    const title = state === 'armed' ? t('jobs.kill.confirm') : state === 'failed' ? t('jobs.kill.failed') : t('jobs.kill.stop', { label: job.label })
     const stop = document.createElement('button')
     stop.type = 'button'
     stop.className = 'jobs-stop'
@@ -21983,7 +22033,7 @@ function jobsItem(job) {
     stop.setAttribute('aria-label', title)
     stop.title = title
     stop.append(jobsIcon('stop', 10))
-    if (state === 'armed') stop.append(jobsSpan('jobs-stop-label', 'Confirm stop'))
+    if (state === 'armed') stop.append(jobsSpan('jobs-stop-label', t('jobs.kill.confirmAction')))
     stop.addEventListener('click', () => jobsPressKill(job))
     line.append(stop)
   }
@@ -22003,7 +22053,7 @@ function jobsItem(job) {
     output.className = 'jobs-term-output'
     if (view.text.length === 0) {
       output.dataset.empty = ''
-      output.textContent = '(no output)'
+      output.textContent = t('jobs.output.empty')
     } else output.textContent = view.text
     terminal.append(command, output)
     panel.append(terminal)
@@ -22017,7 +22067,7 @@ function jobsPaintDuration(cell, job) {
   const live = jobIsLive(job)
   const text = formatJobDuration(live ? jobsUi.now - job.startedAt : (job.finishedAt ?? job.startedAt) - job.startedAt)
   cell.textContent = text
-  cell.title = `${live ? 'Running for' : 'Took'} ${text}`
+  cell.title = t(live ? 'jobs.duration.live' : 'jobs.duration.done', { duration: text })
 }
 
 function jobsPaintDurations() {
@@ -22055,8 +22105,8 @@ function jobsPaintNotices(panel, view) {
     return line
   }
   const notices = []
-  if (view.gapBefore) notices.push(notice('gap', '… earlier output dropped …'))
-  if (view.error !== undefined) notices.push(notice('error', `live output stream interrupted: ${view.error}`))
+  if (view.gapBefore) notices.push(notice('gap', t('jobs.output.gap')))
+  if (view.error !== undefined) notices.push(notice('error', t('jobs.output.error', { error: view.error })))
   panel.prepend(...notices)
 }
 
