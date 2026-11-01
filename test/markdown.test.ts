@@ -385,15 +385,14 @@ test('a text the parser cannot render is shown as its own escaped words, not as 
 })
 
 
-test('footnotes render numbered references, cited definitions and one backref per occurrence', () => {
+test('footnotes render plain numbered superscripts, cited definitions and one return marker per occurrence', () => {
   const html = renderMarkdown('first[^Note] then[^b] again[^note].\n\n[^b]: bee *text*.\n[^Note]: the note.\n[^unused]: never cited.')
-  assert.match(html, /href="#fn-note" id="fnref-note"[^>]*>1<\/a>/)
-  assert.match(html, /href="#fn-b" id="fnref-b"[^>]*>2<\/a>/)
-  assert.match(html, /id="fnref-note-2"[^>]*>1<\/a>/)
-  assert.ok(html.indexOf('<li id="fn-note">') < html.indexOf('<li id="fn-b">'))
+  assert.match(html, /first<sup>1<\/sup> then<sup>2<\/sup> again<sup>1<\/sup>/)
+  assert.ok(html.indexOf('the note.') < html.indexOf('bee <em>text</em>'))
   assert.match(html, /<section class="footnotes">/)
-  assert.match(html, /bee <em>text<\/em>/)
-  assert.match(html, /href="#fnref-note-2" class="footnote-backref"[^>]*>↩2<\/a>/)
+  assert.match(html, /the note\. ↩ ↩<\/p>/)
+  assert.match(html, /bee <em>text<\/em>\. ↩<\/p>/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
   assert.doesNotMatch(html, /never cited|\[\^Note\]:/)
   assert.equal(renderMarkdown('missing[^x] here.'), '<p>missing[^x] here.</p>\n')
   assert.equal(renderMarkdown('no notes at all'), '<p>no notes at all</p>\n')
@@ -412,70 +411,88 @@ test('footnotes respect code, escapes, ordinary reference links and per-document
   const html = renderMarkdown('`[^n]` \\[^n] real[^n] [link][r].\n\n```text\n[^fake]: code\n```\n\n[^n]: [link][r].\n\n[r]: https://example.com')
   assert.match(html, /<code>\[\^n\]<\/code>/)
   assert.match(html, /\[\^fake\]: code/)
-  assert.equal((html.match(/id="fnref-n"/g) ?? []).length, 1)
+  assert.equal((html.match(/<sup>1<\/sup>/g) ?? []).length, 1)
   assert.equal((html.match(/href="https:\/\/example.com"/g) ?? []).length, 2)
   assert.equal(renderInline('alone[^n]'), 'alone[^n]')
   assert.equal(renderMarkdown('alone[^n]'), '<p>alone[^n]</p>\n')
-  assert.doesNotMatch(renderMarkdown('[label[^n]](https://example.com)\n\n[^n]: note'), /fnref-/, 'no nested anchor in link text')
+  assert.doesNotMatch(renderMarkdown('[label[^n]](https://example.com)\n\n[^n]: note'), /<sup>/, 'a footnote inside link text stays literal')
 })
 
 test('footnote bodies and hostile labels pass the existing output and URL policies', () => {
   const html = renderMarkdown('x[^a"&<>] x[^a-2] x[^a] x[^a].\n\n[^a"&<>]: inline <script>alert(1)</script> [bad](javascript:alert(1)) ![remote](https://tracker.example/x)\n[^a-2]: other\n[^a]: okay', { base: '/w' })
   assert.doesNotMatch(html, /<script|href="javascript:|src="https:|onerror=/)
   assert.match(html, /link refused/)
-  const ids = [...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1])
-  assert.equal(new Set(ids).size, ids.length, 'encoded label punctuation cannot collide with repeat suffixes')
-  for (const href of followed(html).filter((url) => url.startsWith('#'))) assert.ok(ids.includes(href.slice(1)), href)
+  assert.equal((html.match(/<sup>\d+<\/sup>/g) ?? []).length, 4)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  assert.match(html, /other/)
+  assert.match(html, /okay ↩ ↩/)
+
 })
 
-test('footnote lone UTF-16 surrogates from JSON retain ordinary prose and safe distinct references', () => {
+test('footnote lone UTF-16 surrogates from JSON retain ordinary prose and distinct definitions and plain references', () => {
   const labels = ['\ud800', '\udc00', '\ud800\ud800', 'x\ud800', '\ud800x', '_ud800', '_udc00', '\ufffd', '\ud800\udc00']
   const source = `normal **prose** ${labels.map((label) => `ref[^${label}] again[^${label}]`).join(' ')}.\n\n`
     + labels.map((label, index) => `[^${label}]: definition ${index}.`).join('\n')
     + '\n\nfollowing *prose*.'
   const html = renderMarkdown(JSON.parse(JSON.stringify({ source })).source as string)
-  assert.match(html, /^<p>normal <strong>prose<\/strong> ref<a /)
+  assert.match(html, /^<p>normal <strong>prose<\/strong> ref<sup>1<\/sup>/)
   assert.match(html, /<p>following <em>prose<\/em>\.<\/p>/)
   assert.doesNotMatch(html, /unrendered|\[\^/)
-  const ids = [...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1] ?? '')
-  assert.equal(ids.length, labels.length * 3, 'two references and one definition per label')
-  assert.equal(new Set(ids).size, ids.length, 'lone units, pairs, replacement characters and literal escape spellings differ')
-  for (const id of ids) assert.match(id, /^fn(?:ref)?-[A-Za-z0-9_]+(?:-2)?$/, 'IDs contain only safe ASCII')
-  for (const href of followed(html)) {
-    assert.ok(href.startsWith('#') && ids.includes(href.slice(1)), 'every citation and backref targets an existing ID')
+  assert.equal((html.match(/<sup>\d+<\/sup>/g) ?? []).length, labels.length * 2)
+  assert.equal((html.match(/<li>/g) ?? []).length, labels.length, 'malformed code units and literal escape spellings remain distinct definitions')
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  for (let index = 0; index < labels.length; index += 1) {
+    assert.ok(html.includes(`definition ${index}. ↩ ↩`))
+    assert.equal((html.match(new RegExp(`<sup>${index + 1}</sup>`, 'g')) ?? []).length, 2)
   }
-  for (let index = 0; index < labels.length; index += 1) assert.ok(html.includes(`definition ${index}.`))
-  assert.match(html, /id="fn-_uD800"/)
-  assert.match(html, /id="fn-_uDC00"/)
   assert.equal(renderMarkdown('ordinary **prose** afterwards'), '<p>ordinary <strong>prose</strong> afterwards</p>\n')
 })
 
-test('footnote valid IDs stay stable without ambiguous underscores or repeated-reference collisions', () => {
-  const cases = [
-    ['Note', 'note'], ['é', '_C3_A9'], ['😀', '_F0_9F_98_80'], ['a', 'a'], ['a-2', 'a_2D2'],
-    ['a_2', 'a_5F2'], ['%', '_25'], ['_25', '_5F25'], ['-', '_2D'], ['_2d', '_5F2d'],
-    ['_ud800', '_5Fud800'], ['_uD800', '_5Fud800'], ['!', '_21'], ['~', '_7E'],
-  ] as const
-  for (const [label, id] of cases) {
-    const html = renderMarkdown(`normal prose ref[^${label}] again[^${label}].\n\n[^${label}]: definition.`)
-    assert.ok(html.includes(`href="#fn-${id}" id="fnref-${id}"`), label)
-    assert.ok(html.includes(`id="fnref-${id}-2"`), label)
-    assert.ok(html.includes(`<li id="fn-${id}">`), label)
-  }
-  const labels = ['a', 'a-2', 'a_2', '%', '_25', '-', '_2d']
+test('footnote punctuation and Unicode labels preserve numbering and repeated plain references', () => {
+  const labels = ['Note', 'é', '😀', 'a', 'a-2', 'a_2', '%', '_25', '-', '_2d', '_ud800', '!', '~']
   const html = renderMarkdown(labels.map((label) => `x[^${label}] x[^${label}]`).join(' ')
-    + '\n\n' + labels.map((label) => `[^${label}]: note.`).join('\n'))
-  const ids = [...html.matchAll(/ id="([^"]*)"/g)].map((match) => match[1])
-  assert.equal(ids.length, labels.length * 3)
-  assert.equal(new Set(ids).size, ids.length, 'underscore escape spellings and -2 labels cannot alias generated suffixes')
-  for (const href of followed(html)) assert.ok(ids.includes(href.slice(1)), href)
+    + '\n\n' + labels.map((label, index) => `[^${label}]: note ${index}.`).join('\n'))
+  assert.equal((html.match(/<li>/g) ?? []).length, labels.length)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b|unrendered|\[\^/)
+  for (let index = 0; index < labels.length; index += 1) {
+    assert.equal((html.match(new RegExp(`<sup>${index + 1}</sup>`, 'g')) ?? []).length, 2)
+    assert.ok(html.includes(`note ${index}. ↩ ↩`))
+  }
+})
+
+// Actual renderer outputs, not a synthetic postpass fixture: the former fn-n/fnref-n anchors collide here.
+test('two concatenated answers have plain footnotes without duplicate generated IDs or cross-answer click targets', () => {
+  const answers = ['Alpha', 'Beta'].map((name) => renderMarkdown(`${name}[^n] again[^n].\n\n[^n]: ${name} **note**.\n\n    - ${name} item`))
+  const html = answers.join('')
+  assert.equal((html.match(/<section class="footnotes">/g) ?? []).length, 2)
+  assert.equal((html.match(/<sup>1<\/sup>/g) ?? []).length, 4)
+  assert.equal((html.match(/↩/g) ?? []).length, 4)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  for (const name of ['Alpha', 'Beta']) {
+    assert.match(html, new RegExp(`${name} <strong>note</strong>`))
+    assert.match(html, new RegExp(`<li>${name} item</li>`))
+  }
+})
+
+test('plain footnote postpass preserves unrelated links and IDs even when author markup imitates generated footnotes', () => {
+  const raw = '<sup class="footnote-ref"><a href="#fn-n" id="fnref-n" data-footnote-ref>7</a></sup>'
+  const html = renderMarkdown(`claim[^n] [ordinary](#fn-n).\n\n${raw}\n\n<section class="footnotes" data-footnotes><ol><li id="fn-author">author <a href="#fnref-n" class="footnote-backref" data-footnote-backref>↩</a></li></ol></section>\n\n[^n]: [safe](https://example.com) <span id="fn-body">body</span> [fragment](#fn-body).`)
+  assert.match(html, /claim<sup>1<\/sup>/)
+  assert.match(html, /<sup class="footnote-ref"><a href="#fn-n" id="fnref-n"[^>]*>7<\/a><\/sup>/)
+  assert.match(html, /<li id="fn-author">/)
+  assert.match(html, /href="#fnref-n" class="footnote-backref"/)
+  assert.match(html, /href="#fn-n"[^>]*>ordinary<\/a>/)
+  assert.match(html, /href="https:\/\/example.com"/)
+  assert.match(html, /<span id="fn-body">body<\/span>/)
+  assert.match(html, /href="#fn-body"[^>]*>fragment<\/a>/)
 })
 
 test('footnote references inside notes, including cycles, terminate with complete backrefs', () => {
   const html = renderMarkdown('x[^a].\n\n[^a]: a[^b] self[^a].\n[^b]: b[^a].')
-  assert.equal((html.match(/<li id="fn-/g) ?? []).length, 2)
-  assert.match(html, /href="#fnref-a-3" class="footnote-backref"/)
-  assert.match(html, /href="#fnref-b" class="footnote-backref"/)
+  assert.equal((html.match(/<li>/g) ?? []).length, 2)
+  assert.equal((html.match(/↩/g) ?? []).length, 4)
+  assert.match(html, /↩ ↩ ↩/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
   const hostile = `x[^n]\n\n[^n]: ${'*a '.repeat(2000)}<b>x</b>${' a*'.repeat(2000)}`
   assert.equal(renderMarkdown(hostile), `<pre class="unrendered"><code>${escapeHtml(hostile)}</code></pre>`)
 })

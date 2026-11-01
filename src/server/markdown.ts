@@ -342,8 +342,8 @@ marked.use({
 /**
  * Narrow footnote support for issue #43. Installed marked has extension hooks but no footnote grammar.
  * DSH collects the first case-insensitive definition, numbers citations in encounter order and renders note
- * block children. Rust already enables comrak footnotes. Keep that semantic contract, with Rust-style reference
- * and backref anchors; this is not exact DSH DOM parity (DSH uses plain superscripts and return glyphs).
+ * block children. Match DSH's plain <sup>number</sup> citations and plain ↩ return markers: neither is a link
+ * or an ID target. Generated placeholders are resolved before sanitizing, never by stripping author links/IDs.
  * The whole document still passes the existing byte/marker budget, nesting bound and output sanitizer.
  */
 interface FootnoteState {
@@ -359,23 +359,19 @@ function freshFootnotes(): FootnoteState {
 let footnotes = freshFootnotes()
 const FOOTNOTE_LABEL = /^\[\^([^\]\s]+)\]/
 const FOOTNOTE_DEFINITION = /^ {0,3}\[\^([^\]\s]+)\]:[ \t]*([^\n]*)(?:\n|$)/
-/**
- * Keep existing UTF-8 IDs for well-formed labels, including escaped punctuation so -2 cannot alias a repeat suffix.
- * JSON can carry lone UTF-16 surrogates, which encodeURIComponent rejects. Encode those code units as _uXXXX:
- * UTF-8 byte escapes start with two hex digits, and literal underscores escape to _5F, so this is disjoint and
- * injective over the case-normalized label's UTF-16 code units (without replacing malformed units with U+FFFD).
- */
-function footnoteId(key: string): string {
-  let id = ''
-  for (const character of key) {
-    const unit = character.charCodeAt(0)
-    if (character.length === 1 && unit >= 0xD800 && unit <= 0xDFFF) {
-      id += `_u${unit.toString(16).toUpperCase()}`
-    } else {
-      id += encodeURIComponent(character).replace(/[-_!'()*~]/g, (punctuation) => `%${punctuation.charCodeAt(0).toString(16).toUpperCase()}`).replace(/%/g, '_')
-    }
-  }
-  return id
+/** Only renderer-generated placeholders are changed by the postpass; the prefix is absent from source. */
+let footnoteMarker = '\0heddle-footnote:'
+let footnoteMarkup: string[] = []
+function generatedFootnote(markup: string): string {
+  const index = footnoteMarkup.push(markup) - 1
+  return `${footnoteMarker}${index}\0`
+}
+function plainFootnotes(html: string): string {
+  return html.split(footnoteMarker).map((part, index) => {
+    if (index === 0) return part
+    const marker = /^(\d+)\0/.exec(part)
+    return marker === null ? part : (footnoteMarkup[Number(marker[1])] ?? '') + part.slice(marker[0].length)
+  }).join('')
 }
 marked.use({
   extensions: [
@@ -437,8 +433,7 @@ marked.use({
         if (!footnotes.numbers.has(key)) footnotes.numbers.set(key, footnotes.numbers.size + 1)
         const count = (footnotes.references.get(key) ?? 0) + 1
         footnotes.references.set(key, count)
-        const label = footnoteId(key)
-        return `<a href="#fn-${label}" id="fnref-${label}${count === 1 ? '' : `-${count}`}" rel="noreferrer noopener">${footnotes.numbers.get(key)}</a>`
+        return generatedFootnote(`<sup>${footnotes.numbers.get(key)}</sup>`)
       },
     },
   ],
@@ -452,12 +447,9 @@ function footnoteSection(): string {
   }
   if (bodies.size === 0) return ''
   const items = [...bodies].map(([key, body]) => {
-    const label = footnoteId(key)
-    const back = Array.from({ length: footnotes.references.get(key) ?? 1 }, (_, index) =>
-      `<a href="#fnref-${label}${index === 0 ? '' : `-${index + 1}`}" class="footnote-backref" rel="noreferrer noopener">↩${index === 0 ? '' : index + 1}</a>`,
-    ).join(' ')
+    const back = Array.from({ length: footnotes.references.get(key) ?? 1 }, () => generatedFootnote('↩')).join(' ')
     const content = /<\/p>\n$/.test(body) ? body.replace(/<\/p>\n$/, ` ${back}</p>\n`) : `${body}${back}\n`
-    return `<li id="fn-${label}">\n${content}</li>`
+    return `<li>\n${content}</li>`
   })
   return `<section class="footnotes">\n<ol>\n${items.join('\n')}\n</ol>\n</section>\n`
 }
@@ -551,13 +543,18 @@ export function renderMarkdown(source: string, options: { readonly base?: string
       : `<section class="frontmatter"><h2>frontmatter</h2><pre><code>${escapeHtml((front[1] ?? '').trim())}</code></pre></section>\n`
   let parsed: string
   footnotes = freshFootnotes()
+  footnoteMarkup = []
+  footnoteMarker = '\0heddle-footnote:'
+  while (body.includes(footnoteMarker)) footnoteMarker += '\0'
   try {
     parsed = marked.parse(escapeLeadingUnderscores(boundNesting(body))) as string
     parsed += footnoteSection()
+    parsed = plainFootnotes(parsed)
   } catch {
     return unrendered(text)
   } finally {
     footnotes = freshFootnotes()
+    footnoteMarkup = []
   }
   return sanitizeHtml(frontHtml + parsed, {
     /**

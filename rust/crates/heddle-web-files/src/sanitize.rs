@@ -44,6 +44,7 @@ pub(crate) const ALLOWED_ELEMENTS: &[&str] = &[
     "section",
     "span",
     "strong",
+    "sup",
     "table",
     "tbody",
     "td",

@@ -118,8 +118,7 @@ async function withFileServer(check) {
   }
 }
 
-// Inspect only the small generated HTML fixture. No hard-coded footnote ids,
-// wrapper tags, classes, aria roles, superscripts or return glyphs are required.
+// DSH policy: actual numeric superscripts and plain return markers, never generated click targets.
 function attributes(tag) {
   const result = {}
   for (const match of tag.matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) result[match[1].toLowerCase()] = match[2] ?? match[3]
@@ -140,21 +139,18 @@ function assertRenderedNotes(html) {
     ...attributes(match[1]), text: match[2].replace(/<[^>]*>/g, '').trim(), index: match.index,
   }))
   assert.ok(anchors.some((a) => a.href === 'https://example.com/footnote' && a.text === 'safe note link'), 'safe note URL remains a link')
-  const references = anchors.filter((a) => /^\d+$/.test(a.text) && a.href?.startsWith('#'))
-  assert.equal(references.length, 2, 'two visible numeric citations')
-  assert.equal(references[0].text, references[1].text, 'repeated citation has the same note number')
-  assert.equal(references[0].href, references[1].href, 'both citations reach the same note')
-  assert.ok(references.every((a) => a.index < html.indexOf('Footnote first paragraph')), 'citations remain in the document body before the note')
-  const ids = [...html.matchAll(/<[a-z][^>]*>/gi)].map((match) => attributes(match[0]).id).filter(Boolean)
-  assert.ok(ids.includes(references[0].href.slice(1)), 'citation target exists')
-  assert.equal(new Set(references.map((a) => a.id)).size, 2, 'citations have distinct return targets')
-  for (const reference of references) {
-    assert.ok(reference.id && ids.includes(reference.id), 'each return target exists')
-    assert.ok(anchors.some((a) => a.href === `#${reference.id}` && a.text.length > 0), 'readable backreference returns to each citation via a safe fragment URL')
-  }
+  const references = [...html.matchAll(/<sup>(\d+)<\/sup>/g)]
+  assert.equal(references.length, 2, 'two visible plain numeric citations')
+  assert.equal(references[0][1], references[1][1], 'repeated citation has the same note number')
+  assert.ok(references.every((match) => match.index < html.indexOf('Footnote first paragraph')), 'citations precede their note')
+  const section = html.match(/<section class="footnotes">([\s\S]*?)<\/section>/)?.[1]
+  assert.ok(section?.includes('Footnote first paragraph'), 'definition remains in the footnote section')
+  assert.equal((section.match(/↩/g) ?? []).length, 2, 'one plain return marker per occurrence')
+  assert.doesNotMatch(html, /\bid="fn(?:ref)?-|\bhref="#fn(?:ref)?-/, 'no generated footnote IDs or click hrefs')
+
 }
 
-test('functional footnotes render repeated citations, note blocks and safe backreferences through /api/file', { timeout: 60_000 }, async () => {
+test('functional footnotes render repeated citations, note blocks and plain return markers through /api/file', { timeout: 60_000 }, async () => {
   await withFileServer(async ({ html }) => assertRenderedNotes(html))
 })
 
@@ -182,7 +178,8 @@ test('functional footnotes appear in the actual File panel without active javasc
           visible: visible(body), text: body.textContent,
           strong: [...body.querySelectorAll('strong')].some(x => x.textContent === 'bold note words' && visible(x)),
           list: [...body.querySelectorAll('ul')].some(x => x.textContent.includes('Footnote list item one') && x.textContent.includes('Footnote list item two') && visible(x)),
-          references: links.filter(x => /^\\d+$/.test(x.textContent.trim()) && x.getAttribute('href')?.startsWith('#') && visible(x)).length,
+          references: [...body.querySelectorAll('sup')].filter(x => /^\\d+$/.test(x.textContent.trim()) && !x.querySelector('a') && visible(x)).length,
+          footnoteTargets: body.querySelectorAll('[id^="fn-"],[id^="fnref-"],a[href^="#fn-"],a[href^="#fnref-"]').length,
           unsafe: links.some(x => x.protocol === 'javascript:'),
           activeMarkup: !!body.querySelector('script,[onclick],[onerror],[onload]'),
           ran: window.__footnoteUnsafe === 1,
@@ -193,6 +190,7 @@ test('functional footnotes appear in the actual File panel without active javasc
       assert.equal(panel.text.split('Footnote first paragraph').length - 1, 1)
       assert.match(panel.text, /Footnote second paragraph/)
       assert.equal(panel.references, 2)
+      assert.equal(panel.footnoteTargets, 0, 'plain citations cannot jump to another answer')
       assert.ok(panel.strong, 'note emphasis is visible as strong text')
       assert.ok(panel.list, 'note list is visible')
       assert.equal(panel.unsafe, false, 'no active javascript link in the panel DOM')

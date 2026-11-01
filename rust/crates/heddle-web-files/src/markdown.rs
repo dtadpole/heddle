@@ -632,17 +632,10 @@ mod tests {
     #[test]
     fn a_footnote_is_a_reference_and_its_definition() {
         let html = render("A claim[^1].\n\n[^1]: the source\n");
-        assert!(
-            html.contains("href=\"#fn-1\""),
-            "a numbered reference: {html}"
-        );
-        assert!(html.contains("id=\"fnref-1\""), "a return target: {html}");
-        assert!(
-            html.contains("class=\"footnotes\""),
-            "a notes section: {html}"
-        );
-        assert!(html.contains("id=\"fn-1\""), "a note target: {html}");
-        assert!(html.contains("href=\"#fnref-1\""), "a backref: {html}");
+        assert!(html.contains("<sup>1</sup>"), "plain numbered reference: {html}");
+        assert!(html.contains("class=\"footnotes\""), "notes section: {html}");
+        assert!(html.contains("↩"), "plain return marker: {html}");
+        assert!(!html.contains("href=") && !html.contains("id="), "no generated click targets: {html}");
         assert!(html.contains("the source"), "{html}");
         assert!(!html.contains("[^1]"), "not literal markdown: {html}");
     }
@@ -652,18 +645,46 @@ mod tests {
         let html = render(
             "claim[^n] again[^n].\n\n[^n]: first *paragraph*.\n\n    second **paragraph** with [bad](javascript:alert(1)).\n\nfollowing prose.",
         );
-        assert!(
-            html.contains("id=\"fnref-n-2\""),
-            "a repeat has its own target: {html}"
-        );
-        assert!(
-            html.contains("href=\"#fnref-n-2\""),
-            "a repeat has a backref: {html}"
-        );
+        assert_eq!(html.matches("<sup>1</sup>").count(), 2, "same number for repeats: {html}");
+        assert_eq!(html.matches('↩').count(), 2, "one plain return per occurrence: {html}");
+        assert!(!html.contains("href=\"#fn") && !html.contains("id=\"fn"), "no generated targets: {html}");
         assert!(html.contains("<em>paragraph</em>"), "{html}");
         assert!(html.contains("<strong>paragraph</strong>"), "{html}");
         assert!(html.contains("following prose."), "{html}");
         assert!(!html.contains("href=\"javascript:"), "{html}");
+    }
+
+    #[test]
+    fn concatenated_answers_have_no_generated_footnote_ids_or_cross_answer_links() {
+        let html = ["Alpha", "Beta"].map(|name| render(&format!(
+            "{name}[^n] again[^n].\n\n[^n]: {name} **note**.\n\n    - {name} item"
+        ))).join("");
+        assert_eq!(html.matches("<section class=\"footnotes\">").count(), 2, "{html}");
+        assert_eq!(html.matches("<sup>1</sup>").count(), 4, "{html}");
+        assert_eq!(html.matches('↩').count(), 4, "{html}");
+        assert!(!html.contains("href=") && !html.contains("id="), "no generated targets: {html}");
+        for name in ["Alpha", "Beta"] {
+            assert!(html.contains(&format!("{name} <strong>note</strong>")), "{html}");
+            assert!(html.contains(&format!("<li>{name} item</li>")), "{html}");
+        }
+    }
+
+    #[test]
+    fn plain_footnotes_preserve_author_links_ids_and_semantic_lookalikes() {
+        let html = render(concat!(
+            "claim[^n] [ordinary](#fn-n).\n\n",
+            "<sup class=\"footnote-ref\"><a href=\"#fn-n\" id=\"fnref-n\" data-footnote-ref>7</a></sup>\n\n",
+            "<section class=\"footnotes\" data-footnotes><ol><li id=\"fn-author\">author <a href=\"#fnref-n\" class=\"footnote-backref\" data-footnote-backref>↩</a></li></ol></section>\n\n",
+            "[^n]: [safe](https://example.com) <span id=\"fn-body\">body</span> [fragment](#fn-body)."
+        ));
+        assert!(html.contains("claim<sup>1</sup>"), "{html}");
+        assert!(html.contains("id=\"fnref-n\""), "raw citation retained: {html}");
+        assert!(html.contains("id=\"fn-author\""), "raw definition retained: {html}");
+        assert!(html.contains("href=\"#fnref-n\""), "raw backref retained: {html}");
+        assert!(html.contains("href=\"#fn-n\""), "ordinary fragment retained: {html}");
+        assert!(html.contains("href=\"https://example.com\""), "note link retained: {html}");
+        assert!(html.contains("id=\"fn-body\""), "note body ID retained: {html}");
+        assert!(html.contains("href=\"#fn-body\""), "note body fragment retained: {html}");
     }
 
     #[test]
@@ -999,13 +1020,15 @@ fn render_markdown_here(source: &str, options: MarkdownOptions<'_>) -> String {
     let arena = comrak::Arena::new();
     let root = comrak::parse_document(&arena, &prepared, &comrak_options);
     rewrite_destinations(root, options.base, options.remote_images);
+    let raw_html = protect_raw_html(root, &prepared);
     let highlighter = FilesHighlighter;
     let mut plugins = comrak::Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(&highlighter);
     let mut bytes: Vec<u8> = Vec::new();
     // Writing into a byte vector cannot fail; a failure would leave the part already written, which is still HTML.
     let _ = comrak::html::format_document_with_plugins(root, &comrak_options, &mut bytes, &plugins);
-    let rendered = rewrite_anchors(&String::from_utf8_lossy(&bytes));
+    let rendered = plain_footnotes(&String::from_utf8_lossy(&bytes));
+    let rendered = rewrite_anchors(&restore_raw_html(rendered, &raw_html));
     let front_html = match front {
         Some(yaml) => format!(
             "<section class=\"frontmatter\"><h2>frontmatter</h2><pre><code>{}</code></pre></section>\n",
@@ -1038,7 +1061,13 @@ pub fn render_inline(text: &str) -> String {
 
 fn render_inline_here(text: &str) -> String {
     let prepared = escape_leading_underscores(&bound_nesting(text));
-    let rendered = comrak::markdown_to_html(&prepared, &comrak_options());
+    let options = comrak_options();
+    let arena = comrak::Arena::new();
+    let root = comrak::parse_document(&arena, &prepared, &options);
+    let raw_html = protect_raw_html(root, &prepared);
+    let mut bytes = Vec::new();
+    let _ = comrak::html::format_document(root, &options, &mut bytes);
+    let rendered = restore_raw_html(plain_footnotes(&String::from_utf8_lossy(&bytes)), &raw_html);
     let body = unwrap_paragraph(&rendered);
     // An inline span is never a document's preview: its images follow an answer's rule.
     let policy = |value: &str, site: UrlSite<'_>| {
@@ -1076,6 +1105,101 @@ fn comrak_options() -> comrak::Options<'static> {
     options.render.hardbreaks = false;
     options.render.github_pre_lang = false;
     options
+}
+
+/// Hide author HTML during the footnote-only postpass, even if it perfectly imitates comrak markup.
+/// The source-absent marker is restored before the ordinary link rewrite and sanitizer judge raw HTML.
+fn protect_raw_html<'a>(
+    root: &'a comrak::nodes::AstNode<'a>,
+    source: &str,
+) -> Vec<(String, String)> {
+    let mut prefix = "heddle-raw-footnote:".to_string();
+    while source.contains(&prefix) {
+        prefix.push(':');
+    }
+    let mut saved = Vec::new();
+    for node in root.descendants() {
+        // Image labels are rendered as escaped alt text, not HTML; hiding them would change that text.
+        if node.ancestors().any(|ancestor| {
+            matches!(ancestor.data.borrow().value, comrak::nodes::NodeValue::Image(_))
+        }) {
+            continue;
+        }
+        let mut data = node.data.borrow_mut();
+        let literal = match &mut data.value {
+            comrak::nodes::NodeValue::HtmlInline(literal) => literal,
+            comrak::nodes::NodeValue::HtmlBlock(block) => &mut block.literal,
+            _ => continue,
+        };
+        let marker = format!(
+            "<!--{prefix}{}-->{}",
+            saved.len(),
+            if literal.ends_with('\n') { "\n" } else { "" }
+        );
+        saved.push((marker.clone(), std::mem::replace(literal, marker)));
+    }
+    saved
+}
+
+fn restore_raw_html(mut html: String, saved: &[(String, String)]) -> String {
+    // Reverse order prevents a restored author's text from being mistaken for an earlier placeholder.
+    for (marker, literal) in saved.iter().rev() {
+        html = html.replace(marker, literal);
+    }
+    html
+}
+
+/// DSH policy: a plain superscript number, one plain ↩ per occurrence, and no generated href/id.
+/// Only comrak's semantic footnote markup is changed. Author HTML is protected by the caller; ordinary
+/// links/IDs (including fn-* spellings and links inside definitions) are not candidates.
+fn plain_footnotes(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut index = 0;
+    let mut in_notes = false;
+    while let Some(at) = html[index..].find('<').map(|offset| index + offset) {
+        out.push_str(&html[index..at]);
+        let Some(end) = tag_end(html, at) else {
+            out.push_str(&html[at..]);
+            return out;
+        };
+        let tag = &html[at..end];
+        if tag == "<section class=\"footnotes\" data-footnotes>" {
+            in_notes = true;
+            out.push_str("<section class=\"footnotes\">");
+        } else if in_notes && tag == "</section>" {
+            in_notes = false;
+            out.push_str(tag);
+        } else if in_notes && tag.starts_with("<li id=\"fn-") {
+            out.push_str("<li>");
+        } else if tag == "<sup class=\"footnote-ref\">" && html[end..].starts_with("<a ") {
+            // The numeric reference is the only comrak sup wrapping a semantic footnote-ref anchor.
+            if let Some(anchor_end) = tag_end(html, end) {
+                let anchor = &html[end..anchor_end];
+                if anchor.contains(" data-footnote-ref>") {
+                    if let Some(close) = html[anchor_end..].find("</a></sup>") {
+                        out.push_str("<sup>");
+                        out.push_str(&html[anchor_end..anchor_end + close]);
+                        out.push_str("</sup>");
+                        index = anchor_end + close + "</a></sup>".len();
+                        continue;
+                    }
+                }
+            }
+            out.push_str(tag);
+        } else if in_notes && tag.starts_with("<a ") && tag.contains(" data-footnote-backref ") {
+            if let Some(close) = html[end..].find("</a>") {
+                out.push('↩');
+                index = end + close + "</a>".len();
+                continue;
+            }
+            out.push_str(tag);
+        } else {
+            out.push_str(tag);
+        }
+        index = end;
+    }
+    out.push_str(&html[index..]);
+    out
 }
 
 /// The highlighter, as the code-fence plugin `comrak` calls.
