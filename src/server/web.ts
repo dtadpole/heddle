@@ -873,12 +873,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * "Weaving" row reconcile against. A page can miss the end of a turn (an error event, a reload mid-turn, a
      * dropped stream); without an authoritative answer that miss became a session that never stops looking active.
      */
+    /**
+     * A turn the route did not start counts too (issue #187): a background subagent's child, a teammate, a notice's
+     * or a goal round run on the agent runtime, and DSH's list says such a session is running — its tree counts a
+     * parent's running children from it (`dsh-client-ui-workspace` `runningChildCount`, "1 subagent running").
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
     const sessions = ctx.session.list().map((entry) => {
       const since = state.runningSince.get(entry.id)
       const completed = state.completedAt.get(entry.id)
       return {
         ...entry,
-        running: (state.running.get(entry.id) ?? 0) > 0,
+        running: (state.running.get(entry.id) ?? 0) > 0 || turns?.isRunning(entry.id) === true,
         ...(since !== undefined ? { runningSince: new Date(since).toISOString() } : {}),
         ...(completed !== undefined ? { turnCompletedAt: new Date(completed).toISOString() } : {}),
       }
