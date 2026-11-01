@@ -108,6 +108,8 @@ function harness(deferredCommands = false, clock?: FakeClock) {
     let looseTurnEvents = null;
     const LOOSE_EVENTS_LIMIT = 2000;
     function rememberSessionWorkspace() {}
+    /** C33: an open session's workspace is opened in the tree; this harness has no tree. */
+    async function openCurrentGroup() {}
     function adoptLooseQueue() {}
     function rememberWorkspace() {}
     function clearMain() { calls.push('clear-main') }
