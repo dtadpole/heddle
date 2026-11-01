@@ -99,6 +99,17 @@ with `reason: { kind: 'interrupted' }`. A session no live writer holds reads wit
 nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
 restart. A turn running in this process holds the lock already and is never closed.
 
+**A lock whose holder is gone never blocks the session** ([`writer-lock.ts`](writer-lock.ts), issue #202). The
+writer lock (`<id>.lock`) used to name only its holder's pid, and a later writer took it only when that pid was gone.
+After a crash the system may give the pid to another live process, or the lock may name pid 1 (`EPERM`), and every
+turn was refused for as long as that process lived. DSH's lock is a kernel `flock(2)`, which dies with its holder
+(dsh-session-persistence-jsonl lib/index.js:692-716); Node has none, so the lock records who its holder is, one line
+both builds write byte for byte: `<pid> boot=<boot id> start=<start>`. It is stale when its pid is gone, when it was
+written in another boot, when its pid now names a process that started at another time, when a pid-only lock (every
+build before #202) names a process that started after the lock was written, or when its pid's process is another
+user's than the file's. A live holder is refused in words that name the process and the lock file and say how to clear
+it; the Rust build (`writer_lock.rs`) says the same.
+
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns
 what belongs here and what to read next, which is the same duty every `INDEX.md` in

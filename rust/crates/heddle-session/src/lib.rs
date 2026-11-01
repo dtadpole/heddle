@@ -55,6 +55,10 @@ pub mod unicode61;
 /// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
 pub mod title_text;
 
+/// The session writer lock's protocol, shared with the TypeScript build (#202), reached by its path
+/// (`heddle_session::writer_lock`), not re-exported at the root.
+pub mod writer_lock;
+
 pub use activity::{
     ActivityEntry, ActivityItem, LineageMeta, RowActivity, activity_sessions, refusal_sentence,
     session_activity,

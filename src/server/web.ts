@@ -3216,7 +3216,12 @@ export function unknownTurnSession(
       try {
         ctx.session.store.append(handle, { type: 'turn/failed', message: (error as Error).message })
       } catch (recordError) {
-        ctx.logger.warn('web: the failed turn could not be recorded — %s', (recordError as Error).message)
+        /**
+         * The server's own line, in the Rust build's words (`record_turn_failure`): a refused turn — a session another
+         * process holds (#202) — cannot record its failure either, and a `warn` record reaches no output at the default
+         * logger level, so the server said nothing at all.
+         */
+        process.stderr.write(`heddle web: the failed turn could not be recorded: ${(recordError as Error).message}\n`)
       }
     }
   } finally {

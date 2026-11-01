@@ -24,6 +24,23 @@ grounded_in:
 - **Meta and definition bytes.** `JSON.stringify(v, null, 2)` + `\n`; an edit keeps every untouched key
   where it was and appends a new one, as the TypeScript spread does.
 - **Directory order.** Entries are visited in byte order, which is what Node's `readdirSync` returns.
+- **Writer lock** (#202, `src/writer_lock.rs`, `src/session/writer-lock.ts`). `<id>.lock` beside the log
+  (`session.lock` in an old-layout directory), created with `O_EXCL`, one line:
+  `<pid> boot=<boot id> start=<start>\n`, e.g. `46183 boot=A16D6C9D-EDEC-4146-9050-6215AF208215 start=1793563380\n`.
+  `boot` is `/proc/sys/kernel/random/boot_id` (Linux) or `kern.bootsessionuuid` (macOS); `start` is field 22
+  of `/proc/<pid>/stat` (Linux, clock ticks after boot) or the `ps -o lstart` second under `LC_ALL=C TZ=UTC0`
+  as seconds since 1970 (macOS). A writer that cannot read its own start writes the pid-only form, and one
+  that cannot read the boot leaves `boot` out; a reader ignores parts it does not know. A lock with identity gets the modification time 2037-12-31T00:00:00Z, which a build from before
+  #202 reads as a lock still being written, so it refuses rather than removing it. A pid-only line,
+  `<pid>\n`, is what every build before #202 wrote. A lock is **stale**, and taken over, when its pid names
+  no process, when its boot is not this boot, when its pid's process started at another time than it
+  records, when (pid-only) its pid's process started more than 5 s after the file's modification time, or
+  when its pid's process runs as another user than the file's owner (pid 1, `EPERM`); a fact that cannot be
+  read never makes it stale. A live holder's refusal is word for word in both builds:
+  `session "<id>" is already owned by an active write handle (process <pid>, <name>). Its lock file is
+  <id>.lock, beside the session's log; if process <pid> is not heddle, delete that file and try again.`
+  `test/session-lock.fixtures.json` holds the lines both suites read. One machine and one pid namespace,
+  as before: a pid names a process on the machine that wrote it.
 
 ## Decisions a dependent crate should know
 
