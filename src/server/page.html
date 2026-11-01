@@ -4555,6 +4555,11 @@ const MESSAGES = Object.freeze({
     'shortcuts.restoredAll': 'Every shortcut is back to its default.',
     'shortcuts.restoreDefault': 'Restore default',
     'tree.files': 'Files',
+    'tree.levelEmpty': 'nothing inside',
+    'tree.readFailed': 'Read failed: {message}',
+    'tree.folderGone': 'That directory is gone. It may have been moved or deleted.',
+    'tree.couldNotRead': 'could not read {name}: {reason}',
+    'tree.answered': 'the tree answered {status}',
     'tree.copyValue': 'Copy: {text}',
     'nav.searchPending': 'Searching session history\u2026',
     'jobs.list': 'Background jobs',
@@ -4681,6 +4686,7 @@ const MESSAGES = Object.freeze({
     'header.views': 'view',
     'header.chat': 'Chat',
     'header.trajectory': 'Trajectory',
+    'header.file': 'File',
     'header.thisSession': 'this session',
     'header.more': 'More actions',
     'header.download': 'Download session log',
@@ -5216,6 +5222,11 @@ const MESSAGES = Object.freeze({
     'shortcuts.restoredAll': '已恢复默认快捷键',
     'shortcuts.restoreDefault': '恢复默认',
     'tree.files': '文件',
+    'tree.levelEmpty': '空目录',
+    'tree.readFailed': '读取失败：{message}',
+    'tree.folderGone': '这个目录不在了。可能已被移动或删除。',
+    'tree.couldNotRead': '无法读取“{name}”：{reason}',
+    'tree.answered': '文件树返回了 {status}',
     'tree.copyValue': '复制：{text}',
     'nav.searchPending': '正在搜索会话历史…',
     'jobs.list': '后台任务',
@@ -5342,6 +5353,7 @@ const MESSAGES = Object.freeze({
     'header.views': '视图',
     'header.chat': '对话',
     'header.trajectory': '轨迹',
+    'header.file': '文件',
     'header.thisSession': '此会话',
     'header.more': '更多操作',
     'header.download': '下载会话日志',
@@ -7278,7 +7290,8 @@ function renderRing(selection) {
     button.dataset.view = 'file'
     button.setAttribute('aria-selected', 'false')
     button.setAttribute('aria-controls', 'file')
-    button.textContent = 'File'
+    button.textContent = t('header.file')
+    button.dataset.i18n = 'header.file'
     ring.prepend(button)
   }
   const offered = selection === 'file' ? ['file'] : ['chat', 'trajectory']
@@ -19808,7 +19821,8 @@ function paintGoneFolder(group, depth) {
   line.className = 'empty'
   line.dataset.filesRow = 'failed'
   line.dataset.filesCode = WorkspaceFolder.NOT_FOUND
-  line.textContent = WorkspaceFolder.GONE_LINE
+  // WorkspaceFolder.GONE_LINE is this key's English, pinned by test/workspace-missing-folder.test.ts.
+  line.textContent = t('tree.folderGone')
   group.append(heading, line)
   markSelection()
 }
@@ -21001,7 +21015,7 @@ function failedLevelLine(failure) {
   line.className = 'empty'
   line.dataset.filesRow = 'failed'
   line.dataset.filesCode = failure.code
-  line.textContent = 'Read failed: ' + failure.message
+  line.textContent = t('tree.readFailed', { message: failure.message })
   return line
 }
 
@@ -21029,10 +21043,10 @@ async function loadChildren(node, li) {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
         if (!response.ok) {
           failed = await failedLevel(response)
-          if (failed === null) throw new Error('the tree answered ' + response.status)
+          if (failed === null) throw new Error(t('tree.answered', { status: response.status }))
         } else files = folderRows((await response.json()).children ?? [])
       } catch (error) {
-        setNote('could not read ' + node.label + ': ' + (error && error.message))
+        setNote(t('tree.couldNotRead', { name: node.label, reason: error && error.message }))
       }
     }
     /** The group may have been closed (or the tree redrawn) while its folders were being read. */
@@ -21051,7 +21065,7 @@ async function loadChildren(node, li) {
     if (group.children.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'empty'
-      empty.textContent = 'nothing inside'
+      empty.textContent = t('tree.levelEmpty')
       group.append(empty)
     }
     markSelection()
@@ -21069,11 +21083,11 @@ async function loadChildren(node, li) {
       const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
       if (!response.ok) {
         failed = await failedLevel(response)
-        if (failed === null) throw new Error('the tree answered ' + response.status)
+        if (failed === null) throw new Error(t('tree.answered', { status: response.status }))
         children = []
       } else children = (await response.json()).children ?? []
     } catch (error) {
-      setNote('could not read ' + node.label + ': ' + (error && error.message))
+      setNote(t('tree.couldNotRead', { name: node.label, reason: error && error.message }))
       children = []
     }
   }
@@ -21094,7 +21108,7 @@ async function loadChildren(node, li) {
      */
     const empty = document.createElement('div')
     empty.className = 'empty'
-    empty.textContent = 'nothing inside'
+    empty.textContent = t('tree.levelEmpty')
     group.append(empty)
     return
   }
@@ -21107,7 +21121,7 @@ async function loadChildren(node, li) {
   if (group.children.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'empty'
-    empty.textContent = 'nothing inside'
+    empty.textContent = t('tree.levelEmpty')
     group.append(empty)
   }
   markSelection()
