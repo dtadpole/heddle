@@ -13,6 +13,9 @@ function source(name: string): string {
   assert.ok(end >= start, `actual ${name} is a top-level function`)
   return page.slice(start, end + 2)
 }
+// Older full-page snapshots have additional real showSession helpers. Lift only those actually present.
+const snapshotHelpers = ['liveRoundsOf', 'rememberSessionWorkspace']
+  .filter((name) => new RegExp(`function ${name}\\(`).test(page)).map(source).join('\n')
 const treeStart = page.indexOf('/* workspace-tree:begin */')
 const treeEnd = page.indexOf('/* workspace-tree:end */', treeStart)
 assert.ok(treeStart >= 0 && treeEnd > treeStart)
@@ -39,11 +42,20 @@ function callEnd(start: number): number {
 const registrations = Array.from(page.matchAll(/\b(?:window\.)?addEventListener\(\s*(['"])(beforeunload|pagehide|pageshow)\1\s*,/g), (match) => ({
   type: match[2]!, text: page.slice(match.index!, callEnd(match.index!)),
 }))
-const registrationSource = registrations.map(({ text }) => text).join('\n')
-// Only real declarations referenced by the lifted handlers/showSession are included. On Q2 this is empty.
-const navigationState = Array.from(page.matchAll(/^(?:let|const)[ \t]+(\w+)[ \t]*=[ \t]*(?:false|true|null|0)[ \t]*;?[ \t]*$/gm))
-  .filter((match) => new RegExp(`\\b${match[1]}\\b`).test(registrationSource))
-  .map((match) => match[0]).join('\n')
+const lifecycleStart = page.indexOf('/* page-lifecycle:begin */')
+const lifecycleEnd = page.indexOf('/* page-lifecycle:end */', lifecycleStart)
+assert.equal(lifecycleStart >= 0, lifecycleEnd >= 0, 'actual lifecycle markers are paired')
+// Lift the approved block whole, including its private state and registrations, exactly once.
+// The unchanged Q2 snapshot has no lifecycle block or navigation registrations.
+const lifecycleSource = lifecycleStart < 0 ? '' : page.slice(lifecycleStart, lifecycleEnd + '/* page-lifecycle:end */'.length)
+// The older immutable edge reference registers leaving through a real loop, not literal calls.
+// Lift that loop verbatim when present; never assign its global or substitute a lifecycle model.
+const legacyLoopStart = page.indexOf("for (const name of ['beforeunload', 'pagehide']) {")
+const legacyLoopSource = lifecycleStart >= 0 || legacyLoopStart < 0 ? ''
+  : page.slice(legacyLoopStart, page.indexOf('\n}', legacyLoopStart) + 2)
+const registrationSource = registrations
+  .filter(({ text }) => !lifecycleSource.includes(text))
+  .map(({ text }) => text).join('\n')
 
 interface Row { className: string; textContent: string; dataset: Record<string, string>; setAttribute(name: string, value: string): void }
 interface HistoryResponse { ok: boolean; status?: number; statusText?: string; json(): Promise<unknown> }
@@ -89,11 +101,14 @@ function harness() {
     const defaultSelection = { model: 'default-model', effort: 'low' };
     const schedState = { drawer: null }, unreadSessions = new Set(), liveTurns = new Map(), sessionMetas = new Map();
     let selectionSeq = 0;
+    const runningSessions = new Set(), turnRounds = new Map(), knownWorkspaces = [];
     ${page.slice(treeStart, treeEnd)}
-    ${navigationState}
+    ${snapshotHelpers}
+    ${lifecycleSource}
     ${source('historyFailureText')}
     ${source('rememberCurrent')}
     ${source('showSession')}
+    ${legacyLoopSource}
     ${registrationSource}
     ({ show: showSession,
        saved: () => WorkspaceTree.savedSelection(localStorage.getItem(WorkspaceTree.SELECTION_KEY)),
@@ -118,17 +133,29 @@ function harness() {
     navigate(type: string, persisted = false) {
       phase = 'navigation-before-teardown'
       const event = new Event(type, { cancelable: type === 'beforeunload' })
-      if (type === 'pagehide') Object.defineProperty(event, 'persisted', { value: persisted })
+      if (type === 'pagehide' || type === 'pageshow') Object.defineProperty(event, 'persisted', { value: persisted })
       window.dispatchEvent(event) // Runs only handlers actually registered by this source; Q2 has none.
     },
     advanceClock(milliseconds: number) {
       phase = 'next-task'
-      now += milliseconds
-      const ready = [...tasks.entries()].filter(([, task]) => task.due <= now)
-      for (const [id, task] of ready) { tasks.delete(id); task.callback() }
+      const target = now + milliseconds
+      for (;;) {
+        const next = [...tasks.entries()].filter(([, task]) => task.due <= target)
+          .sort((a, b) => a[1].due - b[1].due || a[0] - b[0])[0]
+        if (!next) break
+        const [id, task] = next
+        tasks.delete(id); now = task.due; task.callback()
+      }
+      now = target
     },
     teardown() { tornDown = true; phase = 'teardown' },
     isTornDown: () => tornDown,
+    async open(id: string) {
+      const loading = api.show(id); await microtasks()
+      const request = requests.at(-1)!
+      assert.equal(request.url, '/api/sessions/' + id)
+      return { loading, request }
+    },
   }
 }
 
@@ -145,6 +172,7 @@ test('D067 control: ordinary offline history failure really clears the saved sel
   const state = harness(); const { loading, request } = await state.start()
   request.reject(new Error('offline'))
   assert.equal(await loading, false)
+  state.advanceClock(0) // Ordinary failure still persists the empty selection in its next task.
   assert.equal(state.saved(), null)
   assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S'), state.record(null)])
   assert.deepEqual(state.rows.map(({ textContent }) => textContent), ['Failed to load history: offline'])
@@ -168,6 +196,117 @@ for (const [type, persisted] of [['beforeunload', false], ['pagehide', false], [
   })
 }
 
+for (const recovery of ['pageshow', 'expiry'] as const) {
+  test(`D067 edge: pending navigation failure is persisted on ${recovery}`, async () => {
+    const state = harness(); const { loading, request } = await state.start()
+    state.navigate('pagehide', true)
+    request.reject(new Error('navigation pending'))
+    assert.equal(await loading, false)
+    state.advanceClock(0) // Run actual clearFailedSelection while leaving: retain the pending failure.
+    assert.equal(state.saved(), 'S', 'pending failure cannot clear selection during leaving')
+    assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S')])
+    if (recovery === 'pageshow') state.navigate('pageshow', true)
+    else { state.advanceClock(9_999); assert.equal(state.saved(), 'S'); state.advanceClock(1) }
+    assert.equal(state.saved(), null, 'a stayed/restored page eventually persists the still-shown failure')
+    assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S'), state.record(null)])
+    state.advanceClock(10_000)
+    assert.equal(state.writes.length, 2, 'resume cancels expiry and consumes pending exactly once')
+  })
+}
+
+test('D067 edge: repeated leaving replaces expiry so the stale timer cannot resume newer navigation', async () => {
+  const state = harness(); const { loading, request } = await state.start()
+  state.navigate('beforeunload')
+  request.reject(new Error('navigation pending'))
+  assert.equal(await loading, false)
+  state.advanceClock(0)
+  assert.equal(state.saved(), 'S')
+  state.advanceClock(5_000)
+  state.navigate('pagehide', true)
+  state.advanceClock(5_000) // First leaving's expiry; it must have been canceled.
+  assert.equal(state.saved(), 'S', 'old timer cannot consume the newer leaving window')
+  state.advanceClock(4_999); assert.equal(state.saved(), 'S')
+  state.advanceClock(1); assert.equal(state.saved(), null)
+  assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S'), state.record(null)])
+})
+
+test('D067 edge: an older leaving expiry cannot expose a failure during a newer leaving', async () => {
+  const state = harness(); const { loading, request } = await state.start()
+  state.navigate('beforeunload'); state.advanceClock(5_000)
+  state.navigate('pagehide', true); state.advanceClock(5_000)
+  request.reject(new Error('newer navigation abort')); assert.equal(await loading, false)
+  state.advanceClock(0)
+  assert.equal(state.saved(), 'S', 'old expiry must not end the newer leaving before its history abort')
+  state.advanceClock(5_000)
+  assert.equal(state.saved(), null, 'newer expiry eventually consumes its own pending failure')
+})
+
+for (const recovery of ['pageshow', 'expiry'] as const) {
+  test(`D067 edge: ${recovery} cannot clear a newer successful same-session generation`, async () => {
+    const state = harness(); const { loading, request } = await state.start()
+    state.navigate('beforeunload'); request.reject(new Error('navigation pending'))
+    assert.equal(await loading, false)
+    state.advanceClock(0); assert.equal(state.saved(), 'S')
+    const retry = await state.open('S')
+    retry.request.resolve({ ok: true, json: async () => ({ turns: [{ kind: 'user', text: 'new S history' }], seq: 2 }) })
+    assert.equal(await retry.loading, true)
+    const writes = [...state.writes]
+    if (recovery === 'pageshow') state.navigate('pageshow', true)
+    else state.advanceClock(10_000)
+    assert.equal(state.saved(), 'S')
+    assert.deepEqual({ ...state.state() }, { current: 'S', unavailable: null })
+    assert.deepEqual(state.writes, writes, 'pending old generation cannot write over new success')
+    assert.deepEqual(state.rows.map(({ textContent }) => textContent), ['new S history'])
+  })
+}
+
+test('D067 edge: expired navigation allows a later ordinary retry failure to persist', async () => {
+  const state = harness(); const { loading, request } = await state.start()
+  state.navigate('beforeunload'); request.reject(new Error('navigation pending'))
+  assert.equal(await loading, false); state.advanceClock(0)
+  assert.equal(state.saved(), 'S')
+  state.advanceClock(10_000); assert.equal(state.saved(), null)
+  const retry = await state.open('S')
+  retry.request.reject(new Error('offline retry')); assert.equal(await retry.loading, false)
+  assert.equal(state.saved(), 'S', 'retry still defers ordinary clear to the next task')
+  state.advanceClock(0); assert.equal(state.saved(), null)
+  assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S'), state.record(null), state.record('S'), state.record(null)])
+  assert.deepEqual(state.rows.map(({ textContent }) => textContent), ['Failed to load history: offline retry'])
+})
+
+test('D067 edge: queued ordinary failure timer cannot clear a newer successful session', async () => {
+  const state = harness(); const { loading, request } = await state.start()
+  request.reject(new Error('ordinary offline')); assert.equal(await loading, false)
+  assert.equal(state.saved(), 'S', 'ordinary clear is deferred, not synchronous')
+  const newer = await state.open('T')
+  newer.request.resolve({ ok: true, json: async () => ({ turns: [{ kind: 'user', text: 'T history' }], seq: 2 }) })
+  assert.equal(await newer.loading, true)
+  const writes = [...state.writes]
+  state.advanceClock(0)
+  assert.equal(state.saved(), 'T')
+  assert.deepEqual(state.writes, writes, 'stale queued callback checks id and generation')
+  assert.deepEqual({ ...state.state() }, { current: 'T', unavailable: null })
+})
+
+for (const recovery of ['pageshow', 'expiry'] as const) {
+  test(`D067 edge: ${recovery} cannot clear a different newer unavailable session`, async () => {
+    const state = harness(); const { loading, request } = await state.start()
+    state.navigate('pagehide', true); request.reject(new Error('old navigation failure'))
+    assert.equal(await loading, false); state.advanceClock(0)
+    assert.equal(state.saved(), 'S')
+    const newer = await state.open('T')
+    newer.request.reject(new Error('T unavailable')); assert.equal(await newer.loading, false)
+    // T's own deferred clear has not run. Resume of pending S must not clear T.
+    if (recovery === 'pageshow') state.navigate('pageshow', true)
+    else state.advanceClock(10_000) // T callback replaces pending S before the expiry runs.
+    if (recovery === 'pageshow') assert.equal(state.saved(), 'T')
+    state.advanceClock(0)
+    assert.equal(state.saved(), null, 'only the still-shown T failure may persist its clear')
+    assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'T' })
+    assert.deepEqual(state.writes.map(({ value }) => value), [state.record('S'), state.record('T'), state.record(null)])
+  })
+}
+
 test('D067 task control: cancelled beforeunload does not suppress a later ordinary read failure', async () => {
   const state = harness(); const { loading, request } = await state.start()
   state.navigate('beforeunload')
@@ -176,6 +315,7 @@ test('D067 task control: cancelled beforeunload does not suppress a later ordina
   state.advanceClock(10_000) // Also permit the actual fallback recovery timer to expire in a later task.
   request.reject(new Error('offline after cancelled navigation'))
   assert.equal(await loading, false)
+  state.advanceClock(0) // Ordinary failure still persists the empty selection in its next task.
   assert.equal(state.saved(), null)
   assert.deepEqual(state.rows.map(({ textContent }) => textContent), ['Failed to load history: offline after cancelled navigation'])
 })

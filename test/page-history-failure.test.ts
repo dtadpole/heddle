@@ -14,6 +14,10 @@ function source(name: string): string {
 const listenerStart = page.indexOf("events.addEventListener('session', (message) => {")
 assert.ok(listenerStart >= 0)
 const listener = page.slice(listenerStart, page.indexOf('\n})', listenerStart) + 3)
+const lifecycleStart = page.indexOf('/* page-lifecycle:begin */')
+const lifecycleEnd = page.indexOf('/* page-lifecycle:end */', lifecycleStart)
+assert.equal(lifecycleStart >= 0, lifecycleEnd >= 0)
+const lifecycleSource = lifecycleStart < 0 ? '' : page.slice(lifecycleStart, lifecycleEnd + '/* page-lifecycle:end */'.length)
 async function flush() { for (let i = 0; i < 8; i++) await new Promise<void>((resolve) => setImmediate(resolve)) }
 interface Row { className: string; textContent: string; dataset: Record<string, string>; setAttribute(name: string, value: string): void }
 interface Request { resolve(value: unknown): void; reject(error: Error): void }
@@ -27,13 +31,20 @@ function harness(deferredCommands = false) {
   const calls: string[] = []
   const requests: Request[] = []
   const noop = () => {}
+  const timers = new Map<number, () => void>()
+  let timerId = 0
+  const advanceClock = (_milliseconds: 0) => {
+    for (const [id, callback] of [...timers]) { timers.delete(id); callback() }
+  }
   let handle!: (message: { data: string }) => void
   let releaseCommands!: (value: unknown) => void
   const commands = { sessionShown: noop, draw: () => calls.push('command'), drawTurn: () => calls.push('command-turn') }
   const slashReady = deferredCommands ? new Promise((resolve) => { releaseCommands = resolve }) : Promise.resolve(commands)
   const branch = { textContent: 'old branch' }
   const context = {
-    rows, calls, slashReady, performance, TextDecoder,
+    rows, calls, slashReady, performance, TextDecoder, window: new EventTarget(),
+    setTimeout: (callback: () => void, delay: number) => { assert.equal(delay, 0); timers.set(++timerId, callback); return timerId },
+    clearTimeout: (id: number) => { timers.delete(id) },
     fetch: () => new Promise((resolve, reject) => requests.push({ resolve, reject })),
     events: { addEventListener: (_name: string, fn: typeof handle) => { handle = fn }, whenOpen: async () => {} },
     document: { getElementById: () => branch, createElement: (): Row => ({ className: '', textContent: '', dataset: {}, setAttribute: noop }) },
@@ -86,6 +97,7 @@ function harness(deferredCommands = false) {
     const QUEUE_KEY_NONE = ''; let activeFolder = 'workspace', workspaceRoutes = 'present'; const firstTreeReady = Promise.resolve();
     let directTurnPending = 0, directPendingKey = null, stopRequested = false;
     ${['historyFailureText', 'adoptViewSelection', 'selectionForSeat', 'showSession', 'keptToDraw', 'drawKeptEvents', 'drawSessionEvent', 'runTurn'].map(source).join('\n')}
+    ${lifecycleSource}
     ${listener};
     ({ show: showSession, run: runTurn,
        state: () => ({ current, unavailable: unavailableSession, loading: sessionLoading !== null, selectedPath }),
@@ -103,7 +115,7 @@ function harness(deferredCommands = false) {
     seat(id: string): { recorded: boolean; server?: { endpoint: string; model: string | null; effort: string | null }; held?: { endpoint: string; model: string | null; effort: string | null } };
     kept(): number; buffer(): unknown[]; prepare(id: string): void; lifecycle(id: string): boolean[];
   }
-  return { ...api, rows, calls, requests, branch, handle: (payload: unknown) => handle({ data: JSON.stringify(payload) }),
+  return { ...api, rows, calls, requests, branch, advanceClock, handle: (payload: unknown) => handle({ data: JSON.stringify(payload) }),
     releaseCommands: () => releaseCommands(commands), context }
 }
 const delta = (seq: number, text = 'partial') => ({ session: 'S', event: { seq, type: 'assistant/chunk', chunk: { type: 'text-delta', text } } })
@@ -124,6 +136,7 @@ for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as c
     else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
     else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
     assert.equal(await loading, false)
+    state.advanceClock(0)
     assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'S', loading: false, selectedPath: null })
     assert.equal(kept.length, 0, 'failed snapshot deliberately drops its kept events')
     const reason = failure === 'HTTP refusal' ? 'history unavailable (503)' : failure === 'fetch rejection' ? 'network unavailable' : 'invalid snapshot JSON'
@@ -183,6 +196,7 @@ test('late A model JSON retains only A seats after B history becomes unavailable
   const latest = state.show('B'); const second = await started(state, 2)
   second.resolve({ ok: false, status: 503, statusText: 'Unavailable', json: async () => ({ error: 'B unavailable' }) })
   assert.equal(await latest, false)
+  state.advanceClock(0)
   const before = { ...state.selection() }
   const rows = state.rows.map((row) => row.textContent)
   const calls = [...state.calls]
@@ -238,6 +252,7 @@ test('detached 202 JSON acceptance cannot adopt or publish a seat over unavailab
     endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', detach: true })
   const loading = state.show('B'); (await started(state, 2)).reject(new Error('B offline'))
   assert.equal(await loading, false)
+  state.advanceClock(0)
   const before = { ...state.selection() }
   assert.deepEqual(before, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }, 'the seat assertion is non-vacuous')
   const errorRow = state.rows[0]
@@ -294,6 +309,7 @@ for (const failure of ['HTTP refusal', 'fetch rejection', 'JSON rejection'] as c
     else if (failure === 'fetch rejection') request.reject(new Error('network unavailable'))
     else request.resolve({ ok: true, json: async () => { throw new Error('invalid snapshot JSON') } })
     assert.equal(await loading, false)
+    state.advanceClock(0)
     assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'B', loading: false, selectedPath: null })
     const expected = failure === 'HTTP refusal'
       ? { endpoint: null, model: 'default-model', effort: 'low' }

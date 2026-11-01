@@ -18,6 +18,10 @@ const seatSource = page.slice(seatStart, page.indexOf('\n}', seatStart) + 2)
 const failureStart = page.indexOf('function historyFailureText(')
 const failureSource = page.slice(failureStart, page.indexOf('\n}', failureStart) + 2)
 const scrollSource = page.slice(page.indexOf('/* chat-scroll:begin */'), page.indexOf('/* chat-scroll:end */'))
+const lifecycleStart = page.indexOf('/* page-lifecycle:begin */')
+const lifecycleEnd = page.indexOf('/* page-lifecycle:end */', lifecycleStart)
+assert.equal(lifecycleStart >= 0, lifecycleEnd >= 0, 'actual lifecycle markers are paired')
+const lifecycleSource = lifecycleStart < 0 ? '' : page.slice(lifecycleStart, lifecycleEnd + '/* page-lifecycle:end */'.length)
 function helperSource(name: string): string {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
   assert.ok(start >= 0, `the page defines ${name}`)
@@ -39,7 +43,8 @@ function harness() {
   const branch = { textContent: '' }
   const rows: string[] = []
   const context = {
-    schedState: { drawer: null },
+    schedState: { drawer: null }, window: new EventTarget(), setTimeout, clearTimeout,
+    defaultSelection: { model: 'default-model', effort: 'low' }, renderModelSeat() {},
     closeSchedulesPage() {}, closeScheduleDrawer() {}, resetScheduleList() {},
     updateStatusBar() {}, paintEmptyState() {}, applySessionAccess() {},
     placeholderDrawn: () => false, scheduleTreeRefresh() {}, chooseWorkspace() {}, jobsSessionChanged() {},
@@ -92,6 +97,7 @@ function harness() {
     ${helperSource('drawKeptEvents')}
     ${adoptSource}
     ${failureSource}
+    ${lifecycleSource}
     ${source}
     ${selectSource}
     ${seatSource}

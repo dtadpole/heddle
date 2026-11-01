@@ -62,7 +62,7 @@ test('a session that cannot be loaded shows the failure line, is not kept, and l
   assert.match(refused, /if \(vanished\) \{[\s\S]*?chosenModel = defaultSelection\.model[\s\S]*?renderModelSeat\(\)/, 'only a vanished session resets the draft to the default selection (A104)')
   assert.match(show, /failHistory\(0, '', \{ error: error && error\.message \}\)/, 'transport and JSON failures use the shared failure state')
   assert.match(refused, /log\.append\(note\)[\s\S]*paintEmptyState\(\)/, 'into the conversation before the empty state is judged, so the line wins over it')
-  assert.match(refused, /rememberCurrent\(\)/, 'the saved selection is emptied, so a reload starts a fresh session (restoreSelection)')
+  assert.match(refused, /setTimeout\(\(\) => pageLifecycle\.clearFailedSelection\(id, generation\), 0\)/, 'the saved selection is eventually emptied only for the still-shown failure when the page stays (restoreSelection)')
   assert.match(refused, /selectedPath = null[\s\S]*await renderTree\(\)[\s\S]*markSelection\(\)/, 'the tree is read again and the selection dropped')
   assert.match(refused, /return false/, 'and the caller is told the session did not open')
   assert.match(show, /if \(unavailableSession !== null\) \{\n\s+unavailableSession = null/, 'opening any session clears the state')
