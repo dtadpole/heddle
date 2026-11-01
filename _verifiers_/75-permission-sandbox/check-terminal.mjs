@@ -21,18 +21,25 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  * - it is bounded (`maxTerminals`, then `409`), and closing, archiving and server shutdown each end the whole
  *   process tree;
  * - a server that dies without a shutdown (SIGKILL) leaves no wrapper, `script`, shell, program or job under init
- *   (#204).
+ *   (#204);
+ * - a server started with signals ignored does not hand them to the terminal's programs (#210).
  */
 
 const darwin = process.platform === 'darwin'
 
-/** Boot `heddle web` on an ephemeral port with the project's profile and an isolated home. */
-function startServer(home, config) {
+/**
+ * Boot `heddle web` on an ephemeral port with the project's profile and an isolated home, behind `launcher` when
+ * one is given (it must end in an `exec`, so the child is the server itself).
+ */
+function startServer(home, config, launcher = []) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(
-      ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(home, 'sessions')]),
-      { cwd: repoRoot, env: { ...process.env, NO_COLOR: '1', SHELL: '/bin/sh', HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
-    )
+    const [command, args] = heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(home, 'sessions')])
+    const argv = [...launcher, command, ...args]
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd: repoRoot,
+      env: { ...process.env, NO_COLOR: '1', SHELL: '/bin/sh', HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
     let output = ''
     let settled = false
     const onData = (chunk) => {
@@ -158,8 +165,8 @@ async function settle(ms = 400) {
   await new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-/** A workspace root with two session folders, the outside folder, and a running server. */
-async function fixture(label) {
+/** A workspace root with two session folders, the outside folder, and a running server (behind `launcher`). */
+async function fixture(label, { launcher = [] } = {}) {
   const home = isolatedHome(`terminal-${label}`)
   const { config } = scriptedConfig({ home, steps: [{ text: 'unused' }] })
   const top = fixtureDir(`terminal-root-${label}`)
@@ -168,7 +175,7 @@ async function fixture(label) {
   const two = join(top, 'two')
   mkdirSync(one)
   mkdirSync(two)
-  const server = await startServer(home, config)
+  const server = await startServer(home, config, launcher)
   const api = await client(server)
   const added = await api.post('/api/workspaces', { path: top })
   assert.equal(added.status, 200, `the workspace root is added (${JSON.stringify(added.body)})`)
@@ -395,6 +402,28 @@ test('closing a terminal also ends a job that left its process tree for init (re
     assert.equal((await f.api.call(base, { method: 'DELETE' })).status, 200)
     await settle()
     assert.equal(alive(job), false, 'and ends with the terminal')
+  } finally {
+    f.done()
+  }
+})
+
+test('a server started with SIGQUIT and SIGHUP ignored does not hand them to a terminal\'s programs (#210)', async (context) => {
+  if (!skipUnless(context, darwin, 'the PTY runs through BSD script(1); the util-linux form is not measured on this host')) return
+  // `trap '' QUIT HUP; exec` stands for a server started under `nohup`, or with `&` from a script: an ignored signal
+  // survives exec, and `/bin/sh` (bash) keeps a signal ignored on entry for every program it runs, so before #210
+  // Ctrl-\ quit nothing in a Rust-build terminal. Node's libuv resets every signal in a child, so the TypeScript
+  // build passes either way.
+  const f = await fixture('signals', { launcher: ['/bin/sh', '-c', `trap '' QUIT HUP; exec "$@"`, 'heddle-launcher'] })
+  try {
+    const created = await f.api.post(`/api/sessions/${f.a}/terminals`, {})
+    assert.equal(created.status, 201, `a terminal is created (${JSON.stringify(created.body)})`)
+    const base = `/api/sessions/${f.a}/terminals/${created.body.terminal.id}`
+    // Each program signals itself and says so if it lives; the quotes keep the echoed command line from matching,
+    // and one line each lets the shell read every probe on its own.
+    const signals = ['QUIT', 'HUP', 'INT', 'TERM']
+    const line = [...signals.map((name) => `sh -c 'kill -${name} $$; echo SURVIVED-${name.slice(0, 1)}""${name.slice(1)}'`), 'echo PROBE-$((1+1))'].join('\n')
+    const output = await run(f.api, base, line, /PROBE-2/)
+    assert.deepEqual(signals.filter((name) => output.includes(`SURVIVED-${name}`)), [], 'no program in the terminal kept a signal the server was started with ignored')
   } finally {
     f.done()
   }
