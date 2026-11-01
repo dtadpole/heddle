@@ -368,6 +368,7 @@
    * Configuration: one form per profile entry, over `GET` and `POST /api/settings` (DSH's settings page). A row is a
    * label, its control and a Reset for a value this profile overrides; the actions span the form.
    */
+  #settings-config-note[data-state='error'] { color: #ff7b72; }
   #settings-config { display: flex; flex-direction: column; gap: .35rem; }
   .settings-entry { border: 1px solid var(--line); border-radius: 10px; }
   .settings-entry > summary { display: flex; gap: .6rem; align-items: baseline; padding: .5rem .6rem; font-size: .875rem; cursor: pointer; }
@@ -2844,8 +2845,12 @@
   }
   #timeline:empty { display: none; }
   .tr-lanes { position: relative; }
-  /** An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration. */
-  #timeline-tip { position: absolute; top: calc(100% + .25rem); z-index: 5; display: flex; flex-direction: column; gap: .1rem; max-width: 220px; padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
+  /**
+   * An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration.
+   * Fixed, as DSH's tooltip floats in its own layer: placed under the strip inside it, the strip's clip hid it whole,
+   * and a 220 px box cut the TTFT line (developer-ten's N5). The script places it by the tick, inside the window.
+   */
+  #timeline-tip { position: fixed; top: 0; left: 0; z-index: 40; display: flex; flex-direction: column; gap: .1rem; max-width: calc(100vw - 16px); padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
   #timeline-tip[hidden] { display: none; }
   #timeline-tip span { font-family: var(--mono); opacity: .75; }
   .tr-lane { position: relative; height: 15px; }
@@ -2876,6 +2881,8 @@
   /** A focused bar's own ring, drawn inside the lane: the browser's default ring is clipped by the strip's overflow. */
   .tr-tick:focus-visible { outline: 2px solid var(--text-2); outline-offset: 1px; }
   /** A user record's attachment counts beside its text, and the inspector's attachment list (S151). */
+  .tr-more td { padding: 6px 8px; text-align: center; }
+  .tr-more button { font: inherit; font-size: 12px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
   .tr-attach-count { margin-left: .5rem; font-size: 11px; color: var(--text-3); white-space: nowrap; }
   .tr-attachments { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   .tr-attachments li { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
@@ -6170,6 +6177,8 @@ async function showView(next) {
   if (view === 'chat') followChatTail(true)
   if (view === 'trajectory' && current !== null) {
     followTail = true
+    /** Entering the view opens a long ledger at its tail again, DSH's mount-time tail; only a live refetch keeps the window. */
+    trajectory.window = undefined
     await showLedger(current)
     followLedgerTail()
   }
@@ -6179,7 +6188,13 @@ async function showView(next) {
 /** Read the ledger projection for one session and draw it. */
 let ledgerFetches = 0
 async function showLedger(id) {
-  ledger.replaceChildren()
+  /**
+   * Another session's ledger is taken down at once, so it is never read as this one's. The same session's drawn ledger
+   * stays until the new read draws over it (renderLedger replaces the pane): a live refetch, or entering the view again,
+   * used to blank the pane first, and a read the server refused (`!response.ok`) then left it blank for good. Under load,
+   * 80's stale-ledger check caught that pane empty for 20 s on both builds.
+   */
+  if (trajectory.data?.id !== id) ledger.replaceChildren()
   /**
    * Only the newest request draws. Without this, two overlapping reads can land out of order and the older
    * one paints last, which is the other half of the stacked-draw bug.
@@ -6197,8 +6212,10 @@ async function showLedger(id) {
      * drawn would otherwise append its error under the new ledger (developer-two, reproduced in a component run).
      */
     if (ticket !== ledgerFetches) return
+    /** The drawn ledger now stays under a failed read, so an earlier failure's note gives way: one note, not a stack. */
+    ledger.querySelector('.tr-read-failed')?.remove()
     const note = document.createElement('div')
-    note.className = 'turn denied'
+    note.className = 'turn denied tr-read-failed'
     note.textContent = 'could not read the ledger: ' + (error && error.message)
     ledger.append(note)
   }
@@ -6321,8 +6338,8 @@ const trajectory = {
   focus: null,
   /** The overview's zoom (`zoomViewport`): null for the whole domain; kept across a live refetch of the same session. */
   viewport: null,
-  domainStart: undefined,
-  domainEnd: undefined,
+  /** The overview's one Tab stop, `{ id, key }` (turn, lane and ordinal), kept across a redraw of the same session. */
+  barStop: null,
 }
 
 /** DSH's kind vocabulary, which the table's tags speak. */
@@ -6395,6 +6412,39 @@ function rowFolded(row, collapsedTurns, expanded) {
 }
 /* ledger-rows:end */
 
+/* ledger-window:begin */
+/**
+ * How many rows a long ledger opens with, and adds per "Load earlier": DSH's 50 target records ending at the tail
+ * (dsh-client-ui-trajectory, Virtual rows). Pure, and fenced so test/page-ledger-window.test.ts judges it.
+ */
+const LEDGER_WINDOW = 50
+
+/** The index of the section head (a turn's or a Between turns section's first row) at or before `index`. */
+function sectionHeadAt(rows, index) {
+  for (let at = Math.min(index, rows.length - 1); at >= 0; at -= 1) if (rows[at]?.turnStart) return at
+  return 0
+}
+
+/**
+ * The first rendered row when a ledger opens: the last `size` rows, snapped back to their section head when that adds at
+ * most `size` rows more, so the section's label is drawn; a short ledger opens whole.
+ */
+function tailWindowStart(rows, size) {
+  if (rows.length <= size) return 0
+  const start = rows.length - size
+  const head = sectionHeadAt(rows, start)
+  return start - head <= size ? head : start
+}
+
+/** The first rendered row after one "Load earlier": `size` rows before `start`, snapped back the same way. */
+function earlierWindowStart(rows, start, size) {
+  if (start <= 0) return 0
+  const target = Math.max(0, start - size)
+  const head = sectionHeadAt(rows, target)
+  return target - head <= size ? head : target
+}
+/* ledger-window:end */
+
 /* ledger-attachments:begin */
 /**
  * A user record's attachment counts, as DSH's row shows them beside the text: the nonzero image and file counts, or ''
@@ -6432,18 +6482,18 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.turns = new Map((data.ledger?.turns ?? []).map((turn) => [turn.index, turn]))
   trajectory.timeline = timeline_
   if (trajectory.data?.id !== data.id) trajectory.viewport = null
+  /**
+   * A long ledger opens at its tail (S151, DSH's Virtual rows). A live refetch of the same session keeps the window's
+   * start, so new rows extend it and its prefix stays; another session opens at its own tail.
+   */
+  trajectory.window = trajectory.window?.id === data.id
+    ? { id: data.id, start: Math.min(trajectory.window.start, tailWindowStart(trajectory.rows, LEDGER_WINDOW)) }
+    : { id: data.id, start: tailWindowStart(trajectory.rows, LEDGER_WINDOW) }
   trajectory.data = data
   trajectory.tools = Array.isArray(data.tools) ? data.tools : []
   trajectory.selected = -1
   trajectory.expanded.clear()
   trajectory.focus = null
-  const times = trajectory.rows
-    .map((row) => row.record?.startedAt)
-    .filter((at) => typeof at === 'string')
-    .map((at) => Date.parse(at))
-    .filter((at) => !Number.isNaN(at))
-  trajectory.domainStart = times.length > 0 ? Math.min(...times) : undefined
-  trajectory.domainEnd = times.length > 0 ? Math.max(...times) : undefined
 
   /** DSH's shape: a scroll pane holding one table, and a details pane on the right. */
   const split = document.createElement('div')
@@ -6522,8 +6572,12 @@ function renderRows() {
   for (const row of trajectory.rows) trajectory.counts.set(row.turn, (trajectory.counts.get(row.turn) ?? 0) + 1)
   const query = trajectory.search.trim().toLowerCase()
   const shown = []
-  for (let index = 0; index < trajectory.rows.length; index += 1) {
-    const row = trajectory.rows[index]
+  /** Search, fold and selection cover the rendered window, as DSH's do; the status line and overview cover the whole. */
+  /** With the turn fold on, every head is drawn whatever the window: one row per turn is the long session's overview. */
+  const start = trajectory.collapsedTurns ? 0 : Math.max(0, Math.min(trajectory.window?.start ?? 0, trajectory.rows.length))
+  for (let index = start; index < trajectory.rows.length; index += 1) {
+    /** A window that opens inside a section draws its first row as that section's head, marked as continued. */
+    const row = index === start && !trajectory.rows[index].turnStart ? { ...trajectory.rows[index], turnStart: true, continued: true } : trajectory.rows[index]
     const record = row.record ?? {}
     if (query !== '') {
       const haystack = [row.kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase()
@@ -6532,7 +6586,59 @@ function renderRows() {
     if (rowFolded(row, trajectory.collapsedTurns, trajectory.expanded)) continue
     shown.push([row, index])
   }
-  body.replaceChildren(...shown.map(([row, index]) => rowNode(row, index)))
+  const nodes = shown.map(([row, index]) => rowNode(row, index))
+  if (start > 0) {
+    /** A search covers the drawn window, as DSH's does, so the control says how many earlier rows also match. */
+    let matches = 0
+    if (query !== '') {
+      for (let index = 0; index < start; index += 1) {
+        const record = trajectory.rows[index].record ?? {}
+        if ([trajectory.rows[index].kind, record.name ?? '', record.text ?? '', record.result ?? '', record.label ?? ''].join('\n').toLowerCase().includes(query)) matches += 1
+      }
+    }
+    nodes.unshift(loadEarlierNode(start, query === '' ? null : matches))
+  }
+  body.replaceChildren(...nodes)
+}
+
+/**
+ * The first body row while an older prefix is not drawn: one button that draws the previous page of rows, DSH's
+ * first-row load control. The row that was first stays where it was on screen, so the reader does not lose their place.
+ */
+function loadEarlierNode(start, matches) {
+  const tr = document.createElement('tr')
+  tr.className = 'tr-more'
+  const cell = document.createElement('td')
+  cell.colSpan = 2
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.textContent = 'Load earlier · ' + start + (start === 1 ? ' more record' : ' more records') + (matches === null ? '' : ' · ' + matches + (matches === 1 ? ' match' : ' matches'))
+  button.addEventListener('click', () => {
+    revealRows(earlierWindowStart(trajectory.rows, start, LEDGER_WINDOW))
+    /** The button is redrawn, so focus goes to the new control, or to the row that was first, without undoing the scroll. */
+    const control = ledger.querySelector('#tr-table tbody .tr-more button')
+    const target = control ?? ledger.querySelector('#tr-table tbody tr[data-index="' + start + '"]')
+    if (target !== null) {
+      if (control === null) target.tabIndex = -1
+      target.focus({ preventScroll: true })
+    }
+  })
+  cell.append(button)
+  tr.append(cell)
+  return tr
+}
+
+/** Draw the window from `start` (never later than it is), keeping the row that was first at the same place on screen. */
+function revealRows(start) {
+  if (trajectory.window === undefined || start >= trajectory.window.start) return
+  const pane = ledger.querySelector('.tr-pane')
+  const first = ledger.querySelector('#tr-table tbody tr[data-index]')
+  const firstIndex = first?.dataset.index
+  const before = first?.getBoundingClientRect().top
+  trajectory.window.start = Math.max(0, start)
+  renderRows()
+  const again = firstIndex === undefined ? null : ledger.querySelector('#tr-table tbody tr[data-index="' + firstIndex + '"]')
+  if (pane !== null && again !== null && before !== undefined) pane.scrollTop += again.getBoundingClientRect().top - before
 }
 
 function rowNode(row, index) {
@@ -6559,7 +6665,7 @@ function rowNode(row, index) {
     rail.className = 'tr-rail'
     const label = document.createElement('span')
     label.className = 'tr-turn-label'
-    label.textContent = sectionLabel(row)
+    label.textContent = sectionLabel(row) + (row.continued === true ? ' (continued)' : '')
     event.append(rail, label)
   }
   const tag = document.createElement('span')
@@ -6598,7 +6704,8 @@ function rowNode(row, index) {
   tr.tabIndex = 0
   tr.setAttribute('role', 'row')
   /** A Between turns head is no turn's anchor: every such section has turn 0, and a tick picks a numbered turn. */
-  if (row.turnStart && !row.loose) turnAnchors.set(row.turn, tr)
+  /** A "(continued)" head is not the turn's anchor: a tick for that turn draws and scrolls to its real first record. */
+  if (row.turnStart && !row.loose && row.continued !== true) turnAnchors.set(row.turn, tr)
   tr.addEventListener('click', () => {
     if (collapsed) {
       trajectory.expanded.add(row.turn)
@@ -7001,11 +7108,83 @@ function viewportDomain(viewport, screenFraction) {
   if (viewport === null || viewport === undefined) return screenFraction
   return viewport.from + screenFraction * (viewport.to - viewport.from)
 }
+
+/**
+ * A viewport that shows the stretch `[x0, x1]`, by DSH's rule for its selected span: unchanged when the stretch is in
+ * view (touching an edge counts, as for a tab stop), else moved at the same zoom just far enough to bring it in, from
+ * the side it lies on. The whole domain shows everything.
+ */
+function viewportShowing(viewport, x0, x1) {
+  if (viewport === null || viewport === undefined) return null
+  if (x1 >= viewport.from && x0 <= viewport.to) return viewport
+  const span = viewport.to - viewport.from
+  const start = Math.min(Math.max(x1 < viewport.from ? x0 : x1 - span, 0), 1 - span)
+  return { from: start, to: start + span }
+}
 /* overview-viewport:end */
+
+/* overview-keys:begin */
+/**
+ * Where a key moves the overview's one tab stop. The strip is a single Tab stop, as DSH's overview is (developer-ten's
+ * N4: a stop per bar made Tab walk through hundreds), and the arrows move among its bars. `bars` are `{ x0, lane }` in
+ * reading order (by start, then lane: input, model, tools) and `at` is the focused bar's index. Left and Right step
+ * through that order, Home and End go to its ends, and Up and Down change lane, to the bar nearest in time in the next
+ * lane that has one. Returns the index to focus, or null for a key the strip leaves alone. Pure, and fenced so
+ * test/page-overview-keys.test.ts judges it.
+ */
+function overviewKeyTarget(bars, at, key) {
+  if (bars.length === 0 || at < 0 || at >= bars.length) return null
+  if (key === 'Home') return 0
+  if (key === 'End') return bars.length - 1
+  if (key === 'ArrowLeft') return Math.max(0, at - 1)
+  if (key === 'ArrowRight') return Math.min(bars.length - 1, at + 1)
+  if (key !== 'ArrowUp' && key !== 'ArrowDown') return null
+  const lanes = ['input', 'model', 'tools']
+  const step = key === 'ArrowUp' ? -1 : 1
+  const here = bars[at]
+  for (let lane = lanes.indexOf(here.lane) + step; lane >= 0 && lane < lanes.length; lane += step) {
+    let best = -1
+    bars.forEach((bar, index) => {
+      if (bar.lane !== lanes[lane]) return
+      if (best === -1 || Math.abs(bar.x0 - here.x0) < Math.abs(bars[best].x0 - here.x0)) best = index
+    })
+    if (best !== -1) return best
+  }
+  return at
+}
+/* overview-keys:end */
+
+/* overview-focus:begin */
+/**
+ * The recorded time a focus window lights (developer-ten's zoom N7). A window is a stretch `[from, to]` of the strip's
+ * domain, and the rows are lit by when they started. In the actual mode the domain is the timeline's own clock, which
+ * starts at `startsAtMs` and lasts `totalMs` (to the latest end, not to the rows' latest start). In the equal mode the
+ * domain is record slots, not time: the window lights the items whose slots it touches, from the first of them to start
+ * to the last moment one of them can hold a row (`last`, a fraction like `start`; a record's own start, a turn's end).
+ * A window that touches no slot lights nothing. `items` are `{ x0, x1, start, last? }`. Returns `{ from, to }` in epoch
+ * milliseconds, or null when there is no clock to judge rows by. Pure, and fenced so test/page-overview-focus.test.ts
+ * judges it.
+ */
+function focusWindowTime(from, to, items, durationActual, startsAtMs, totalMs) {
+  if (!Number.isFinite(startsAtMs) || !(totalMs > 0)) return null
+  if (durationActual) return { from: startsAtMs + from * totalMs, to: startsAtMs + to * totalMs }
+  const touched = items.filter((item) => item.x1 >= from && item.x0 <= to)
+  if (touched.length === 0) return { from: Infinity, to: -Infinity }
+  /** Half a millisecond either side: a row's time is whole milliseconds, and the fractions come back through floats. */
+  return {
+    from: startsAtMs + Math.min(...touched.map((item) => item.start)) * totalMs - 0.5,
+    to: startsAtMs + Math.max(...touched.map((item) => item.last ?? item.start)) * totalMs + 0.5,
+  }
+}
+/* overview-focus:end */
 
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
+  /** A redraw (a live refetch, every 500 ms while a turn runs) keeps the keyboard where it was: on its bar, focused. */
+  const refocus = timeline.contains(document.activeElement)
   timeline.replaceChildren()
+  timeline.dataset.window = 'false'
+  if (trajectory.barStop?.id !== data.id) trajectory.barStop = null
   const spans = timeline_?.spans ?? []
   if (spans.length === 0) return
   const total = timeline_?.durationMs ?? 0
@@ -7022,6 +7201,9 @@ function renderTimeline(timeline_, data = {}) {
     : records.map((record, index) => ({ ...record, x0: index / records.length, x1: (index + 0.9) / records.length }))
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
+  /** The lanes are one control, entered by one Tab stop and moved in with the arrows (a toolbar's roving tabindex). */
+  wrapper.setAttribute('role', 'toolbar')
+  wrapper.setAttribute('aria-label', 'Timeline overview')
   const focusBox = document.createElement('div')
   focusBox.className = 'tr-focus'
   wrapper.append(focusBox)
@@ -7050,10 +7232,12 @@ function renderTimeline(timeline_, data = {}) {
     const track = tracks.get(lane)
     /**
      * With per-record data, the lane draws DSH's per-record bars; an answer from a server without records keeps one tick
-     * per turn. Bars are buttons like ticks, so Tab reaches them and Enter picks their turn; their listeners are the
-     * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time.
+     * per turn. Bars are buttons like ticks, so the keyboard reaches them (the strip's one Tab stop, then the arrows) and
+     * Enter picks their turn; their listeners are the strip's own, below. A bar is placed by its layout (`x0`/`x1`) and
+     * speaks its recorded time. Its ordinal among its turn's bars in the lane names it across a redraw.
      */
     if (bars !== null) {
+      const ordinals = new Map()
       for (const bar of bars) {
         if (bar.lane !== lane) continue
         const element = document.createElement('button')
@@ -7061,6 +7245,8 @@ function renderTimeline(timeline_, data = {}) {
         element.className = 'tr-tick tr-bar'
         element.dataset.lane = lane
         element.dataset.turn = String(bar.turn)
+        element.dataset.ordinal = String(ordinals.get(bar.turn) ?? 0)
+        ordinals.set(bar.turn, (ordinals.get(bar.turn) ?? 0) + 1)
         element.dataset.kind = bar.kinds.join(' ')
         element.dataset.x0 = String(bar.x0)
         element.dataset.x1 = String(bar.x1)
@@ -7089,6 +7275,10 @@ function renderTimeline(timeline_, data = {}) {
       const width = trajectory.durationActual ? Math.max(span.end - span.start, 0.004) : equal * 0.9
       tick.style.left = (left * 100).toFixed(3) + '%'
       tick.style.width = (width * 100).toFixed(3) + '%'
+      /** A tick has a layout like a bar's, so the zoom's tab stop and the arrows treat both alike (developer-ten's note). */
+      tick.dataset.x0 = String(left)
+      tick.dataset.x1 = String(left + width)
+      tick.dataset.ordinal = '0'
       if (span.running) tick.dataset.running = 'true'
       /**
        * The details wait for a 500 ms hover, as DSH's do, in the strip's own tip rather than a native title (which the
@@ -7126,6 +7316,21 @@ function renderTimeline(timeline_, data = {}) {
     focusBox.style.left = (Math.max(left, 0) * 100).toFixed(2) + '%'
     focusBox.style.width = (Math.max(Math.min(right, 1) - Math.max(left, 0), 0) * 100).toFixed(2) + '%'
   }
+  /**
+   * The strip's one Tab stop (developer-ten's N4; DSH's overview is one stop too): the bar the keyboard last stood on,
+   * while it is in view, else the first bar in view, so Tab never lands on a bar the strip does not show. The arrows
+   * move it (`overviewKeyTarget`), in reading order: by start, then lane.
+   */
+  const inOrder = () => [...wrapper.querySelectorAll('.tr-tick')].sort((left, right) => Number(left.dataset.x0) - Number(right.dataset.x0) || lanes.indexOf(left.dataset.lane) - lanes.indexOf(right.dataset.lane))
+  const stopKey = (tick) => tick.dataset.turn + '|' + tick.dataset.lane + '|' + tick.dataset.ordinal
+  const inView = (tick) => {
+    const viewport = trajectory.viewport
+    return viewport === null || viewport === undefined || (Number(tick.dataset.x1) >= viewport.from && Number(tick.dataset.x0) <= viewport.to)
+  }
+  const makeStop = (stop) => {
+    for (const tick of wrapper.querySelectorAll('.tr-tick')) tick.tabIndex = tick === stop ? 0 : -1
+    trajectory.barStop = stop === null ? null : { id: data.id, key: stopKey(stop) }
+  }
   const applyViewport = () => {
     const viewport = trajectory.viewport
     const span = viewport === null ? 1 : viewport.to - viewport.from
@@ -7135,14 +7340,13 @@ function renderTimeline(timeline_, data = {}) {
       track.style.right = viewport === null ? '' : 'auto'
     }
     wrapper.dataset.zoomed = viewport === null ? 'false' : 'true'
-    /** Only a bar inside the viewport is a tab stop, so Tab never lands on a bar the strip does not show. */
-    for (const bar of wrapper.querySelectorAll('.tr-bar')) {
-      const inside = viewport === null || (Number(bar.dataset.x1) >= viewport.from && Number(bar.dataset.x0) <= viewport.to)
-      bar.tabIndex = inside ? 0 : -1
-    }
+    const ticks = inOrder()
+    const kept = trajectory.barStop === null ? undefined : ticks.find((tick) => stopKey(tick) === trajectory.barStop.key && inView(tick))
+    makeStop(kept ?? ticks.find(inView) ?? null)
     drawFocus()
   }
   applyViewport()
+  if (refocus) wrapper.querySelector('.tr-tick[tabindex="0"]')?.focus({ preventScroll: true })
   /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
   const tip = document.createElement('div')
   tip.id = 'timeline-tip'
@@ -7163,7 +7367,13 @@ function renderTimeline(timeline_, data = {}) {
     const tick = tickOf(clickEvent.target)
     if (tick === null) return
     clickEvent.stopPropagation()
-    const anchor = turnAnchors.get(Number(tick.dataset.turn))
+    const turnIndex = Number(tick.dataset.turn)
+    /** A turn before the drawn window is drawn first: the overview covers the whole ledger, so its turns all reach a row. */
+    if (!turnAnchors.has(turnIndex)) {
+      const head = trajectory.rows.findIndex((row) => row.turn === turnIndex && row.turnStart && !row.loose)
+      if (head !== -1) revealRows(head)
+    }
+    const anchor = turnAnchors.get(turnIndex)
     if (anchor !== undefined) anchor.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   })
   /** Capture-phase enter and leave: they do not bubble, but the strip's capturing listener still sees each tick's. */
@@ -7174,10 +7384,17 @@ function renderTimeline(timeline_, data = {}) {
     tipTimer = setTimeout(() => {
       tipTimer = null
       tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+      tip.hidden = false
+      /**
+       * Under the strip at the tick, as DSH's tip sits below its span, kept inside the window: shifted left when it would
+       * pass the right edge, and above the strip when there is no room below. Measured once shown, at its own width.
+       */
       const strip = timeline.getBoundingClientRect()
       const at = tick.getBoundingClientRect()
-      tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
-      tip.hidden = false
+      const width = tip.offsetWidth
+      const height = tip.offsetHeight
+      tip.style.left = Math.max(8, Math.min(at.left, window.innerWidth - width - 8)) + 'px'
+      tip.style.top = (strip.bottom + 4 + height <= window.innerHeight - 4 ? strip.bottom + 4 : Math.max(4, strip.top - height - 4)) + 'px'
     }, 500)
   }, true)
   wrapper.addEventListener('pointerleave', (pointerEvent) => {
@@ -7204,12 +7421,24 @@ function renderTimeline(timeline_, data = {}) {
       trajectory.focus = null
     } else {
       focusDomain = { from, to }
-      const start = trajectory.domainStart
-      const end = trajectory.domainEnd
-      trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
+      /**
+       * The window's stretch is the strip's domain: the timeline's clock in the actual mode, record slots in the equal
+       * one (`focusWindowTime`). It was read as the rows' first to last start in both, which lit the wrong rows in the
+       * default mode wherever time was not spread evenly (developer-ten's zoom N7).
+       */
+      const slots = bars !== null ? placed : spans.map((span, index) => ({ x0: index * equal, x1: index * equal + equal * 0.9, start: span.start, last: span.end }))
+      trajectory.focus = focusWindowTime(from, to, slots, trajectory.durationActual, startsAtMs, total)
     }
+    timeline.dataset.window = focusDomain === null ? 'false' : 'true'
     drawFocus()
-    renderRows()
+    /** A focus window that reaches rows before the drawn window draws them first, so they can be lit or dimmed. */
+    const focus = trajectory.focus
+    const reach = focus === null ? -1 : trajectory.rows.findIndex((row) => {
+      const at = Date.parse(row.record?.startedAt ?? '')
+      return !Number.isNaN(at) && at >= focus.from && at <= focus.to
+    })
+    if (reach !== -1 && trajectory.window !== undefined && reach < trajectory.window.start) revealRows(sectionHeadAt(trajectory.rows, reach))
+    else renderRows()
   }
   timeline.oncontextmenu = (menuEvent) => menuEvent.preventDefault()
   timeline.onwheel = (wheelEvent) => {
@@ -7271,6 +7500,38 @@ function renderTimeline(timeline_, data = {}) {
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     setWindow(Math.min(startX, x), Math.max(startX, x))
   }
+  /**
+   * The keyboard, from the strip's one Tab stop: the arrows, Home and End move it among the bars, a zoomed strip panning
+   * just far enough to show the bar (DSH's rule for its selected span); Enter picks the bar's turn, as a click does; and
+   * Escape clears the focus window, as Escape on DSH's overview does. A bar the keyboard stands on stays the stop.
+   */
+  wrapper.addEventListener('focusin', (focusEvent) => {
+    const tick = tickOf(focusEvent.target)
+    if (tick !== null && tick.tabIndex !== 0) makeStop(tick)
+  })
+  wrapper.addEventListener('keydown', (keyEvent) => {
+    if (keyEvent.altKey || keyEvent.ctrlKey || keyEvent.metaKey || keyEvent.isComposing) return
+    if (keyEvent.key === 'Escape') {
+      if (focusDomain === null) return
+      keyEvent.preventDefault()
+      setWindow(0, 0)
+      return
+    }
+    const tick = tickOf(keyEvent.target)
+    if (tick === null) return
+    const ticks = inOrder()
+    const target = overviewKeyTarget(ticks.map((each) => ({ x0: Number(each.dataset.x0), lane: each.dataset.lane })), ticks.indexOf(tick), keyEvent.key)
+    if (target === null) return
+    keyEvent.preventDefault()
+    const next = ticks[target]
+    const shown = viewportShowing(trajectory.viewport, Number(next.dataset.x0), Number(next.dataset.x1))
+    if (shown !== trajectory.viewport) {
+      trajectory.viewport = shown
+      applyViewport()
+    }
+    makeStop(next)
+    next.focus({ preventScroll: true })
+  })
   const legend = document.createElement('div')
   legend.id = 'timeline-legend'
   legend.textContent = [human(total) + ' recorded', spans.length + ' turn(s)'].filter(Boolean).join(' · ')
@@ -7290,9 +7551,15 @@ function wireTrajectoryToolbar() {
       trajectory[key] = !trajectory[key]
       button.setAttribute('aria-pressed', trajectory[key] ? 'true' : 'false')
       if (key === 'durationActual') {
-        /** Record slots and recorded time are different domains, with different floors: a zoom does not carry over. */
+        /**
+         * Record slots and recorded time are different domains, with different floors: neither a zoom nor a focus window
+         * carries over. The redraw drops the window from the strip, so the rows it dimmed are lit again with it.
+         */
         trajectory.viewport = null
+        const hadFocus = trajectory.focus !== null
+        trajectory.focus = null
         renderTimeline(trajectory.timeline, trajectory.data)
+        if (hadFocus) renderRows()
       }
       else renderRows()
     })
@@ -7832,15 +8099,82 @@ function markRunning(id) {
   runningMarkedAt.set(id, ++runningTick)
 }
 
+/**
+ * The verdicts of this page's detached turns (#128), each the `turn` frame the server pushes when a turn ends.
+ *
+ * A verdict can be read before the `202` that names its turn — a fast turn ends while the answer is still on its way
+ * — so one that nobody waits for yet is kept, the newest few, until its turn asks. A verdict the stream never
+ * delivers (it reset past it, or the server restarted) does not leave the turn waiting for good: a sessions read
+ * issued after the turn was accepted that finds its session idle ends the wait as `lost` (`refreshSessions`).
+ */
+const turnVerdicts = (() => {
+  const waiting = new Map()
+  const early = new Map()
+  /** Turns ended as `lost` whose verdict may still come: it then runs the tail they skipped (developer-ten's review). */
+  const late = new Map()
+  return {
+    receive(data) {
+      if (data === null || typeof data !== 'object' || typeof data.turn !== 'string') return
+      const tail = late.get(data.turn)
+      if (tail !== undefined) {
+        late.delete(data.turn)
+        tail(data)
+        return
+      }
+      const waiter = waiting.get(data.turn)
+      if (waiter !== undefined) {
+        waiting.delete(data.turn)
+        waiter.resolve(data)
+        return
+      }
+      early.set(data.turn, data)
+      if (early.size > 64) early.delete(early.keys().next().value)
+    },
+    wait(turn, session) {
+      const arrived = early.get(turn)
+      if (arrived !== undefined) {
+        early.delete(turn)
+        return Promise.resolve(arrived)
+      }
+      /** Its own tick, so a sessions read issued before the turn was accepted cannot end it. */
+      return new Promise((resolve) => waiting.set(turn, { session, resolve, tick: ++runningTick }))
+    },
+    /** Run `tail` with the verdict of a turn ended as `lost`, if it still arrives; the newest few are kept. */
+    lateTail(turn, tail) {
+      late.set(turn, tail)
+      if (late.size > 64) late.delete(late.keys().next().value)
+    },
+    /** End every wait whose session a read issued at `readTick` found idle (`live` holds the running ones). */
+    endIdle(live, readTick) {
+      for (const [turn, waiter] of [...waiting]) {
+        if (waiter.tick > readTick || waiter.session === null || live.has(waiter.session)) continue
+        waiting.delete(turn)
+        waiter.resolve({ turn, session: waiter.session, outcome: 'lost' })
+      }
+    },
+  }
+})()
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale, and a read already in flight with it. */
   searchIndex = null
   searchEpoch += 1
   /** The newest running mark this read can know about; a mark after it outranks the read's silence. */
   const readTick = runningTick
-  const response = await fetch('/api/sessions')
-  if (!response.ok) return
-  const sessions = await response.json()
+  /**
+   * A list that cannot be read changes nothing: the rows keep what they last showed, the tree's own read says it failed,
+   * and the stream's reconnect or the browser's return online reads again (`StreamBaseline`). This used to reject, and
+   * every action that refreshes after its request — a rename, a pin, an archive, a fork — left an unhandled rejection
+   * when the network dropped right after the server had applied it (#91).
+   */
+  let sessions
+  try {
+    const response = await fetch('/api/sessions')
+    if (!response.ok) return
+    sessions = await response.json()
+  } catch (error) {
+    return
+  }
   listedMetas.clear()
   for (const meta of Array.isArray(sessions) ? sessions : []) {
     if (meta !== null && typeof meta === 'object' && typeof meta.id === 'string') listedMetas.set(meta.id, meta)
@@ -7904,6 +8238,8 @@ async function refreshSessions() {
       paintRunningMarks()
       refreshRunningStatus()
     }
+    /** A detached turn whose verdict the stream lost ends with the session it ran in (#128). */
+    turnVerdicts.endIdle(live, readTick)
     /**
      * A turn whose end this page never saw ends here, as the `turn/completed` handler would end it (#122): the open
      * chat settles, the composer offers Send again, and a message queued behind that turn is sent. Measured before
@@ -7968,6 +8304,8 @@ async function restoreSelection() {
     }
   }
   const [workspaceBody, sessions] = await Promise.all([read('/api/workspaces'), read('/api/sessions')])
+  /** Kept for New session's lookup too (#119), which a load in the flat list, where no tree is read, needs as well. */
+  if (Array.isArray(workspaceBody?.workspaces)) knownWorkspaces = workspaceBody.workspaces
   /**
    * If a session was opened while the lists were read, that session stays shown. It may be a row a person picked, a turn
    * that created a session, or a check that opens one by name. The boot does not reopen the saved session over it, or
@@ -8009,27 +8347,97 @@ async function restoreSelection() {
  *   to 10 s, with `#connection-state` shown and `body[data-connection]` set to `connecting` until `ready`;
  * - two heartbeat intervals of silence count as a failure, so a stream a relay dropped without closing is noticed.
  * Listeners are registered once, on this object, and re-attached to every source it opens.
+ *
+ * **One stream per browser, not one per tab (#128).** A browser allows six connections per host, shared by every
+ * tab of it, and an `EventSource` holds one for as long as the page is open: measured, the sixth tab of one server
+ * never finished loading and every other tab stopped answering with it. (DSH carries its streams over one WebSocket
+ * per page, which the pool does not count.) So the tabs of one server share one stream: the tab holding the
+ * `heddle-events` Web Lock opens the source and relays every frame and its connection state over a
+ * `BroadcastChannel`, and the others deliver what it relays.
+ * - When that tab closes, the browser hands the lock to a waiting tab, which reconnects from the newest id it was
+ *   given, so the server replays the gap.
+ * - A tab a person brings to the front takes the lock over: a background tab may be throttled or frozen, and the
+ *   tab being read is the one whose stream must not stall. A tab that opens in front first waits for the leading
+ *   tab's newest id (its answer to `hello`), so it connects with that cursor and the server replays what was
+ *   written between the old source closing and the new one opening (developer-ten's review: without it, a turn
+ *   streaming in the old tab lost those frames).
+ * - The leading tab relays the server's heartbeat, and its own state on every connection attempt. A following tab
+ *   that hears nothing for three heartbeats while the stream is open (30 s while it is connecting) takes the lock
+ *   over: Chrome freezes background tabs, and a frozen one keeps its lock while relaying nothing (developer-ten).
+ * - A frame whose id is not newer than the last one delivered is dropped (`FeedOrder`), so a handover that replays
+ *   from an older id draws nothing twice.
+ * Where the platform offers no locks or channel (an insecure origin, or an opaque frame), the tab keeps a stream of
+ * its own, as before. `body[data-feed]` says which: `leader`, `follower` or `solo`.
  */
+/* feed-order:begin */
+const FeedOrder = {
+  /** Frames the server writes without an id of their own: an EventSource repeats the previous id for them. */
+  UNNUMBERED: new Set(['ready', 'heartbeat', 'reset']),
+  /** `<epoch>-<seq>` as `{ epoch, seq }`, or null for an id that is not one. */
+  parse(id) {
+    if (typeof id !== 'string') return null
+    const dash = id.lastIndexOf('-')
+    if (dash <= 0 || !/^\d+$/.test(id.slice(dash + 1))) return null
+    return { epoch: id.slice(0, dash), seq: Number(id.slice(dash + 1)) }
+  },
+  /** Whether a frame is new after `last` (the newest delivered `{ epoch, seq }`, or null): another epoch is a new stream. */
+  isNew(last, name, id) {
+    if (this.UNNUMBERED.has(name)) return true
+    const parsed = this.parse(id)
+    if (parsed === null || last === null || parsed.epoch !== last.epoch) return true
+    return parsed.seq > last.seq
+  },
+}
+/* feed-order:end */
 const events = (() => {
   const handlers = new Map()
   const banner = document.getElementById('connection-state')
+  const LOCK = 'heddle-events'
   let source = null
   let lastEventId = ''
+  /** The newest numbered frame delivered, `{ epoch, seq }`, so a replayed one is not delivered again. */
+  let lastDelivered = null
   let attempt = 0
   let heartbeatMs = 2000
   let retryTimer = 0
   let silenceTimer = 0
+  /** The relay between this server's tabs, or null while this tab keeps a stream of its own. */
+  let channel = null
+  /** Whether this tab owns the stream: always when solo, while it holds the lock when shared. */
+  let leading = false
+  /** Whether a queued (not stealing) lock request is still waiting, so a stepped-down tab queues only once. */
+  let candidate = false
+  /** A following tab's watch on the leading one: armed by every relayed message, it takes the lock when it fires. */
+  let watchdog = 0
+  /** A tab that opened in front takes the stream once the leading tab has told it where the stream stands. */
+  let frontOnJoin = false
+  function post(message) {
+    if (channel === null) return
+    try {
+      channel.postMessage(message)
+    } catch {
+      // a closed channel has nobody left to tell
+    }
+  }
+  /** Callers waiting for the stream to open: a turn is sent only once its events will reach this page. */
+  const openWaiters = new Set()
   function setState(state) {
     document.body.dataset.connection = state
     banner.hidden = state !== 'connecting'
+    if (leading) post({ kind: 'state', state, lastEventId })
+    if (state === 'open') for (const resolve of [...openWaiters]) resolve()
   }
   function heard() {
     clearTimeout(silenceTimer)
     silenceTimer = setTimeout(() => fail(), heartbeatMs * 2 + 500)
   }
   function deliver(name, message) {
-    if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
-    heard()
+    const id = typeof message.lastEventId === 'string' ? message.lastEventId : ''
+    if (leading) heard()
+    if (!FeedOrder.isNew(lastDelivered, name, id)) return
+    if (!FeedOrder.UNNUMBERED.has(name)) lastDelivered = FeedOrder.parse(id) ?? lastDelivered
+    if (id.length > 0) lastEventId = id
+    if (leading) post({ kind: 'frame', name, data: message.data, lastEventId: id })
     for (const handler of handlers.get(name) ?? []) {
       try {
         handler(message)
@@ -8045,8 +8453,11 @@ const events = (() => {
   }
   function connect() {
     clearTimeout(retryTimer)
+    if (!leading) return
     const es = new EventSource(lastEventId.length > 0 ? '/api/events?cursor=' + encodeURIComponent(lastEventId) : '/api/events')
     source = es
+    /** Each attempt tells the other tabs this one is still trying, so a server that is down does not look like a frozen tab. */
+    post({ kind: 'beat' })
     /** A connection that never says `ready` is as dead as one that went quiet. */
     heard()
     es.addEventListener('ready', (message) => {
@@ -8064,25 +8475,167 @@ const events = (() => {
       deliver('ready', message)
     })
     es.addEventListener('heartbeat', () => {
-      if (source === es) heard()
+      if (source !== es) return
+      heard()
+      post({ kind: 'beat' })
     })
     for (const name of handlers.keys()) if (name !== 'ready') attach(es, name)
     es.onerror = () => {
       if (source === es) fail()
     }
   }
-  function fail() {
+  function stop() {
     clearTimeout(silenceTimer)
+    clearTimeout(retryTimer)
     if (source !== null) source.close()
     source = null
+  }
+  function fail() {
+    stop()
+    if (!leading) return
     setState('connecting')
-    clearTimeout(retryTimer)
     const cap = Math.min(10_000, 500 * 2 ** attempt)
     attempt = Math.min(attempt + 1, 10)
     retryTimer = setTimeout(connect, cap / 2 + Math.random() * (cap / 2))
   }
-  connect()
+  /** This tab owns the stream until the lock is taken from it; the promise is the lock, held while the page lives. */
+  function lead() {
+    leading = true
+    /** A tab that leads has nothing left to wait for before taking the stream. */
+    frontOnJoin = false
+    clearTimeout(watchdog)
+    attempt = 0
+    document.body.dataset.feed = channel === null ? 'solo' : 'leader'
+    connect()
+    return new Promise(() => {})
+  }
+  /** Without locks or a channel, or when the browser refuses them here, the tab keeps its own stream. */
+  function solo() {
+    if (channel !== null) channel.close()
+    channel = null
+    if (!leading) lead()
+  }
+  /** The lock was taken over (a tab came to the front), or could not be had at all. */
+  function lost(error) {
+    if (error === null || typeof error !== 'object' || error.name !== 'AbortError') {
+      solo()
+      return
+    }
+    if (!leading || channel === null) return
+    leading = false
+    stop()
+    document.body.dataset.feed = 'follower'
+    watch()
+    stand()
+  }
+  /** Wait for the lock: granted at once to the first tab, and to a waiting one when the leading tab closes. */
+  function stand() {
+    if (candidate || channel === null) return
+    candidate = true
+    navigator.locks
+      .request(LOCK, () => {
+        candidate = false
+        return lead()
+      })
+      .catch((error) => {
+        candidate = false
+        lost(error)
+      })
+  }
+  /** Take the lock now, from whichever tab holds it: the tab a person is reading leads. */
+  function seize() {
+    if (leading || channel === null) return
+    navigator.locks.request(LOCK, { steal: true }, () => lead()).catch(lost)
+  }
+  /** Take the lock over when the leading tab goes quiet: three heartbeats while open, 30 s while it is connecting. */
+  function watch() {
+    clearTimeout(watchdog)
+    if (leading || channel === null) return
+    const quiet = document.body.dataset.connection === 'open' ? heartbeatMs * 3 + 1000 : 30_000
+    watchdog = setTimeout(() => {
+      if (!leading) seize()
+    }, quiet)
+  }
+  function relayed(message) {
+    if (message === null || typeof message !== 'object') return
+    if (message.kind === 'hello') {
+      if (leading) post({ kind: 'state', state: document.body.dataset.connection ?? null, lastEventId })
+      return
+    }
+    /** The leading tab reads its own source; what another tab still relays from before a handover is not news. */
+    if (leading) return
+    if (message.kind === 'state') {
+      if (typeof message.state === 'string') setState(message.state)
+      /** In order with the frames, so it is never older than what was delivered here; a handover starts from it. */
+      if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
+      if (frontOnJoin) {
+        frontOnJoin = false
+        if (document.visibilityState === 'visible') seize()
+      }
+    } else if (message.kind === 'frame' && typeof message.name === 'string') {
+      if (message.name === 'ready') {
+        try {
+          const data = JSON.parse(message.data)
+          if (Number.isFinite(data.heartbeatMs) && data.heartbeatMs > 0) heartbeatMs = data.heartbeatMs
+        } catch {
+          // a ready frame without data keeps the default interval
+        }
+      }
+      deliver(message.name, { data: message.data, lastEventId: typeof message.lastEventId === 'string' ? message.lastEventId : '' })
+    }
+    /** Anything from the leading tab shows it is alive; armed after its state, which sets how long to wait. */
+    watch()
+  }
+  function share() {
+    try {
+      if (typeof BroadcastChannel !== 'function' || typeof navigator.locks?.request !== 'function') return false
+      channel = new BroadcastChannel(LOCK)
+    } catch {
+      channel = null
+      return false
+    }
+    channel.onmessage = (event) => relayed(event.data)
+    document.body.dataset.feed = 'follower'
+    post({ kind: 'hello' })
+    watch()
+    /**
+     * Queued at once, which the first tab is granted at once. A tab that opens in front takes the stream from a leading
+     * tab only after its answer to `hello` gave it a cursor (`relayed`).
+     */
+    frontOnJoin = document.visibilityState === 'visible'
+    /** A leader answers `hello` in milliseconds; one that has not in 2 s is frozen or gone, so the front tab takes over. */
+    if (frontOnJoin) {
+      setTimeout(() => {
+        if (!frontOnJoin) return
+        frontOnJoin = false
+        if (document.visibilityState === 'visible') seize()
+      }, 2000)
+    }
+    stand()
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') seize()
+    })
+    return true
+  }
+  if (!share()) solo()
   return {
+    /**
+     * Resolve once the stream is open, or after `timeoutMs`. A page that sends as soon as it loads would otherwise
+     * post its turn before its stream is subscribed, and the turn's first events (the person's own message) would
+     * reach the server's log but never this page (measured in check-composer once the stream waited for its lock).
+     */
+    whenOpen(timeoutMs) {
+      if (document.body.dataset.connection === 'open') return Promise.resolve()
+      return new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer)
+          openWaiters.delete(done)
+          resolve()
+        }
+        const timer = setTimeout(done, timeoutMs)
+        openWaiters.add(done)
+      })
+    },
     addEventListener(name, handler) {
       if (!handlers.has(name)) {
         handlers.set(name, [])
@@ -8180,6 +8733,100 @@ function scheduleTreeRefresh() {
     void renderTree()
   }, 400)
 }
+
+/* stream-baseline:begin */
+/**
+ * When the tree reads its baselines again — DSH's connection generation, as far as this page's stream can follow it (#91).
+ *
+ * DSH re-acquires the Workspace and Session baselines on every new connection. Its `ConnectionController` publishes
+ * `connected` and calls `onConnected` only once the stream's `ready` item has arrived (dsh-client-connection
+ * lib/client.browser.js:1094-1100, README "Connection generation"); the Session controller re-reads its list there
+ * (dsh-api-session-controller lib/client.js:4289-4296, `handleConnected` :3570-3584), and the Workspace state stream
+ * reopens on a `baseline` frame that replaces the projection and clears its error (dsh-api-workspace-controller
+ * lib/client.js:473-490, `replaceBaseline` :183-194). A browser `offline` aborts the stream and suspends the retries; the
+ * next `online` starts again at the 500 ms tier (lib/client.browser.js:989-999, `watchBrowserNetwork` :1359-1376, README
+ * "Browser offline aborts active work…").
+ *
+ * This page follows `GET /api/events` through its own connection (`events` above), whose every connection opens with
+ * the server's `ready` frame (`src/server/stream.ts`). A reconnect presents its cursor, so the server replays the frames
+ * written while the page was away, or answers `reset` when it cannot and the page reads everything again. Neither
+ * brings back a read the page had already started and lost to the cut: a rename's or a workspace delete's own frame that
+ * arrived before the cut, or the redraw after the page's own request, failed there, and nothing asked again, so the old
+ * title and the "could not read the workspaces" note stayed (#91, rechecked on the following stream). So:
+ * - the **first** `ready` is the page's own load, whose boot reads the tree itself: nothing more;
+ * - every **later** `ready` is a reconnect: read again at once, as `onConnected` does on every connection, resumed or
+ *   not (a `reset` that follows reads the open transcript and the approvals too);
+ * - `offline` reads nothing (the read would fail) and is remembered;
+ * - `online` after an `offline` reads again after DSH's first tier, because the page's connection does not watch the
+ *   browser's network state: it may have kept its stream through the cut, and then no `ready` comes.
+ *
+ * Pure, so `test/stream-baseline.test.ts` judges it out of the page. `next` answers the next state and the delay before
+ * a read, `null` for none.
+ */
+const StreamBaseline = (() => {
+  const ONLINE_DELAY_MS = 500
+
+  function initial() {
+    return { generations: 0, offline: false }
+  }
+
+  function next(state, signal) {
+    if (signal === 'ready') {
+      const generations = state.generations + 1
+      return { state: { ...state, generations }, reread: generations > 1 ? 0 : null }
+    }
+    if (signal === 'offline') return { state: { ...state, offline: true }, reread: null }
+    if (signal === 'online') return { state: { ...state, offline: false }, reread: state.offline ? ONLINE_DELAY_MS : null }
+    return { state, reread: null }
+  }
+
+  return { ONLINE_DELAY_MS, initial, next }
+})()
+/* stream-baseline:end */
+
+/**
+ * Read the tree's baselines again: `/api/workspaces` and `/api/sessions` through `renderTree`, whose successful draw
+ * replaces a stale "could not read the workspaces" note, then the session list's running state through
+ * `refreshSessions`. The search index is a cache of the session list, so it is dropped first; the one-column list draws
+ * from it. A read asked for while one is in flight runs once more after it, so the last answer drawn is never the older.
+ */
+let baselineFollow = StreamBaseline.initial()
+let baselineTimer = 0
+let baselineRead = null
+let baselineAgain = false
+function reacquireBaselines() {
+  if (baselineRead !== null) {
+    baselineAgain = true
+    return baselineRead
+  }
+  baselineRead = (async () => {
+    try {
+      do {
+        baselineAgain = false
+        clearTimeout(treeRefreshTimer)
+        searchIndex = null
+        await renderTree()
+        await refreshSessions()
+      } while (baselineAgain)
+    } catch (error) {
+      setNote('could not read the workspaces: ' + (error && error.message))
+    } finally {
+      baselineRead = null
+    }
+  })()
+  return baselineRead
+}
+function followConnection(signal) {
+  const step = StreamBaseline.next(baselineFollow, signal)
+  baselineFollow = step.state
+  if (step.reread === null) return
+  clearTimeout(baselineTimer)
+  baselineTimer = setTimeout(() => void reacquireBaselines(), step.reread)
+}
+events.addEventListener('ready', () => followConnection('ready'))
+window.addEventListener('offline', () => followConnection('offline'))
+window.addEventListener('online', () => followConnection('online'))
+
 events.addEventListener('session', (message) => {
   const payload = JSON.parse(message.data)
   const event = payload.event
@@ -9587,6 +10234,14 @@ async function sendTurn(body) {
   }
 }
 
+events.addEventListener('turn', (message) => {
+  try {
+    turnVerdicts.receive(JSON.parse(message.data))
+  } catch {
+    // a frame that is not JSON is no verdict
+  }
+})
+
 async function runTurn(text, key, attachments = [], onAccepted) {
   const target = key === QUEUE_KEY_NONE ? null : key
   /**
@@ -9615,6 +10270,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   }
   liveTurns += 1
   updateStatusBar()
+  /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
+  await events.whenOpen(3000)
   const startedAt = performance.now()
   const response = await sendTurn({
     /**
@@ -9631,6 +10288,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     folder,
     ...(fresh ? { new: true } : {}),
     ...selectionForTurn(),
+    /** Answer at acceptance; the verdict comes on the stream (#128). A server without it streams, read below. */
+    detach: true,
   })
   if (!response.ok) {
     /**
@@ -9649,15 +10308,174 @@ async function runTurn(text, key, attachments = [], onAccepted) {
    * dock now rather than at the end of the turn (measured: a long turn kept the row in the dock for minutes).
    */
   onAccepted?.()
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  /**
+   * What one terminal frame means here, wherever it came from: the turn's own response, or a detached turn's verdict on
+   * the stream.
+   */
   /**
    * The session this turn created, once adopted. The turn stream repeats its `session` event with the events it
    * relays, and adopting on each one re-read the whole session (`fetchSessionAccess`) about five times a model round:
    * measured on TS, 52 full reads in one test's two messages. A turn creates at most one session, so it is adopted once.
    */
   let adopted = null
+  const verdict = async (name, payload) => {
+    if (name === 'session') {
+      /**
+       * A turn with no session starts one, and the panel follows it: the queue that was loose while the
+       * turn ran belongs to the session it created.
+       */
+      if (target === null && adopted === null) {
+        adopted = payload.session
+        /**
+         * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
+         * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
+         * the created session is opened as any open is, a new generation and a redraw from its own log, because only
+         * pointing `current` at it would leave the other session's history on screen with this turn's live events
+         * appended under it.
+         */
+        if (current !== null && current !== payload.session) void showSession(payload.session)
+        else {
+          current = payload.session
+          rememberCurrent()
+          chooseWorkspace(null)
+          adoptSession(payload.session)
+        }
+        /** The pending send belongs to the session it just created; the row follows it. */
+        if (directTurnPending > 0) directPendingKey = payload.session
+        /** The created session's mode record is what the chip must show; it did not exist a moment ago. */
+        void fetchSessionAccess(payload.session)
+        /** A Stop pressed before the session existed lands now. */
+        if (stopRequested) {
+          stopRequested = false
+          void stopTurn()
+        }
+      }
+    } else if (name === 'done') {
+      /** What the provider said the turn cost, and how long it took, if it said anything. */
+      stopRequested = false
+      stopButton.disabled = false
+      // Replace live figures only when the durable fold arrives; clearing first flashes an empty dock.
+      void refreshSessionStats()
+      /**
+       * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
+       *
+       * The turn's `done` comes on its own connection and can be handled before the answer's last deltas arrive on
+       * the event stream. A note appended then split the answer in two: the late text started a new row after the
+       * refusals (live-testing draft developer-five-9, seen on TS). With the answer as the newest row, each note goes
+       * just before it, so late text still lands in the answer. A turn with no answer row yet appends as before;
+       * its answer then follows the notes whole.
+       */
+      const answerRow = lastTurnRow()
+      for (const denial of payload.denials ?? []) {
+        add('denied', `${denial.tool}: ${denial.message}`)
+        const note = lastTurnRow()
+        if (answerRow !== null && answerRow.dataset.kind === 'assistant' && note !== null && note !== answerRow && note.dataset.kind === 'denied') answerRow.before(note)
+      }
+      /**
+       * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
+       * reason travels on the completed event, so a reload shows it again from the transcript.
+       */
+      if (Array.isArray(payload.ended) && payload.ended.length > 0) {
+        const last = lastTurnRow()
+        if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
+        else log.append(turnNotice(payload.ended))
+      }
+      /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
+      settleReasoning()
+      settleChat()
+      refreshRunningStatus()
+      void renderSettledAnswers()
+      /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
+      renderScheduleCards(true)
+
+      /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
+      void attachTurnUsage()
+      /** And DSH's ChangedFiles card, once per turn and only for a turn that edited something. */
+      void attachEditedFiles()
+      /**
+       * The turn may have created **this folder's** session, so both the tree and the list are
+       * re-read.
+       *
+       * The view-ring handler sat inside this branch until 2026-10-11, and it was a defect rather
+       * than a placement: every finished turn registered another identical listener, and the same
+       * registration appeared twice more at the end of the file. Measured: three handlers after one
+       * turn, one more per turn after that. It is registered once, below.
+       */
+      await renderTree()
+      await refreshSessions()
+    } else if (name === 'cancelled') {
+      stoppedQueues.add(queueOf(typeof payload.session === 'string' ? payload.session : key))
+      /**
+       * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
+       * sentence in the transcript for something the reader asked for.
+       */
+      stopRequested = false
+      stopButton.disabled = false
+      settleReasoning()
+      refreshRunningStatus()
+      /** A question the stopped turn was waiting on has no answer to give now. */
+      hideApproval()
+      settleChat()
+      if (current === null || payload.session === current) markStopped()
+      void renderSettledAnswers()
+      /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
+      void attachEditedFiles()
+      if (typeof payload.session === 'string') {
+        noteCompletion(payload.session, runningSessions.has(payload.session), false)
+        runningSessions.delete(payload.session)
+        runningSince.delete(payload.session)
+        pendingInteractions.delete(payload.session)
+        paintRunningMarks()
+      }
+      renderComposerState()
+    } else if (name === 'error') {
+      stopButton.disabled = false
+      hideApproval()
+      drawTurnFailure(payload.session, payload.message)
+      /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
+      if (typeof payload.session === 'string') {
+        noteCompletion(payload.session, runningSessions.has(payload.session), false)
+        runningSessions.delete(payload.session)
+        runningSince.delete(payload.session)
+        pendingInteractions.delete(payload.session)
+        paintRunningMarks()
+      }
+      renderComposerState()
+    } else if (name === 'lost') {
+      /**
+       * A detached turn whose verdict never arrived — the stream reset past it, or the server restarted — and that a
+       * sessions read found ended: that read already settled the rows and the running marks (#122), so only the
+       * composer's own Stop state is left to put back.
+       */
+      stopRequested = false
+      stopButton.disabled = false
+      renderComposerState()
+    }
+  }
+  /**
+   * Detached (#128): the server answered `202 {session, turn}` at acceptance and will say how the turn ended on the
+   * stream, so no connection stays open for the length of the turn. A browser allows six per host across all its tabs,
+   * and holding one per running turn stalled every other request of the page once five turns ran.
+   */
+  if ((response.headers.get('content-type') ?? '').includes('application/json')) {
+    const accepted = await response.json()
+    const session = typeof accepted.session === 'string' ? accepted.session : null
+    if (session !== null) await verdict('session', { session })
+    const turn = String(accepted.turn ?? '')
+    const ended = await turnVerdicts.wait(turn, session)
+    /**
+     * A turn ended as `lost` can still see its verdict: a sessions read can find the session idle a moment before the
+     * verdict lands (another turn's done re-reads the list). Its tail then runs when it does; repeating the settle
+     * steps is harmless.
+     */
+    if (ended.outcome === 'lost') turnVerdicts.lateTail(turn, (data) => void verdict(data.outcome, data))
+    await verdict(ended.outcome, ended)
+    return
+  }
+  /** A server that predates `detach` streams the turn as before, and its frames are read the old way. */
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
   /**
    * Blocks are separated by a **blank line** — two real newlines. Measured while writing this, and the reason
    * the literal is called out: it was written as `'\\n\\n'`, four characters rather than two, so the split
@@ -9669,138 +10487,20 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    for (const block of buffer.split('\n\n')) {
+    /**
+     * Only completed blocks are read; the unfinished tail waits for the next chunk (developer-ten's review of #128).
+     * The loop used to read the tail as well and keep it, so a chunk that split a `data:` line threw in JSON.parse
+     * and the turn read as failed, and a block read while partial was read again once whole.
+     */
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) {
       if (!block.trim().startsWith('event:')) continue
       const name = /event: (.+)/.exec(block)?.[1]
       const data = /data: (.+)/.exec(block)?.[1]
       if (!data) continue
-      const payload = JSON.parse(data)
-      if (name === 'session') {
-        /**
-         * A turn with no session starts one, and the panel follows it: the queue that was loose while the
-         * turn ran belongs to the session it created.
-         */
-        if (target === null && adopted === null) {
-          adopted = payload.session
-          /**
-           * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
-           * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
-           * the created session is opened as any open is, a new generation and a redraw from its own log, because only
-           * pointing `current` at it would leave the other session's history on screen with this turn's live events
-           * appended under it.
-           */
-          if (current !== null && current !== payload.session) void showSession(payload.session)
-          else {
-            current = payload.session
-            rememberCurrent()
-            chooseWorkspace(null)
-            adoptSession(payload.session)
-          }
-          /** The pending send belongs to the session it just created; the row follows it. */
-          if (directTurnPending > 0) directPendingKey = payload.session
-          /** The created session's mode record is what the chip must show; it did not exist a moment ago. */
-          void fetchSessionAccess(payload.session)
-          /** A Stop pressed before the session existed lands now. */
-          if (stopRequested) {
-            stopRequested = false
-            void stopTurn()
-          }
-        }
-      } else if (name === 'done') {
-        /** What the provider said the turn cost, and how long it took, if it said anything. */
-        stopRequested = false
-        stopButton.disabled = false
-        // Replace live figures only when the durable fold arrives; clearing first flashes an empty dock.
-        void refreshSessionStats()
-        /**
-         * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
-         *
-         * The turn's `done` comes on its own connection and can be handled before the answer's last deltas arrive on
-         * the event stream. A note appended then split the answer in two: the late text started a new row after the
-         * refusals (live-testing draft developer-five-9, seen on TS). With the answer as the newest row, each note goes
-         * just before it, so late text still lands in the answer. A turn with no answer row yet appends as before;
-         * its answer then follows the notes whole.
-         */
-        const answerRow = lastTurnRow()
-        for (const denial of payload.denials ?? []) {
-          add('denied', `${denial.tool}: ${denial.message}`)
-          const note = lastTurnRow()
-          if (answerRow !== null && answerRow.dataset.kind === 'assistant' && note !== null && note !== answerRow && note.dataset.kind === 'denied') answerRow.before(note)
-        }
-        /**
-         * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
-         * reason travels on the completed event, so a reload shows it again from the transcript.
-         */
-        if (Array.isArray(payload.ended) && payload.ended.length > 0) {
-          const last = lastTurnRow()
-          if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
-          else log.append(turnNotice(payload.ended))
-        }
-        /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
-        settleReasoning()
-        settleChat()
-        refreshRunningStatus()
-        void renderSettledAnswers()
-        /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
-        renderScheduleCards(true)
-
-        /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
-        void attachTurnUsage()
-        /** And DSH's ChangedFiles card, once per turn and only for a turn that edited something. */
-        void attachEditedFiles()
-        /**
-         * The turn may have created **this folder's** session, so both the tree and the list are
-         * re-read.
-         *
-         * The view-ring handler sat inside this branch until 2026-10-11, and it was a defect rather
-         * than a placement: every finished turn registered another identical listener, and the same
-         * registration appeared twice more at the end of the file. Measured: three handlers after one
-         * turn, one more per turn after that. It is registered once, below.
-         */
-        await renderTree()
-        await refreshSessions()
-      } else if (name === 'cancelled') {
-        stoppedQueues.add(queueOf(typeof payload.session === 'string' ? payload.session : key))
-        /**
-         * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
-         * sentence in the transcript for something the reader asked for.
-         */
-        stopRequested = false
-        stopButton.disabled = false
-        settleReasoning()
-        refreshRunningStatus()
-        /** A question the stopped turn was waiting on has no answer to give now. */
-        hideApproval()
-        settleChat()
-        if (current === null || payload.session === current) markStopped()
-        void renderSettledAnswers()
-        /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
-        void attachEditedFiles()
-        if (typeof payload.session === 'string') {
-          noteCompletion(payload.session, runningSessions.has(payload.session), false)
-          runningSessions.delete(payload.session)
-          runningSince.delete(payload.session)
-          pendingInteractions.delete(payload.session)
-          paintRunningMarks()
-        }
-        renderComposerState()
-      } else if (name === 'error') {
-        stopButton.disabled = false
-        hideApproval()
-        drawTurnFailure(payload.session, payload.message)
-        /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
-        if (typeof payload.session === 'string') {
-          noteCompletion(payload.session, runningSessions.has(payload.session), false)
-          runningSessions.delete(payload.session)
-          runningSince.delete(payload.session)
-          pendingInteractions.delete(payload.session)
-          paintRunningMarks()
-        }
-        renderComposerState()
-      }
+      await verdict(name, JSON.parse(data))
     }
-    const lastBreak = buffer.lastIndexOf('\n\n')
-    if (lastBreak !== -1) buffer = buffer.slice(lastBreak + 2)
   }
 }
 
@@ -12511,6 +13211,14 @@ function chooseWorkspace(path) {
  */
 let treeTops = []
 
+/**
+ * `/api/workspaces`' last whole answer: every workspace with its `sessionIds`, archived sessions included, whatever the
+ * archive filter drew. New session finds the open session's workspace here (`WorkspaceTree.newSessionWorkspace`), because
+ * the drawn groups leave out an archived session under Hide archived, and the lookup then fell back to another
+ * project's folder (#119).
+ */
+let knownWorkspaces = []
+
 function readExpanded() {
   try {
     return new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) ?? '[]'))
@@ -13159,13 +13867,14 @@ async function showHtml(path, body, ticket) {
     RETURN_DOM: false,
   })
   /**
-   * The policy goes in as the first thing in the document, and `base` after it, so a relative reference the browser
-   * resolves itself — a `url()` inside a stylesheet, which the rewrite cannot see — still lands beside the document.
+   * The policy goes first in the document, with no injected base, as in DSH's basic static HTML preview (#40).
+   * Quoted resource attributes already point at the authenticated raw route. A filesystem-folder base neither
+   * serves relative CSS dependencies through that route nor complies with base-uri 'none'; CSS url()/@import
+   * dependency rewriting remains a separate limitation rather than a reason to widen this policy.
    */
-  const base = path.slice(0, path.lastIndexOf('/') + 1)
   const framed = clean.replace(
     /<head([^>]*)>/i,
-    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}"><base href="${base}">`,
+    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}">`,
   )
   htmlView.setAttribute('sandbox', 'allow-same-origin')
   /**
@@ -13576,11 +14285,18 @@ function menuItemsFor(node) {
         run: async () => {
           const title = window.prompt('Rename this conversation', node.session.title ?? '')
           if (title === null) return
-          const response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ title }),
-          })
+          let response
+          try {
+            response = await fetch('/api/sessions/' + encodeURIComponent(node.session.id) + '/title', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ title }),
+            })
+          } catch (error) {
+            /** Said in the note rather than left to the console; the next baseline read shows what the server holds (#91). */
+            setNote('could not rename that conversation: ' + (error && error.message))
+            return
+          }
           const body = await response.json().catch(() => ({}))
           if (!response.ok) {
             setNote(body.error ?? 'could not rename that conversation')
@@ -13688,6 +14404,11 @@ async function confirmSessionRename() {
       return
     }
   } catch (error) {
+    /**
+     * A request that fails in flight is said in the dialog, which stays open, as DSH's `RenameForm` does
+     * (`dsh-client-ui-workspace` `lib/client.js:4449-4455`). The server may have applied it before the cut; the next
+     * baseline read shows what it holds (`StreamBaseline`, #91).
+     */
     refuse('could not rename that session: ' + (error && error.message))
     return
   }
@@ -13697,6 +14418,7 @@ async function confirmSessionRename() {
     sessionRenameDialog.close()
   }
   setNote('')
+  /** Neither read rejects: a failed one leaves the tree's note, and a reconnect or the return online reads again (#91). */
   await renderTree()
   await refreshSessions()
 }
@@ -14026,10 +14748,20 @@ async function startSessionAt(node) {
 /**
  * Which workspace a new session should start in: `WorkspaceTree.newSessionWorkspace` over the rows the tree last drew and
  * the reader's context — the workspace chosen beside the open session (`chosenWorkspace`), the open session's, the
- * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws.
+ * selected row's, the folder the prompt box was aimed at, then the first workspace the tree draws. The open session's
+ * workspace is read from the whole index (`knownWorkspaces`, `sessionMetas`), not from the drawn groups, so an archived
+ * session open under Hide archived still starts New session in its own workspace rather than in the last remembered
+ * folder (#119).
  */
 function newSessionWorkspace() {
-  return WorkspaceTree.newSessionWorkspace(treeTops, { chosen: chosenWorkspace, current, selected: selectedPath, active: activeFolder })
+  return WorkspaceTree.newSessionWorkspace(treeTops, {
+    chosen: chosenWorkspace,
+    current,
+    selected: selectedPath,
+    active: activeFolder,
+    workspaces: knownWorkspaces,
+    sessions: [...sessionMetas.values()],
+  })
 }
 
 /**
@@ -14596,7 +15328,10 @@ async function fillSettings() {
       const response = await fetch(path)
       if (response.ok) return { body: await response.json() }
       if (response.status === 404) return { missing: true }
-      return { failure: `the server answered ${response.status}`, status: response.status }
+      // The server's own sentence when it sent one (#165): the file, line and reason, not only the status.
+      const refusal = await response.json().catch(() => null)
+      const said = refusal !== null && typeof refusal.error === 'string' && refusal.error.length > 0 ? refusal.error : null
+      return { failure: said ?? `the server answered ${response.status}`, status: response.status }
     } catch (error) {
       return { failure: (error && error.message) || String(error) }
     }
@@ -14695,6 +15430,7 @@ function renderSettingsConfig(view, failure) {
   const host = document.getElementById('settings-config')
   const note = document.getElementById('settings-config-note')
   host.replaceChildren()
+  delete note.dataset.state
   if (failure !== undefined) {
     note.textContent = `could not read the settings: ${failure}`
     return
@@ -14706,6 +15442,14 @@ function renderSettingsConfig(view, failure) {
   note.textContent = view.writable
     ? 'Changes are written to this profile\u2019s patch.'
     : 'This run has no profile patch to write (start it with --profile, or from a project without --patch); values are read-only.'
+  /**
+   * A hand edit that broke the patch (#165): the forms show the running configuration, as DSH's do, and the note says
+   * why a Save will be refused until the file is fixed, in the server's words (file, line, reason; none of the file).
+   */
+  if (typeof view.documentError === 'string' && view.documentError.length > 0) {
+    note.textContent = `The profile patch could not be read, so these values are the running configuration and Save is refused until the file is fixed: ${view.documentError}`
+    note.dataset.state = 'error'
+  }
   for (const entry of view.namespaces) host.append(settingsEntryForm(entry))
 }
 
@@ -15468,14 +16212,16 @@ function isStopSequence(previous, now) {
   return previous !== null && now - previous >= 0 && now - previous <= STOP_SEQUENCE_MS
 }
 /**
- * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover or the approval
- * card. DSH breaks the stop sequence on each, so Escape closing the model menu or an approval card never also counts
- * toward a stop. Read in the capture phase, before those controls close themselves.
+ * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover, the approval
+ * card, or the trajectory overview clearing its focus window. DSH breaks the stop sequence on each, so Escape closing
+ * the model menu or an approval card never also counts toward a stop. Read in the capture phase, before those controls
+ * close themselves.
  */
 function uiTakesEscape() {
   if (document.querySelector('dialog[open]') !== null) return true
   if ([...document.querySelectorAll('[role="menu"]')].some((menu) => !menu.hidden)) return true
   if (statPopoverKind !== null) return true
+  if (timeline?.dataset.window === 'true' && timeline.contains(document.activeElement)) return true
   const card = document.getElementById('approval-card')
   return card !== null && !card.hidden
 }
@@ -16216,19 +16962,48 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * The registered workspace a session lives in, read from the **whole** index, whatever the archive filter draws:
+   * `workspaces` is `/api/workspaces`'s array and `sessions` `/api/sessions`, archived sessions included in both. DSH finds
+   * the open session's workspace in its full workspace list, by the account that names it (`dsh-client-ui-workspace`
+   * `lib/client.js:1503-1506`), and archiving never touches that account: an archived session keeps its `sessionIds` slot
+   * (`dsh-workspace` `lib/index.js:232-233`, `:502-503`; the README's "Archive filtering alone changes neither saved
+   * positions nor account membership"). Heddle's account is the session's canonical `cwd` mapped to its nearest root, which
+   * both servers derive into `sessionIds`; an adopted root counts for the registered workspace above it, where
+   * `deriveGroups` draws it. A session no workspace names yet (a list read before it was made) falls back to its own
+   * `cwd`: the deepest registered workspace containing it. Undefined for an unknown id or a session no registered
+   * workspace holds (an Ungrouped one).
+   */
+  function sessionWorkspace(workspaces, sessions, id) {
+    if (typeof id !== 'string' || id.length === 0) return undefined
+    const list = Array.isArray(workspaces) ? workspaces.filter((entry) => entry !== null && typeof entry === 'object' && typeof entry.path === 'string') : []
+    const byId = new Map(list.map((entry) => [entry.id, entry]))
+    const named = list.find((entry) => (Array.isArray(entry.sessionIds) ? entry.sessionIds : []).includes(id))
+    const home = named === undefined ? undefined : registered(named) ? named : registeredAboveIn(named, byId)
+    if (home !== undefined) return home
+    const meta = (Array.isArray(sessions) ? sessions : []).find((entry) => entry !== null && typeof entry === 'object' && entry.id === id)
+    const cwd = typeof meta?.cwd === 'string' ? meta.cwd : ''
+    if (cwd.length === 0) return undefined
+    return list
+      .filter((entry) => registered(entry) && (cwd === entry.path || cwd.startsWith(entry.path.endsWith('/') ? entry.path : entry.path + '/')))
+      .sort((left, right) => right.path.length - left.path.length)[0]
+  }
+
+  /**
    * Which workspace a new session should start in, among the workspace rows the tree draws (`tops`, each
    * `{ path, label, group }`, in drawing order).
    *
    * The panel's primary action has no row of its own to be about, so it takes the reader's context in the order that
-   * context exists (`state` is `{ chosen, current, selected, active }`): the workspace row the person opened or added
-   * since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace (DSH's
-   * `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace, then
-   * the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where am
-   * I", and the first one that applies wins. Null when the tree draws no workspace.
+   * context exists (`state` is `{ chosen, current, selected, active, workspaces, sessions }`): the workspace row the person
+   * opened or added since the open session was chosen (`chosen`, `{ path, during }`), then the open session's workspace
+   * (DSH's `currentWorkspaceId`, `dsh-client-ui-workspace` `lib/client.js:1505-1508`), then the selected row's workspace,
+   * then the folder the prompt box was last aimed at, then the first workspace the tree draws. All are answers to "where
+   * am I", and the first one that applies wins. Null when the tree draws no workspace and no session is open in one.
+   * `workspaces` and `sessions` are the whole index (`/api/workspaces`, `/api/sessions`), whatever the archive filter
+   * drew; the open session's workspace is read there.
    */
   function newSessionWorkspace(tops, state = {}) {
     const list = Array.isArray(tops) ? tops.filter((node) => node !== null && typeof node === 'object' && typeof node.path === 'string') : []
-    const { chosen = null, current = null, selected = null, active = null } = state ?? {}
+    const { chosen = null, current = null, selected = null, active = null, workspaces = [], sessions = [] } = state ?? {}
     /** The nearest registered workspace that owns a path, if any — the deepest of the tree's workspaces above it. */
     const owner = (path) =>
       list.filter((node) => path === node.path || path.startsWith(node.path + '/')).sort((left, right) => right.path.length - left.path.length)[0] ?? null
@@ -16237,8 +17012,19 @@ const WorkspaceTree = (() => {
       const byChoice = list.find((node) => node.path === chosen.path)
       if (byChoice !== undefined) return byChoice
     }
-    /** Then the open session's own workspace: it is the group the reader is looking at. */
+    /**
+     * Then the open session's own workspace, from the whole index (`sessionWorkspace`), drawn or not: its drawn row, else
+     * the workspace by its path and display title (a filter such as Archived only may leave it undrawn). #119: this was
+     * looked up among the drawn groups only, so with an archived session open under Hide archived it missed and the new
+     * session started in `active`, the last remembered folder, which was another project's. When the open session's
+     * workspace is known, nothing below is asked. A caller without the index still finds it among the drawn groups.
+     */
     if (current !== null) {
+      const home = sessionWorkspace(workspaces, sessions, current)
+      if (home !== undefined) {
+        const label = typeof home.title === 'string' && home.title.length > 0 ? workspaceDisplayTitle(home.title) : basename(home.path)
+        return list.find((node) => node.path === home.path) ?? { kind: 'workspace', path: home.path, label }
+      }
       const byCurrent = list.find((node) => node.group !== undefined && containsSession(node.group, current, false))
       if (byCurrent !== undefined) return byCurrent
     }
@@ -16674,6 +17460,7 @@ const WorkspaceTree = (() => {
     savedSelection,
     recentWorkspace,
     restoreChoice,
+    sessionWorkspace,
     newSessionWorkspace,
     newConversationTarget,
     folderLabel,
@@ -18435,6 +19222,37 @@ function glideRows(previous) {
   }
 }
 
+/**
+ * The failure a level's listing answered with, when it is one the tree draws as a line of its own — `null` otherwise.
+ *
+ * DSH's file tree tells an empty level from a failed one (dsh-client-ui-sidebar-files lib/client.js:564-581): a failed
+ * level is one line, by code, and never "Empty directory". The tree route answers a folder the server may not read with
+ * `workspace-file/unreadable` (#106); it was `200` with no children, drawn as "nothing inside", which was false.
+ */
+async function failedLevel(response) {
+  try {
+    const body = await response.json()
+    return body !== null && body.code === 'workspace-file/unreadable' && typeof body.error === 'string' ? { code: body.code, message: body.error } : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The line a failed level shows, in DSH's words: a code DSH's tree names has its own sentence, and any other says
+ * "Read failed: <message>" with the transport's own message (`failureLine` and `error.unavailable`,
+ * dsh-client-ui-sidebar-files lib/client.js:483-489 and :773). DSH has no `workspace-file/unreadable`, so it is the
+ * second: `Read failed: cannot list "locked": permission denied`.
+ */
+function failedLevelLine(failure) {
+  const line = document.createElement('div')
+  line.className = 'empty'
+  line.dataset.filesRow = 'failed'
+  line.dataset.filesCode = failure.code
+  line.textContent = 'Read failed: ' + failure.message
+  return line
+}
+
 /** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
 async function loadChildren(node, li) {
   const group = document.createElement('ul')
@@ -18451,20 +19269,24 @@ async function loadChildren(node, li) {
     for (const child of node.group.children) group.append(groupRow(child))
     paintSessionRows(group, node.group, depth + 1)
     let files = []
+    let failed = null
     if (node.kind === 'workspace') {
       /** Its folder was deleted or moved (#141): said in DSH's words under the Files heading, without a read. */
       if (WorkspaceFolder.gone(node.group)) return paintGoneFolder(group, depth)
       try {
         const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-        if (!response.ok) throw new Error('the tree answered ' + response.status)
-        files = folderRows((await response.json()).children ?? [])
+        if (!response.ok) {
+          failed = await failedLevel(response)
+          if (failed === null) throw new Error('the tree answered ' + response.status)
+        } else files = folderRows((await response.json()).children ?? [])
       } catch (error) {
         setNote('could not read ' + node.label + ': ' + (error && error.message))
       }
     }
     /** The group may have been closed (or the tree redrawn) while its folders were being read. */
     if (!group.isConnected) return
-    if (files.length > 0) {
+    /** A workspace folder the server may not read keeps its `Files` heading, over the one line that says why (#106). */
+    if (files.length > 0 || failed !== null) {
       const heading = document.createElement('li')
       heading.className = 'tree-heading'
       heading.setAttribute('role', 'none')
@@ -18472,6 +19294,7 @@ async function loadChildren(node, li) {
       heading.textContent = 'Files'
       group.append(heading)
       for (const child of files) group.append(nodeRow(child, depth + 1))
+      if (failed !== null) group.append(failedLevelLine(failed))
     }
     if (group.children.length === 0) {
       const empty = document.createElement('div')
@@ -18483,6 +19306,7 @@ async function loadChildren(node, li) {
     return
   }
   let children = node.children
+  let failed = null
   if (children === null) {
     try {
       /**
@@ -18491,12 +19315,20 @@ async function loadChildren(node, li) {
        * every reopened branch replaced it with the unfiltered list — the row existed and could not be seen.
        */
       const response = await fetch('/api/tree?path=' + encodeURIComponent(node.path) + archiveQuery('&'))
-      if (!response.ok) throw new Error('the tree answered ' + response.status)
-      children = (await response.json()).children ?? []
+      if (!response.ok) {
+        failed = await failedLevel(response)
+        if (failed === null) throw new Error('the tree answered ' + response.status)
+        children = []
+      } else children = (await response.json()).children ?? []
     } catch (error) {
       setNote('could not read ' + node.label + ': ' + (error && error.message))
       children = []
     }
+  }
+  /** A level the server may not read is that one line, never "nothing inside" (#106). */
+  if (failed !== null) {
+    group.append(failedLevelLine(failed))
+    return
   }
   if (children.length === 0) {
     /**
@@ -19090,6 +19922,8 @@ async function renderTree() {
     setNote('could not read the workspaces: ' + (error && error.message))
     return
   }
+  /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
+  if (Array.isArray(workspaces)) knownWorkspaces = workspaces
   rowIndex.clear()
   noteSessions(sessions)
   listedSessions = new Set((Array.isArray(sessions) ? sessions : []).map((meta) => meta?.id).filter((id) => typeof id === 'string'))
@@ -20328,7 +21162,10 @@ document.getElementById('workspace-delete-confirm').addEventListener('click', as
     }
     if (activeFolder === deleteTarget.path) activeFolder = null
     deleteTarget = null
+    /** The dialog closes with its Deleting… line put away, not left set behind it (#91). */
+    document.getElementById('workspace-delete-status').hidden = true
     workspaceDelete.close()
+    /** A redraw that cannot read the tree says so in its note, and a reconnect or the return online reads again (#91). */
     await renderTree()
   } catch (error) {
     if (deleteTarget !== null) deleteTarget.busy = false

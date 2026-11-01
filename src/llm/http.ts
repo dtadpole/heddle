@@ -10,6 +10,12 @@ import { CONTEXT_WINDOW_EXCEEDED, ModelError } from './types.ts'
  * Adapters disagree about how to say it — OpenAI says `context_length_exceeded`, DeepSeek says the
  * conversation is too long, a gateway may just echo "maximum context length" — so the matching
  * happens once, on the body of a failed response, and everything above reads the code.
+ *
+ * Anthropic says `prompt is too long: 352406 tokens > 200000 maximum` (a 400) and `request_too_large`
+ * (a 413). Without those two, every `anthropic-messages` and `anthropic-vertex` refusal was a plain
+ * HTTP failure and overflow recovery never ran (#153). DSH matches the same wordings: pi-ai's overflow
+ * list opens with `/prompt (?:is )?too long/i` and carries `request_too_large`, and `dsh-llm`'s
+ * `isContextWindowExceededError` adds "input/prompt/request is too long/large for this model".
  */
 const WINDOW_PATTERNS = [
   /context[_ ]length[_ ]exceeded/i,
@@ -18,6 +24,9 @@ const WINDOW_PATTERNS = [
   /too many tokens/i,
   /reduce the length of the messages/i,
   /exceeds the (?:model'?s )?(?:maximum )?context/i,
+  /prompt (?:is )?too long/i,
+  /request_too_large/i,
+  /(?:input|prompt|request) is too (?:long|large) for (?:this|the) model/i,
 ]
 
 /** The error code one failed response deserves, given its status and body. */
@@ -26,6 +35,50 @@ export function failureCode(status: number, body: string): string {
     if (WINDOW_PATTERNS.some((pattern) => pattern.test(body))) return CONTEXT_WINDOW_EXCEEDED
   }
   return 'HTTP'
+}
+
+/**
+ * What a failed response says, in the provider's words rather than its JSON.
+ *
+ * OpenAI and Anthropic both put the sentence at `error.message`, some gateways at a top-level `message`
+ * or as `error` itself. Live #153: the page showed `{"type": "error", "error": {…"prompt is too long: …"}}`
+ * where the sentence alone says it. A body that is not JSON, or JSON with no such field, is kept as it
+ * came; either way at most 400 characters.
+ */
+export function providerMessage(body: string): string {
+  let said: string | undefined
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown; message?: unknown } | null
+    const error = parsed?.error
+    if (typeof error === 'object' && error !== null && typeof (error as { message?: unknown }).message === 'string') {
+      said = (error as { message: string }).message
+    }
+    else if (typeof error === 'string') said = error
+    else if (typeof parsed?.message === 'string') said = parsed.message
+  } catch {
+    // Not JSON: the body is the message.
+  }
+  const text = (said !== undefined && said.trim().length > 0 ? said : body).trim()
+  return text.slice(0, 400)
+}
+
+/** What a window refusal adds to the provider's sentence (#153); the Rust build says the same words. */
+export const WINDOW_REMEDY =
+  "The conversation is larger than this model's context window: switch to a model with a larger window, or run /compact with one before switching back."
+
+/**
+ * The sentence a refused HTTP call fails with.
+ *
+ * A window refusal names the way out as well (#153). The message reaches a person only when overflow
+ * recovery could not make the conversation fit — a refusal it fixed is retried and never shown — and in
+ * that case the conversation is larger than this model can take, so the remedy is a model with a larger
+ * window, or a `/compact` run on one before coming back.
+ */
+export function failureMessage(endpoint: string, status: number, body: string): string {
+  const said = providerMessage(body)
+  const head = `'${endpoint}' answered ${status}${said ? ` — ${said}` : ''}`
+  if (failureCode(status, body) !== CONTEXT_WINDOW_EXCEEDED) return head
+  return `${/[.!?]$/.test(head) ? head : `${head}.`} ${WINDOW_REMEDY}`
 }
 
 /**
@@ -198,10 +251,7 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
   const status = response.statusCode ?? 0
   if (status < 200 || status >= 300) {
     const text = await readAll(response)
-    throw new ModelError(
-      `'${request.endpoint}' answered ${status}${text ? ` — ${text.slice(0, 400)}` : ''}`,
-      { endpoint: request.endpoint, code: failureCode(status, text), status },
-    )
+    throw new ModelError(failureMessage(request.endpoint, status, text), { endpoint: request.endpoint, code: failureCode(status, text), status })
   }
 
   /**
