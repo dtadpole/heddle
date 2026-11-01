@@ -3124,6 +3124,8 @@ pub(crate) mod tests {
         let model = ScriptedModel::new(vec![Step::Fail(ModelError {
             code: None,
             message: "the provider broke".into(),
+            status: None,
+            retry_after_ms: None,
         })]);
         let runtime = runtime(
             Arc::clone(&model),
@@ -3164,6 +3166,8 @@ pub(crate) mod tests {
             Step::Fail(ModelError {
                 code: None,
                 message: "the provider broke".into(),
+                status: None,
+                retry_after_ms: None,
             }),
         ]);
         let runtime = runtime(
@@ -3209,6 +3213,8 @@ pub(crate) mod tests {
             ModelError {
                 code: None,
                 message: "the stream broke".into(),
+                status: None,
+                retry_after_ms: None,
             },
         )]);
         let runtime = runtime(
@@ -3245,6 +3251,8 @@ pub(crate) mod tests {
             ModelError {
                 code: None,
                 message: "the stream was cancelled".into(),
+                status: None,
+                retry_after_ms: None,
             },
         )]);
         let token = CancellationToken::new();
@@ -3290,6 +3298,8 @@ pub(crate) mod tests {
                 ModelError {
                     code: None,
                     message: "the stream broke".into(),
+                    status: None,
+                    retry_after_ms: None,
                 },
             ),
         ]);
