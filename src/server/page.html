@@ -4186,6 +4186,9 @@ const MESSAGES = Object.freeze({
     'browser.address': 'Address',
     'browser.addressPlaceholder': 'Enter an HTTP(S) address',
     'browser.start': 'Enter an HTTP(S) address to start browsing',
+    'browser.back': 'Back',
+    'browser.forward': 'Forward',
+    'browser.reload': 'Reload',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
     'empty.title': 'Start a conversation',
     'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
@@ -4432,6 +4435,9 @@ const MESSAGES = Object.freeze({
     'browser.address': '地址',
     'browser.addressPlaceholder': '输入 HTTP(S) 地址',
     'browser.start': '输入 HTTP(S) 地址开始浏览',
+    'browser.back': '后退',
+    'browser.forward': '前进',
+    'browser.reload': '重新加载',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
     'empty.title': '开始对话',
     'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
@@ -11889,9 +11895,9 @@ function openBrowserTab(initialAddress) {
   const bar = document.createElement('form')
   bar.className = 'browser-bar'
   bar.setAttribute('aria-label', t('browser.navigation'))
-  tab.back = browserButton('back', 'Back', 'M10 3.5 5.5 8l4.5 4.5')
-  tab.forward = browserButton('forward', 'Forward', 'M6 3.5 10.5 8 6 12.5')
-  tab.reload = browserButton('reload', 'Reload', 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
+  tab.back = browserButton('back', t('browser.back'), 'M10 3.5 5.5 8l4.5 4.5')
+  tab.forward = browserButton('forward', t('browser.forward'), 'M6 3.5 10.5 8 6 12.5')
+  tab.reload = browserButton('reload', t('browser.reload'), 'M13 8a5 5 0 1 1-1.5-3.55M13 2.5v3h-3')
   tab.address = document.createElement('input')
   tab.address.type = 'text'
   tab.address.className = 'browser-address'
