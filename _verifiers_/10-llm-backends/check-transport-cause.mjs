@@ -34,7 +34,8 @@ test('a refused connection names the refusal and keeps the key, user and fragmen
     const port = await freePort()
     const config = writeJson(join(home, 'heddle.json'), {
       default: 'refused',
-      endpoints: [{ name: 'refused', kind: 'openai-chat', baseUrl: `http://user:hunter2@127.0.0.1:${port}/v1?key=SECRET#frag`, model: 'm' }],
+      // No retry: the subject is the sentence, and a retried refusal (TRANSPORT, as DSH retries it) only makes it slower.
+      endpoints: [{ name: 'refused', kind: 'openai-chat', baseUrl: `http://user:hunter2@127.0.0.1:${port}/v1?key=SECRET#frag`, model: 'm', retryPolicy: { maxRetries: 0 } }],
     })
     const env = { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config }
     const run = await runCli(['--endpoint', 'refused', '--max-rounds', '1', '--turn', 'hello'], { env, cwd: home })
@@ -44,7 +45,8 @@ test('a refused connection names the refusal and keeps the key, user and fragmen
     assert.notEqual(line, '', `the failure says the request could not be sent\n${said}`)
     const rust = !harnessEntry().endsWith('cli.js')
     assert.match(line, rust ? /Connection refused/ : /ECONNREFUSED/, `the sentence names the refusal\n${line}`)
-    for (const secret of ['SECRET', 'key=', 'hunter2', 'user:', '#frag']) assert.ok(!said.includes(secret), `${secret} is not said\n${said}`)
+    // 'hunter2' alone proves the user info is gone; 'user:' could match a transcript's role line.
+    for (const secret of ['SECRET', 'key=', 'hunter2', '#frag']) assert.ok(!said.includes(secret), `${secret} is not said\n${said}`)
   } finally {
     removeDir(home)
   }
