@@ -24,7 +24,7 @@ function harness() {
   const children: Array<{ textContent: string; hidden: boolean; attributes: Record<string, string>; [key: string]: unknown }> = []
   const body = { textContent: '', innerHTML: '', hidden: false, dataset: { renderer: '' }, replaceChildren(...nodes: typeof children) { children.splice(0, children.length, ...nodes) } }
   const head = { textContent: '' }
-  const frame = { srcdoc: '', setAttribute() {} }
+  const frame = { srcdoc: '', attributes: {} as Record<string, string>, setAttribute(name: string, value: string) { this.attributes[name] = value } }
   const pane = { hidden: true }
   const context = {
     fileBody: body, fileHead: head, htmlView: frame, fileHtml: pane,
@@ -124,6 +124,26 @@ test('the active HTML selection still publishes its sanitized frame', async () =
   assert.equal(state.body.hidden, true)
 })
 
+
+test('HTML publication honors base-none without injecting a base and preserves sanitization and sandbox', async () => {
+  const state = harness()
+  const current = state.showFile({ path: '/w/current.html' })
+  await state.htmlStarted.promise
+  state.html.resolve({ html: '<head><base href="https://example.invalid/"></head><body>CURRENT</body>', csp: "default-src 'none'; script-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'" })
+  let options: { FORBID_TAGS: string[]; FORBID_ATTR: string[]; WHOLE_DOCUMENT: boolean } | undefined
+  state.purifier.resolve({ sanitize: (value: string, config?: typeof options) => {
+    options = config
+    return value.replace(/<base[^>]*>/gi, '')
+  } })
+  await current
+  assert.doesNotMatch(state.frame.srcdoc, /<base\b/i, 'no application base contradicts the CSP')
+  assert.match(state.frame.srcdoc, /<head><meta http-equiv="Content-Security-Policy" content="[^"]*base-uri 'none'/, 'policy is first in the head')
+  assert.equal(state.frame.attributes.sandbox, 'allow-same-origin', 'no scripts, forms or navigation permissions added')
+  assert.ok(options?.FORBID_TAGS.includes('base'), 'source base remains forbidden by the actual sanitizer configuration')
+  for (const tag of ['script', 'iframe', 'object', 'embed', 'form']) assert.ok(options?.FORBID_TAGS.includes(tag), tag)
+  assert.ok(options?.FORBID_ATTR.includes('srcdoc'))
+  assert.equal(options?.WHOLE_DOCUMENT, true)
+})
 
 for (const path of ['/w/invalid.bin', '/w/network-failure.txt']) {
   test(`a failed new selection is visible after a settled HTML preview: ${path}`, async () => {

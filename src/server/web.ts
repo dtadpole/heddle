@@ -2839,6 +2839,8 @@ export function unknownTurnSession(
     new?: boolean
     /** The agent preset a session this turn creates runs under (inventory A96). */
     preset?: string
+    /** Answer `202 {session, turn}` at acceptance and push the verdict on `/api/events` (#128). */
+    detach?: boolean
   }
   try {
     const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
@@ -3063,8 +3065,19 @@ export function unknownTurnSession(
   const handles = state.controllers.get(handle.id) ?? new Set<AbortController>()
   handles.add(controller)
   state.controllers.set(handle.id, handles)
-  respondSse(response)
-  state.clients.add(response)
+  /**
+   * Detached (#128): the answer is `202 {session, turn}` as soon as the turn's prompt is in the log (below), and the
+   * turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six connections per host, shared by every tab, and a turn that holds its own
+   * response open for minutes holds one of them: five running turns stalled every other request of the page. The
+   * verdict goes through the stream's log after every event the turn appended, so it is replayed to a page that
+   * reconnects and never arrives before the answer it closes. Without `detach` the response streams as before.
+   */
+  const detached = body.detach === true
+  const turnId = newClientId()
+  if (!detached) {
+    respondSse(response)
+    state.clients.add(response)
+  }
   /**
    * Writing to a client that has gone away must not become an uncaught exception.
    *
@@ -3085,48 +3098,83 @@ export function unknownTurnSession(
     if (payload.session !== handle.id) return
     safeWrite(`event: session\ndata: ${JSON.stringify(payload)}\n\n`)
   }
+  /** The turn's terminal frame: on its own response, or as a detached turn's verdict on the stream. */
+  const finish = (name: 'done' | 'cancelled' | 'error', data: Record<string, unknown>) => {
+    if (detached) push(state, 'turn', turnVerdict(turnId, name, data))
+    else safeWrite(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
   // A listener registered through `ctx.on` here would need a fiber of its own, and the
   // request has none, so the turn's events are relayed by subscribing directly to the
-  // same emit the server already listens on for other clients.
-  const unsubscribe = subscribeSessionEvent(ctx, forward)
+  // same emit the server already listens on for other clients. A detached turn relays nothing.
+  const unsubscribe = detached ? () => {} : subscribeSessionEvent(ctx, forward)
+  /**
+   * A detached turn is answered once its first event is in the log, normally its prompt (or the end, if it ends
+   * first, or 10 s at most behind another turn of the session). That is the moment the streamed answer's first frame
+   * used to mark. The page adopts a session it created from this answer and redraws the log from the session's
+   * history, so answering before the prompt was written lost the person's own message from the page.
+   */
+  let recorded: () => void = () => {}
+  const firstRecord = new Promise<void>((resolve) => {
+    recorded = resolve
+  })
+  const stopWatching = detached
+    ? subscribeSessionEvent(ctx, (payload) => {
+        if (payload.session === handle.id) recorded()
+      })
+    : () => {}
+  const running = runTurn(ctx, {
+    session: handle,
+    endpoint,
+    prompt: body.prompt,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    signal: controller.signal,
+    /**
+     * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
+     * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
+     * "backend stopped to respond" on prompts with more than twenty steps.
+     */
+    maxRounds: state.maxRounds,
+    ...(runModel !== undefined ? { model: runModel } : {}),
+    ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
+  })
+  if (detached) {
+    let bound: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      firstRecord,
+      running.then(
+        () => {},
+        () => {},
+      ),
+      new Promise<void>((resolve) => {
+        bound = setTimeout(resolve, 10_000)
+      }),
+    ])
+    clearTimeout(bound)
+    stopWatching()
+    respond(response, 202, 'application/json', `${JSON.stringify({ session: handle.id, turn: turnId })}\n`)
+  }
   try {
-    const result = await runTurn(ctx, {
-      session: handle,
-      endpoint,
-      prompt: body.prompt,
-      ...(attachments.length > 0 ? { attachments } : {}),
-      signal: controller.signal,
-      /**
-       * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
-       * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
-       * "backend stopped to respond" on prompts with more than twenty steps.
-       */
-      maxRounds: state.maxRounds,
-      ...(runModel !== undefined ? { model: runModel } : {}),
-      ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
-    })
+    const result = await running
     /**
      * A turn that was stopped is a cancellation, not a completion — including the case where the loop noticed the
      * abort between rounds and returned a result instead of throwing. Without this, the page saw a normal `done`
      * and left the composer in its running state.
      */
     if (controller.signal.aborted) {
-      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      finish('cancelled', { session: handle.id, message: 'stopped' })
       return
     }
-    safeWrite(
-      `event: done\ndata: ${JSON.stringify({
-        session: handle.id,
-        text: result.text,
-        finishReason: result.finishReason,
-        rounds: result.rounds,
-        denials: result.denials,
-        /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
-        ...(result.ended !== undefined ? { ended: result.ended } : {}),
-        /** What the provider said the turn cost; the page derives a rate and a context share from it. */
-        ...(result.usage !== undefined ? { usage: result.usage } : {}),
-      })}\n\n`,
-    )
+    finish('done', {
+      session: handle.id,
+      text: result.text,
+      finishReason: result.finishReason,
+      rounds: result.rounds,
+      denials: result.denials,
+      /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
+      ...(result.ended !== undefined ? { ended: result.ended } : {}),
+      /** What the provider said the turn cost; the page derives a rate and a context share from it. */
+      ...(result.usage !== undefined ? { usage: result.usage } : {}),
+    })
   } catch (error) {
     /**
      * A stopped turn is an answer, not a failure: the abort reaches the provider connection and the loop
@@ -3134,7 +3182,7 @@ export function unknownTurnSession(
      * something the reader asked for, so it is its own event and the page settles the row with it.
      */
     if (controller.signal.aborted) {
-      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      finish('cancelled', { session: handle.id, message: 'stopped' })
     } else {
       /**
        * The failure is logged as well as streamed. Measured: an error that only reached the
@@ -3147,7 +3195,7 @@ export function unknownTurnSession(
        * a session that is not running kept its spinner and its running row (the owner's "weaving shows for sessions
        * that are not active at all").
        */
-      safeWrite(`event: error\ndata: ${JSON.stringify({ session: handle.id, message: (error as Error).message })}\n\n`)
+      finish('error', { session: handle.id, message: (error as Error).message })
       /**
        * And it is recorded, so it reaches every client and every later read (R-developer-six-2, DSH's
        * `api-session/error`). The `event: error` above told only the client that started the turn: another page
@@ -3397,6 +3445,17 @@ function streamTerminal(request: IncomingMessage, response: ServerResponse, regi
     if (!response.writableEnded && !response.destroyed) response.write(': heartbeat\n\n')
   }, heartbeatInterval())
   beat.unref()
+}
+
+/**
+ * A detached turn's verdict, as the `turn` frame `/api/events` carries (#128): the terminal frame's own fields, its
+ * name as `outcome`, and the turn id the `202` answer gave. The answer's text is left out — the stream already
+ * carried it as the session's own events, and its log keeps every frame for replay. The Rust route's
+ * `turn_verdict` is the same rule.
+ */
+export function turnVerdict(turn: string, outcome: 'done' | 'cancelled' | 'error', data: Record<string, unknown>): Record<string, unknown> {
+  const { text: _text, ...fields } = data
+  return { ...fields, turn, outcome }
 }
 
 /**
@@ -3874,10 +3933,20 @@ export function transcriptTurns(
        */
       const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
       if (event.type === 'turn/failed' && !blocked) {
-        const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
+        const message = typeof event.message === 'string' && event.message.length > 0 ? event.message : undefined
         const last = turns[turns.length - 1]
-        if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
-        else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+        /**
+         * Said once (#153). The loop has already ended this answer with `failed: <message>` (recordUnfinished), and
+         * the route records the same message in `turn/failed`; both were drawn, as "Failed: X; the turn failed: X".
+         * Only the newest row is read, as before: a later turn whose failure left no answer row has its prompt last,
+         * so an earlier answer's identical failure cannot swallow it.
+         */
+        const said = message !== undefined && last !== undefined && last.kind === 'assistant' && (last.ended ?? []).includes(`failed: ${message}`)
+        if (!said) {
+          const reason = `the turn failed: ${message ?? 'unknown error'}`
+          if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
+          else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+        }
       }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()
