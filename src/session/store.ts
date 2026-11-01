@@ -11,19 +11,20 @@ import {
   statSync,
   truncateSync,
   unlinkSync,
-  writeFileSync,
   writeSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 
-import type { Chunk, ContentPart, Message } from '../llm/types.ts'
+import { textOf, type Chunk, type ContentPart, type Message } from '../llm/types.ts'
+import { readSessionDefinition, SESSIONS_FOLDER } from './definition.ts'
+import { writeFileAtomic } from './fsio.ts'
 import { workspaceKey } from './layout.ts'
 import { interruptedTurnClosers } from './repair.ts'
 import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
-import { normalizeSessionTitle } from './title-text.ts'
+import { normalizeSessionTitle, titleFrom } from './title-text.ts'
 
 /**
  * The session store.
@@ -667,6 +668,130 @@ export function skippedLogLine(path: string, reason: string): string {
 }
 
 /**
+ * A session record as the listing believes it: an object whose `id` is a string, or `null` for anything else — a cut
+ * file, an empty one, or one that is not JSON.
+ */
+export function parseRecord(text: string): SessionMeta | null {
+  try {
+    const value: unknown = JSON.parse(text)
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+    return typeof (value as { id?: unknown }).id === 'string' ? (value as SessionMeta) : null
+  } catch {
+    return null
+  }
+}
+
+/** What a session's log says about its record: the facts {@link SessionStore} rebuilds a record from (#195). */
+export interface RecordFacts {
+  /** The `session/created` event's time. */
+  readonly created: string
+  /** The `session/created` event's `cwd`. */
+  readonly cwd: string
+  /** Every user `message`, as `message()` and a fork's seed counted them into `turns`. */
+  readonly turns: number
+  /** The latest user message a person wrote (no `source`): `touch`'s `promptedAt`. Absent when none was. */
+  readonly updated?: string
+  /** The name the first message gave an untitled session (`titleFrom`, cleaned as `rename` cleans it), when one did. */
+  readonly firstMessageTitle?: string
+}
+
+/**
+ * Read a record's facts from a log's bytes, or `null` when the log cannot rebuild one: its first event is not a
+ * `session/created` that names the folder.
+ *
+ * Every whole event up to the first line that is not one is read, as the store's listing judges a log by its first
+ * record and finds a damaged body only when it reads it. The Rust twin is `record_facts` in heddle-session `store.rs`.
+ */
+export function recordFacts(bytes: Buffer): RecordFacts | null {
+  const events: SessionEvent[] = []
+  for (const line of decodeTranscript(bytes).lines) {
+    let record: unknown
+    try {
+      record = JSON.parse(line)
+    } catch {
+      break
+    }
+    if (!isEventRecord(record)) break
+    events.push(record as SessionEvent)
+  }
+  const created = events[0]
+  if (created?.type !== 'session/created' || typeof created.cwd !== 'string' || created.cwd.length === 0) return null
+  let turns = 0
+  let updated: string | undefined
+  let firstMessageTitle: string | undefined
+  for (const event of events) {
+    if (event.type !== 'message' || isReplacementOp(event.surfaceOp as SurfaceOp | undefined)) continue
+    const message = event.message as RecordedMessage | undefined
+    if (message?.role !== 'user') continue
+    turns += 1
+    if (message.source === undefined) updated = event.at
+    if (firstMessageTitle === undefined && Array.isArray(message.content)) {
+      const title = normalizeSessionTitle(titleFrom(textOf(message.content)))
+      if (title.length > 0) firstMessageTitle = title
+    }
+  }
+  return {
+    created: created.at,
+    cwd: created.cwd,
+    turns,
+    ...(updated !== undefined ? { updated } : {}),
+    ...(firstMessageTitle !== undefined ? { firstMessageTitle } : {}),
+  }
+}
+
+/**
+ * The title a person gave the session, as the definition in its folder records it (`<cwd>/_sessions_/<name>/session.json`):
+ * the title it was created with, or the one a rename from the page wrote there too. `undefined` when no definition there
+ * names this session, or the one that does holds no title. Neither the first message's name nor the title model's is
+ * written there, which is why it is asked first: what it holds is a person's.
+ */
+export function definitionTitle(cwd: string, id: SessionId): string | undefined {
+  const folder = join(cwd, SESSIONS_FOLDER)
+  let names: string[]
+  try {
+    names = readdirSync(folder)
+  } catch {
+    return undefined
+  }
+  for (const name of names) {
+    const fields = readSessionDefinition(join(folder, name))
+    if (fields?.id !== id) continue
+    const title = typeof fields.title === 'string' ? normalizeSessionTitle(fields.title) : ''
+    return title.length > 0 ? title : undefined
+  }
+  return undefined
+}
+
+/** Where a rebuilt record's title came from, as its line says. */
+export type RebuiltTitle = 'definition' | 'message' | 'none'
+
+/**
+ * The line the store prints when it rebuilds a session's record from its log (#195); the Rust store prints the same.
+ *
+ * It names the record and the log, why the record was rebuilt, which fields the log gave, and which it could not:
+ * those are left as a new session has them, and saying so is what tells a person that a pin, an archive or a model
+ * choice has to be made again.
+ */
+export function rebuiltRecordLine(record: string, log: string, missing: boolean, title: RebuiltTitle, failure?: string): string {
+  const named =
+    title === 'definition' ? 'title from its definition in the folder' : title === 'message' ? 'title from its first message' : 'no title (no message names it)'
+  return (
+    `heddle session: rebuilt the record ${record} from its log ${log} (the record ${missing ? 'was missing' : 'could not be read'}): ` +
+    `cwd, created, turns and last prompt from the log, ${named}; not in the log, so as a new session has them: ` +
+    `endpoint, model, preset, pin, archive, parent session, team` +
+    (failure !== undefined ? `; it could not be written back: ${failure}` : '')
+  )
+}
+
+/** The line the store prints when it leaves a session out because its record cannot be read and its log cannot rebuild it. */
+export function skippedRecordLine(id: SessionId, record: string, missing: boolean, log: string | undefined): string {
+  return (
+    `heddle session: skipped session ${id}: its record ${record} ${missing ? 'is missing' : 'cannot be read'}, and ` +
+    (log !== undefined ? `its log ${log} holds no session/created to rebuild it from` : 'it has no log to rebuild it from')
+  )
+}
+
+/**
  * Judge a log file by its first record ({@link judgeLogHeader}), reading only as far as that record ends.
  *
  * A file that cannot be opened is judged as `readLog` reads it, an empty session: the store's rule for a log not
@@ -884,6 +1009,14 @@ export class SessionStore {
   /** The unreadable whole logs `loads` has already named, so a second sweep does not name one twice. */
   private readonly reportedLoads = new Set<string>()
 
+  /**
+   * Each record this store could not read and did not leave written back, keyed by the record's path, with the state of
+   * the log it was judged at: a record its log cannot rebuild (`meta: null`), or one rebuilt that could not be written
+   * (the rebuilt record). `list()` asks on every call, so the log is re-read, and the record named again, only after the
+   * log changed. A record rebuilt and written is not kept: the next read finds it whole, and a later damage is named anew.
+   */
+  private readonly unreadableRecords = new Map<string, { readonly size: number; readonly mtimeMs: number; readonly meta: SessionMeta | null }>()
+
   constructor(
     root: string = defaultSessionRoot(),
     options: {
@@ -936,7 +1069,7 @@ export class SessionStore {
     const handle: SessionHandle = { id, dir, transcript: join(dir, logName(id)), meta: join(dir, metaName(id)) }
     /** A title is cleaned as DSH cleans an accepted one (`./title-text.ts`); one with nothing visible left is not written. */
     const title = options.title === undefined ? '' : normalizeSessionTitle(options.title)
-    writeFileSync(
+    writeFileAtomic(
       handle.meta,
       `${JSON.stringify(
         {
@@ -986,7 +1119,7 @@ export class SessionStore {
     if (trimmed.length === 0) delete (next as { title?: string }).title
     const meta = this.metaFile(id)
     if (meta === null) return null
-    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    writeFileAtomic(meta, `${JSON.stringify(next, null, 2)}\n`)
     /**
      * After the write, as with `onEvent`: a listener never announces a title the record does not hold. A listener that
      * throws is logged and swallowed: the rename has landed, and the first-message fallback that renames inside
@@ -1014,7 +1147,7 @@ export class SessionStore {
     const next: SessionMeta = { ...current, preset: preset.trim() }
     const meta = this.metaFile(id)
     if (meta === null) return null
-    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    writeFileAtomic(meta, `${JSON.stringify(next, null, 2)}\n`)
     return next
   }
 
@@ -1054,20 +1187,105 @@ export class SessionStore {
     }
     const meta = this.metaFile(id)
     if (meta === null) return null
-    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    writeFileAtomic(meta, `${JSON.stringify(next, null, 2)}\n`)
     return next
   }
 
-  /** One session's record, read from its own file; `null` for an unknown id or an unreadable record. */
+  /**
+   * One session's record, read from its own file; `null` for an unknown id, or a record that cannot be read and that its
+   * log cannot rebuild ({@link SessionStore.readRecord}).
+   */
   meta(id: SessionId): SessionMeta | null {
     const file = this.metaFile(id)
     if (file === null) return null
+    return this.readRecord(file, dirname(file), id)
+  }
+
+  /**
+   * A session's record, read from `file`; when it cannot be read — cut, empty, not JSON, or missing beside its log — it
+   * is **rebuilt from the log** and written back whole (#195).
+   *
+   * Measured before: a record cut in half or deleted, with its log intact, dropped the session out of the list, search,
+   * Rename and Pin, and nothing said so; the TypeScript turn route still wrote turns into it, while the Rust one refused.
+   * DSH has no such record: a session's metadata is its log's header line, written once (dsh-session-persistence-jsonl
+   * `create` and `toHeaderLine`, lib/index.js:2465-2479 and 813-821), and a header that does not read is left out of
+   * discovery (`listArtifacts`, :3102-3138) and refused on open (`SessionPersistenceCorruptionError`, :2675). Here the
+   * record is a second file, rewritten on every prompt, and its facts are in the log: the folder and the creation time in
+   * `session/created`, the turns and the last prompt in the user messages. The title is not (heddle keeps it in the
+   * record, not in a `session/title` event as DSH does, `./title.ts`), so it is taken from the folder's definition, where
+   * a person's title is written, or else from the first message, as that message named the session. So the session is
+   * kept rather than refused, and one line names the repair ({@link rebuiltRecordLine}). What the log does not carry — a
+   * chosen endpoint and model, the preset, a pin, an archive, a parent, a team — is left as a new session has it, and the
+   * line says so. A log that cannot rebuild it (no `session/created` first) leaves the session out, named once
+   * ({@link skippedRecordLine}), and it opens as no session, so every route answers it as `list()` does.
+   */
+  private readRecord(file: string, dir: string, id: SessionId): SessionMeta | null {
+    let text: string | undefined
+    let missing = false
     try {
-      const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta
-      return typeof meta?.id === 'string' ? meta : null
+      text = readFileSync(file, 'utf8')
+    } catch (error) {
+      /** Not there at all; a stray file named like a session directory reads as `ENOTDIR`, and holds no session either. */
+      const code = (error as NodeJS.ErrnoException).code
+      missing = code === 'ENOENT' || code === 'ENOTDIR'
+    }
+    if (text !== undefined) {
+      const meta = parseRecord(text)
+      if (meta !== null) return meta
+    }
+    return this.rebuildRecord(file, dir, id, missing)
+  }
+
+  /** {@link SessionStore.readRecord}'s repair: never throws, since a listing must not fail for one session. */
+  private rebuildRecord(file: string, dir: string, id: SessionId, missing: boolean): SessionMeta | null {
+    const log = this.transcriptFor(dir, id)
+    let size = -1
+    let mtimeMs = -1
+    try {
+      ;({ size, mtimeMs } = statSync(log))
     } catch {
+      /** Nothing was there to rebuild from, nor to name: a folder with neither a record nor a log is no session. */
+      if (missing) return null
+    }
+    const known = this.unreadableRecords.get(file)
+    if (known !== undefined && known.size === size && known.mtimeMs === mtimeMs) return known.meta
+    const leaveOut = (line: string): null => {
+      this.unreadableRecords.set(file, { size, mtimeMs, meta: null })
+      this.warn(line)
       return null
     }
+    if (size === -1) return leaveOut(skippedRecordLine(id, file, missing, undefined))
+    /** A log that is not a log is named by its own line and left out (#130); there is nothing to rebuild from. */
+    if (!this.logReadable(log)) return null
+    let facts: RecordFacts | null = null
+    try {
+      facts = recordFacts(readFileSync(log))
+    } catch {
+      facts = null
+    }
+    if (facts === null) return leaveOut(skippedRecordLine(id, file, missing, log))
+    const fromDefinition = definitionTitle(facts.cwd, id)
+    const title = fromDefinition ?? facts.firstMessageTitle
+    /** The key order of a record `create` wrote and a prompt then touched: `id`, `created`, `cwd`, `title`, `turns`, `updated`. */
+    const meta: SessionMeta = {
+      id,
+      created: facts.created,
+      cwd: facts.cwd,
+      ...(title !== undefined ? { title } : {}),
+      turns: facts.turns,
+      ...(facts.updated !== undefined ? { updated: facts.updated } : {}),
+    }
+    const named: RebuiltTitle = fromDefinition !== undefined ? 'definition' : title !== undefined ? 'message' : 'none'
+    try {
+      writeFileAtomic(file, `${JSON.stringify(meta, null, 2)}\n`)
+      this.unreadableRecords.delete(file)
+      this.warn(rebuiltRecordLine(file, log, missing, named))
+    } catch (error) {
+      /** Still listed, from memory, until a write lands; the line says the file is not repaired. */
+      this.unreadableRecords.set(file, { size, mtimeMs, meta })
+      this.warn(rebuiltRecordLine(file, log, missing, named, error instanceof Error ? error.message : String(error)))
+    }
+    return meta
   }
 
   /**
@@ -1186,7 +1404,7 @@ export class SessionStore {
     else delete (next as { reasoningEffort?: string }).reasoningEffort
     const meta = this.metaFile(id)
     if (meta === null) return null
-    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    writeFileAtomic(meta, `${JSON.stringify(next, null, 2)}\n`)
     return next
   }
 
@@ -1201,13 +1419,23 @@ export class SessionStore {
   private metaFile(id: SessionId): string | null {
     const legacy = join(this.root, id, 'meta.json')
     if (existsSync(legacy)) return legacy
+    let names: string[]
     try {
-      for (const name of readdirSync(this.root)) {
-        const candidate = join(this.root, name, metaName(id))
-        if (existsSync(candidate)) return candidate
-      }
+      names = readdirSync(this.root)
     } catch {
       return null
+    }
+    for (const name of names) {
+      const candidate = join(this.root, name, metaName(id))
+      if (existsSync(candidate)) return candidate
+    }
+    /**
+     * No record, but a log (#195): the record's place beside it, where `readRecord` rebuilds it. Measured before: such a
+     * session answered `404` on every route while its log sat in the store.
+     */
+    if (existsSync(transcriptIn(join(this.root, id)))) return legacy
+    for (const name of names) {
+      if (existsSync(join(this.root, name, logName(id)))) return join(this.root, name, metaName(id))
     }
     return null
   }
@@ -1258,6 +1486,12 @@ export class SessionStore {
       const dir = dirname(meta)
       const transcript = this.transcriptFor(dir, id)
       if (!this.logReadable(transcript)) return null
+      /**
+       * A record that cannot be read is rebuilt from the log first, or the session opens as no session, as `list()` leaves
+       * it out (#195): measured before, the TypeScript turn route opened a session with a cut record and wrote its turns
+       * into a log that nothing listed.
+       */
+      if (this.readRecord(meta, dir, id) === null) return null
       return { id, dir, transcript, meta }
     }
     const newest = this.list()[0]
@@ -1292,7 +1526,9 @@ export class SessionStore {
    *
    * The walk reads a session's own directory (the old shape) and every workspace folder's `<id>.json` (the
    * current one), so a store that holds both answers with all of its sessions and none of them twice. A session whose
-   * log cannot be read is left out, and named once ({@link SessionStore.logReadable}).
+   * log cannot be read is left out, and named once ({@link SessionStore.logReadable}). A session whose record cannot be
+   * read, or is gone beside its log, is listed from a record rebuilt out of that log, and named once
+   * ({@link SessionStore.readRecord}, #195).
    */
   list(): readonly SessionMeta[] {
     let names: string[]
@@ -1302,24 +1538,21 @@ export class SessionStore {
       return []
     }
     const metas = new Map<string, SessionMeta>()
-    const remember = (text: string, dir: string): void => {
-      try {
-        const meta = JSON.parse(text) as SessionMeta
-        if (typeof meta?.id !== 'string' || metas.has(meta.id)) return
-        if (!this.logReadable(this.transcriptFor(dir, meta.id))) return
-        metas.set(meta.id, meta)
-      } catch {
-        // A file that is not metadata is not a reason to lose the sessions that are.
-      }
+    /**
+     * One session's record at `file`, for the session `id` its file name says. A record that cannot be read is rebuilt from
+     * its log ({@link SessionStore.readRecord}, #195) — measured before, it was skipped without a word — and one that its
+     * log cannot rebuild is left out, named once; a record that reads is believed for the id it holds, as always.
+     */
+    const remember = (file: string, dir: string, id: SessionId): void => {
+      const meta = this.readRecord(file, dir, id)
+      if (meta === null || metas.has(meta.id)) return
+      if (!this.logReadable(this.transcriptFor(dir, meta.id))) return
+      metas.set(meta.id, meta)
     }
     for (const name of names) {
       const at = join(this.root, name)
       if (name.startsWith('session-')) {
-        try {
-          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at)
-        } catch {
-          // A session directory without readable metadata is skipped, as it always was.
-        }
+        remember(join(at, 'meta.json'), at, name)
         continue
       }
       let entries: string[]
@@ -1328,13 +1561,15 @@ export class SessionStore {
       } catch {
         continue
       }
+      const records = new Set(entries.filter((entry) => entry.startsWith('session-') && entry.endsWith('.json')))
       for (const entry of entries) {
-        if (!entry.startsWith('session-') || !entry.endsWith('.json')) continue
-        try {
-          remember(readFileSync(join(at, entry), 'utf8'), at)
-        } catch {
+        if (records.has(entry)) {
+          remember(join(at, entry), at, entry.slice(0, -'.json'.length))
           continue
         }
+        /** A log whose record is gone is a session too: its record is rebuilt beside it (#195). */
+        const orphan = /^(session-.+?)(?:\.v2\.jsonl\.zstd|\.jsonl)$/.exec(entry)?.[1]
+        if (orphan !== undefined && !records.has(metaName(orphan))) remember(join(at, metaName(orphan)), at, orphan)
       }
     }
     return [...metas.values()].sort((left, right) => (left.created < right.created ? 1 : -1))
@@ -1793,6 +2028,11 @@ export class SessionStore {
    * The meta is a convenience beside the log: failing to write it must never lose the event that was just appended, which is
    * why the catch swallows. `updated` is what a row's age reads and what **Last updated** sorts by, and `turns` what its
    * tooltip counts. A call with neither writes nothing.
+   *
+   * The write replaces the record whole ({@link writeFileAtomic}): it used to rewrite it in place on every prompt, so a full
+   * disk or a process killed mid-write left the record cut and the session dropped out of every list (#195). A record that
+   * cannot be read here is rebuilt from the log ({@link SessionStore.readRecord}), which already holds the event this
+   * touch counts, so the rebuilt record is the counted one.
    */
   touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean; readonly addTurns?: number; readonly promptedAt?: string } = {}): void {
     const path = handle.meta
@@ -1803,13 +2043,23 @@ export class SessionStore {
     const added = (options.bumpTurns === true ? 1 : 0) + (options.addTurns ?? 0)
     if (added === 0 && options.promptedAt === undefined) return
     try {
-      const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
+      let text: string | undefined
+      try {
+        text = readFileSync(path, 'utf8')
+      } catch {
+        text = undefined
+      }
+      const meta = text === undefined ? null : parseRecord(text)
+      if (meta === null) {
+        this.readRecord(path, handle.dir, handle.id)
+        return
+      }
       const updated: SessionMeta = {
         ...meta,
         ...(options.promptedAt !== undefined ? { updated: options.promptedAt } : {}),
         ...(added > 0 ? { turns: (meta.turns ?? 0) + added } : {}),
       }
-      writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)
+      writeFileAtomic(path, `${JSON.stringify(updated, null, 2)}\n`)
     } catch {
       // A session without readable metadata is still a usable session; the count
       // is a convenience and losing it must not lose the turn.

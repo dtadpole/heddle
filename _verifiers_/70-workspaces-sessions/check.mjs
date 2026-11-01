@@ -4,7 +4,7 @@
  * words in those comments, never backticks.
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
@@ -1587,6 +1587,124 @@ test('a session log that is not a readable log is left out after a restart, and 
     for (const log of [randomLog, plainLog]) {
       assert.ok(output.split('\n').some((line) => line.includes(log) && /skipped/i.test(line)), `a line of the server's log names the skipped file ${log}\n${output}`)
     }
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+  }
+})
+
+test('a session whose record is cut or missing while its log is intact is rebuilt from the log: listed with its folder and title, open to a turn, named once, and still there after a restart (#195)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * Issue #195 (developer-six, J175), by its own steps: sessions in one workspace, titled; one record cut in half (bravo),
+   * another removed with its log kept (echo); the server restarted. Measured before: both vanished from GET /api/sessions
+   * during the run and after a restart, and the server said nothing; the TypeScript turn route still wrote turns into
+   * bravo, and the Rust one answered 404, which the page showed as the raw JSON body.
+   *
+   * DSH keeps a session's metadata in its log's header line, written once (dsh-session-persistence-jsonl create,
+   * lib/index.js:2465-2479), so it has no record to cut. heddle's record is a second file, and the log holds its facts:
+   * the folder and the creation time in session/created, the turns in the user messages, and the title in the folder's
+   * definition (a person's rename) or the first message (the name that message gave). So both builds rebuild it, write it
+   * back whole, and print one line naming the repair.
+   */
+  const h = harness('record-rebuilt')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  const env = { ...h.env, HOME: h.home }
+  let live
+  try {
+    const connect = async () => {
+      const origin = new URL(live.url).origin
+      const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+      return (path, init = {}) => fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+    }
+    live = await startServer(serverArgs, env)
+    let call = await connect()
+    const registered = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: h.work }) })
+    assert.equal(registered.status, 200, `the folder was registered\n${await registered.text()}`)
+    const made = {}
+    for (const name of ['alpha', 'bravo', 'echo']) {
+      const response = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: h.work }) })
+      const body = await response.text()
+      assert.equal(response.status, 200, `session ${name} was created\n${body}`)
+      made[name] = JSON.parse(body)
+    }
+    const { alpha, bravo, echo } = { alpha: made.alpha.session, bravo: made.bravo.session, echo: made.echo.session }
+    /** bravo is named by a person, as the page's Rename names it: the store and the definition in the folder both hold it. */
+    const renamed = await call(`/api/sessions/${bravo}/title`, { method: 'POST', body: JSON.stringify({ title: 'bravo note', folder: dirname(String(made.bravo.definition)) }) })
+    assert.equal(renamed.status, 200, `bravo was renamed\n${await renamed.text()}`)
+    const turnInto = async (session, prompt) => {
+      const turn = await call('/api/turn', { method: 'POST', body: JSON.stringify({ session, prompt }) })
+      const stream = await turn.text()
+      assert.equal(turn.status, 200, `a turn into ${session} was taken\n${stream}`)
+      assert.ok(stream.includes('a remembered answer'), `and answered\n${stream}`)
+    }
+    await turnInto(alpha, 'alpha check')
+    await turnInto(bravo, 'tell me about herons')
+    /** echo is named by its first message. */
+    await turnInto(echo, 'echo about the herons')
+    const before = JSON.parse(await (await call('/api/sessions')).text())
+    const was = (id) => before.find((meta) => meta.id === id)
+    assert.equal(was(bravo)?.title, 'bravo note', 'bravo carries the name it was given')
+    assert.equal(was(echo)?.title, 'echo about the herons', 'echo the name its first message gave it')
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 300))
+
+    const root = join(h.home, 'sessions')
+    const bravoRecord = recordFile(root, bravo)
+    const echoRecord = recordFile(root, echo)
+    const bravoText = readFileSync(bravoRecord, 'utf8')
+    writeFileSync(bravoRecord, bravoText.slice(0, Math.floor(bravoText.length / 2)))
+    rmSync(echoRecord)
+    assert.ok(existsSync(transcriptFile(join(root, bravo))) && existsSync(transcriptFile(join(root, echo))), 'both logs are kept')
+
+    live = await startServer(serverArgs, env)
+    call = await connect()
+    const listing = await call('/api/sessions')
+    const listed = await listing.text()
+    assert.equal(listing.status, 200, `the sessions are listed\n${listed}`)
+    const now = (id) => JSON.parse(listed).find((meta) => meta.id === id)
+    for (const id of [bravo, echo]) {
+      assert.ok(now(id) !== undefined, `the session ${id} is listed after its record was ${id === bravo ? 'cut in half' : 'removed'}\n${listed}`)
+      assert.equal(now(id).cwd, was(id).cwd, 'with the folder it was bound to')
+      assert.equal(now(id).title, was(id).title, 'and the title it had')
+      assert.equal(now(id).turns, was(id).turns, 'and its turns')
+    }
+    assert.ok(now(alpha) !== undefined, 'the healthy session is listed as before')
+    for (let waited = 0; waited < 2_000 && ![bravoRecord, echoRecord].every((file) => live.output().includes(file)); waited += 100) {
+      await new Promise((done) => setTimeout(done, 100))
+    }
+    const lines = live.output().split('\n')
+    for (const file of [bravoRecord, echoRecord]) {
+      const naming = lines.filter((line) => line.includes(file))
+      assert.equal(naming.length, 1, `one line of the server's log names the rebuilt record ${file}\n${live.output()}`)
+      assert.match(naming[0], /heddle session: rebuilt the record .* from its log /, 'as a repair from the log')
+    }
+    for (const id of [bravo, echo]) {
+      const opened = await call(`/api/sessions/${id}`)
+      assert.equal(opened.status, 200, `the rebuilt session opens\n${await opened.text()}`)
+      await turnInto(id, `one more for ${id === bravo ? 'bravo' : 'echo'}`)
+      assert.equal(JSON.parse(readFileSync(recordFile(root, id), 'utf8')).id, id, 'and its record on disk reads whole')
+    }
+    const counted = JSON.parse(await (await call('/api/sessions')).text())
+    for (const id of [bravo, echo]) {
+      assert.equal(counted.find((meta) => meta.id === id)?.turns, was(id).turns + 1, 'the new turn is counted on the rebuilt record')
+    }
+    live.kill()
+    live = undefined
+    await new Promise((done) => setTimeout(done, 300))
+
+    live = await startServer(serverArgs, env)
+    call = await connect()
+    const again = JSON.parse(await (await call('/api/sessions')).text())
+    for (const id of [bravo, echo]) {
+      const meta = again.find((one) => one.id === id)
+      assert.ok(meta !== undefined, `after a restart ${id} is still listed\n${JSON.stringify(again)}`)
+      assert.equal(meta.title, was(id).title, 'with its title')
+    }
+    await new Promise((done) => setTimeout(done, 300))
+    assert.ok(!/rebuilt the record/.test(live.output()), `and nothing is rebuilt again\n${live.output()}`)
   } finally {
     live?.kill()
     removeDir(h.home)

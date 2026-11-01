@@ -38,6 +38,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::clock::iso_now;
+use crate::definition::{SESSIONS_FOLDER, read_session_definition};
 use crate::error::{SessionError, SessionFlagError};
 use crate::event::{AppendOptions, Events, NewEvent, SessionEvent, SessionHandle, SurfaceOp};
 use crate::layout::workspace_key;
@@ -363,6 +364,11 @@ pub struct SessionStore {
     warn: Mutex<Option<Warn>>,
     /// Where a written title is announced ([`SessionStore::on_renamed`]); nobody until the boot names a listener.
     renamed: Mutex<Option<RenameListener>>,
+    /// Each record this store could not read and did not leave written back, keyed by the record's path
+    /// ([`SessionStore::read_record`], #195): `list()` asks on every call, so the log is re-read, and the record named
+    /// again, only after the log changed. Held across a whole rebuild, so two threads that find one record cut rebuild
+    /// it once, and a rename written meanwhile is never replaced by the rebuilt record.
+    unreadable_records: Mutex<HashMap<String, UnreadableRecord>>,
 }
 
 /// Receives the line naming a log the store leaves out.
@@ -461,29 +467,180 @@ fn entries_sorted(dir: &Path) -> Vec<String> {
     names
 }
 
-/// Add one parsed metadata file to a listing, first occurrence winning. A file that is not metadata is
-/// skipped rather than failing the list, and so is a session whose log `readable` refuses.
-fn remember_meta(
-    text: Result<String, std::io::Error>,
-    metas: &mut Vec<SessionMeta>,
-    seen: &mut Vec<String>,
-    readable: impl Fn(&str) -> bool,
-) {
-    let Ok(text) = text else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return;
-    };
-    let Some(meta) = SessionMeta::from_value(value) else {
-        return;
-    };
-    let id = meta.id().to_string();
-    if seen.contains(&id) || !readable(&id) {
-        return;
+/// A session record as the listing believes it: an object whose `id` is a string, or `None` for anything else — a
+/// cut file, an empty one, or one that is not JSON (`parseRecord` in `src/session/store.ts`).
+pub fn parse_record(text: &str) -> Option<SessionMeta> {
+    let value = serde_json::from_str::<Value>(text).ok()?;
+    SessionMeta::from_value(value)
+}
+
+/// What a session's log says about its record: the facts a record is rebuilt from (#195; `RecordFacts` in
+/// `src/session/store.ts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordFacts {
+    /// The `session/created` event's time.
+    pub created: String,
+    /// The `session/created` event's `cwd`.
+    pub cwd: String,
+    /// Every user `message`, as `message` and a fork's seed counted them into `turns`.
+    pub turns: u64,
+    /// The latest user message a person wrote (no `source`): the touch's `prompted_at`.
+    pub updated: Option<String>,
+    /// The name the first message gave an untitled session ([`crate::service::title_from`], cleaned as `rename`
+    /// cleans it), when one did.
+    pub first_message_title: Option<String>,
+}
+
+/// Whether an event entered the surface as a replacement (`surfaceOp: {"op": "replace", …}`).
+fn is_replacement(event: &SessionEvent) -> bool {
+    event
+        .get("surfaceOp")
+        .and_then(|op| op.get("op"))
+        .and_then(Value::as_str)
+        == Some("replace")
+}
+
+/// Read a record's facts from a log's bytes, or `None` when the log cannot rebuild one: its first event is not a
+/// `session/created` that names the folder (`recordFacts` in `src/session/store.ts`).
+///
+/// Every whole event up to the first line that is not one is read, as the listing judges a log by its first record and
+/// finds a damaged body only when it reads it.
+pub fn record_facts(bytes: &[u8]) -> Option<RecordFacts> {
+    let mut events = Vec::new();
+    for line in decode_transcript(bytes).lines {
+        match SessionEvent::from_line(&line) {
+            Ok(event) => events.push(event),
+            Err(_) => break,
+        }
     }
-    seen.push(id);
-    metas.push(meta);
+    let created = events.first()?;
+    if created.kind != "session/created" {
+        return None;
+    }
+    let cwd = created
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|cwd| !cwd.is_empty())?;
+    let mut facts = RecordFacts {
+        created: created.at.clone(),
+        cwd: cwd.to_string(),
+        turns: 0,
+        updated: None,
+        first_message_title: None,
+    };
+    for event in &events {
+        if event.kind != "message" || is_replacement(event) {
+            continue;
+        }
+        let Some(message) = event.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("user") {
+            continue;
+        }
+        facts.turns += 1;
+        if message.get("source").is_none() {
+            facts.updated = Some(event.at.clone());
+        }
+        if facts.first_message_title.is_none()
+            && let Some(Value::Array(parts)) = message.get("content")
+        {
+            // `textOf`: the text parts, joined with nothing between them.
+            let text: String = parts
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect();
+            let title = crate::title_text::clean_session_title(&crate::service::title_from(&text));
+            if !title.is_empty() {
+                facts.first_message_title = Some(title);
+            }
+        }
+    }
+    Some(facts)
+}
+
+/// The title a person gave the session, as the definition in its folder records it
+/// (`<cwd>/_sessions_/<name>/session.json`): the title it was created with, or the one a rename from the page wrote
+/// there too. `None` when no definition there names this session, or the one that does holds no title. Neither the first
+/// message's name nor the title model's is written there, which is why it is asked first (`definitionTitle` in
+/// `src/session/store.ts`).
+pub fn definition_title(cwd: &str, id: &str) -> Option<String> {
+    let folder = Path::new(cwd).join(SESSIONS_FOLDER);
+    for name in entries_sorted(&folder) {
+        let Some(fields) = read_session_definition(&folder.join(&name).to_string_lossy()) else {
+            continue;
+        };
+        if fields.id() != id {
+            continue;
+        }
+        let title = crate::title_text::clean_session_title(fields.title().unwrap_or(""));
+        return (!title.is_empty()).then_some(title);
+    }
+    None
+}
+
+/// Where a rebuilt record's title came from, as its line says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuiltTitle {
+    Definition,
+    Message,
+    None,
+}
+
+/// The line the store prints when it rebuilds a session's record from its log (#195), the same line the TypeScript
+/// store prints (`rebuiltRecordLine`): the record and the log, why, which fields the log gave, and which it could not.
+pub fn rebuilt_record_line(
+    record: &str,
+    log: &str,
+    missing: bool,
+    title: RebuiltTitle,
+    failure: Option<&str>,
+) -> String {
+    let named = match title {
+        RebuiltTitle::Definition => "title from its definition in the folder",
+        RebuiltTitle::Message => "title from its first message",
+        RebuiltTitle::None => "no title (no message names it)",
+    };
+    let cause = if missing {
+        "was missing"
+    } else {
+        "could not be read"
+    };
+    let mut line = format!(
+        "heddle session: rebuilt the record {record} from its log {log} (the record {cause}): \
+         cwd, created, turns and last prompt from the log, {named}; not in the log, so as a new session has them: \
+         endpoint, model, preset, pin, archive, parent session, team"
+    );
+    if let Some(failure) = failure {
+        line.push_str(&format!("; it could not be written back: {failure}"));
+    }
+    line
+}
+
+/// The line the store prints when it leaves a session out because its record cannot be read and its log cannot
+/// rebuild it (`skippedRecordLine` in `src/session/store.ts`).
+pub fn skipped_record_line(id: &str, record: &str, missing: bool, log: Option<&str>) -> String {
+    let state = if missing {
+        "is missing"
+    } else {
+        "cannot be read"
+    };
+    match log {
+        Some(log) => format!(
+            "heddle session: skipped session {id}: its record {record} {state}, and its log {log} holds no session/created to rebuild it from"
+        ),
+        None => format!(
+            "heddle session: skipped session {id}: its record {record} {state}, and it has no log to rebuild it from"
+        ),
+    }
+}
+
+/// A record this store could not read and did not leave written back ([`SessionStore::read_record`]): the state of
+/// its log when it was judged, and the record rebuilt from it (`None` when the log could not rebuild one).
+struct UnreadableRecord {
+    log: Option<(u64, Option<std::time::SystemTime>)>,
+    meta: Option<SessionMeta>,
 }
 
 impl SessionStore {
@@ -499,6 +656,7 @@ impl SessionStore {
             headers: Mutex::new(HashMap::new()),
             warn: Mutex::new(None),
             renamed: Mutex::new(None),
+            unreadable_records: Mutex::new(HashMap::new()),
         }
     }
 
@@ -513,6 +671,7 @@ impl SessionStore {
             headers: Mutex::new(HashMap::new()),
             warn: Mutex::new(None),
             renamed: Mutex::new(None),
+            unreadable_records: Mutex::new(HashMap::new()),
         }
     }
 
@@ -582,19 +741,150 @@ impl SessionStore {
             verdict
         };
         if let LogHeader::Unreadable(reason) = verdict {
-            let line = skipped_log_line(path, reason);
-            let warn = self
-                .warn
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            match warn {
-                Some(warn) => warn(&line),
-                None => eprintln!("{line}"),
-            }
+            self.say(&skipped_log_line(path, reason));
             return false;
         }
         true
+    }
+
+    /// Print one line of the store's own ([`skipped_log_line`], [`rebuilt_record_line`], [`skipped_record_line`]) to
+    /// the collector [`SessionStore::set_warn`] named, else to standard error.
+    fn say(&self, line: &str) {
+        let warn = self
+            .warn
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match warn {
+            Some(warn) => warn(line),
+            None => eprintln!("{line}"),
+        }
+    }
+
+    /// A session's record, read from `file`; when it cannot be read — cut, empty, not JSON, or missing beside its log —
+    /// it is **rebuilt from the log** and written back whole (#195; `readRecord` in `src/session/store.ts`).
+    ///
+    /// Measured before: a record cut in half or deleted, with its log intact, dropped the session out of the list,
+    /// search, Rename and Pin without a word, and `POST /api/turn` answered it `404` while the page showed the raw body.
+    /// DSH has no such record: a session's metadata is its log's header line, written once
+    /// (dsh-session-persistence-jsonl `create` and `toHeaderLine`, lib/index.js:2465-2479 and 813-821), and a header
+    /// that does not read is left out of discovery (`listArtifacts`, :3102-3138). Here the record is a second file, and
+    /// its facts are in the log: the folder and the creation time in `session/created`, the turns and the last prompt in
+    /// the user messages; the title, which heddle keeps in the record rather than in a `session/title` event, comes from
+    /// the folder's definition (a person's) or else the first message, as that message named the session. What the log
+    /// does not carry is left as a new session has it, and the line says so ([`rebuilt_record_line`]). A log that cannot
+    /// rebuild it leaves the session out, named once ([`skipped_record_line`]), and it opens as no session.
+    fn read_record(&self, file: &str, dir: &str, id: &str) -> Option<SessionMeta> {
+        match std::fs::read_to_string(file) {
+            Ok(text) => parse_record(&text).or_else(|| self.rebuild_record(file, dir, id)),
+            Err(_) => self.rebuild_record(file, dir, id),
+        }
+    }
+
+    /// [`SessionStore::read_record`]'s repair, under the rebuild lock; the line is printed once the lock is released.
+    fn rebuild_record(&self, file: &str, dir: &str, id: &str) -> Option<SessionMeta> {
+        let (meta, line) = {
+            let mut notes = self
+                .unreadable_records
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Read again under the lock: another thread may have rebuilt it, or renamed it, since.
+            let missing = match std::fs::read_to_string(file) {
+                Ok(text) => {
+                    if let Some(meta) = parse_record(&text) {
+                        return Some(meta);
+                    }
+                    false
+                }
+                // Not there at all; a stray file named like a session directory reads as not-a-directory, and holds no
+                // session either.
+                Err(error) => matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ),
+            };
+            let log = Self::transcript_for(dir, id);
+            let state = std::fs::metadata(&log)
+                .ok()
+                .map(|stat| (stat.len(), stat.modified().ok()));
+            // Nothing was there to rebuild from, nor to name: a folder with neither a record nor a log is no session.
+            if state.is_none() && missing {
+                return None;
+            }
+            if let Some(known) = notes.get(file)
+                && known.log == state
+            {
+                return known.meta.clone();
+            }
+            let mut leave_out = |line: String| {
+                notes.insert(
+                    file.to_string(),
+                    UnreadableRecord {
+                        log: state,
+                        meta: None,
+                    },
+                );
+                (None, Some(line))
+            };
+            if state.is_none() {
+                leave_out(skipped_record_line(id, file, missing, None))
+            } else if !self.log_readable(&log) {
+                // A log that is not a log is named by its own line and left out (#130).
+                return None;
+            } else if let Some(facts) = std::fs::read(&log)
+                .ok()
+                .and_then(|bytes| record_facts(&bytes))
+            {
+                let from_definition = definition_title(&facts.cwd, id);
+                let named = match (&from_definition, &facts.first_message_title) {
+                    (Some(_), _) => RebuiltTitle::Definition,
+                    (None, Some(_)) => RebuiltTitle::Message,
+                    (None, None) => RebuiltTitle::None,
+                };
+                let title = from_definition.or(facts.first_message_title);
+                // The key order of a record `create` wrote and a prompt then touched: `id`, `created`, `cwd`, `title`,
+                // `turns`, `updated`.
+                let mut record = Map::new();
+                record.insert("id".to_string(), Value::String(id.to_string()));
+                record.insert("created".to_string(), Value::String(facts.created));
+                record.insert("cwd".to_string(), Value::String(facts.cwd));
+                if let Some(title) = title {
+                    record.insert("title".to_string(), Value::String(title));
+                }
+                record.insert("turns".to_string(), Value::from(facts.turns));
+                if let Some(updated) = facts.updated {
+                    record.insert("updated".to_string(), Value::String(updated));
+                }
+                let meta =
+                    SessionMeta::from_value(Value::Object(record)).expect("the record has an id");
+                match crate::fsio::write_atomic(file, meta.to_file_text()) {
+                    Ok(()) => {
+                        notes.remove(file);
+                        let line = rebuilt_record_line(file, &log, missing, named, None);
+                        (Some(meta), Some(line))
+                    }
+                    Err(error) => {
+                        // Still listed, from memory, until a write lands; the line says the file is not repaired.
+                        notes.insert(
+                            file.to_string(),
+                            UnreadableRecord {
+                                log: state,
+                                meta: Some(meta.clone()),
+                            },
+                        );
+                        let failure = error.to_string();
+                        let line = rebuilt_record_line(file, &log, missing, named, Some(&failure));
+                        (Some(meta), Some(line))
+                    }
+                }
+            } else {
+                leave_out(skipped_record_line(id, file, missing, Some(&log)))
+            }
+        };
+        if let Some(line) = line {
+            self.say(&line);
+        }
+        meta
     }
 
     /// The log of the session whose metadata is in `dir`: `<id>.v2.jsonl.zstd` beside it, else the directory's own
@@ -1013,10 +1303,26 @@ impl SessionStore {
         if legacy.exists() {
             return Some(legacy.to_string_lossy().into_owned());
         }
-        for name in entries_sorted(Path::new(&self.root)) {
-            let candidate = Path::new(&self.root).join(&name).join(meta_name(id));
+        let names = entries_sorted(Path::new(&self.root));
+        for name in &names {
+            let candidate = Path::new(&self.root).join(name).join(meta_name(id));
             if candidate.exists() {
                 return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+        // No record, but a log (#195): the record's place beside it, where `read_record` rebuilds it. Measured before:
+        // such a session answered `404` on every route while its log sat in the store.
+        if Path::new(&transcript_in(
+            &Path::new(&self.root).join(id).to_string_lossy(),
+        ))
+        .exists()
+        {
+            return Some(legacy.to_string_lossy().into_owned());
+        }
+        for name in &names {
+            let dir = Path::new(&self.root).join(name);
+            if dir.join(log_name(id)).exists() {
+                return Some(dir.join(meta_name(id)).to_string_lossy().into_owned());
             }
         }
         None
@@ -1036,6 +1342,9 @@ impl SessionStore {
         if !self.log_readable(&transcript) {
             return None;
         }
+        // A record that cannot be read is rebuilt from the log first, or the session opens as no session, as `list()`
+        // leaves it out (#195).
+        self.read_record(&meta, &dir, id)?;
         Some(SessionHandle {
             id: id.to_string(),
             dir,
@@ -1045,12 +1354,14 @@ impl SessionStore {
     }
 
     /// One session's metadata record, read straight from its file: no directory walk beyond locating it
-    /// and no log load. `None` when there is no such session or the file is not metadata.
+    /// and no log load. `None` when there is no such session, or its record cannot be read and its log cannot
+    /// rebuild it ([`SessionStore::read_record`]).
     pub fn meta(&self, id: &str) -> Option<SessionMeta> {
         let path = self.meta_file(id)?;
-        let text = std::fs::read_to_string(path).ok()?;
-        let value: Value = serde_json::from_str(&text).ok()?;
-        SessionMeta::from_value(value)
+        let dir = Path::new(&path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned())?;
+        self.read_record(&path, &dir, id)
     }
 
     /// Whether the session or a subagent ancestor is archived ([`crate::under_archived_session`]), read from the
@@ -1066,37 +1377,56 @@ impl SessionStore {
         self.open(newest.id())
     }
 
-    /// Every session, newest `created` first, from both layouts, none twice. A file that is not
-    /// metadata is skipped rather than failing the list, and so is a session whose log cannot be read
-    /// ([`SessionStore::log_readable`], which names it once). Directory entries are visited in byte order,
-    /// as Node's `readdirSync` returns them.
+    /// Every session, newest `created` first, from both layouts, none twice. A session whose log cannot be
+    /// read is left out ([`SessionStore::log_readable`], which names it once). A session whose record cannot be
+    /// read, or is gone beside its log, is listed from a record rebuilt out of that log, and named once
+    /// ([`SessionStore::read_record`], #195); one its log cannot rebuild is left out, named once. Directory entries
+    /// are visited in byte order, as Node's `readdirSync` returns them.
     pub fn list(&self) -> Vec<SessionMeta> {
         let mut metas: Vec<SessionMeta> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
+        // One session's record at `file`, for the session `id` its file name says; a record that reads is believed for
+        // the id it holds, as always.
+        let mut remember = |file: &Path, dir: &str, id: &str| {
+            let Some(meta) = self.read_record(&file.to_string_lossy(), dir, id) else {
+                return;
+            };
+            let id = meta.id().to_string();
+            if seen.contains(&id) || !self.log_readable(&Self::transcript_for(dir, &id)) {
+                return;
+            }
+            seen.push(id);
+            metas.push(meta);
+        };
 
         for name in entries_sorted(Path::new(&self.root)) {
             let at = Path::new(&self.root).join(&name);
             let dir = at.to_string_lossy().into_owned();
-            let readable = |id: &str| self.log_readable(&Self::transcript_for(&dir, id));
             if name.starts_with("session-") {
-                remember_meta(
-                    std::fs::read_to_string(at.join("meta.json")),
-                    &mut metas,
-                    &mut seen,
-                    readable,
-                );
+                remember(&at.join("meta.json"), &dir, &name);
                 continue;
             }
-            for entry in entries_sorted(&at) {
-                if !entry.starts_with("session-") || !entry.ends_with(".json") {
+            let entries = entries_sorted(&at);
+            let records: std::collections::HashSet<&str> = entries
+                .iter()
+                .map(String::as_str)
+                .filter(|entry| entry.starts_with("session-") && entry.ends_with(".json"))
+                .collect();
+            for entry in &entries {
+                if records.contains(entry.as_str()) {
+                    remember(&at.join(entry), &dir, &entry[..entry.len() - ".json".len()]);
                     continue;
                 }
-                remember_meta(
-                    std::fs::read_to_string(at.join(&entry)),
-                    &mut metas,
-                    &mut seen,
-                    readable,
-                );
+                // A log whose record is gone is a session too: its record is rebuilt beside it (#195).
+                let orphan = entry
+                    .strip_suffix(".v2.jsonl.zstd")
+                    .or_else(|| entry.strip_suffix(".jsonl"))
+                    .filter(|id| id.starts_with("session-"));
+                if let Some(id) = orphan
+                    && !records.contains(meta_name(id).as_str())
+                {
+                    remember(&at.join(meta_name(id)), &dir, id);
+                }
             }
         }
 
@@ -1716,8 +2046,9 @@ impl SessionStore {
     }
 
     /// Record a person's prompt time (`updated`, when `prompted_at` is given) and/or count a user turn, in
-    /// one meta write; a call with neither writes nothing. A meta file that cannot be read or written is
-    /// ignored: losing the count must never lose the event that was just appended.
+    /// one meta write; a call with neither writes nothing. A meta file that cannot be written is ignored:
+    /// losing the count must never lose the event that was just appended. One that cannot be read is rebuilt
+    /// from the log ([`SessionStore::read_record`], #195).
     pub fn touch(&self, handle: &SessionHandle, bump_turns: bool, prompted_at: Option<&str>) {
         self.touch_counting(handle, u64::from(bump_turns), prompted_at);
     }
@@ -1747,9 +2078,15 @@ impl SessionStore {
             return None;
         }
         let _meta = self.meta_guard();
-        let text = std::fs::read_to_string(&handle.meta).ok()?;
-        let value = serde_json::from_str::<Value>(&text).ok()?;
-        let mut meta = SessionMeta::from_value(value)?;
+        let Some(mut meta) = std::fs::read_to_string(&handle.meta)
+            .ok()
+            .and_then(|text| parse_record(&text))
+        else {
+            // A record that cannot be read is rebuilt from the log (#195), which already holds the message this touch
+            // counts, so the rebuilt record is the counted one, named by its first message when nothing else named it.
+            self.read_record(&handle.meta, &handle.dir, &handle.id);
+            return None;
+        };
         let mut named = false;
         if let Some(at) = prompted_at {
             meta.set("updated", Value::String(at.to_string()));

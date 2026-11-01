@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
 import { canonicalPath } from '../paths.ts'
+import { writeFileAtomic } from './fsio.ts'
 import type { SessionHandle } from './store.ts'
 import { normalizeSessionTitle } from './title-text.ts'
 
@@ -190,7 +191,7 @@ export function ensureSessionsFolder(branch: string): string {
   const dir = join(canonicalPath(branch), SESSIONS_FOLDER)
   mkdirSync(dir, { recursive: true })
   const index = join(dir, 'INDEX.md')
-  if (!existsSync(index)) writeFileSync(index, SESSIONS_INDEX)
+  if (!existsSync(index)) writeFileAtomic(index, SESSIONS_INDEX)
   return dir
 }
 
@@ -199,7 +200,8 @@ export function ensureSessionsFolder(branch: string): string {
  *
  * `taken` is the list of names already in the branch's `_sessions_` folder, so two sessions created in one
  * minute do not collide. The log is never touched: this writes the two small files and nothing else, which
- * is what keeps the definition safe to commit while the log is not.
+ * is what keeps the definition safe to commit while the log is not. Each is replaced whole (`./fsio.ts`), as the Rust
+ * build writes them, so a write that fails leaves the old file rather than a cut one (#195).
  */
 export function writeSessionDefinition(
   handle: SessionHandle,
@@ -223,8 +225,8 @@ export function writeSessionDefinition(
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
   }
-  writeFileSync(join(dir, DEFINITION_FILE), `${JSON.stringify(fields, null, 2)}\n`)
-  writeFileSync(join(dir, 'INDEX.md'), indexFor(name, canonical, fields))
+  writeFileAtomic(join(dir, DEFINITION_FILE), `${JSON.stringify(fields, null, 2)}\n`)
+  writeFileAtomic(join(dir, 'INDEX.md'), indexFor(name, canonical, fields))
   return { name, dir, file: join(dir, DEFINITION_FILE), log: handle.transcript }
 }
 
@@ -268,6 +270,6 @@ export function updateSessionDefinition(dir: string, patch: { readonly title?: s
     if (trimmed.length === 0) delete (next as { title?: string }).title
     else (next as { title?: string }).title = trimmed
   }
-  writeFileSync(join(dir, DEFINITION_FILE), `${JSON.stringify(next, null, 2)}\n`)
+  writeFileAtomic(join(dir, DEFINITION_FILE), `${JSON.stringify(next, null, 2)}\n`)
   return true
 }

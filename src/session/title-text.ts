@@ -59,6 +59,24 @@ export function normalizeSessionTitle(input: string, maxBytes: number = MAX_TITL
   return truncateTitleUtf8(cleanTitleText(input), maxBytes).trimEnd()
 }
 
+/**
+ * A session's name taken from its first message: one line, shortened at a word, no trailing punctuation.
+ *
+ * The same shape DSH shows in its session list. It is a *label*, so it may be lossy; the id stays the identity
+ * and the full message stays in the log. Kept here, beside the cleaning, because two layers write it: the service
+ * names an untitled session with it at its first message, and the store names a record it rebuilds from the log
+ * the same way (#195). `./service.ts` re-exports it; the Rust twin is `title_from` in heddle-session `service.rs`.
+ */
+export function titleFrom(text: string): string {
+  const line = text.replace(/\s+/g, ' ').trim()
+  if (line.length === 0) return ''
+  const limit = 48
+  if (line.length <= limit) return line.replace(/[.,;:!?]+$/, '')
+  const cut = line.slice(0, limit)
+  const at = cut.lastIndexOf(' ')
+  return (at > limit / 2 ? cut.slice(0, at) : cut).replace(/[.,;:!?]+$/, '') + '…'
+}
+
 /** DSH's refusal of a title with nothing visible left, word for word (`SessionTitleInvalidError`, `session/title-invalid`). */
 export const TITLE_INVALID = Object.freeze({
   code: 'session/title-invalid',

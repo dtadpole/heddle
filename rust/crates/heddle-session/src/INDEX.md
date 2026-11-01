@@ -1,8 +1,8 @@
 ---
 title: The heddle-session sources
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T08:22:31Z
-version: 0.6.0
+modified: 2026-11-01T18:20:00Z
+version: 0.7.0
 description: The sources of the heddle-session crate, one module per TypeScript source, with unit tests beside the code.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -25,7 +25,8 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`event.rs`](event.rs) | `SessionEvent`, `NewEvent`, `SessionHandle`, `SurfaceOp`, `AppendOptions` | `store.ts` types |
 | [`meta.rs`](meta.rs) | `SessionMeta` as ordered JSON, and the options that create or edit it | `store.ts` `SessionMeta` |
 | [`surface.rs`](surface.rs) | the surface fold and message derivation | `store.ts` free functions |
-| [`store.rs`](store.rs) | `SessionStore` | `store.ts` `SessionStore` |
+| [`store.rs`](store.rs) | `SessionStore`; a record that is cut or gone beside its log is rebuilt from the log and named once (`read_record`, `record_facts`, #195) | `store.ts` `SessionStore` |
+| [`fsio.rs`](fsio.rs) | `write_atomic`: every whole-file write, through a temporary file renamed over the target | `fsio.ts` |
 | [`mode.rs`](mode.rs) | the `permission/mode` fold | `mode.ts` |
 | [`repair.rs`](repair.rs) | the closers of a turn its writer never finished (DSH's `openTurnClosers`): appended at the first write-open after a restart, shown by a read while no writer holds the session (issue #5) | `repair.ts` |
 | [`inbox.rs`](inbox.rs) | the pending-input inbox: DSH's `agent/inbox/spliced` fold, `queue_steer`, `claim_next_step` (R-developer-two-5) | `inbox.ts` |

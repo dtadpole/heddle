@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.5.0
+version: 1.6.0
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -81,6 +81,19 @@ nothing when it omits one; heddle names the file because it is the one thing a p
 missing one and a torn frame still read as before. Every later line must be an event too (the Rust reader's rule), and
 the server's startup sweeps leave out a log that does not read whole (`SessionStore.loads`): a throw there used to
 dispose every plugin after the listener was up and before the login line.
+
+**A record that is cut or gone beside its log is rebuilt from the log, and named** (issue #195). The record
+(`<id>.json`) is written whole: every writer goes through [`fsio.ts`](fsio.ts), a temporary file in the same folder
+renamed over the target, as the Rust build's `write_atomic` and DSH's `dsh-atomic-write` do, so a full disk or a
+process killed mid-write leaves the old record rather than a cut one (it used to be rewritten in place on every prompt).
+A record that still cannot be read — cut, empty, not JSON, or missing while its log is there — no longer drops the
+session silently: `list()`, `open()`, `meta()` and the prompt's touch rebuild it from the log (the folder and creation
+time from `session/created`, the turns and last prompt from the user messages, the title from the folder's definition,
+where a person's rename is written, or else from the first message), write it back whole, and print
+`heddle session: rebuilt the record <path> from its log <path> (…)` once, saying which fields the log could not give
+(endpoint, model, preset, pin, archive, parent session, team: left as a new session has them). DSH has no such second
+file: its metadata is the log's header line, written once. A log that cannot rebuild it (no `session/created` first)
+leaves the session out, named once, and it opens as no session, so every route answers as the list does.
 
 **The file is read once per process** (`SessionStore.load`). Events are kept in memory and advanced
 on append, because a single turn used to re-read and re-parse the whole transcript twenty-one times:

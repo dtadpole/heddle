@@ -350,7 +350,9 @@ test('the start report leaves teammates, old cuts, orphans and live writers alon
   assert.equal(store.read(old).at(-1)?.type, 'assistant/chunk', 'and its log is not touched')
   assert.equal(service.reportInterrupted([teammate], Date.now()), 0, 'a teammate is the team sweep’s')
   assert.equal(service.reportInterrupted([live]), 0, 'a child whose writer is alive may still be running')
+  /** Gone means record and log: a record removed beside its log is rebuilt from that log (#195). */
   rmSync(orphanParent.meta, { force: true })
+  rmSync(orphanParent.transcript, { force: true })
   assert.equal(service.reportInterrupted([orphan]), 0, 'a child whose parent is gone has no one to tell')
   assert.equal(notices.length, 0)
   store.release(live)

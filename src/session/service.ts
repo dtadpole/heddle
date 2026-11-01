@@ -9,6 +9,7 @@ import { ensureSessionsFolder, existingSessionNames, requireFolder, unwritableIn
 import { textOf, type ContentPart, type Message } from '../llm/types.ts'
 import { MODE_EVENT, effectiveMode as foldEffectiveMode, recordedMode as foldRecordedMode } from './mode.ts'
 import { interruptedTurnClosers } from './repair.ts'
+import { titleFrom } from './title-text.ts'
 
 import { inheritsAnswer, SessionStore, defaultSessionRoot, type RecordedMessage, type SessionEvent, type SessionHandle, type SessionId, type SessionMeta, type SurfaceState } from './store.ts'
 
@@ -33,21 +34,8 @@ export interface Config {
  * and never touches a path. The store itself stays a plain class with no Cordis
  * dependency, which is what lets it be tested without a context.
  */
-/**
- * A session's name taken from its first message: one line, shortened at a word, no trailing punctuation.
- *
- * The same shape DSH shows in its session list. It is a *label*, so it may be lossy; the id stays the identity
- * and the full message stays in the log.
- */
-export function titleFrom(text: string): string {
-  const line = text.replace(/\s+/g, ' ').trim()
-  if (line.length === 0) return ''
-  const limit = 48
-  if (line.length <= limit) return line.replace(/[.,;:!?]+$/, '')
-  const cut = line.slice(0, limit)
-  const at = cut.lastIndexOf(' ')
-  return (at > limit / 2 ? cut.slice(0, at) : cut).replace(/[.,;:!?]+$/, '') + '…'
-}
+/** A session's name taken from its first message (`./title-text.ts`, where the store's rebuild reads it too). */
+export { titleFrom }
 
 /**
  * A fork's name, from its **source's** title alone: DSH's `increasedForkTitle`.

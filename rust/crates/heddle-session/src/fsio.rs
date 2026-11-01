@@ -1,12 +1,13 @@
 //! Whole-file writes that a concurrent reader never sees half-done.
 //!
-//! The TypeScript build writes a session's meta and definition files with `writeFileSync`, which a single
-//! Node process cannot observe mid-write. In Rust the store is shared across threads (the server's goal
-//! route reads a session's meta while a resumed round rewrites it), and `std::fs::write` truncates then
-//! writes, so a reader can catch an empty or partial file and conclude the session does not exist. A
-//! write here goes to a temporary file in the same directory and is renamed over the target, which POSIX
-//! makes atomic: a reader sees the old bytes or the new ones, never a mix. The bytes written are exactly
-//! the bytes given, so the files stay byte-identical to the TypeScript build's.
+//! In Rust the store is shared across threads (the server's goal route reads a session's meta while a
+//! resumed round rewrites it), and `std::fs::write` truncates then writes, so a reader can catch an empty
+//! or partial file and conclude the session does not exist. A write here goes to a temporary file in the
+//! same directory and is renamed over the target, which POSIX makes atomic: a reader sees the old bytes or
+//! the new ones, never a mix, and a write that fails (a full disk) leaves the old file whole. The bytes
+//! written are exactly the bytes given, so the files stay byte-identical to the TypeScript build's, which
+//! writes its meta and definition files the same way since #195 (`src/session/fsio.ts`): it used to
+//! rewrite them in place with `writeFileSync`, and a failed write left a cut record.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

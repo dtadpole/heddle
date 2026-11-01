@@ -10974,9 +10974,14 @@ async function runTurn(text, key, attachments = [], onAccepted) {
      *
      * Measured on 2026-10-12: a refusal here was reported as `the server refused it (400)`, and the sentence
      * that said *why* — the name of an endpoint the run did not have — was read and thrown away. A status is
-     * not a diagnosis; the body is.
+     * not a diagnosis; the body is. A JSON refusal is shown by its sentence (`error`), not as the body (#195:
+     * the message could not be sent: {"error":"no session …","code":"session/not-found"}).
      */
-    const detail = await response.text().catch(() => '')
+    let detail = await response.text().catch(() => '')
+    try {
+      const said = JSON.parse(detail)?.error
+      if (typeof said === 'string' && said.trim() !== '') detail = said
+    } catch {}
     throw new Error(detail.trim().replace(/\s+/g, ' ').slice(0, 300) || `the server refused it (${response.status})`)
   }
   /**
