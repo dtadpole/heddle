@@ -765,14 +765,14 @@ mod tests {
         let store = MemoryStore::new();
         let session = store.open("s");
         store.message(&session, text_message(Role::System, "be brief"));
-        let first = store.message(&session, text_message(Role::User, &"u".repeat(1500)));
+        let first = store.message(&session, text_message(Role::User, "u".repeat(1500)));
         store.assistant_chunk(
             &session,
             serde_json::json!({"type": "done", "finishReason": "stop"}),
         );
         let silent = store.surface(&session).expect("the surface folds").nodes[2];
-        store.message(&session, text_message(Role::User, &"q".repeat(1500)));
-        store.message(&session, text_message(Role::Assistant, &"a".repeat(1500)));
+        store.message(&session, text_message(Role::User, "q".repeat(1500)));
+        store.message(&session, text_message(Role::Assistant, "a".repeat(1500)));
         store.message(&session, text_message(Role::User, "and now?"));
         assert_eq!(
             store
