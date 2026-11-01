@@ -15,6 +15,18 @@ import { runInNewContext } from 'node:vm'
  */
 
 const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
+
+/** The page's English table (#80): the lifted code draws its words through t(), as the page does. */
+const ENGLISH: Record<string, string> = (() => {
+  const start = page.indexOf('  en: Object.freeze({')
+  const table: Record<string, string> = {}
+  if (start < 0) return table
+  const stop = page.indexOf('\n  }),', start)
+  for (const match of page.slice(start, stop).matchAll(/^\s+'([^']+)': '((?:[^'\\]|\\.)*)',$/gm)) table[match[1]!] = match[2]!.replace(/\\'/g, "'")
+  return table
+})()
+const englishT = (key: string, vars: Record<string, unknown> = {}): string =>
+  Object.entries(vars).reduce((text, [name, value]) => text.split('{' + name + '}').join(String(value)), ENGLISH[key] ?? key)
 const begin = page.indexOf('/* workspace-tree:begin */')
 const end = page.indexOf('/* workspace-tree:end */')
 
@@ -40,6 +52,7 @@ async function branch(answer: () => Promise<unknown>): Promise<{ notes: string[]
     const renderTree = async () => {}
     const showSession = async (id) => { opened.push(id); return true }
     const fetch = ANSWER
+    const t = T
     ${source('branchAction')}
     ;({
       button: branchAction({ dataset: { forkSeq: '12' } }),
@@ -48,7 +61,7 @@ async function branch(answer: () => Promise<unknown>): Promise<{ notes: string[]
       words: { unavailable: WorkspaceTree.NO_COMPLETED_TURN, failed: WorkspaceTree.FORK_FAILED },
     })
     `,
-    { ANSWER: answer, JSON, Number, String, Object, Array, Map, Set, Promise, Error },
+    { ANSWER: answer, T: englishT, JSON, Number, String, Object, Array, Map, Set, Promise, Error },
   ) as { button: { onclick: () => Promise<void>; disabled: boolean }; notes(): string; opened(): string; words: { unavailable: string; failed: string } }
   await api.button.onclick()
   /** Read back as JSON, so the arrays are this realm's: deepEqual compares prototypes. */

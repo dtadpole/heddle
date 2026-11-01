@@ -402,7 +402,8 @@ test('the + menu carries the computer-side File action and the input it drives',
    * judges the gesture end to end; this is the removal detector underneath it.
    */
   assert.match(page, /<input type="file" id="attach-file" multiple hidden>/, 'the picker input exists')
-  assert.match(page, /file\.textContent = 'File'/, 'the menu item is labelled File, as DSH labels it')
+  assert.match(page, /file\.textContent = (?:'File'|t\('composer\.attachFile'\))/, 'the menu item is labelled File, as DSH labels it')
+  assert.match(page, /'composer\.attachFile': 'File',/, 'its English is DSH\'s input.file, word for word (#80)')
   assert.match(page, /`\/api\/uploads\?name=\$\{encodeURIComponent\(file\.name\)\}`/, 'the bytes go to the upload route')
   assert.match(page, /id="attach-cards"/, 'the composer draws pending attachment cards')
   assert.match(page, /saved\.path, name: file\.name, bytes: saved\.bytes/, 'the stored reference waits as a pending attachment')

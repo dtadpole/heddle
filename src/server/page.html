@@ -4125,6 +4125,21 @@ const MESSAGES = Object.freeze({
     'tree.pinned': 'Pinned',
     'tree.loadingWorkspaces': 'Loading workspaces\u2026',
     'tree.copied': 'Copied',
+    'chat.copied': 'Copied',
+    'chat.copyAnswer': 'Copy this answer',
+    'chat.copy': 'Copy',
+    'chat.branch': 'Branch into a new conversation',
+    'chat.weaving': 'Weaving',
+    'chat.weavingFor': 'Weaving for {duration} \u00b7\u00b7\u00b7',
+    'chat.inspect': 'Inspect',
+    'chat.imageOpenOriginal': 'View original',
+    'chat.imageOpenOriginalLabel': '{label}, click to view original',
+    'chat.imageLabel': 'Image {name}',
+    'composer.attachFile': 'File',
+    'composer.attachFileTitle': 'Add a file from this computer',
+    'model.noEfforts': 'This model provides no reasoning effort levels.',
+    'preview.imageLoading': 'Loading image\u2026',
+    'preview.imageFailed': 'This image could not be displayed.',
     'settings.note': 'Credentials are never shown here — the endpoint file stays on this machine and its keys are not sent to the page.',
     'empty.title': 'Start a conversation',
     'empty.before': 'Pick a workspace in the left panel and start a session there, or press',
@@ -4310,6 +4325,21 @@ const MESSAGES = Object.freeze({
     'tree.pinned': '已置顶',
     'tree.loadingWorkspaces': '正在加载工作区…',
     'tree.copied': '已复制',
+    'chat.copied': '已复制',
+    'chat.copyAnswer': '复制此回答',
+    'chat.copy': '复制',
+    'chat.branch': '在新对话中分支',
+    'chat.weaving': '编织中',
+    'chat.weavingFor': '已编织 {duration} ···',
+    'chat.inspect': '查看',
+    'chat.imageOpenOriginal': '查看原图',
+    'chat.imageOpenOriginalLabel': '{label}，点击查看原图',
+    'chat.imageLabel': '图片 {name}',
+    'composer.attachFile': '文件',
+    'composer.attachFileTitle': '从这台电脑添加文件',
+    'model.noEfforts': '当前模型未提供推理等级。',
+    'preview.imageLoading': '加载图片…',
+    'preview.imageFailed': '此图片无法显示。',
     'settings.note': '这里从不显示凭据——端点文件留在本机，其中的密钥不会发送到页面。',
     'empty.title': '开始对话',
     'empty.before': '在左侧面板选择一个工作区并在其中开始会话，或按',
@@ -4946,7 +4976,7 @@ function copyAction(row, label) {
       await navigator.clipboard.writeText(text)
       button.dataset.copied = 'true'
       button.replaceChildren(copiedIcon())
-      button.setAttribute('aria-label', 'Copied')
+      button.setAttribute('aria-label', t('chat.copied'))
       setTimeout(() => {
         delete button.dataset.copied
         button.replaceChildren(copyIcon())
@@ -4966,7 +4996,7 @@ function copyAction(row, label) {
 function messageActions(row) {
   const bar = document.createElement('div')
   bar.className = 'actions'
-  bar.append(copyAction(row, 'Copy this answer'))
+  bar.append(copyAction(row, t('chat.copyAnswer')))
   if (row.dataset.forkSeq !== undefined) bar.append(branchAction(row))
   return bar
 }
@@ -5008,8 +5038,8 @@ function branchAction(row) {
   button.className = 'action'
   button.dataset.action = 'branch'
   button.append(branchIcon())
-  button.title = 'Branch into a new conversation'
-  button.setAttribute('aria-label', 'Branch into a new conversation')
+  button.title = t('chat.branch')
+  button.setAttribute('aria-label', t('chat.branch'))
   button.onclick = async () => {
     const source = current
     const atSeq = Number(row.dataset.forkSeq)
@@ -5340,7 +5370,7 @@ function userActions(row, iso) {
   time.className = 'turn-time'
   if (typeof iso === 'string' && iso !== '') time.dateTime = iso
   time.textContent = formatMessageClock(iso)
-  bar.append(time, copyAction(row, 'Copy'))
+  bar.append(time, copyAction(row, t('chat.copy')))
   return bar
 }
 
@@ -5568,7 +5598,7 @@ function refreshRunningStatus() {
     status.setAttribute('role', 'status')
     status.setAttribute('aria-live', 'polite')
     status.setAttribute('aria-atomic', 'true')
-    status.textContent = 'Weaving'
+    status.textContent = t('chat.weaving')
     const divider = document.createElement('span')
     divider.className = 'divider'
     divider.setAttribute('aria-hidden', 'true')
@@ -5580,7 +5610,7 @@ function refreshRunningStatus() {
     glyph.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5v11M8 2.5v11M12 2.5v11" opacity=".45"/><path d="M2.5 8h11"/><path d="M6.2 6.3 8 4.8l1.8 1.5v3.4L8 11.2 6.2 9.7Z"/></svg>'
     const label = document.createElement('span')
     label.className = 'label'
-    label.textContent = 'Weaving'
+    label.textContent = t('chat.weaving')
     content.append(glyph, label)
     runRow.append(status, divider, content)
     runClock = setInterval(refreshRunningStatus, 1000)
@@ -5590,7 +5620,7 @@ function refreshRunningStatus() {
   const label = runRow.querySelector('.label')
   if (label !== null) {
     /** The reference clamps the first reading to a second: its `Math.max(1e3, now - startTime)`. */
-    label.textContent = `Weaving for ${formatRunDuration(Math.max(1000, Date.now() - startedAt))} ···`
+    label.textContent = t('chat.weavingFor', { duration: formatRunDuration(Math.max(1000, Date.now() - startedAt)) })
   }
   if (runRow !== log.lastElementChild) log.append(runRow)
   followChatTail()
@@ -6251,7 +6281,7 @@ function paintTodoCard(node) {
     raw = document.createElement('details')
     raw.className = 'todo-call-raw'
     const inspect = document.createElement('summary')
-    inspect.textContent = 'Inspect'
+    inspect.textContent = t('chat.inspect')
     raw.append(inspect)
     body.append(raw)
   }
@@ -10928,8 +10958,8 @@ function renderAttachMenu(node) {
   const file = document.createElement('button')
   file.type = 'button'
   file.className = 'attach-add-file'
-  file.textContent = 'File'
-  file.title = 'Add a file from this computer'
+  file.textContent = t('composer.attachFile')
+  file.title = t('composer.attachFileTitle')
   file.addEventListener('click', () => {
     closeAttachMenu()
     attachFileInput.click()
@@ -11156,8 +11186,8 @@ function messageAttachments(attachments) {
       frame.type = 'button'
       frame.className = 'message-image'
       frame.dataset.variant = images.length > 1 ? 'tile' : 'single'
-      frame.title = 'View original'
-      frame.setAttribute('aria-label', `Image ${image.name}, click to view original`)
+      frame.title = t('chat.imageOpenOriginal')
+      frame.setAttribute('aria-label', t('chat.imageOpenOriginalLabel', { label: t('chat.imageLabel', { name: image.name }) }))
       const picture = document.createElement('img')
       picture.src = image.url
       picture.alt = image.name
@@ -12470,7 +12500,7 @@ function buildEffortPane() {
   if (choices.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'model-empty'
-    empty.textContent = 'This model provides no reasoning effort levels.'
+    empty.textContent = t('model.noEfforts')
     modelMenu.append(empty)
     return
   }
@@ -13547,7 +13577,7 @@ async function showFile(node) {
         throw new Error('invalid PNG preview source')
       }
       const status = document.createElement('p')
-      status.textContent = 'Loading image…'
+      status.textContent = t('preview.imageLoading')
       status.setAttribute('role', 'status')
       const image = document.createElement('img')
       image.alt = 'Image preview: ' + (body.name ?? body.path)
@@ -13565,7 +13595,7 @@ async function showFile(node) {
         image.hidden = true
         status.hidden = false
         status.setAttribute('role', 'alert')
-        status.textContent = 'This image could not be displayed.'
+        status.textContent = t('preview.imageFailed')
       }
       fileBody.replaceChildren(status, image)
       image.src = source

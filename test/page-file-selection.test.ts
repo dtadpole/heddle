@@ -5,6 +5,18 @@ import { runInNewContext } from 'node:vm'
 import { test } from 'node:test'
 
 const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src/server/page.html'), 'utf8')
+
+/** The page's English table (#80): the lifted code draws its words through t(), as the page does. */
+const ENGLISH: Record<string, string> = (() => {
+  const start = page.indexOf('  en: Object.freeze({')
+  const table: Record<string, string> = {}
+  if (start < 0) return table
+  const stop = page.indexOf('\n  }),', start)
+  for (const match of page.slice(start, stop).matchAll(/^\s+'([^']+)': '((?:[^'\\]|\\.)*)',$/gm)) table[match[1]!] = match[2]!.replace(/\\'/g, "'")
+  return table
+})()
+const englishT = (key: string, vars: Record<string, unknown> = {}): string =>
+  Object.entries(vars).reduce((text, [name, value]) => text.split('{' + name + '}').join(String(value)), ENGLISH[key] ?? key)
 function fn(name: string) {
   const start = page.search(new RegExp(`(?:async )?function ${name}\\(`))
   assert.ok(start >= 0)
@@ -34,6 +46,7 @@ function harness() {
       createElement: () => ({ textContent: '', hidden: false, attributes: {} as Record<string, string>, setAttribute(name: string, value: string) { this.attributes[name] = value } }),
     },
     closeSchedulesPage() {},
+    t: englishT,
     chooseSelected() {}, renderRing() {}, showView: async () => {}, humanBytes: () => '10 B',
     loadPurifier: () => { purifierStarted.resolve(); return purifier.promise },
     fetch: async (url: string) => {
