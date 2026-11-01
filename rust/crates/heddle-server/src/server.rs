@@ -1639,7 +1639,10 @@ async fn steer_session(
         },
         None => Vec::new(),
     };
-    if !state.runs().is_running(id.as_str()) {
+    // Any running turn takes a steer, not only one this server started (issue #176): a goal round, a teammate's or a
+    // child's turn runs on the agent runtime and reads the session's appended messages at its next step, as DSH's
+    // agent takes a steer into whatever turn is running.
+    if !state.runs().is_running(id.as_str()) && !state.harness().turns.is_live(id.as_str()) {
         return respond::error_with_code(
             StatusCode::CONFLICT,
             "the current turn no longer accepts steering",
@@ -5747,6 +5750,57 @@ mod tests {
             self.interrupted.lock().unwrap().push(session.to_owned());
             self.is_live(session)
         }
+    }
+
+    /// Issue #176: a turn the agent runtime holds (a goal round, a teammate's or a child's turn) takes a steer; an idle
+    /// session is still refused with `session/steer-unavailable`.
+    #[tokio::test]
+    async fn a_turn_the_agent_runtime_holds_takes_a_steer_and_an_idle_session_does_not() {
+        let live = "session-00000000-0000-0000-0000-000000000001";
+        let runner = Arc::new(LiveTurns {
+            live: vec![live.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(Sessions::with_one()),
+                Arc::new(Models),
+                runner,
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("steer-live-turn")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(
+            &router,
+            &format!("/api/sessions/{live}/steer"),
+            &cookie,
+            r#"{"prompt":"look at the tests too"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["accepted"], true);
+
+        let idle = "session-00000000-0000-0000-0000-000000000009";
+        let (status, bytes) = post_json(
+            &router,
+            &format!("/api/sessions/{idle}/steer"),
+            &cookie,
+            r#"{"prompt":"anyone there"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "session/steer-unavailable");
     }
 
     #[tokio::test]
