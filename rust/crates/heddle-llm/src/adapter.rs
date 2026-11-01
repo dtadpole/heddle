@@ -43,21 +43,23 @@ pub trait Adapter: Send + Sync {
 pub fn adapter_for(endpoint: EndpointConfig) -> Result<Arc<dyn Adapter>, ModelError> {
     let adapter: Arc<dyn Adapter> = match endpoint.kind {
         heddle_config::EndpointKind::OpenaiChat => {
-            Arc::new(crate::chat::ChatAdapter::new(endpoint))
+            Arc::new(RefuseEmpty(crate::chat::ChatAdapter::new(endpoint)))
         }
-        heddle_config::EndpointKind::OpenaiResponses => {
-            Arc::new(crate::responses::ResponsesAdapter::new(endpoint))
-        }
-        heddle_config::EndpointKind::AnthropicVertex => {
-            Arc::new(crate::anthropic::AnthropicVertexAdapter::new(endpoint))
-        }
+        heddle_config::EndpointKind::OpenaiResponses => Arc::new(RefuseEmpty(
+            crate::responses::ResponsesAdapter::new(endpoint),
+        )),
+        heddle_config::EndpointKind::AnthropicVertex => Arc::new(RefuseEmpty(
+            crate::anthropic::AnthropicVertexAdapter::new(endpoint),
+        )),
         heddle_config::EndpointKind::Scripted => {
             Arc::new(crate::scripted::ScriptedAdapter::new(endpoint))
         }
         heddle_config::EndpointKind::Other(ref kind)
             if kind == crate::messages::ANTHROPIC_MESSAGES =>
         {
-            Arc::new(crate::messages::AnthropicMessagesAdapter::new(endpoint))
+            Arc::new(RefuseEmpty(crate::messages::AnthropicMessagesAdapter::new(
+                endpoint,
+            )))
         }
         heddle_config::EndpointKind::Other(ref kind) => {
             return Err(ModelError::new(
@@ -68,6 +70,64 @@ pub fn adapter_for(endpoint: EndpointConfig) -> Result<Arc<dyn Adapter>, ModelEr
         }
     };
     Ok(adapter)
+}
+
+/// A provider route whose answer fails when it finished `stop` with nothing in it (#173, `refuseEmpty`).
+///
+/// Measured on both builds: a chat answer of a role-only delta, `finish_reason: stop`, `completion_tokens: 0` and
+/// `[DONE]` was recorded as a finished answer with no text, and the person's message sat unanswered with no notice.
+/// DSH fails it with `EMPTY_RESPONSE`. Content is text, reasoning or a tool call; an empty answer that finished on its
+/// output limit is a `max_output_tokens` finish, not this. A scripted fixture is not wrapped: its empty round is the
+/// fixture's own statement.
+pub struct RefuseEmpty<A>(pub A);
+
+impl<A: Adapter> Adapter for RefuseEmpty<A> {
+    fn endpoint(&self) -> &EndpointConfig {
+        self.0.endpoint()
+    }
+
+    fn stream(&self, request: GenerateRequest) -> ChunkStream {
+        refuse_empty(self.0.endpoint().name.clone(), self.0.stream(request))
+    }
+}
+
+/// The chunks of one answer, with a content-free `stop` turned into `EMPTY_RESPONSE`.
+pub fn refuse_empty(endpoint: String, inner: ChunkStream) -> ChunkStream {
+    Box::pin(futures::stream::unfold(
+        (inner, endpoint, false, false),
+        |(mut inner, endpoint, mut content, ended)| async move {
+            if ended {
+                return None;
+            }
+            let item = inner.next().await?;
+            match &item {
+                Ok(Chunk::TextDelta { text }) | Ok(Chunk::ReasoningDelta { text }) => {
+                    content |= !text.is_empty();
+                }
+                Ok(Chunk::ToolCall(_)) => content = true,
+                Ok(Chunk::Done { finish_reason, .. }) if finish_reason == "stop" && !content => {
+                    let error = ModelError::new(
+                        format!("'{endpoint}' returned a completed response with no content"),
+                        endpoint.clone(),
+                        crate::error::code::EMPTY_RESPONSE,
+                    );
+                    return Some((Err(error), (inner, endpoint, content, true)));
+                }
+                _ => {}
+            }
+            Some((item, (inner, endpoint, content, false)))
+        },
+    ))
+}
+
+/// The failure a stream that ended before its route's terminal event fails with (#173, `streamCut`): DSH's readers
+/// throw `STREAM_CLOSED` before any tool call is emitted. The words are the TypeScript build's too.
+pub fn stream_cut(endpoint: &str, terminal: &str) -> ModelError {
+    ModelError::new(
+        format!("'{endpoint}' ended its stream before the answer finished (no {terminal})"),
+        endpoint,
+        crate::error::code::STREAM_CLOSED,
+    )
 }
 
 /// A request translated for one wire shape, before it is sent.
@@ -165,8 +225,9 @@ pub trait StreamFold: Send {
     /// One event in. A provider-reported failure is an error (`REMOTE`); an unparseable `data:` is skipped.
     fn event(&mut self, event: &SseEvent) -> Result<Folded, ModelError>;
 
-    /// The body ended without a terminal event: whatever the fold still owes (assembled tool calls, a `done`).
-    fn end(&mut self) -> Vec<Chunk>;
+    /// The body ended without a terminal event. Every streaming route has one, so this is a cut stream and its
+    /// answer fails (`STREAM_CLOSED`, #173); a fold whose route can end without one may still owe a `done`.
+    fn end(&mut self) -> Result<Vec<Chunk>, ModelError>;
 }
 
 /// Drive a fold over a streamed body: parse events, fold each, stop at the terminal one or at the body's end.
@@ -204,7 +265,10 @@ pub fn fold_sse(body: ByteStream, fold: Box<dyn StreamFold>) -> ChunkStream {
                     }
                     None => {
                         done = true;
-                        queue.extend(fold.end().into_iter().map(Ok));
+                        match fold.end() {
+                            Ok(chunks) => queue.extend(chunks.into_iter().map(Ok)),
+                            Err(error) => queue.push_back(Err(error)),
+                        }
                     }
                 }
             }
@@ -346,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn a_body_that_ends_without_a_terminal_event_gets_the_folds_tail() {
+    fn a_body_that_ends_without_a_terminal_event_ends_on_the_folds_failure() {
         use bytes::Bytes;
         let body: ByteStream = Box::pin(futures::stream::iter(vec![Ok(Bytes::from_static(
             b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"cut\"}\n\n",
@@ -354,13 +418,84 @@ mod tests {
         let chunks: Vec<_> = futures::executor::block_on(
             fold_sse(body, Box::new(crate::responses::ResponsesFold::new())).collect(),
         );
+        assert_eq!(chunks.len(), 2, "{chunks:?}");
         assert_eq!(
-            chunks.last().and_then(|item| item.as_ref().ok()),
-            Some(&Chunk::Done {
-                finish_reason: "stream_ended".into(),
-                usage: None
-            })
+            chunks
+                .last()
+                .and_then(|item| item.as_ref().err())
+                .map(|error| error.code.as_str()),
+            Some(crate::error::code::STREAM_CLOSED)
         );
+    }
+
+    fn chunks_of(items: Vec<Result<Chunk, ModelError>>) -> ChunkStream {
+        Box::pin(futures::stream::iter(items))
+    }
+
+    fn done(finish_reason: &str) -> Chunk {
+        Chunk::Done {
+            finish_reason: finish_reason.into(),
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn a_stop_with_nothing_in_it_is_an_empty_response() {
+        // #173: a role-only delta, `finish_reason: stop`, `[DONE]` was a finished answer with no text.
+        let items = futures::executor::block_on(
+            refuse_empty("chat".into(), chunks_of(vec![Ok(done("stop"))])).collect::<Vec<_>>(),
+        );
+        assert_eq!(items.len(), 1, "{items:?}");
+        let error = items[0].as_ref().expect_err("an empty stop fails");
+        assert_eq!(error.code, crate::error::code::EMPTY_RESPONSE);
+        assert_eq!(
+            error.to_string(),
+            "'chat' returned a completed response with no content"
+        );
+        // An empty text delta is no content either.
+        let items = futures::executor::block_on(
+            refuse_empty(
+                "chat".into(),
+                chunks_of(vec![
+                    Ok(Chunk::TextDelta {
+                        text: String::new(),
+                    }),
+                    Ok(done("stop")),
+                ]),
+            )
+            .collect::<Vec<_>>(),
+        );
+        assert!(items.last().is_some_and(Result::is_err), "{items:?}");
+    }
+
+    #[test]
+    fn text_reasoning_a_tool_call_or_an_output_limit_is_not_empty() {
+        let cases = vec![
+            vec![Ok(Chunk::TextDelta { text: "hi".into() }), Ok(done("stop"))],
+            vec![
+                Ok(Chunk::ReasoningDelta {
+                    text: "thinking".into(),
+                }),
+                Ok(done("stop")),
+            ],
+            vec![
+                Ok(Chunk::ToolCall(crate::types::ToolCall {
+                    id: "c".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                })),
+                Ok(done("tool_calls")),
+            ],
+            vec![Ok(done("max_output_tokens"))],
+        ];
+        for case in cases {
+            let expected = case.len();
+            let items = futures::executor::block_on(
+                refuse_empty("chat".into(), chunks_of(case)).collect::<Vec<_>>(),
+            );
+            assert_eq!(items.len(), expected, "{items:?}");
+            assert!(items.iter().all(Result::is_ok), "{items:?}");
+        }
     }
 
     #[test]

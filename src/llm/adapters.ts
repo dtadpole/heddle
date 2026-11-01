@@ -1,6 +1,8 @@
 import { anthropicUsage, openaiChatUsage, openaiResponsesUsage, type TokenUsage } from './usage.ts'
 import {
+  EMPTY_RESPONSE,
   ModelError,
+  STREAM_CLOSED,
   baseUrlFor,
   canonicalFinishReason,
   reasoningLevelFor,
@@ -224,8 +226,13 @@ export function openAiChatAdapter(
      * waits for that frame, `[DONE]` or the end (#69).
      */
     let finished: string | undefined
+    /** Whether the provider said `[DONE]`: with a finish frame, one of the two ends this route has (#173). */
+    let sentinel = false
     for await (const event of readSse(result.stream)) {
-      if (event.data === '[DONE]') break
+      if (event.data === '[DONE]') {
+        sentinel = true
+        break
+      }
       let parsed: {
         choices?: {
           delta?: {
@@ -236,12 +243,20 @@ export function openAiChatAdapter(
           finish_reason?: string | null
         }[]
         usage?: { prompt_tokens?: number; completion_tokens?: number }
+        error?: unknown
       }
       try {
         parsed = JSON.parse(event.data)
       } catch {
         continue
       }
+      /**
+       * A provider that fails after its headers says so in the stream: `data: {"error": {"message", "type", "code"}}`,
+       * then it closes (#173; DeepSeek's chat route, OpenAI-shaped gateways and vLLM all do). It was skipped as a frame
+       * with no choices, so the fragment before it became a finished answer and the provider's sentence was lost. It
+       * fails the call in the provider's words, as the Messages route's `event: error` already does.
+       */
+      if (parsed.error !== undefined && parsed.error !== null) throw streamedFailure(endpoint.name, parsed.error)
       if (finished !== undefined) {
         const usage = openaiChatUsage(parsed.usage)
         if (usage !== undefined) {
@@ -287,8 +302,35 @@ export function openAiChatAdapter(
         finished = reason
       }
     }
+    /**
+     * A stream that ends on neither a finish frame nor `[DONE]` was cut (#173), and its text is a fragment: it fails
+     * `STREAM_CLOSED` as DSH's readers do, and a tool call half-written when it was cut is never emitted. It used to end
+     * `stop`, so the fragment went back to the model as a complete answer on every later turn.
+     */
+    if (finished === undefined && !sentinel) throw streamCut(endpoint.name, 'finish_reason or [DONE]')
     yield { type: 'done', finishReason: finished ?? 'stop' }
   })()
+}
+
+/**
+ * The failure a stream that ended before its terminal event fails with, on every streaming route (#173).
+ *
+ * DSH's readers throw `STREAM_CLOSED` ("stream ended before message_stop", "event stream ended without done/error")
+ * before any tool call is emitted. The words are the Rust build's too.
+ */
+export function streamCut(endpoint: string, terminal: string): ModelError {
+  return new ModelError(`'${endpoint}' ended its stream before the answer finished (no ${terminal})`, { endpoint, code: STREAM_CLOSED })
+}
+
+/**
+ * A failure the provider reported inside a stream, in its own words: `'<endpoint>' reported <type> — <message>`, the
+ * Messages route's sentence (#173). An error object's `type` names it, else its `code`; a bare string is the message.
+ */
+export function streamedFailure(endpoint: string, error: unknown): ModelError {
+  const object = typeof error === 'object' && error !== null ? (error as { type?: unknown; code?: unknown; message?: unknown }) : undefined
+  const kind = typeof object?.type === 'string' && object.type.length > 0 ? object.type : typeof object?.code === 'string' && object.code.length > 0 ? object.code : 'an error'
+  const said = typeof object?.message === 'string' && object.message.length > 0 ? object.message : typeof error === 'string' ? error : JSON.stringify(error).slice(0, 200)
+  return new ModelError(`'${endpoint}' reported ${kind} — ${said}`, { endpoint, code: 'REMOTE' })
 }
 
 /**
@@ -620,16 +662,14 @@ export function openAiResponsesAdapter(
         })
       }
     }
-    for (const call of calls.values()) {
-      yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
-    }
     /**
      * The stream closed without a terminal event. That is not a normal stop: the route always ends on one of
      * `response.completed`, `response.incomplete` or `response.failed`, so a stream that ends on none of them was
-     * cut, and saying `stop` would present a truncated answer as a finished one.
+     * cut, and saying `stop` would present a truncated answer as a finished one. It used to finish `stream_ended`, which
+     * kept the fragment as the answer and still emitted the calls the cut left half-written; it fails `STREAM_CLOSED`
+     * now, as the other routes do (#173).
      */
-    finishReason = 'stream_ended'
-    yield { type: 'done', finishReason, ...(usage ? { usage } : {}) }
+    throw streamCut(endpoint.name, 'response.completed')
   })()
 }
 
@@ -871,6 +911,8 @@ export async function* anthropicChunks(
 ): AsyncIterable<Chunk> {
   const calls = new Map<number, PartialToolCall>()
   let finishReason = 'stop'
+  /** Whether a `message_delta` carried the stop reason (#173): see the end of this fold. */
+  let stopSeen = false
   let usage: TokenUsage | undefined
 
   for await (const event of events) {
@@ -925,7 +967,10 @@ export async function* anthropicChunks(
        * Anthropic's words, translated. Its healthy end is `end_turn`, which the loop does not know, so passing it
        * through put a stop notice on every ordinary Claude answer.
        */
-      if (typeof delta?.stop_reason === 'string') finishReason = canonicalFinishReason(delta.stop_reason, calls.size)
+      if (typeof delta?.stop_reason === 'string') {
+        finishReason = canonicalFinishReason(delta.stop_reason, calls.size)
+        stopSeen = true
+      }
       // The delta's usage restates what it knows; a bucket it names replaces the start frame's.
       const reported = anthropicUsage(parsed.usage)
       if (reported !== undefined) usage = { ...(usage ?? {}), ...reported }
@@ -941,6 +986,13 @@ export async function* anthropicChunks(
       )
     }
   }
+  /**
+   * The stream ended without `message_stop`. After the stop reason every content block is closed, so that answer is
+   * whole; before it, the stream was cut (#173). A cut used to end `stop` with the fragment as the answer, and emit the
+   * tool call that was half-written when it was cut, which the loop then ran. DSH's Messages reader throws
+   * `STREAM_CLOSED` before any call is emitted, and so does this one.
+   */
+  if (!stopSeen) throw streamCut(endpointName, 'message_stop')
   for (const call of calls.values()) yield { type: 'tool-call', id: call.id, name: call.name, arguments: call.arguments }
   yield { type: 'done', finishReason, ...(usage !== undefined ? { usage } : {}) }
 }
@@ -1253,17 +1305,40 @@ export function scriptedAdapter(
   })()
 }
 
+/**
+ * A provider's answer, failed when it finished `stop` with nothing in it (#173).
+ *
+ * Measured on both builds: a chat answer of a role-only delta, `finish_reason: stop`, `completion_tokens: 0` and
+ * `[DONE]` was recorded as a finished answer with no text, the page drew no assistant row, and the person's message sat
+ * there unanswered with no notice. DSH fails it: `dsh-llm-deepseek` throws "returned no content" and `dsh-llm-pi-ai`
+ * maps a `stop` with no content blocks to `EMPTY_RESPONSE`, the first of its default retryable codes. Content is text,
+ * reasoning or a tool call, as a thinking block is a content block there; an empty answer that finished on its output
+ * limit is a `max_output_tokens` finish, not this. Applied to the provider routes only: a scripted fixture's empty
+ * round is the fixture's own statement.
+ */
+export async function* refuseEmpty(endpoint: string, chunks: AsyncIterable<Chunk>): AsyncIterable<Chunk> {
+  let content = false
+  for await (const chunk of chunks) {
+    if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') content ||= chunk.text.length > 0
+    else if (chunk.type === 'tool-call') content = true
+    else if (chunk.type === 'done' && chunk.finishReason === 'stop' && !content) {
+      throw new ModelError(`'${endpoint}' returned a completed response with no content`, { endpoint, code: EMPTY_RESPONSE })
+    }
+    yield chunk
+  }
+}
+
 /** The adapter for one endpoint's declared kind. */
 export function adapterFor(endpoint: Adapter['endpoint']): Adapter {
   switch (endpoint.kind) {
     case 'openai-chat':
-      return { endpoint, stream: (request, signal) => openAiChatAdapter(endpoint, request, signal) }
+      return { endpoint, stream: (request, signal) => refuseEmpty(endpoint.name, openAiChatAdapter(endpoint, request, signal)) }
     case 'openai-responses':
-      return { endpoint, stream: (request, signal) => openAiResponsesAdapter(endpoint, request, signal) }
+      return { endpoint, stream: (request, signal) => refuseEmpty(endpoint.name, openAiResponsesAdapter(endpoint, request, signal)) }
     case 'anthropic-vertex':
-      return { endpoint, stream: (request, signal) => anthropicVertexAdapter(endpoint, request, signal) }
+      return { endpoint, stream: (request, signal) => refuseEmpty(endpoint.name, anthropicVertexAdapter(endpoint, request, signal)) }
     case 'anthropic-messages':
-      return { endpoint, stream: (request, signal) => anthropicMessagesAdapter(endpoint, request, signal) }
+      return { endpoint, stream: (request, signal) => refuseEmpty(endpoint.name, anthropicMessagesAdapter(endpoint, request, signal)) }
     case 'scripted':
       return { endpoint, stream: (request, signal) => scriptedAdapter(endpoint, request, signal) }
     default: {

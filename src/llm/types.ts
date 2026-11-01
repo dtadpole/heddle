@@ -453,6 +453,18 @@ export const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
  */
 export const QUOTA_EXCEEDED = 'QUOTA'
 
+/**
+ * The code a stream that ended before its terminal event fails with (#173): DSH's `STREAM_CLOSED`. A cut stream's
+ * text is a fragment, so it is a failure, never a `stop`.
+ */
+export const STREAM_CLOSED = 'STREAM_CLOSED'
+
+/**
+ * The code an answer that finished `stop` with nothing in it fails with (#173): DSH's `EMPTY_RESPONSE_CODE`, the
+ * first of its default retryable codes. Reasoning counts as content, as a thinking block does in DSH.
+ */
+export const EMPTY_RESPONSE = 'EMPTY_RESPONSE'
+
 /** A failure with the endpoint and status attached, so a caller can diagnose it. */
 export class ModelError extends Error {  readonly endpoint: string
   readonly status?: number

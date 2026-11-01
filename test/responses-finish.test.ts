@@ -81,9 +81,12 @@ test('a reply cut by its budget reports why, rather than an empty stop', async (
 })
 
 test('a stream that closes without a terminal event is not a normal stop', async () => {
-  const result = await finishOf([sse('response.output_text.delta', { delta: 'partial' })])
-  assert.equal(result.text, 'partial')
-  assert.equal(result.finish, 'stream_ended')
+  // #173: it finished `stream_ended`, which kept the fragment as the answer; a cut stream fails, as on every route.
+  await assert.rejects(
+    finishOf([sse('response.output_text.delta', { delta: 'partial' })]),
+    (error: Error & { code?: string }) =>
+      error.code === 'STREAM_CLOSED' && error.message === "'double' ended its stream before the answer finished (no response.completed)",
+  )
 })
 
 test('the mapping itself, for the cases the double does not need a server for', () => {

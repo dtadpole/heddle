@@ -291,12 +291,18 @@ async fn a_body_that_ends_without_a_terminal_event_is_not_a_finished_answer() {
     ))
     .expect("a responses adapter");
     let chunks = collect(adapter.stream(ask("codex", "go"))).await;
+    // #173: a cut stream fails, so its fragment is never a finished answer.
+    let last = chunks.last().expect("the stream says something");
     assert_eq!(
-        chunks.last().and_then(|item| item.as_ref().ok()),
-        Some(&Chunk::Done {
-            finish_reason: "stream_ended".into(),
-            usage: None
-        })
+        last.as_ref().err().map(|error| error.code.as_str()),
+        Some("STREAM_CLOSED"),
+        "{chunks:?}"
+    );
+    assert!(
+        !chunks
+            .iter()
+            .any(|item| matches!(item, Ok(Chunk::Done { .. }))),
+        "{chunks:?}"
     );
 }
 

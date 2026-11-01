@@ -253,10 +253,13 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
 
   const timeoutMs = request.timeoutMs ?? 120_000
   const { send, options } = destination(request, target, headers)
+  /** Why this side destroyed the request, once it has: read by the body readers below (#173). */
+  const cut: BodyCut = { endpoint: request.endpoint, timeoutMs }
 
   const response = await new Promise<IncomingMessage>((resolve, reject) => {
     const clientRequest = send(options, resolve)
     clientRequest.setTimeout(timeoutMs, () => {
+      cut.reason ??= 'TIMEOUT'
       clientRequest.destroy(new Error(`timed out after ${timeoutMs}ms`))
     })
     clientRequest.on('error', (error) => {
@@ -269,7 +272,14 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
       )
     })
     if (request.signal) {
-      request.signal.addEventListener('abort', () => clientRequest.destroy(new Error('aborted')), { once: true })
+      request.signal.addEventListener(
+        'abort',
+        () => {
+          cut.reason ??= 'ABORTED'
+          clientRequest.destroy(new Error('aborted'))
+        },
+        { once: true },
+      )
     }
     if (body !== undefined) clientRequest.write(body)
     clientRequest.end()
@@ -294,7 +304,7 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
   const looksStreamed = contentType.includes('text/event-stream')
 
   if (!looksStreamed) {
-    if (!streaming) return { json: await readJson(response, request.endpoint) }
+    if (!streaming) return { json: await readJson(response, request.endpoint, cut) }
     /**
      * A stream was asked for and the answer is **not labelled**. Two providers behave this way and they must not be
      * confused: one ignores `stream` and answers a single JSON body (buffering it is the only way to read it), and
@@ -303,27 +313,89 @@ export async function wire(request: WireRequest): Promise<WireResponse> {
      * held whole.
      */
     const iterator = response[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>
-    const first = await iterator.next()
+    const first = await next(iterator, cut)
     if (first.done === true) return { json: null }
     const head = first.value
     if (Buffer.from(head).toString('utf8').trimStart().startsWith('{')) {
       const parts: Buffer[] = [Buffer.from(head)]
       for (;;) {
-        const next = await iterator.next()
-        if (next.done === true) break
-        parts.push(Buffer.from(next.value))
+        const more = await next(iterator, cut)
+        if (more.done === true) break
+        parts.push(Buffer.from(more.value))
       }
       return { json: parseJsonBody(Buffer.concat(parts).toString('utf8'), request.endpoint) }
     }
-    return { stream: replay(head, iterator), status }
+    return { stream: replay(head, iterator, cut), status }
   }
 
-  return { stream: iterate(response), status }
+  return { stream: replay(undefined, response[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>, cut), status }
+}
+
+/**
+ * Why this side ended a response early, and what the failure then says (#173).
+ *
+ * Destroying a request whose answer has begun does not always fail the body. Measured on this Node: a chunked body
+ * throws "aborted", but a **close-delimited** one (`connection: close`, no length, no chunking, which is what an
+ * event stream through many proxies is) simply ends, so a Stop or the socket-idle limit read as the provider having
+ * finished. The TS build then recorded the fragment before a 120 s stall as a finished answer (`finishReason: "stop"`),
+ * where the Rust build fails the turn with "the request to '…' timed out after 120000ms". So the reason is kept here
+ * when the request is destroyed, and every body reader below asks it, whether the body ended or threw.
+ */
+interface BodyCut {
+  readonly endpoint: string
+  readonly timeoutMs: number
+  reason?: 'TIMEOUT' | 'ABORTED'
+}
+
+/** The failure a destroyed request's body ends with, or `undefined` while this side has not destroyed it. */
+function cutFailure(cut: BodyCut): ModelError | undefined {
+  if (cut.reason === 'TIMEOUT') {
+    return new ModelError(`the request to '${cut.endpoint}' timed out after ${cut.timeoutMs}ms`, { endpoint: cut.endpoint, code: 'TIMEOUT' })
+  }
+  if (cut.reason === 'ABORTED') {
+    return new ModelError(`the request to '${cut.endpoint}' was aborted`, { endpoint: cut.endpoint, code: 'ABORTED' })
+  }
+  return undefined
+}
+
+/**
+ * One read of a body, with the reason the read ended named.
+ *
+ * A body this side destroyed fails with why (a timeout, a Stop), whether Node ended it or threw. A body the other side
+ * cut throws the socket's own word ("aborted", `ECONNRESET`); that is a transport failure, and it is said as one with
+ * the endpoint named, as the Rust build says it ("could not be read — …"), rather than as a bare `Error` with no code.
+ */
+async function next(iterator: AsyncIterator<Uint8Array>, cut: BodyCut): Promise<IteratorResult<Uint8Array>> {
+  let result: IteratorResult<Uint8Array>
+  try {
+    result = await iterator.next()
+  } catch (error) {
+    throw (
+      cutFailure(cut) ??
+      new ModelError(`the request to '${cut.endpoint}' could not be read — ${(error as Error).message}`, {
+        endpoint: cut.endpoint,
+        code: 'TRANSPORT',
+        cause: error,
+      })
+    )
+  }
+  if (result.done === true) {
+    const failure = cutFailure(cut)
+    if (failure !== undefined) throw failure
+  }
+  return result
 }
 
 /** A whole body read as JSON, with the endpoint named in the error a person would see. */
-async function readJson(response: IncomingMessage, endpoint: string): Promise<unknown> {
-  return parseJsonBody(await readAll(response), endpoint)
+async function readJson(response: IncomingMessage, endpoint: string, cut: BodyCut): Promise<unknown> {
+  const parts: Buffer[] = []
+  const iterator = response[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>
+  for (;;) {
+    const more = await next(iterator, cut)
+    if (more.done === true) break
+    parts.push(Buffer.from(more.value))
+  }
+  return parseJsonBody(Buffer.concat(parts).toString('utf8'), endpoint)
 }
 
 /** Parse one body as JSON, or say which endpoint answered with something else. */
@@ -338,13 +410,25 @@ function parseJsonBody(text: string, endpoint: string): unknown {
   }
 }
 
-/** The peeked chunk, then the rest of the body, so an unlabelled stream loses at most one chunk of latency. */
-async function* replay(head: Uint8Array, iterator: AsyncIterator<Uint8Array>): AsyncIterable<Uint8Array> {
-  yield head
-  for (;;) {
-    const next = await iterator.next()
-    if (next.done === true) return
-    yield next.value
+/**
+ * A streamed body as bytes, so a caller can parse it incrementally: the peeked chunk first when there is one (an
+ * unlabelled stream loses at most one chunk of latency), then the rest, each read through {@link next}.
+ *
+ * **A caller that stops early lets go of the body.** An adapter returns once it has the answer (a chat stream's
+ * `[DONE]`), which closes this generator before the body ends. The body is then handed back (`return()`, which
+ * destroys the response) as `for await` over the response did before. Without it the connection stayed open: a real
+ * provider that keeps it alive after `[DONE]` held a finished `--turn` process for as long as it kept the socket.
+ */
+async function* replay(head: Uint8Array | undefined, iterator: AsyncIterator<Uint8Array>, cut: BodyCut): AsyncIterable<Uint8Array> {
+  try {
+    if (head !== undefined) yield head
+    for (;;) {
+      const more = await next(iterator, cut)
+      if (more.done === true) return
+      yield more.value
+    }
+  } finally {
+    await iterator.return?.()
   }
 }
 
@@ -358,9 +442,3 @@ function readAll(response: IncomingMessage): Promise<string> {
   })
 }
 
-/** Relay a response body as bytes, so a caller can parse it incrementally. */
-async function* iterate(response: IncomingMessage): AsyncIterable<Uint8Array> {
-  for await (const chunk of response) {
-    yield chunk as Uint8Array
-  }
-}

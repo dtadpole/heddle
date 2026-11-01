@@ -12,7 +12,9 @@
 use futures::StreamExt;
 use serde_json::Value;
 
-use crate::adapter::{Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse};
+use crate::adapter::{
+    Adapter, ChunkStream, Folded, PreparedCall, StreamFold, fold_sse, stream_cut,
+};
 use crate::error::ModelError;
 use crate::http::{Method, WireRequest, WireResponse, wire};
 use crate::sse::SseEvent;
@@ -398,6 +400,9 @@ pub struct AnthropicFold {
     endpoint: String,
     calls: Vec<(u32, ToolCall)>,
     finish_reason: String,
+    /// Whether a `message_delta` carried the stop reason: every content block is closed by then, so the answer is
+    /// whole even if the body ends before `message_stop` (#173).
+    stop_seen: bool,
     usage: Option<crate::usage::TokenUsage>,
     live_tool_calls: bool,
 }
@@ -409,6 +414,7 @@ impl AnthropicFold {
             endpoint: endpoint.into(),
             calls: Vec::new(),
             finish_reason: "stop".to_owned(),
+            stop_seen: false,
             usage: None,
             live_tool_calls: false,
         }
@@ -561,6 +567,7 @@ impl StreamFold for AnthropicFold {
                 {
                     self.finish_reason =
                         crate::types::canonical_finish_reason(Some(stop), self.calls.len());
+                    self.stop_seen = true;
                 }
                 // The delta's usage restates what it knows; a bucket it names replaces the start frame's.
                 if let Some(reported) = parsed.get("usage").and_then(crate::usage::anthropic_usage)
@@ -613,8 +620,15 @@ impl StreamFold for AnthropicFold {
         })
     }
 
-    fn end(&mut self) -> Vec<Chunk> {
-        self.finish()
+    fn end(&mut self) -> Result<Vec<Chunk>, ModelError> {
+        // A body that ends after the stop reason is whole; one that ends before it was cut (#173). It used to finish
+        // `stop` with the fragment as the answer and emit the call the cut left half-written, which the loop then ran.
+        // DSH's Messages reader throws `STREAM_CLOSED` before any call is emitted.
+        if self.stop_seen {
+            Ok(self.finish())
+        } else {
+            Err(stream_cut(&self.endpoint, "message_stop"))
+        }
     }
 }
 
@@ -775,11 +789,54 @@ mod tests {
         ))
         .expect("folds");
         assert_eq!(
-            fold.end(),
+            fold.end().expect("the stop reason was seen"),
             vec![Chunk::Done {
                 finish_reason: "max_output_tokens".into(),
                 usage: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_body_cut_before_the_stop_reason_fails_and_emits_no_half_written_call() {
+        // #173: the text cut finished `stop`, and the tool cut emitted `bash` with `{"command": "echo DRO`.
+        let mut fold = AnthropicFold::new("claude");
+        let mut chunks = Vec::new();
+        for (event, value) in [
+            (
+                "message_start",
+                serde_json::json!({ "type": "message_start", "message": {} }),
+            ),
+            (
+                "content_block_start",
+                serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text" } }),
+            ),
+            (
+                "content_block_delta",
+                serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "Running it now. " } }),
+            ),
+            (
+                "content_block_start",
+                serde_json::json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "tool_use", "id": "toolu_1", "name": "bash" } }),
+            ),
+            (
+                "content_block_delta",
+                serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{\"command\": \"echo DRO" } }),
+            ),
+        ] {
+            chunks.extend(fold.event(&sse(event, value)).expect("folds").chunks);
+        }
+        let cut = fold.end().expect_err("a cut stream fails");
+        assert_eq!(cut.code, crate::error::code::STREAM_CLOSED);
+        assert_eq!(
+            cut.to_string(),
+            "'claude' ended its stream before the answer finished (no message_stop)"
+        );
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Chunk::ToolCall(_))),
+            "no assembled call: {chunks:?}"
         );
     }
 
