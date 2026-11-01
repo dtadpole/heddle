@@ -82,8 +82,23 @@ into a newer selection. No server sanitizer, path-reading shell, POST store or a
 Authored regressions are in [`preview-shell.test.ts`](../../test/preview-shell.test.ts),
 [`page-file-selection.test.ts`](../../test/page-file-selection.test.ts), and the Rust server/preview
 unit tests. Existing browser checks now inspect the loaded frame DOM and response headers rather
-than source-document markup. **All runtime verdicts remain UNJUDGED** under D067 because available
-disk is below 16 GiB; no suite, typecheck, build, browser or Cargo run is authorized here.
+than source-document markup. At the initial source checkpoint `bd80bf04`, D067 allowed only static
+diff and Node syntax checks because disk was below 16 GiB; runtime verdicts were UNJUDGED.
+
+After the parent explicitly reauthorized TypeScript validation and fresh preflights met memory free
+at least 25 percent and disk at least 16 GiB, focused regressions passed **37 of 37** and the corrected
+type check passed. The initial type check exposed a setter-only test control inferred as undefined;
+`f060f427` adds its boolean getter. The parent then formatted Rust sources in `751df88d` and reported
+**21 Rust preview tests and clippy passing**. The child ran no Cargo, build or browser commands.
+
+The first full TypeScript suite at `751df88d` honestly **failed** with **1439 tests, 1436 passed,
+2 failed and 1 skipped**. The unchanged jobs timing test's first read already contained both `one`
+and `two` instead of only `one`; its 150 ms observation is not a synchronization barrier. The
+highlight parity test could not read its cwd-relative local dependency directory, absent in the new
+worktree even though ancestor module imports resolved. The parent subsequently linked existing
+dependencies for its build; this fixes that environment premise but does not retroactively pass the
+suite or waive the jobs failure. Build/browser results and the actual-resource premise remain pending;
+no blind full-suite retry or unrelated jobs test change is claimed here.
 
 The separately owned actual-resource browser probe is still pending. It must establish post-load
 injection resource/CSP behavior, including remote HTTPS resources and parent detached parsing, before
