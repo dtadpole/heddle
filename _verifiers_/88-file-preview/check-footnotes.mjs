@@ -10,9 +10,9 @@ import { endChild, fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot,
 /**
  * Issue #43 — functional footnotes through the delivered /api/file renderer and,
  * optionally, the actual File panel. This is not full Markdown grammar parity or
- * an exact DSH DOM contract. Rust/comrak and TypeScript/marked may wrap notes and
- * name anchors differently; the repeated citation, note blocks and safe return
- * links must work in either build. The caller builds; HEDDLE_BIN is honored.
+ * an exact DSH DOM contract. Both render plain superscript numbers and plain ↩;
+ * no generated href/id is a deliberate collision policy, differing from DSH's
+ * definition IDs and repeat ordinals. The caller builds; HEDDLE_BIN is honored.
  * Browser mode is headless and opt-in with HEDDLE_FOOTNOTE_BROWSER=1, subject to
  * the shared browserAvailable gate (including HEDDLE_VERIFY_UI=0).
  */
