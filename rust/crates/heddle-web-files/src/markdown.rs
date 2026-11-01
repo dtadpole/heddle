@@ -1704,7 +1704,7 @@ fn attribute_value(tag: &str, name: &str) -> Option<String> {
     let bytes = tag.as_bytes();
     let mut index = 0usize;
     while index + name.len() <= bytes.len() {
-        if !tag[index..].starts_with(name) {
+        if !bytes[index..].starts_with(name.as_bytes()) {
             index += 1;
             continue;
         }
