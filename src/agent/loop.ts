@@ -594,6 +594,7 @@ async function runTurnBody(
         endpoint: request.endpoint,
         ...(request.model !== undefined ? { model: request.model } : {}),
         ...(request.reasoningEffort !== undefined ? { reasoningEffort: request.reasoningEffort } : {}),
+        ...(request.reasoningEffortDefault === true ? { reasoningEffortDefault: true as const } : {}),
         messages: request.messages.length,
         tools: (request.tools ?? []).map((tool) => tool.name),
         estimatedTokens: report.estimatedTokens,

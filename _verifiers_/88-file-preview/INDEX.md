@@ -57,6 +57,82 @@ _tools_/local-build/run --ts -- node --test --test-name-pattern='standalone PNG'
 
 Run from the repository root; build the selected CLI through its corresponding resource gate first.
 
+## Text-read failure policy — issue #45
+
+Both builds classify an OS permission-denied text read as HTTP `400` with
+`{"error":"cannot read \"denied.txt\": permission denied","code":"workspace-file/unreadable"}`
+for a file named `denied.txt`. This is the owner's unreadable policy shared with the folder/picker
+refusal in issue #106; only the basename is shown.
+Unexpected filesystem I/O is HTTP `500` with
+`{"error":"cannot read file: I/O error","code":"workspace-file/read-failed"}`.
+Neither answer exposes a parent directory or raw OS error. Missing paths and directories retain `404`;
+binary and invalid UTF-8 retain `415`. Authentication and canonical workspace ownership still
+precede reading. PNG metadata and raw-byte routes are not changed by this text-read policy.
+
+This is **scoped Heddle policy, not DSH HTTP status parity**. The inspected installed
+`@deepseek-ai/dsh-fs-local` and `@deepseek-ai/dsh-api-workspace-files` versions are `0.2.1-rc.2`.
+The former's `statRegularFile` (`lib/index.js` 349–359) names missing/nonregular files but
+rethrows permission/I/O failures; `streamWholeText` (452–471) rethrows stream failures.
+The latter's `cutPage` (618–634) maps only `FS_NOT_TEXT` to `workspace-file/not-text` and
+rethrows other errors. It supplies no permission-specific HTTP status contract to copy.
+
+The focused [TypeScript regression](../../test/file-preview-errors.test.ts) needs **no browser
+or build**. It changes only its own fixture file to mode `000`, verifies actual OS denial,
+and restores the mode in `finally` before deleting its scoped scratch directory. If the host
+can still read that mode, it reports the permission case skipped/unjudged, not passing.
+It also checks a real symlink-loop I/O failure, HTTP status/body, auth, outside symlink,
+nonfile, binary, invalid UTF-8 and readable controls. Rust's workspace reader has the same
+own-file permission fixture with a drop guard; the web-files route tests pin named error
+status/body. A privileged Rust host fails the fixture prerequisite explicitly rather than
+silently claiming denial coverage. These tests do not judge rendered browser error text.
+
+```bash
+_tools_/local-build/run --ts -- node --test test/file-preview-errors.test.ts test/tree.test.ts test/read-file-errors.test.ts
+```
+
+### Delivered-CLI HTTP regression
+
+[`check-read-failures.mjs`](check-read-failures.mjs) needs **no browser** and never builds the product.
+It starts the selected actual CLI on loopback port zero with its own private home, offline scripted
+configuration and named workspace. Its unique scratch directory is under the initialized, realpathed
+shared test root. Only its own nested `denied.txt` changes to mode `000`; the mode is restored before
+cleanup. A host (including root) that can still read it skips the permission subtest as **unjudged**,
+not passing; the other HTTP controls still run. The shared runner returns `3` for that skip.
+
+The check asserts exact `400 workspace-file/unreadable` JSON with basename-only permission text,
+JSON/no-store headers and no parent paths or raw Node errors; it also pins missing/nonregular `404`,
+binary/invalid UTF-8 `415`, unauthenticated `401`, outside/canonical-symlink `400`, restored-file and
+readable-control `200`. A real self-symlink gives `500 workspace-file/read-failed` with only the generic
+I/O sentence. That loop case follows inspected canonical-path fallback, ownership and actual host-reader
+wiring in **both** servers, not merely an in-process reader test. Startup, headers/body consumption,
+response size, overall test and owned-process shutdown are bounded. No rendered File-panel error body
+or path header is judged by this HTTP-only check.
+
+The parent/caller must pin and build each selected product first; this verifier uses those artifacts
+unchanged and does not run build, cargo, a browser or an existing daemon. From the repository root:
+
+```bash
+node --check _verifiers_/88-file-preview/check-read-failures.mjs
+node _tools_/verify-runner/run.mjs _verifiers_/88-file-preview/check-read-failures.mjs --json
+HEDDLE_BIN=/path/to/pinned/heddle node _tools_/verify-runner/run.mjs _verifiers_/88-file-preview/check-read-failures.mjs --json
+```
+
+The folder's existing `check*.mjs` entry-point discovery includes this check automatically.
+This entry describes authored coverage, not execution evidence; a parent-run result is required.
+
+## HTML base policy regression
+
+The HTML check in [`check.mjs`](check.mjs) uses a **headless browser** and reads its actual recorded console
+for `base-uri` violations. It verifies that source base elements are sanitized, no base is injected, the
+`base-uri 'none'` policy and script/form/frame/sandbox restrictions remain intact, and quoted image and
+linked stylesheet resources still load via the authenticated raw route. Relative CSS `url()`/`@import`
+dependencies remain unsupported; this check does not claim full CSS dependency parity or URL isolation.
+
+```bash
+_tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
+HEDDLE_BIN=/path/to/heddle _tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
+```
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.

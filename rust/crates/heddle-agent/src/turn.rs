@@ -809,6 +809,7 @@ async fn run_turn_body(
                     endpoint: request.endpoint.clone(),
                     model: request.model.clone(),
                     reasoning_effort: request.reasoning_effort.clone(),
+                    reasoning_effort_default: request.reasoning_effort_default,
                     messages: request.messages.len(),
                     tools: request.tools.iter().map(|tool| tool.name.clone()).collect(),
                     estimated_tokens: report.estimated_tokens,
