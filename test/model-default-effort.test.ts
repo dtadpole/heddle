@@ -32,4 +32,5 @@ test('a named effort is the request\'s own, and a model without a default sends 
   assert.deepEqual(withDefaultEffort(endpoint, ask({ reasoningEffort: 'low' })), ask({ reasoningEffort: 'low' }), 'a person\'s or a policy\'s level wins')
   assert.deepEqual(withDefaultEffort(endpoint, ask({ model: 'sonnet' })), ask({ model: 'sonnet' }), 'no default: the provider\'s own, so nothing is invented')
   assert.deepEqual(withDefaultEffort(undefined, ask()), ask(), 'an unknown endpoint is left to the call to refuse')
+  assert.deepEqual(withDefaultEffort(endpoint, ask({ model: '' })), { ...ask({ model: '' }), reasoningEffort: 'xhigh', reasoningEffortDefault: true }, 'an empty model is the endpoint\'s own, as in Rust')
 })

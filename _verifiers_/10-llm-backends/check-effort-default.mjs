@@ -4,7 +4,7 @@
 // no default sends nothing (the provider's own default). Runs against whichever harness HEDDLE_BIN names, or the
 // TypeScript build; a local OpenAI-compatible double stands in for the provider.
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -74,7 +74,7 @@ async function modelRequests(server, session) {
   return text.split('\n').filter(Boolean).map((line) => JSON.parse(line)).filter((event) => event.type === 'model/request')
 }
 
-test('a turn that names no effort runs at the model\'s declared default, recorded as a default', async (context) => {
+test('a turn that names no effort runs at the model\'s declared default, and its record names that level', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), 'web')) return
   const home = isolatedHome('effort-default')
   const double = await chatDouble({ content: 'ok' })

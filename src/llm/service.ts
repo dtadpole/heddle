@@ -364,7 +364,9 @@ declare module '@deepseek-ai/cordis' {
  */
 export function withDefaultEffort(endpoint: EndpointConfig | undefined, request: GenerateRequest): GenerateRequest {
   if (endpoint === undefined || (request.reasoningEffort !== undefined && request.reasoningEffort.length > 0)) return request
-  const fallback = reasoningLevelsFor(endpoint, request.model ?? endpoint.model)?.default
+  // An empty model is no model, as the Rust twin filters it: the endpoint's own model answers.
+  const model = request.model !== undefined && request.model.length > 0 ? request.model : endpoint.model
+  const fallback = reasoningLevelsFor(endpoint, model)?.default
   if (fallback === undefined || fallback.length === 0) return request
   return { ...request, reasoningEffort: fallback, reasoningEffortDefault: true }
 }
