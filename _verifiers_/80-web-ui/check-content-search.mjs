@@ -321,7 +321,9 @@ test('content search: a failed host request leaves the name matches with no warn
  *
  * The host's answer is held back 1.5 s inside the page, so the press goes down before it and the release comes after the
  * redraw it causes. Each hit is a name match whose conversation does not hold the query, so the redraw adds no snippet line
- * that would move the control from under a still pointer.
+ * that would move the control from under a still pointer. The press holds the button down (`buttons: 1`) as a person's
+ * does; before the release the check asks what is under the pointer, and every failure message carries what the press did
+ * (the mousedown, mouseup and click targets, and the flags requests with their status).
  */
 test('a press on a search hit, or on its Unarchive button, lands though the host\'s answer redraws the hits between the press and the release (#151)', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
@@ -369,10 +371,30 @@ test('a press on a search hit, or on its Unarchive button, lands though the host
     await browser.evaluate(`localStorage.setItem('heddle.tree.archived.v1', 'show')`)
     await browser.goto(server.url)
     await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    /**
+     * The host's answer held back 1.5 s, and a record of what the press did, for the failure message: every mousedown,
+     * mouseup and click (its target, whether it is the pressed element or inside it, and the buttons it reported), and every
+     * flags request with its status. A run on the Rust build failed at the unarchive with no way to tell a lost click from a
+     * refused request (parent's report of 31 Oct 18:26).
+     */
     await browser.evaluate(`(() => {
+      const describe = (node) => node === null ? null : node.nodeType === 1 ? node.tagName.toLowerCase() + (node.getAttribute('class') ? '.' + node.getAttribute('class').split(' ').join('.') : '') : '#' + node.nodeName
+      window.__d151 = { events: [], posts: [] }
+      for (const type of ['mousedown', 'mouseup', 'click', 'pointercancel', 'dragstart']) {
+        document.addEventListener(type, (event) => {
+          const pressed = window.__pressed ?? null
+          window.__d151.events.push({ type, target: describe(event.target), onPressed: pressed === null ? null : pressed.contains(event.target), buttons: event.buttons })
+        }, true)
+      }
+      window.__describe = describe
       const original = window.fetch
       window.fetch = (input, init) => {
         const url = String(input instanceof Request ? input.url : input)
+        if (url.includes('/flags')) {
+          const entry = { url: url.replace(/session-[0-9a-f-]{36}/, '<id>'), body: String(init?.body ?? ''), status: null }
+          window.__d151.posts.push(entry)
+          return original(input, init).then((response) => { entry.status = response.status; return response }, (error) => { entry.status = String(error); throw error })
+        }
         if (!url.includes('/api/sessions/search')) return original(input, init)
         return new Promise((done) => setTimeout(done, 1500)).then(() => original(input, init))
       }
@@ -382,37 +404,78 @@ test('a press on a search hit, or on its Unarchive button, lands though the host
     const pending = `(() => { const box = document.getElementById('search-pending'); return box !== null && !box.hidden })()`
     const centre = async (expression) =>
       JSON.parse(await browser.evaluate(`JSON.stringify((() => { const node = ${expression}; if (!node) return null; const r = node.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } })())`))
-    const pointer = (kind, at) => browser.send('Input.dispatchMouseEvent', { type: kind, x: at.x, y: at.y, button: 'left', clickCount: 1 })
+    /**
+     * A person's press holds the button down, so the press says so (`buttons: 1`) and the release lets it go, as
+     * _tools_/browser-use and check-access press: a press that reports no button held is one Chrome's own mouse moves
+     * during the hold (it sends one when the content under a still pointer changes) can read as already let go.
+     */
+    const pointer = (kind, at) =>
+      browser.send('Input.dispatchMouseEvent', {
+        type: kind,
+        x: at.x,
+        y: at.y,
+        button: kind === 'mouseMoved' ? 'none' : 'left',
+        buttons: kind === 'mousePressed' ? 1 : 0,
+        ...(kind === 'mouseMoved' ? {} : { clickCount: 1 }),
+      })
     const hit = (title) => `[...document.querySelectorAll('#search-results .hit')].find((entry) => entry.querySelector('.hit-title')?.textContent === ${JSON.stringify(title)})`
+    /**
+     * Under the still pointer: what the point hits now, whether that is the pressed element or inside it, and the pressed
+     * element's box and its hit's box, now and as they were at the press (`mark` stores them under that name).
+     */
+    const box = `((node) => { if (!node) return null; const r = node.getBoundingClientRect(); return [Math.round(r.left * 10) / 10, Math.round(r.top * 10) / 10, Math.round(r.width * 10) / 10, Math.round(r.height * 10) / 10] })`
+    const mark = (name) => browser.evaluate(`(() => { window.__d151.boxes = window.__d151.boxes ?? {}; window.__d151.boxes[${JSON.stringify(name)}] = { pressed: ${box}(window.__pressed), hit: ${box}(window.__pressed?.closest('.hit')) }; return true })()`)
+    const under = async (at) => {
+      await mark('release')
+      return JSON.parse(await browser.evaluate(`JSON.stringify((() => { const node = document.elementFromPoint(${at.x}, ${at.y}); return { at: window.__describe(node), onPressed: window.__pressed?.contains(node) ?? null, boxes: window.__d151.boxes } })())`))
+    }
+    const record = async () => browser.evaluate('JSON.stringify(window.__d151)')
+    /** The sidebar settles first, so nothing above the hits moves them while a press is held. */
+    let last = ''
+    for (let quiet = 0, round = 0; quiet < 5 && round < 50; round += 1) {
+      const now = await browser.evaluate(`(() => { const r = document.getElementById('session-search').getBoundingClientRect(); return r.top + ':' + r.left + ':' + r.width })()`)
+      quiet = now === last ? quiet + 1 : 0
+      last = now
+      await new Promise((done) => setTimeout(done, 200))
+    }
 
     /** The Unarchive button: pressed while the host is still asked, released after its answer redrew the hits. */
     await type('quokka shelf')
     assert.ok(await browser.waitFor(`${hit('quokka shelf')}?.querySelector('.hit-unarchive') != null && ${pending}`, 10_000), 'the archived hit is drawn with its Unarchive button while the host is asked')
     const button = await centre(`${hit('quokka shelf')}.querySelector('.hit-unarchive')`)
     await browser.evaluate(`window.__pressed = ${hit('quokka shelf')}.querySelector('.hit-unarchive'); true`)
+    await mark('press')
     await pointer('mouseMoved', button)
     await pointer('mousePressed', button)
     assert.ok(await browser.waitFor(`!${pending}`, 10_000), 'the host answered and the hits redrew while the button was held')
-    assert.equal(await browser.evaluate(`window.__pressed.isConnected && ${hit('quokka shelf')}?.querySelector('.hit-unarchive') === window.__pressed`), true, 'the button under the pointer is the one the press went down on')
+    assert.equal(await browser.evaluate(`window.__pressed.isConnected && ${hit('quokka shelf')}?.querySelector('.hit-unarchive') === window.__pressed`), true, 'the button the press went down on is still the hit\'s button')
+    const atRelease = await under(button)
+    assert.equal(atRelease.onPressed, true, `and it is still under the pointer, so the release lands on it\nunder the pointer: ${JSON.stringify(atRelease)}\nrecord: ${await record()}`)
     await pointer('mouseReleased', button)
     let restored = false
     for (const end = Date.now() + 5_000; Date.now() < end && !restored; ) {
       restored = !(await isArchived())
       if (!restored) await new Promise((done) => setTimeout(done, 100))
     }
-    assert.equal(restored, true, 'the release is a click on Unarchive: the session is unarchived')
+    assert.equal(restored, true, `the release is a click on Unarchive: the session is unarchived\nrecord: ${await record()}`)
 
     /** A hit: pressed while the host is asked, released after the redraw, and it opens. */
+    await browser.evaluate('window.__d151.events = []; window.__d151.posts = []; window.__d151.boxes = {}; true')
     await type('quokka desk')
     assert.ok(await browser.waitFor(`${hit('quokka desk')} != null && ${pending}`, 10_000), 'the hit is drawn while the host is asked')
     const title = await centre(`${hit('quokka desk')}.querySelector('.hit-title')`)
+    await browser.evaluate(`window.__pressed = ${hit('quokka desk')}; true`)
+    await mark('press')
     await pointer('mouseMoved', title)
     await pointer('mousePressed', title)
     assert.ok(await browser.waitFor(`!${pending}`, 10_000), 'the host answered and the hits redrew while the hit was held')
+    assert.equal(await browser.evaluate(`window.__pressed.isConnected && ${hit('quokka desk')} === window.__pressed`), true, 'the hit the press went down on is still the hit')
+    const onHit = await under(title)
+    assert.equal(onHit.onPressed, true, `and it is still under the pointer\nunder the pointer: ${JSON.stringify(onHit)}\nrecord: ${await record()}`)
     await pointer('mouseReleased', title)
     assert.ok(
       await browser.waitFor(`document.getElementById('session-title').textContent.includes('quokka desk')`, 10_000),
-      `the release is a click on the hit: the session opens\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('session-title').textContent)`)}`,
+      `the release is a click on the hit: the session opens\nsaw: ${await browser.evaluate(`JSON.stringify(document.getElementById('session-title').textContent)`)}\nrecord: ${await record()}`,
     )
     assert.equal(await browser.evaluate(`document.getElementById('session-search').value`), '', 'and the search is put away')
   } finally {
