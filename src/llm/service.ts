@@ -4,7 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { adapterFor } from './adapters.ts'
 import { projectAttachments } from './attachments.ts'
 import { inputModalitiesFromModelList, type InputModality } from './model-info.ts'
-import { ModelError, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
+import { ModelError, reasoningLevelsFor, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
 
@@ -215,7 +215,8 @@ export class ModelService extends Service {
      * policy attaches to. `model/stream` below is the chunk-level seam for logging,
      * retrying or replaying a call.
      */
-    return this.ctx.waterfall('model/request', request, () => request)
+    const effective = this.ctx.waterfall('model/request', request, () => request)
+    return withDefaultEffort(this.endpoints.get(effective.endpoint)?.endpoint, effective)
   }
 
   /** Stream a request `resolve` already answered; the `model/request` waterfall is not run again. */
@@ -352,4 +353,20 @@ declare module '@deepseek-ai/cordis' {
      */
     'model/request'(this: ModelService, request: GenerateRequest, next: () => GenerateRequest): GenerateRequest
   }
+}
+
+/**
+ * A request that names no reasoning effort runs at its model's declared default (#157), as DSH's `resolveCallWithInfo`
+ * resolves `requested ?? reasoning.defaultEffort`, and says so with `reasoningEffortDefault`. Applied after the
+ * `model/request` waterfall, so a selection policy that names a level wins, and on the endpoint that will answer (a
+ * policy may have moved the call). A model that declares levels but no default keeps sending nothing: that is the
+ * provider's own default, the page's `Default` row.
+ */
+export function withDefaultEffort(endpoint: EndpointConfig | undefined, request: GenerateRequest): GenerateRequest {
+  if (endpoint === undefined || (request.reasoningEffort !== undefined && request.reasoningEffort.length > 0)) return request
+  // An empty model is no model, as the Rust twin filters it: the endpoint's own model answers.
+  const model = request.model !== undefined && request.model.length > 0 ? request.model : endpoint.model
+  const fallback = reasoningLevelsFor(endpoint, model)?.default
+  if (fallback === undefined || fallback.length === 0) return request
+  return { ...request, reasoningEffort: fallback, reasoningEffortDefault: true }
 }

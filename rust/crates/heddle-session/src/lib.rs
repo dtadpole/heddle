@@ -55,7 +55,10 @@ pub mod unicode61;
 /// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
 pub mod title_text;
 
-pub use activity::{ActivityEntry, ActivityItem, LineageMeta, activity_sessions, session_activity};
+pub use activity::{
+    ActivityEntry, ActivityItem, LineageMeta, RowActivity, activity_sessions, refusal_sentence,
+    session_activity,
+};
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,
@@ -87,9 +90,9 @@ pub use service::{
     StartOptions, fork_title, title_from,
 };
 pub use store::{
-    EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, SessionStore,
-    TRANSCRIPT_NAME, Warn, can_compress, default_session_root, is_framed, lock_path, log_name,
-    meta_name, read_log_header, skipped_log_line, transcript_in,
+    EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord,
+    RenameListener, SessionStore, TRANSCRIPT_NAME, Warn, can_compress, default_session_root,
+    is_framed, lock_path, log_name, meta_name, read_log_header, skipped_log_line, transcript_in,
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,

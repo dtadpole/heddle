@@ -18,7 +18,7 @@ import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
-import { renderSourceOffThread } from './code.ts'
+import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
@@ -40,10 +40,11 @@ import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
-import { activitySessions, sessionActivity } from '../session/activity.ts'
+import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { pendingInbox, queueSteer, steeringOpen } from '../session/inbox.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
-import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../jobs/http.ts'
+import type { ScheduleService } from '../schedule/service.ts'
+import { handleJobsRoute } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
   COOKIE_MAX_AGE,
@@ -144,7 +145,13 @@ export interface WebServerOptions {
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
    */
   readonly settings?: SettingsService
-  /** Exact Browser opt-in captured at server startup (D-068). */
+  /**
+   * Exact Browser opt-in captured at server startup (D-068): the page policy then allows HTTP(S) frames, and
+   * `/api/status` reports it so the page offers its Browser tab (#86), which frames those pages beside the conversation.
+   *
+   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
+   * The server never fetches, proxies or probes a page.
+   */
   readonly browser?: boolean
 }
 
@@ -216,6 +223,13 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       client.write(line)
     }
   })
+
+  /**
+   * A session's title was written, so every page retitles it (#33). DSH records each title change and every view of the
+   * session follows (inventory-shell S16). That covers a person's rename, the first message's fallback and the title
+   * model's answer, so the push comes from the store's one rename path, not from the rename route alone.
+   */
+  ctx.on('session/renamed', ({ session, title }) => push({ log, subscribers }, 'sessions', { type: 'session/renamed', session, title }))
 
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
@@ -433,6 +447,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
+  /** Whether the operator enabled Browser framing and the page's Browser tab (`HEDDLE_WEB_BROWSER=1`; D-068, #86). */
   readonly browser: boolean
   /** The settings surface, when the server was started with one. */
   readonly settings?: SettingsService
@@ -978,6 +993,21 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const wanted = url.searchParams.get('path')
+    /**
+     * A folder that is gone (#141) is judged before it is read: under a root it is `404` with DSH's
+     * `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the folder
+     * is gone instead of listing it empty; outside every root it is the `400` below. It is placed through the real path
+     * of what still exists, so the spelling a person typed (`/tmp/x/w` for `/private/tmp/x/w`) is the same folder.
+     */
+    const missing = wanted !== null && wanted.length > 0 ? workspaces.missingFolder(wanted) : undefined
+    if (missing !== undefined) {
+      if (missing.owner === undefined) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `${missing.path} is not under any workspace root` })}\n`)
+      } else {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no entry at "${missing.path}"`, code: 'workspace-file/not-found' })}\n`)
+      }
+      return
+    }
     if (wanted !== null && wanted.length > 0 && workspaces.owner(wanted) === undefined) {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
@@ -1035,7 +1065,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const reading = readFileText(wanted)
+      const path = canonicalPath(wanted)
+      if (rendererFor(path).renderer === 'image') {
+        let stats
+        try { stats = statSync(path) } catch { throw new Error(`${path} is not a file`) }
+        if (!stats.isFile()) throw new Error(`${path} is not a file`)
+        // Decide before the UTF-8 reader rejects PNG. No bytes or HTML in this metadata;
+        // /api/raw rechecks authentication and workspace ownership when the img loads.
+        respond(response, 200, 'application/json', `${JSON.stringify({
+          path, name: basename(path), bytes: stats.size, renderer: 'image',
+          image: { src: `/api/raw?path=${encodeURIComponent(path)}`, mediaType: 'image/png' },
+        })}\n`)
+        return
+      }
+      const reading = readFileText(path)
       /**
        * The reading and the **renderer's decision** travel together.
        *
@@ -1573,7 +1616,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      const { workspaceIds, moved } = workspaces.reorder(body.workspaceId, typeof before === 'string' ? before : undefined)
+      /**
+       * Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an added, renamed or
+       * removed workspace is, and a page redraws its tree from it. A move that changes nothing is not announced, as
+       * DSH's registry writes nothing then (dsh-workspace lib/index.js:484, :492).
+       */
+      if (moved) push(state, 'workspace', { type: 'workspace/reordered', workspaceIds })
       respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
     } catch (error) {
       const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
@@ -1712,52 +1761,49 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     /**
      * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
-     * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     * stop. Here the turn's stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
      *
      * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
-     * `details.activity`): the turn in progress and the running subagent descendants, which the page's stop-and-archive
-     * dialog lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn,
-     * a teammate's, a notice's), because a session the page did not start can still be working.
+     * `details.activity`): the turn in progress, the session's live background jobs, its running subagent descendants and
+     * its active reminders, in DSH's listener order (`src/session/activity.ts`), which the page's stop-and-archive dialog
+     * lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn, a
+     * teammate's, a notice's), because a session the page did not start can still be working. The jobs are also listed
+     * as `jobs`, the jobs row's own field (`sessionJobActivity`), which the page's older confirm reads.
+     *
+     * With `stop: true` every family is stopped only once the archive is written, which is DSH's order: the archive set
+     * first, then each `workspace/session-stop` listener, awaited (`dsh-workspace/lib/index.js:527-541`, `:621-628`).
+     * The turn and its running subagents are aborted with `session archived`, the jobs killed with the same reason and
+     * the reminders removed. A write that is refused (`409`), finds no session (`404`) or fails stops nothing, as a
+     * throwing `setState` in DSH never reaches `stopSessionActivity`.
      */
-    /**
-     * A session's live background jobs are activity too (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`):
-     * they block the archive the same way, are listed in the refusal, and with `stop: true` are killed with
-     * `session archived` once the archive is written.
-     */
-    const jobs = ctx.get('jobs') as JobRegistry | undefined
-    const stopJobs = archived === true && body.stop === true
+    const rows = { jobs: ctx.get('jobs') as JobRegistry | undefined, schedule: ctx.get('schedule') as ScheduleService | undefined }
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    /** The sessions a successful write stops: the session and the subagents its activity named. Empty without stop: true. */
+    let stopSessions: string[] = []
     if (archived === true) {
-      const turns = ctx.get('turns') as TurnRegistry | undefined
       const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
-      /** The session's own turn and its running subagents (stack-2's archive), then its live jobs (main's jobs view). */
-      const activity = sessionActivity(id, ctx.session.list(), isRunning)
-      const liveJobs = sessionJobActivity(jobs, id)
-      if (activity.length > 0 || liveJobs.length > 0) {
+      const work = await rowActivity(rows, id)
+      const activity = sessionActivity(id, ctx.session.list(), isRunning, work)
+      if (activity.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
             `${JSON.stringify({
-              error:
-                activity.length > 0
-                  ? `session ${id} is running; pass stop: true to stop it and archive`
-                  : `session ${id} has running background jobs; pass stop: true to stop them and archive`,
+              error: refusalSentence(id, activity),
               code: 'active',
               running: state.running.get(id) ?? 0,
-              /** DSH's list, every family: `dsh-jobs` prepends its `{ kind: 'job', items }` ahead of the rest (lib/index.js:19-31). */
-              activity: [...(liveJobs.length > 0 ? [{ kind: 'job', items: liveJobs }] : []), ...activity],
-              ...(liveJobs.length > 0 ? { jobs: liveJobs } : {}),
+              activity,
+              ...(work.jobs.length > 0 ? { jobs: work.jobs } : {}),
             })}\n`,
           )
           return
         }
-        for (const sessionId of activitySessions(id, activity)) {
-          abortSession(state.controllers, sessionId)
-          turns?.abort(sessionId, 'session archived')
-        }
+        stopSessions = activitySessions(id, activity)
       }
     }
+    const stopRows = archived === true && body.stop === true
     let meta
     try {
       meta = ctx.session.flags(id, {
@@ -1781,7 +1827,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
-    if (stopJobs) stopSessionJobs(jobs, id)
+    for (const sessionId of stopSessions) {
+      abortSession(state.controllers, sessionId)
+      turns?.abort(sessionId, 'session archived')
+    }
+    if (stopRows) await stopRowActivity(rows, id, (message) => ctx.logger.warn(message))
     /** Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end with their owner (#85). */
     if (archived === true) await state.terminals.closeSession(id)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
@@ -1840,7 +1890,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
     if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
-    push(state, 'sessions', { type: 'session/renamed', session: id, title: meta.title ?? body.title })
+    /** The store's rename announced it, and `session/renamed` pushed it to every page (#33). */
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -2518,13 +2568,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * reports while no session is open. A session that switched does not appear here — its own mode travels
    * with `GET /api/sessions/<id>`, because a server-wide answer would misreport every session that chose
    * otherwise.
+   *
+   * `browser: true` appears only when the operator enabled the page's Browser tab, so a default server's answer is
+   * the same bytes it always was.
    */
   if (url.pathname === '/api/status' && request.method === 'GET') {
     respond(
       response,
       200,
       'application/json',
-      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot })}\n`,
+      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot, ...(state.browser ? { browser: true } : {}) })}\n`,
     )
     return
   }
@@ -2819,6 +2872,8 @@ export function unknownTurnSession(
     new?: boolean
     /** The agent preset a session this turn creates runs under (inventory A96). */
     preset?: string
+    /** Answer `202 {session, turn}` at acceptance and push the verdict on `/api/events` (#128). */
+    detach?: boolean
   }
   try {
     const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
@@ -3043,8 +3098,19 @@ export function unknownTurnSession(
   const handles = state.controllers.get(handle.id) ?? new Set<AbortController>()
   handles.add(controller)
   state.controllers.set(handle.id, handles)
-  respondSse(response)
-  state.clients.add(response)
+  /**
+   * Detached (#128): the answer is `202 {session, turn}` as soon as the turn's prompt is in the log (below), and the
+   * turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six connections per host, shared by every tab, and a turn that holds its own
+   * response open for minutes holds one of them: five running turns stalled every other request of the page. The
+   * verdict goes through the stream's log after every event the turn appended, so it is replayed to a page that
+   * reconnects and never arrives before the answer it closes. Without `detach` the response streams as before.
+   */
+  const detached = body.detach === true
+  const turnId = newClientId()
+  if (!detached) {
+    respondSse(response)
+    state.clients.add(response)
+  }
   /**
    * Writing to a client that has gone away must not become an uncaught exception.
    *
@@ -3065,48 +3131,83 @@ export function unknownTurnSession(
     if (payload.session !== handle.id) return
     safeWrite(`event: session\ndata: ${JSON.stringify(payload)}\n\n`)
   }
+  /** The turn's terminal frame: on its own response, or as a detached turn's verdict on the stream. */
+  const finish = (name: 'done' | 'cancelled' | 'error', data: Record<string, unknown>) => {
+    if (detached) push(state, 'turn', turnVerdict(turnId, name, data))
+    else safeWrite(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
   // A listener registered through `ctx.on` here would need a fiber of its own, and the
   // request has none, so the turn's events are relayed by subscribing directly to the
-  // same emit the server already listens on for other clients.
-  const unsubscribe = subscribeSessionEvent(ctx, forward)
+  // same emit the server already listens on for other clients. A detached turn relays nothing.
+  const unsubscribe = detached ? () => {} : subscribeSessionEvent(ctx, forward)
+  /**
+   * A detached turn is answered once its first event is in the log, normally its prompt (or the end, if it ends
+   * first, or 10 s at most behind another turn of the session). That is the moment the streamed answer's first frame
+   * used to mark. The page adopts a session it created from this answer and redraws the log from the session's
+   * history, so answering before the prompt was written lost the person's own message from the page.
+   */
+  let recorded: () => void = () => {}
+  const firstRecord = new Promise<void>((resolve) => {
+    recorded = resolve
+  })
+  const stopWatching = detached
+    ? subscribeSessionEvent(ctx, (payload) => {
+        if (payload.session === handle.id) recorded()
+      })
+    : () => {}
+  const running = runTurn(ctx, {
+    session: handle,
+    endpoint,
+    prompt: body.prompt,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    signal: controller.signal,
+    /**
+     * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
+     * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
+     * "backend stopped to respond" on prompts with more than twenty steps.
+     */
+    maxRounds: state.maxRounds,
+    ...(runModel !== undefined ? { model: runModel } : {}),
+    ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
+  })
+  if (detached) {
+    let bound: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      firstRecord,
+      running.then(
+        () => {},
+        () => {},
+      ),
+      new Promise<void>((resolve) => {
+        bound = setTimeout(resolve, 10_000)
+      }),
+    ])
+    clearTimeout(bound)
+    stopWatching()
+    respond(response, 202, 'application/json', `${JSON.stringify({ session: handle.id, turn: turnId })}\n`)
+  }
   try {
-    const result = await runTurn(ctx, {
-      session: handle,
-      endpoint,
-      prompt: body.prompt,
-      ...(attachments.length > 0 ? { attachments } : {}),
-      signal: controller.signal,
-      /**
-       * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
-       * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
-       * "backend stopped to respond" on prompts with more than twenty steps.
-       */
-      maxRounds: state.maxRounds,
-      ...(runModel !== undefined ? { model: runModel } : {}),
-      ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
-    })
+    const result = await running
     /**
      * A turn that was stopped is a cancellation, not a completion — including the case where the loop noticed the
      * abort between rounds and returned a result instead of throwing. Without this, the page saw a normal `done`
      * and left the composer in its running state.
      */
     if (controller.signal.aborted) {
-      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      finish('cancelled', { session: handle.id, message: 'stopped' })
       return
     }
-    safeWrite(
-      `event: done\ndata: ${JSON.stringify({
-        session: handle.id,
-        text: result.text,
-        finishReason: result.finishReason,
-        rounds: result.rounds,
-        denials: result.denials,
-        /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
-        ...(result.ended !== undefined ? { ended: result.ended } : {}),
-        /** What the provider said the turn cost; the page derives a rate and a context share from it. */
-        ...(result.usage !== undefined ? { usage: result.usage } : {}),
-      })}\n\n`,
-    )
+    finish('done', {
+      session: handle.id,
+      text: result.text,
+      finishReason: result.finishReason,
+      rounds: result.rounds,
+      denials: result.denials,
+      /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
+      ...(result.ended !== undefined ? { ended: result.ended } : {}),
+      /** What the provider said the turn cost; the page derives a rate and a context share from it. */
+      ...(result.usage !== undefined ? { usage: result.usage } : {}),
+    })
   } catch (error) {
     /**
      * A stopped turn is an answer, not a failure: the abort reaches the provider connection and the loop
@@ -3114,7 +3215,7 @@ export function unknownTurnSession(
      * something the reader asked for, so it is its own event and the page settles the row with it.
      */
     if (controller.signal.aborted) {
-      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      finish('cancelled', { session: handle.id, message: 'stopped' })
     } else {
       /**
        * The failure is logged as well as streamed. Measured: an error that only reached the
@@ -3127,7 +3228,7 @@ export function unknownTurnSession(
        * a session that is not running kept its spinner and its running row (the owner's "weaving shows for sessions
        * that are not active at all").
        */
-      safeWrite(`event: error\ndata: ${JSON.stringify({ session: handle.id, message: (error as Error).message })}\n\n`)
+      finish('error', { session: handle.id, message: (error as Error).message })
       /**
        * And it is recorded, so it reaches every client and every later read (R-developer-six-2, DSH's
        * `api-session/error`). The `event: error` above told only the client that started the turn: another page
@@ -3377,6 +3478,17 @@ function streamTerminal(request: IncomingMessage, response: ServerResponse, regi
     if (!response.writableEnded && !response.destroyed) response.write(': heartbeat\n\n')
   }, heartbeatInterval())
   beat.unref()
+}
+
+/**
+ * A detached turn's verdict, as the `turn` frame `/api/events` carries (#128): the terminal frame's own fields, its
+ * name as `outcome`, and the turn id the `202` answer gave. The answer's text is left out — the stream already
+ * carried it as the session's own events, and its log keeps every frame for replay. The Rust route's
+ * `turn_verdict` is the same rule.
+ */
+export function turnVerdict(turn: string, outcome: 'done' | 'cancelled' | 'error', data: Record<string, unknown>): Record<string, unknown> {
+  const { text: _text, ...fields } = data
+  return { ...fields, turn, outcome }
 }
 
 /**
@@ -3850,9 +3962,13 @@ export function transcriptTurns(
       }
       /**
        * A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the same notice row
-       * a stopped turn uses, so a reload says what the live page said.
+       * a stopped turn uses, so a reload says what the live page said. A turn the archived-session gate blocked
+       * (`reason: { kind: 'blocked' }`) is no failure and adds nothing, not even to the previous answer: DSH's chat shows
+       * no failure for a `blocked` end (`endFailure`, dsh-client-ui-chat lib/client.js:10475-10487), and its input was
+       * discarded (#139).
        */
-      if (event.type === 'turn/failed') {
+      const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
+      if (event.type === 'turn/failed' && !blocked) {
         const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
         const last = turns[turns.length - 1]
         if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }

@@ -12,7 +12,9 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
  * DSH's sidebar (`dsh-client-ui-workspace`): an archived session comes back from the **Archived only** filter through
  * its row menu's `Unarchive session`, and from **search**, where an archived result carries an `Unarchive session`
  * button and choosing the result explains that it cannot be opened ("Archived sessions cannot be opened. Unarchive it
- * to view.") without clearing the query or navigating. Archiving a session with running work asks first: the Host
+ * to view.") without clearing the query or navigating. Search follows the archive filter (`deriveSearchResults` keeps
+ * only what `sessionVisible` shows, lib/client.js:1185), so the archived result is searched for under *All
+ * conversations (show archived)*. Archiving a session with running work asks first: the Host
  * refuses the plain archive and names the work, and the stop-and-archive dialog lists it ("The turn in progress", and
  * its running bash call as "1 background job: sleep 40"),
  * Cancel leaves it running, and Stop and archive stops it, archives it and shows a notice with `undo`.
@@ -235,10 +237,48 @@ test('an archived session is restored from Archived only and from search, and a 
     )
     assert.equal(await noticeText('archived'), 'Session archived. You can undo or filter archived sessions', "and DSH's notice offers undo and the filter")
 
-    /** Search: an archived result carries Unarchive, and choosing the result explains rather than opens. */
+    /**
+     * Under *Hide archived* the archived session is no search result: not by its title, and not as the host's content hit
+     * (its first prompt holds the word). Search follows the filter, as DSH's does (`sessionVisible` in
+     * `deriveSearchResults`, lib/client.js:1185 and :1199), and "No matching sessions" waits for the host's answer
+     * (`!pending`, :3492), so the note judges both halves.
+     */
+    await search('kestrel')
+    assert.ok(
+      await browser
+        .waitFor(`document.getElementById('search-note').hidden === false && document.getElementById('search-note').textContent === 'No matching sessions'`, 10_000)
+        .catch(() => false),
+      `under Hide archived the archived session is not found\nhits: ${await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#search-results .hit')].map((hit) => hit.textContent))`)}`,
+    )
+    assert.equal(await browser.evaluate(`document.querySelectorAll('#search-results .hit').length`), 0, 'and no result is listed for it')
+    await search('')
+
+    /**
+     * Search: an archived result carries Unarchive, and choosing the result explains rather than opens. Search follows
+     * the archive filter, as DSH's does (`sessionVisible` in `deriveSearchResults`, lib/client.js:1185), so the archived
+     * session is a result under *All conversations (show archived)*, the filter DSH's stop-and-archive dialog names.
+     */
     const opened = await browser.evaluate(`document.getElementById('session-title').textContent`)
+    await chooseView('All conversations (show archived)')
     await search('kestrel')
     assert.ok(await browser.waitFor(`document.querySelector('#search-results .hit[data-archived="true"]') !== null`, 10_000), 'the archived session is a search result, marked archived')
+    /**
+     * The result is drawn again, element by element, while the page is still catching up:
+     * - the filter's tree redraw re-opens each remembered group through `toggle`, which redraws a standing search;
+     * - the host's content answer, 250 ms after the keystroke, redraws it with the snippet.
+     * A press and a release that straddle one of those redraws land on two different elements, so no click reaches
+     * Unarchive (seen on Rust, 1 run in 3: the record stayed archived for the whole 15 s wait). So press nothing in the
+     * result until it is quiet: the tree has stopped redrawing, the host has answered (no skeleton rows), and the hit
+     * carries the snippet it found, since the session's first prompt holds the word.
+     */
+    await settle()
+    assert.ok(
+      await browser.waitFor(
+        `document.querySelector('#search-results .hit[data-archived="true"] .hit-snippet') !== null && (document.getElementById('search-pending') === null || document.getElementById('search-pending').hidden)`,
+        10_000,
+      ),
+      'the host answers, and the archived result carries the snippet it found',
+    )
     const hit = JSON.parse(
       await browser.evaluate(
         `JSON.stringify((() => { const hit = document.querySelector('#search-results .hit[data-archived="true"]'); return { description: hit.getAttribute('aria-description'), buttons: [...hit.querySelectorAll('button')].map((button) => button.getAttribute('aria-label')) } })())`,
@@ -255,9 +295,11 @@ test('an archived session is restored from Archived only and from search, and a 
     assert.equal(await browser.evaluate(`document.getElementById('session-title').textContent`), opened, 'and nothing was opened')
     const restore = await box(`document.querySelector('#search-results .hit[data-archived="true"] .hit-unarchive')`)
     await click(restore.x, restore.y)
-    assert.equal(await until(async () => (await meta(kestrel))?.archived !== true), true, 'Unarchive session in the result restores it')
+    /** Bounded: the server's record is read again until it shows the session restored; a failure says what the page sent. */
+    assert.equal(await until(async () => (await meta(kestrel))?.archived !== true), true, `Unarchive session in the result restores it\npage: ${await pageState()}`)
     assert.ok(await browser.waitFor(`document.querySelector('#search-results .hit[data-archived="true"]') === null && document.querySelectorAll('#search-results .hit').length === 1`, 10_000), 'and the result redraws as an ordinary one')
     await search('')
+    await chooseView('Hide archived')
 
     /** A running session: the archive asks first, lists the work, Cancel keeps it running, Stop and archive stops it. */
     writeFileSync(server.script, `${JSON.stringify({ steps: [{ toolCall: { name: 'bash', arguments: { command: 'sleep 40', timeoutMs: 60000 } } }, { text: 'slept' }] }, null, 2)}\n`)
@@ -287,12 +329,12 @@ test('an archived session is restored from Archived only and from search, and a 
       'naming the session and the way back',
     )
     /**
-     * The work the server named, family by family: the turn, and its running bash call, which is a job as well (dsh-tool-bash
-     * registers every call's process with `ctx.jobs` as it starts, lib/index.js:210-216). Judged as a set: DSH's order is
-     * turn, job, subagent, schedule, and the server's order, with the schedule family, is fixed in
-     * hd/developer-eight-archive-activity (R-developer-eight-13).
+     * The work the server named, family by family, in the order it named it: the turn, then its running bash call, which
+     * is a job as well (dsh-tool-bash registers every call's process as an owned job as it starts, lib/index.js:386-410).
+     * DSH's order is turn, job, subagent, schedule — each listener puts its family before the rest and the turn's is
+     * registered first (src/session/activity.ts) — and the dialog draws the families as received, as DSH's does.
      */
-    assert.deepEqual([...dialog.work].sort(), ['1 background job: sleep 40', 'The turn in progress'], `and listing the work the server named\nsaw: ${JSON.stringify(dialog.work)}`)
+    assert.deepEqual(dialog.work, ['The turn in progress', '1 background job: sleep 40'], `and listing the work the server named, in DSH's order\nsaw: ${JSON.stringify(dialog.work)}`)
     assert.equal(dialog.action, 'Stop and archive')
     await browser.evaluate(`[...document.querySelectorAll('#session-archive [data-ws-close]')].find((button) => button.textContent.trim() === 'Cancel').click()`)
     assert.equal(await browser.evaluate(`document.getElementById('session-archive').open`), false, 'Cancel closes it')

@@ -151,7 +151,9 @@ test('GET /api/workspaces names each workspace\'s parent and the sessions whose 
     const repo = byId.get(fixture.repo.id)
     const inner = byId.get(fixture.inner.id)
     assert.ok(repo !== undefined && inner !== undefined, 'both registered workspaces are listed')
-    assert.deepEqual(Object.keys(repo), ['id', 'path', 'title', 'origin', 'parent', 'createdAt', 'updatedAt', 'sessionIds'], 'in the one shape both servers write')
+    /** `status` is DSH's Workspace.status(), 'ok' or 'missing-dir' (#141; dsh-workspace lib/index.js:154-160). */
+    assert.deepEqual(Object.keys(repo), ['id', 'path', 'title', 'origin', 'parent', 'createdAt', 'updatedAt', 'sessionIds', 'status'], 'in the one shape both servers write')
+    assert.equal(repo.status, 'ok', 'and a folder that is there is ok')
     assert.equal(repo.parent, null, 'a top-level workspace has no parent')
     assert.equal(inner.parent, fixture.repo.id, 'the nested one names the workspace above it')
     assert.equal(repo.origin, 'added')
@@ -248,6 +250,56 @@ test('the left column is DSH\'s workspace tree: groups, nested workspaces first,
     await browser.waitFor(`document.querySelectorAll('#tree > li[data-kind="workspace"]').length === 2`, 15_000)
     const siblings = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tree > li[data-kind="workspace"] > .row .label')].map((label) => label.textContent).sort())`))
     assert.deepEqual(siblings, [appLabel, repoLabel].sort(), 'both workspaces are top-level sections')
+  } finally {
+    browser.close()
+    fixture.close()
+  }
+})
+
+/**
+ * A session in a nested registered workspace is named after **that** workspace (#57), wherever a session is named with
+ * its workspace: a search hit, and a row of the one-column list (`In one list`).
+ *
+ * DSH's search result names the workspace whose `sessionIds` holds the session, by its title (`deriveSearchResults`,
+ * dsh-client-ui-workspace `lib/client.js:1182-1183`), the group the tree files it under — so `app session` reads `app`,
+ * not the root above it. The search hit has done that since it matched workspace names; the one-column row named the
+ * longest top-level root that held the folder, so it read the outer workspace. DSH's flat rows carry no workspace
+ * (`sessionNode`, `lib/client.js:1059-1073`); heddle's row does, and it must name the same workspace the tree does.
+ */
+test('a session in a nested registered workspace is named after that workspace: in a search hit and in the one-column list', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const fixture = await seeded('nested-name')
+  const browser = await openBrowser({ width: 1280, height: 720 })
+  try {
+    const repoLabel = fixture.repo.title
+    const appLabel = fixture.inner.title
+    await browser.goto(fixture.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor('document.querySelectorAll(\'#tree li[data-kind="session"]\').length > 0', 15_000)
+
+    /** The search: the hit line reads `<workspace> · <age>`. */
+    await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = 'session'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    await browser.waitFor(`[...document.querySelectorAll('#search-results .hit .hit-title')].some((title) => title.textContent === 'app session')`, 10_000)
+    const hits = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#search-results .hit')].map((hit) => [hit.querySelector('.hit-title').textContent, hit.querySelector('.hit-workspace').textContent.split(' · ')[0]]))`))
+    assert.deepEqual(
+      hits.filter(([title]) => title === 'app session' || title === 'repo session 7'),
+      [['app session', appLabel], ['repo session 7', repoLabel]],
+      `the nested workspace's session names the nested workspace, the outer one's names the outer one\nsaw: ${JSON.stringify(hits)}`,
+    )
+
+    /** The one-column list: each row's `.age` reads `<workspace> · <age>` too. */
+    await browser.evaluate(`localStorage.setItem('heddle.tree.grouping.v1', 'list')`)
+    await browser.goto(fixture.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="session"] > .row > .label')].some((label) => label.textContent === 'app session')`, 15_000)
+    const rows = JSON.parse(await browser.evaluate(`JSON.stringify([...document.querySelectorAll('#tree li[data-kind="session"] > .row')].map((row) => [row.querySelector('.label').textContent, row.querySelector('.age').textContent.split(' · ')[0]]))`))
+    assert.ok(rows.length >= 9, `the list draws every session as a row\nsaw: ${JSON.stringify(rows)}`)
+    assert.deepEqual(
+      rows.filter(([title]) => title === 'app session' || title === 'repo session 7'),
+      [['app session', appLabel], ['repo session 7', repoLabel]],
+      `a row names the nearest registered workspace that holds its session, not the top-level root\nsaw: ${JSON.stringify(rows)}`,
+    )
   } finally {
     browser.close()
     fixture.close()
@@ -849,7 +901,8 @@ test('a first visit opens a fresh New session, never the newest session someone 
     assert.ok(await browser.waitFor(`${rowOf(first.saved)} !== null && ${rowOf(other.id)} !== null`, 10_000).catch(() => false), `both rows are drawn\nsaw: ${await state()}`)
     const actions = (id) => `(() => {
       const li = ${rowOf(id)}
-      li.querySelector(':scope > .row').focus()
+      /** The tree item is the row's one Tab stop (#92, F4); its focus draws the row's controls. */
+      li.focus()
       const read = JSON.stringify({
         label: li.querySelector(':scope > .row > .label')?.textContent ?? null,
         selected: li.getAttribute('aria-selected'),
@@ -857,7 +910,7 @@ test('a first visit opens a fresh New session, never the newest session someone 
         quick: [...li.querySelectorAll(':scope > .row .session-actions button')].map((button) => button.getAttribute('aria-label')),
         buttons: [...li.querySelectorAll(':scope > .row button')].map((button) => button.getAttribute('aria-label') ?? button.textContent),
       })
-      li.querySelector(':scope > .row').blur()
+      li.blur()
       return read
     })()`
     const blank = JSON.parse(await browser.evaluate(actions(first.saved)))
@@ -1414,5 +1467,196 @@ test('a session dragged above another switches the order to Manual, and the orde
   } finally {
     browser.close()
     fixture.close()
+  }
+})
+
+/**
+ * The sidebar search is DSH's local session search (C14). Read from DSH's own source: `deriveSearchResults`
+ * (dsh-client-ui-workspace `lib/client.js:1169`) matches the query, trimmed and lower-cased, as a substring of the session's
+ * **title or its workspace's name** — never its id — and lists the hits newest first, at most `searchResultLimit` = 20
+ * (dsh-api-session-controller `lib/client.js:357`, `:3797`), with `Showing the first 20 results. Narrow your search.` under
+ * them when more matched and `No matching sessions` when none did (`lib/client.js:4909-4910`). Choosing a hit
+ * (`openSearchResult`, `:3664`) clears the query, opens the session, and reveals its row in the tree: its workspace
+ * expanded, the watermark raised to reach it, scrolled into view (`:2269`, `:3081`, `:2830`).
+ */
+test('the sidebar search finds a title or a workspace name, lists twenty at most, and a chosen hit is opened and revealed', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('tree-search')
+  const root = fixtureDir('tree-search-repo')
+  const other = fixtureDir('tree-search-other')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const register = async (path) => {
+      const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path }) })
+      assert.equal(added.status, 200, `registered ${path} (${JSON.stringify(added.body)})`)
+      return added.body.record
+    }
+    const repo = await register(root)
+    const elsewhere = await register(other)
+    /** Twenty-two names sharing one word — two more than DSH lists — written oldest first so newest-first has one answer. */
+    for (let index = 1; index <= 22; index += 1) {
+      const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root, title: `Capword item ${index}` }) })
+      assert.equal(made.status, 200, `created session ${index} (${JSON.stringify(made.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+    }
+    const weekly = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: other, title: 'weekly sync' }) })
+    assert.equal(weekly.status, 200)
+    const weeklyId = weekly.body.session
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor('document.querySelectorAll(\'#tree li[data-kind="session"]\').length > 0', 15_000)
+
+    /** Type a query the way a person does, and read what the list shows once it has answered. */
+    const searchFor = async (query) => {
+      await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+      await new Promise((done) => setTimeout(done, 600))
+      return JSON.parse(await browser.evaluate(`JSON.stringify({
+        treeHidden: document.getElementById('tree').hidden,
+        hits: [...document.querySelectorAll('#search-results .hit')].map((hit) => ({ title: hit.querySelector('.hit-title').textContent, where: hit.querySelector('.hit-workspace').textContent })),
+        note: document.getElementById('search-note').hidden ? null : document.getElementById('search-note').textContent,
+        more: document.getElementById('search-more') === null || document.getElementById('search-more').hidden ? null : document.getElementById('search-more').textContent,
+      })`))
+    }
+
+    const capped = await searchFor('CAPWORD')
+    assert.equal(capped.treeHidden, true, 'a query replaces the tree')
+    assert.equal(capped.hits.length, 20, `twenty of the twenty-two matches are listed\nsaw: ${capped.hits.length}`)
+    assert.deepEqual(capped.hits.slice(0, 2).map((hit) => hit.title), ['Capword item 22', 'Capword item 21'], 'newest first, whatever the case of the query')
+    assert.ok(capped.hits.every((hit) => hit.where.startsWith(repo.title)), `each hit names its workspace\nsaw: ${JSON.stringify(capped.hits[0])}`)
+    assert.equal(capped.more, 'Showing the first 20 results. Narrow your search.', 'and the list says it stopped at twenty')
+
+    const byWorkspace = await searchFor(elsewhere.title.toUpperCase())
+    assert.deepEqual(byWorkspace.hits.map((hit) => hit.title), ['weekly sync'], `a workspace name finds the session in it\nsaw: ${JSON.stringify(byWorkspace)}`)
+    assert.equal(byWorkspace.more, null, 'with no overflow line under one hit')
+
+    const byId = await searchFor(String(weeklyId).slice(0, 20))
+    assert.deepEqual(byId.hits, [], `an id is not a name\nsaw: ${JSON.stringify(byId)}`)
+    assert.equal(byId.note, 'No matching sessions', 'and an empty answer says so in DSH\'s words')
+
+    /** A hit in the folded workspace: choosing it clears the search, opens the session, and draws its row selected. */
+    await searchFor(elsewhere.title)
+    await browser.evaluate(`[...document.querySelectorAll('#search-results .hit')].find((hit) => hit.querySelector('.hit-title').textContent === 'weekly sync').click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent.includes('weekly sync')`, 10_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][aria-selected="true"]') !== null`, 10_000).catch(() => false)
+
+    /** A row that is shown is selected, inside the scrolling list's box, and the search is gone. */
+    const revealed = (title) => browser.evaluate(`JSON.stringify((() => {
+      const field = document.getElementById('session-search')
+      const li = [...document.querySelectorAll('#tree li[data-kind="session"]')].find((item) => item.querySelector(':scope > .row .label')?.textContent === ${JSON.stringify(title)})
+      const scroller = document.getElementById('workspace-scroll').getBoundingClientRect()
+      const box = li?.querySelector(':scope > .row').getBoundingClientRect()
+      return {
+        query: field.value,
+        resultsHidden: document.getElementById('search-results').hidden,
+        treeHidden: document.getElementById('tree').hidden,
+        rowDrawn: li !== undefined,
+        selected: li?.getAttribute('aria-selected') ?? null,
+        inView: box === undefined ? null : box.top >= scroller.top - 1 && box.bottom <= scroller.bottom + 1,
+      }
+    })())`).then((text) => JSON.parse(text))
+    const weeklyRow = await revealed('weekly sync')
+    assert.deepEqual(weeklyRow, { query: '', resultsHidden: true, treeHidden: false, rowDrawn: true, selected: 'true', inView: true }, `the folded workspace opened to the chosen row\nsaw: ${JSON.stringify(weeklyRow)}`)
+
+    /** The oldest of twenty-two sits past the five-row watermark: the reveal raises it so the row is drawn, and scrolls to it. */
+    await searchFor('capword item 1')
+    await browser.evaluate(`[...document.querySelectorAll('#search-results .hit')].find((hit) => hit.querySelector('.hit-title').textContent === 'Capword item 1').click()`)
+    await browser.waitFor(`document.getElementById('session-title').textContent.includes('Capword item 1')`, 10_000)
+    await browser.waitFor(`[...document.querySelectorAll('#tree li[data-kind="session"][aria-selected="true"]')].some((li) => li.textContent.includes('Capword item 1'))`, 10_000).catch(() => false)
+    const deepRow = await revealed('Capword item 1')
+    assert.deepEqual(deepRow, { query: '', resultsHidden: true, treeHidden: false, rowDrawn: true, selected: 'true', inView: true }, `the row past the watermark is drawn and scrolled to\nsaw: ${JSON.stringify(deepRow)}`)
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root, other]) removeDir(dir)
+  }
+})
+
+/**
+ * A failed read is not an empty store (#58). DSH's title and workspace matches are computed over the session list the
+ * client already holds (`deriveSearchResults`, dsh-client-ui-workspace `lib/client.js:1169-1187`), so a network failure
+ * cannot make them say nothing matched; only the content request can fail (its README, Search). The page used to keep a
+ * failed `/api/sessions` read as an empty index: `No matching sessions` beside a tree listing the sessions, and again
+ * after the network was back, until something re-read the session list.
+ *
+ * The browser's own `fetch` is switched to fail `/api/sessions` the way a lost network does, for one search, then back.
+ */
+test('a search while /api/sessions fails lists the rows the tree holds, and the same search afterwards reads the sessions again', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('tree-search-offline')
+  const root = fixtureDir('tree-search-offline-repo')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  const server = await startCli(
+    ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
+    { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
+  )
+  let browser
+  try {
+    const cookie = await cookieFor(server.url)
+    const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: root }) })
+    assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
+    for (const title of ['Kestrel plan', 'Kestrel notes', 'weekly sync']) {
+      const made = await api(server.url, cookie, '/api/sessions', { method: 'POST', body: JSON.stringify({ branch: root, title }) })
+      assert.equal(made.status, 200, `created ${title} (${JSON.stringify(made.body)})`)
+      await new Promise((done) => setTimeout(done, 15))
+    }
+
+    browser = await openBrowser({ width: 1280, height: 720 })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 15_000)
+    await browser.waitFor('document.querySelectorAll(\'#tree li[data-kind="session"]\').length >= 3', 15_000)
+
+    /** While `__sessionsDown` is set, the page's `/api/sessions` requests fail as a request with no network does. */
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.__sessionsDown = true
+      window.__sessionReads = 0
+      window.fetch = (input, init) => {
+        const url = new URL(typeof input === 'string' ? input : input.url, location.href)
+        if (url.pathname === '/api/sessions' && (init?.method ?? 'GET') === 'GET') {
+          window.__sessionReads += 1
+          if (window.__sessionsDown) return Promise.reject(new TypeError('Failed to fetch'))
+        }
+        return real(input, init)
+      }
+      return true
+    })()`)
+
+    const searchFor = async (query) => {
+      await browser.evaluate(`(() => { const field = document.getElementById('session-search'); field.value = ${JSON.stringify(query)}; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+      await new Promise((done) => setTimeout(done, 800))
+      return JSON.parse(await browser.evaluate(`JSON.stringify({
+        treeHidden: document.getElementById('tree').hidden,
+        hits: [...document.querySelectorAll('#search-results .hit')].map((hit) => hit.querySelector('.hit-title').textContent),
+        note: document.getElementById('search-note').hidden ? null : document.getElementById('search-note').textContent,
+      })`))
+    }
+
+    const offline = await searchFor('kestrel')
+    await browser.evaluate('(() => { window.__sessionsDown = false; return true })()')
+    const online = await searchFor('kestrel')
+    const reads = await browser.evaluate('window.__sessionReads')
+    assert.deepEqual(
+      { offline, online },
+      {
+        offline: { treeHidden: true, hits: ['Kestrel notes', 'Kestrel plan'], note: null },
+        online: { treeHidden: true, hits: ['Kestrel notes', 'Kestrel plan'], note: null },
+      },
+      `during the failure the search lists the tree's matching rows with no "No matching sessions", and the same search after it finds them from a fresh read (page reads of /api/sessions: ${reads})`,
+    )
+    assert.ok(reads >= 2, `the failed read was not kept: the search after it asked again (page reads of /api/sessions: ${reads})`)
+  } finally {
+    browser?.close()
+    server.kill()
+    for (const dir of [home, root]) removeDir(dir)
   }
 })

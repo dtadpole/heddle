@@ -44,7 +44,7 @@ interface Page extends Opened {
   waiting(what: string): number
 }
 
-function harness(): Page {
+function harness(options: { holdGoal?: boolean } = {}): Page {
   const pending: { what: string; resolve: (answer: unknown) => void }[] = []
   const opened = runInNewContext(
     `
@@ -93,7 +93,7 @@ function harness(): Page {
     function paintScheduleHeader() {}
     function applySessionModel() {}
     function followChatTail() {}
-    async function refreshGoal() {}
+    async function refreshGoal() { if (HOLD_GOAL) await hold('goal') }
     async function refreshTodo() {}
     function renderScheduleCards() {}
     function renderScheduleDrawer() {}
@@ -102,6 +102,9 @@ function harness(): Page {
     // The conversation chain's pieces of an open (#76, C74): live events kept aside during the history read, tagged with
     // the same showGeneration, and the reader's scroll place. The kept events are the page's own; drawing one is a stub.
     let sessionLoading = null;
+    // #31: an open reconciles the dock's steering rows with the view's waiting steers; nothing here steers.
+    let steerClock = 0;
+    function reconcileSteers() {}
     function rememberChatScroll() {}
     function restoreChatScroll() {}
     function drawSessionEvent() {}
@@ -114,7 +117,7 @@ function harness(): Page {
       current: () => current,
     })
   `,
-    { hold: (what: string) => new Promise((resolve) => pending.push({ what, resolve })) },
+    { hold: (what: string) => new Promise((resolve) => pending.push({ what, resolve })), HOLD_GOAL: options.holdGoal === true },
   ) as Opened
   return {
     show: (id) => opened.show(id),
@@ -310,4 +313,49 @@ test('a first visit does not start a fresh session over one that was opened whil
   await answerLists(at, [{ id: T }])
   await boot
   assert.deepEqual([at.opened, at.started], [[], []], 'the open session stays the open one: nothing is opened or started over it')
+})
+
+test('an open that another session replaced while its goal was read resolves false; one replaced by the same session, true (N3)', { timeout: 5000 }, async () => {
+  /**
+   * developer-ten's N3 on follow-up 1: an open superseded during refreshGoal/refreshTodo still resolved true, so the flat
+   * row that awaited it marked itself selected while another session was shown. It now answers whether the session it
+   * asked for is the one shown.
+   */
+  const other = harness({ holdGoal: true })
+  const first = other.show(S)
+  await settle()
+  other.release('list')
+  await settle()
+  other.release(read(S), history(S))
+  await settle()
+  assert.equal(other.waiting('goal'), 1, "the first open is reading S's goal")
+  const second = other.show(T)
+  await settle()
+  other.release('list')
+  await settle()
+  other.release(read(T), history(T))
+  await settle()
+  other.release('goal')
+  await settle()
+  other.release('goal')
+  assert.deepEqual(await Promise.all([first, second]), [false, true], 'the open of S, which T replaced, resolves false; T resolves true')
+  assert.equal(other.current(), T)
+
+  const same = harness({ holdGoal: true })
+  const again = same.show(S)
+  await settle()
+  same.release('list')
+  await settle()
+  same.release(read(S), history(S))
+  await settle()
+  const repeat = same.show(S)
+  await settle()
+  same.release('list')
+  await settle()
+  same.release(read(S), history(S))
+  await settle()
+  same.release('goal')
+  await settle()
+  same.release('goal')
+  assert.deepEqual(await Promise.all([again, repeat]), [true, true], 'replaced by an open of the same session, both resolve true: S is shown')
 })
