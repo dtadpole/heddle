@@ -525,6 +525,27 @@ test('plain footnote postpass preserves unrelated links and IDs even when author
   assert.match(html, /href="#fn-body"[^>]*>fragment<\/a>/)
 })
 
+test('footnote marker proper-prefix immediately before an actual citation preserves author text and NUL', () => {
+  // The old marker grew a trailing NUL on collision: the authored prefix then joined the citation's leading NUL.
+  const literal = 'literal\0heddle-footnote:'
+  const html = renderMarkdown(`${literal}[^n]\n\n[^n]: note`)
+  assert.match(html, /^<p>literal\0heddle-footnote:<sup>1<\/sup><\/p>/)
+  assert.match(html, /note ↩<\/p>/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+})
+
+test('footnote markers preserve bare author tokens, numeric lookalikes and unrelated NULs', () => {
+  const literals = ['heddle-footnote:', 'heddle-footnote::', '\0heddle-footnote:0\0', '\0heddle-footnote:\0', 'harmless\0text']
+  for (const literal of literals) {
+    const html = renderMarkdown(`${literal}[^n]\n\n[^n]: note`)
+    assert.ok(html.startsWith(`<p>${literal}<sup>1</sup></p>`), JSON.stringify(literal))
+    assert.match(html, /note ↩<\/p>/)
+    assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+    assert.equal(renderInline(literal), literal)
+  }
+  assert.equal(renderMarkdown('ordinary paragraphs\n\nno footnotes'), '<p>ordinary paragraphs</p>\n<p>no footnotes</p>\n')
+})
+
 test('footnote references inside notes, including cycles, terminate with complete backrefs', () => {
   const html = renderMarkdown('x[^a].\n\n[^a]: a[^b] self[^a].\n[^b]: b[^a].')
   assert.equal((html.match(/<li>/g) ?? []).length, 2)
