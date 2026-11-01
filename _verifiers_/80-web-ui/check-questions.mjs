@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { fixtureDir, heddleCommand, isolatedHome, readTranscript, removeDir, repoRoot, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * The question card (`ask_user_question`), judged where a person meets it.
@@ -326,5 +326,58 @@ test('a question asked before a restart is answerable after it, and the answer r
     }
   } finally {
     removeDir(home)
+  }
+})
+
+test("a fork cut inside a waiting question answers only itself: the source's turn keeps waiting, as DSH keeps waits per session", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Issue #245. A fork copies `question/*` events with their request ids, and both builds looked the waiting turn up by
+   * the id alone. So the fork's copy read `waiting`, and an answer posted to the fork resolved the source's turn, while
+   * the answer was written to the fork's log only. DSH keys its foreground waits by the live agent, so by session
+   * (dsh-user-questions `waits.get(agent)`). API only: the page's Branch offers completed turns.
+   */
+  const server = await startServer('fork', [ask, { text: 'the source resumed' }])
+  const answers = [{ id: 'color', selected: ['Red'] }, { id: 'note', selected: [] }]
+  const questionsOf = async (session) => (await (await request(server, `/api/questions?session=${session}&all=1`)).json()).requests ?? []
+  const events = (session) => readTranscript(join(server.home, 'sessions', session))
+  try {
+    void request(server, '/api/turn', { method: 'POST', body: JSON.stringify({ prompt: 'ask me something', new: true }) }).then((response) => response.text()).catch(() => {})
+    let source
+    for (let attempt = 0; attempt < 60 && source === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      const candidate = await onlySession(server)
+      if (candidate !== undefined && (await questionsOf(candidate)).some((entry) => entry.state === 'waiting')) source = candidate
+    }
+    assert.ok(source !== undefined, 'the question waits in the source')
+    const atSeq = Math.max(...events(source).map((event) => event.seq))
+    const forked = await request(server, `/api/sessions/${source}/fork`, { method: 'POST', body: JSON.stringify({ atSeq }) })
+    assert.equal(forked.status, 200, `a fork cut at the waiting question is made\n${await forked.clone().text()}`)
+    const fork = (await forked.json()).session
+    const [copy] = await questionsOf(fork)
+    const [original] = await questionsOf(source)
+    assert.equal(copy?.id, original?.id, 'the fork copies the request with its id')
+    assert.equal(copy?.state, 'continued', 'but no turn of the fork waits on it')
+
+    const answered = await request(server, `/api/questions/${copy.id}`, { method: 'POST', body: JSON.stringify({ session: fork, answers }) })
+    const body = await answered.json()
+    assert.equal(answered.status, 200)
+    assert.equal(body.late, true, "the fork's answer is late, a message for the fork's next turn")
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    assert.equal((await questionsOf(source))[0]?.state, 'waiting', "the source's turn still waits")
+    assert.deepEqual(events(source).filter((event) => event.type === 'question/answered' || event.type === 'turn/completed').map((event) => event.type), [], "and the source's log has neither an answer nor a finished turn")
+
+    const own = await request(server, `/api/questions/${original.id}`, { method: 'POST', body: JSON.stringify({ session: source, answers }) })
+    assert.equal(own.status, 200)
+    assert.equal((await own.json()).late, false, 'an answer in the source reaches its waiting turn')
+    let done = false
+    for (let attempt = 0; attempt < 50 && !done; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      done = events(source).some((event) => event.type === 'turn/completed')
+    }
+    assert.ok(done, 'and the source turn finishes')
+    assert.equal(events(source).filter((event) => event.type === 'question/answered').length, 1, "the source's log records its own answer once")
+  } finally {
+    await server.close()
   }
 })
