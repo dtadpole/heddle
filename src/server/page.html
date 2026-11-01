@@ -4320,6 +4320,19 @@ const MESSAGES = Object.freeze({
     'schedule.timing.error': 'Could not confirm the timing update. Your draft is retained. Check the task before retrying.',
     'schedule.timing.zoneRecent': 'Recent',
     'schedule.timing.zoneAll': 'All time zones',
+    'hover.time.now': 'now',
+    'hover.time.ago': '{t} ago',
+    'hover.time.minutes': '{n}min',
+    'hover.time.hours': '{n}h',
+    'hover.time.days': '{n}d',
+    'hover.time.months': '{n}mo',
+    'hover.time.years': '{n}y',
+    'hover.dateYmd': '{y}-{m}-{d}',
+    'hover.created': 'Created {time}',
+    'hover.status.waitingApproval': 'Waiting for approval',
+    'hover.status.running': 'Running',
+    'hover.status.idle': 'Idle',
+    'hover.archived': 'Archived',
     'chat.viewChanges': 'View changes to {path}',
     'composer.editQueued': 'Edit queued message',
     'composer.saveQueued': 'Save queued message',
@@ -4723,6 +4736,19 @@ const MESSAGES = Object.freeze({
     'schedule.timing.error': '无法确认时间修改是否已保存。草稿已保留，请在重试前检查任务',
     'schedule.timing.zoneRecent': '最近使用',
     'schedule.timing.zoneAll': '全部时区',
+    'hover.time.now': '刚刚',
+    'hover.time.ago': '{t}前',
+    'hover.time.minutes': '{n}分钟',
+    'hover.time.hours': '{n}小时',
+    'hover.time.days': '{n}天',
+    'hover.time.months': '{n}个月',
+    'hover.time.years': '{n}年',
+    'hover.dateYmd': '{y}年{m}月{d}日',
+    'hover.created': '创建于 {time}',
+    'hover.status.waitingApproval': '等待审批',
+    'hover.status.running': '进行中',
+    'hover.status.idle': '空闲',
+    'hover.archived': '已归档',
     'chat.viewChanges': '查看 {path} 的更改',
     'composer.editQueued': '编辑排队消息',
     'composer.saveQueued': '保存排队消息',
@@ -19451,6 +19477,21 @@ const HoverCards = (() => {
   const TASK_LIMIT = 2
   const DAY_MS = 86_400_000
 
+  /**
+   * The words a card says (#80). The page hands its `t()` in through `useWords`, so a card reads in the interface
+   * language; loaded bare, as test/hover-cards.test.ts loads this block, each word is the English written beside its key.
+   */
+  let translate = null
+  function useWords(words) {
+    translate = typeof words === 'function' ? words : null
+  }
+  function say(key, english, vars = {}) {
+    if (translate !== null) return translate(key, vars)
+    return english.replace(/\{(\w+)\}/g, (whole, name) => (Object.hasOwn(vars, name) ? String(vars[name]) : whole))
+  }
+  /** DSH's `time.locale` for the card's dates and zone names: `en`, or `zh-CN`, which leaves the year out (`statesYear`). */
+  const locale = () => say('schedule.time.locale', 'en')
+
   /** The primitives' `relativeTime`: whole units, floored, from `now` up to years. */
   function relativeTime(then, now) {
     const span = Math.max(0, now - then)
@@ -19461,14 +19502,15 @@ const HoverCards = (() => {
     if (span < 365 * DAY_MS) return { unit: 'months', n: Math.floor(span / (30 * DAY_MS)) }
     return { unit: 'years', n: Math.floor(span / (365 * DAY_MS)) }
   }
-  const SHORT_UNIT = { minutes: 'min', hours: 'h', days: 'd', months: 'mo', years: 'y' }
+  const SHORT_UNIT = { minutes: '{n}min', hours: '{n}h', days: '{n}d', months: '{n}mo', years: '{n}y' }
 
-  /** `hoverTimeLabel`: `now`, else the compact distance in DSH's `{t} ago` — `5min ago`, `3h ago`, `2mo ago`. */
+  /** `hoverTimeLabel`: `now`, else the compact distance in DSH's `{t} ago` — `5min ago`, `3h ago`, `2mo ago` (刚刚, 5分钟前). */
   function timeAgo(stamp, now) {
     const at = Date.parse(String(stamp ?? ''))
     if (!Number.isFinite(at)) return ''
     const { unit, n } = relativeTime(at, now)
-    return unit === 'now' ? 'now' : `${n}${SHORT_UNIT[unit]} ago`
+    if (unit === 'now') return say('hover.time.now', 'now')
+    return say('hover.time.ago', '{t} ago', { t: say(`hover.time.${unit}`, SHORT_UNIT[unit], { n }) })
   }
 
   /** `createdLabel`: `Created {y}-{m}-{d} {hh}:{mm}` on the reader's clock, month and day unpadded as DSH's `date.ymd`. */
@@ -19476,7 +19518,8 @@ const HoverCards = (() => {
     const at = new Date(String(stamp ?? ''))
     if (Number.isNaN(at.getTime())) return ''
     const pad = (value) => String(value).padStart(2, '0')
-    return `Created ${at.getFullYear()}-${at.getMonth() + 1}-${at.getDate()} ${pad(at.getHours())}:${pad(at.getMinutes())}`
+    const date = say('hover.dateYmd', '{y}-{m}-{d}', { y: at.getFullYear(), m: at.getMonth() + 1, d: at.getDate() })
+    return say('hover.created', 'Created {time}', { time: `${date} ${pad(at.getHours())}:${pad(at.getMinutes())}` })
   }
 
   /** `abbreviateHomePath`: `~` for the host's home and `~/…` beneath it; no home, or a Windows path, keeps the path. */
@@ -19499,9 +19542,9 @@ const HoverCards = (() => {
    */
   function sessionStatuses(facts) {
     let statuses
-    if (facts.pendingApproval === true) statuses = [{ state: 'warning', label: 'Waiting for approval' }]
-    else if (facts.running === true) statuses = [{ state: 'ongoing', label: 'Running' }]
-    else statuses = [{ state: 'idle', label: 'Idle' }]
+    if (facts.pendingApproval === true) statuses = [{ state: 'warning', label: say('hover.status.waitingApproval', 'Waiting for approval') }]
+    else if (facts.running === true) statuses = [{ state: 'ongoing', label: say('hover.status.running', 'Running') }]
+    else statuses = [{ state: 'idle', label: say('hover.status.idle', 'Idle') }]
     return facts.archived === true ? statuses.filter((status) => status.state !== 'idle' && status.state !== 'done') : statuses
   }
 
@@ -19538,7 +19581,7 @@ const HoverCards = (() => {
 
   const UNITS = [['day', 86_400], ['hour', 3_600], ['minute', 60], ['second', 1]]
   const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-  const unitWord = (unit, value) => (value === 1 ? unit : `${unit}s`)
+  const unitWord = (unit, value) => say(`schedule.unit.${unit}.${value === 1 ? 'one' : 'other'}`, value === 1 ? unit : `${unit}s`)
 
   /** `clockLabel`: a stored `HH:MM:SS(.mmm)` without its fraction and without zero seconds. */
   function clockLabel(time) {
@@ -19556,7 +19599,7 @@ const HoverCards = (() => {
       offset = undefined
     }
     try {
-      const name = new Intl.DateTimeFormat('en', { timeZone: zone, timeZoneName: 'longGeneric' }).formatToParts(at).find((part) => part.type === 'timeZoneName')?.value
+      const name = new Intl.DateTimeFormat(locale(), { timeZone: zone, timeZoneName: 'longGeneric' }).formatToParts(at).find((part) => part.type === 'timeZoneName')?.value
       if (offset === undefined) return name ?? zone
       return name === undefined || /^GMT(?:[+-]|$)/.test(name) ? offset : `${offset} · ${name}`
     } catch {
@@ -19573,42 +19616,45 @@ const HoverCards = (() => {
     switch (record.kind) {
       case 'after':
       case 'at':
-        return 'Once'
+        return say('schedule.frequency.once', 'Once')
       case 'every': {
         const seconds = Number(record.everySeconds)
         const [unit, size] = UNITS.find(([, each]) => seconds % each === 0) ?? UNITS[UNITS.length - 1]
         const value = seconds / size
-        return `Every ${value} ${unitWord(unit, value)}`
+        return say('schedule.frequency.every', 'Every {value} {unit}', { value, unit: unitWord(unit, value) })
       }
       case 'daily':
-        return `Daily at ${clockLabel(record.time)} (${zoneLabel(record.timeZone, at)})`
+        return say('schedule.frequency.daily', 'Daily at {time} ({timeZone})', { time: clockLabel(record.time), timeZone: zoneLabel(record.timeZone, at) })
       case 'weekly': {
-        const days = (Array.isArray(record.weekdays) ? record.weekdays : []).map((day) => WEEKDAYS[day - 1] ?? WEEKDAYS[0]).join(', ')
-        return `Weekly on ${days} at ${clockLabel(record.time)} (${zoneLabel(record.timeZone, at)})`
+        const day = (weekday) => (WEEKDAYS[weekday - 1] === undefined ? 1 : weekday)
+        const days = (Array.isArray(record.weekdays) ? record.weekdays : []).map((weekday) => say(`schedule.frequency.weekday.${day(weekday)}`, WEEKDAYS[day(weekday) - 1])).join(say('schedule.frequency.weekday.join', ', '))
+        return say('schedule.frequency.weekly', 'Weekly on {weekdays} at {time} ({timeZone})', { weekdays: days, time: clockLabel(record.time), timeZone: zoneLabel(record.timeZone, at) })
       }
       case 'cron':
-        return `Cron ${record.expression} (${zoneLabel(record.timeZone, at)})`
+        return say('schedule.frequency.cron', 'Cron {expression} ({timeZone})', { expression: record.expression, timeZone: zoneLabel(record.timeZone, at) })
       default:
         return ''
     }
   }
 
-  /** `formatScheduleAbsolute` in English: `Oct 30, 2026, 15:00` in the reader's zone; the raw value when unparseable. */
+  /** `formatScheduleAbsolute`: `Oct 30, 2026, 15:00` (10月30日 15:00) in the reader's zone; the raw value when unparseable. */
   function absoluteLabel(scheduledAt) {
     const at = Date.parse(scheduledAt)
     if (Number.isNaN(at)) return String(scheduledAt)
-    return new Intl.DateTimeFormat('en', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
+    const year = locale().toLowerCase().startsWith('zh') ? {} : { year: 'numeric' }
+    return new Intl.DateTimeFormat(locale(), { ...year, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at)
   }
 
   /** `formatScheduleRelative`, parenthesised as `nextRunParts` has it: `(in 5 hours)`, `(3 minutes overdue)`, `(Due now)`. */
   function relativeLabel(scheduledAt, now) {
     const difference = Date.parse(scheduledAt) - now
     if (Number.isNaN(difference)) return ''
-    if (difference === 0) return '(Due now)'
+    if (difference === 0) return `(${say('schedule.relative.now', 'Due now')})`
     const seconds = Math.abs(difference) / 1000
     const [unit, size] = UNITS.find(([, each]) => seconds >= each) ?? UNITS[UNITS.length - 1]
     const value = Math.max(1, difference > 0 ? Math.ceil(seconds / size) : Math.floor(seconds / size))
-    return difference > 0 ? `(in ${value} ${unitWord(unit, value)})` : `(${value} ${unitWord(unit, value)} overdue)`
+    const words = { value, unit: unitWord(unit, value) }
+    return `(${difference > 0 ? say('schedule.relative.future', 'in {value} {unit}', words) : say('schedule.relative.overdue', '{value} {unit} overdue', words)})`
   }
 
   /** `orderScheduleRecords`: overdue first, then by target, keeping the input order for equal targets. */
@@ -19653,9 +19699,12 @@ const HoverCards = (() => {
     return { left: row.right + GAP, top }
   }
 
-  return { OPEN_DELAY_MS, CLOSE_DELAY_MS, COPIED_MS, GAP, TASK_LIMIT, relativeTime, timeAgo, createdLabel, abbreviateHome, sessionStatuses, sessionCard, workspaceCard, clockLabel, zoneLabel, frequencyLabel, absoluteLabel, relativeLabel, orderTasks, sessionTasks, place }
+  return { OPEN_DELAY_MS, CLOSE_DELAY_MS, COPIED_MS, GAP, TASK_LIMIT, useWords, relativeTime, timeAgo, createdLabel, abbreviateHome, sessionStatuses, sessionCard, workspaceCard, clockLabel, zoneLabel, frequencyLabel, absoluteLabel, relativeLabel, orderTasks, sessionTasks, place }
 })()
 /* hover-card:end */
+
+/** The cards speak the interface language: the pure block takes the page's t() (#80). */
+HoverCards.useWords(t)
 
 /**
  * The row hover cards, the page's half: one card at a time, on the body, placed beside its row, driven by pointer events
@@ -19839,7 +19888,7 @@ const rowHoverCard = (() => {
           row.append(icon, body)
           section.append(row)
         }
-        if (model.schedule.more > 0) section.append(element('div', 'hover-more', `${model.schedule.more} more`))
+        if (model.schedule.more > 0) section.append(element('div', 'hover-more', t('schedule.hover.more', { count: model.schedule.more })))
         lines.push(section)
       }
       for (const status of model.statuses) {
@@ -19853,7 +19902,7 @@ const rowHoverCard = (() => {
       }
       if (model.archived) {
         const line = element('div', 'hover-status hover-archived')
-        line.append(kindIcon('archive'), element('span', '', 'Archived'))
+        line.append(kindIcon('archive'), element('span', '', t('hover.archived')))
         lines.push(line)
       }
     }
@@ -20057,6 +20106,8 @@ const rowHoverCard = (() => {
   }
   window.addEventListener('scroll', follow, true)
   window.addEventListener('resize', follow)
+  /** A showing card is drawn again in the new language (#80); a hidden one draws in it when it next shows. */
+  window.addEventListener('heddle:locale', redraw)
 
   return { hide }
 })()
