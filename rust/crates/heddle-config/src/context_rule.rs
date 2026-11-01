@@ -162,36 +162,87 @@ fn scope_problems(
     let retain_tokens = merged("retainTokens");
     let threshold_ratio = merged("thresholdRatio").unwrap_or(THRESHOLD_RATIO);
     let retain_ratio = merged("retainRatio").unwrap_or(RETAIN_RATIO);
+    let threshold = threshold_tokens.unwrap_or_else(|| (window * threshold_ratio).floor());
+    let retain = retain_tokens.unwrap_or_else(|| (window * retain_ratio).floor());
+    // Ratios alone are judged whatever the window, as DSH's validateRatioRetention judges them at load.
+    let ratios_conflict =
+        threshold_tokens.is_none() && retain_tokens.is_none() && retain_ratio >= threshold_ratio;
+    if !ratios_conflict && retain < threshold {
+        return Vec::new();
+    }
+    vec![retain_not_below(&RetainNotBelow {
+        prefix,
+        window_name: "contextWindow",
+        window,
+        threshold_tokens,
+        retain_tokens,
+        threshold_ratio,
+        retain_ratio,
+        threshold,
+        retain,
+    })]
+}
+
+/// A budget whose retained tail is not below its trigger, as [`retain_not_below`] names it.
+#[derive(Clone, Copy, Debug)]
+pub struct RetainNotBelow<'a> {
+    /// `""` for the row, `policies[i].` for an endpoint's policy.
+    pub prefix: &'a str,
+    /// What the window is called: `contextWindow`, or `endpoint 'name' window` when the endpoint declares it.
+    pub window_name: &'a str,
+    /// The window the ratios were taken of.
+    pub window: f64,
+    /// Set when the trigger is written in tokens.
+    pub threshold_tokens: Option<f64>,
+    /// Set when the tail is written in tokens.
+    pub retain_tokens: Option<f64>,
+    /// The resolved trigger ratio, the default filled in.
+    pub threshold_ratio: f64,
+    /// The resolved tail ratio, the default filled in.
+    pub retain_ratio: f64,
+    /// The resolved trigger in tokens.
+    pub threshold: f64,
+    /// The resolved tail in tokens.
+    pub retain: f64,
+}
+
+/// The sentence for a tail not below its trigger, naming each side by what was written: one sentence for the
+/// write-time rule and for heddle-context's `resolve_budget` when a turn starts, so a refusal at Save and a
+/// failure at a turn read alike. `src/config/budget-words.ts` is its twin, word for word.
+pub fn retain_not_below(budget: &RetainNotBelow<'_>) -> SchemaProblem {
+    let RetainNotBelow {
+        prefix,
+        window_name,
+        window,
+        threshold_tokens,
+        retain_tokens,
+        threshold_ratio,
+        retain_ratio,
+        threshold,
+        retain,
+    } = *budget;
     match (threshold_tokens, retain_tokens) {
+        (Some(threshold), Some(retain)) => {
+            return problem(
+                format!("{prefix}retainTokens"),
+                format!(
+                    "({}) must be less than thresholdTokens ({})",
+                    shown(retain),
+                    shown(threshold)
+                ),
+            );
+        }
         (None, None) if retain_ratio >= threshold_ratio => {
-            return vec![problem(
+            return problem(
                 format!("{prefix}retainRatio"),
                 format!(
                     "({}) must be less than the resolved thresholdRatio ({})",
                     shown(retain_ratio),
                     shown(threshold_ratio)
                 ),
-            )];
-        }
-        (Some(threshold), Some(retain)) => {
-            if retain >= threshold {
-                return vec![problem(
-                    format!("{prefix}retainTokens"),
-                    format!(
-                        "({}) must be less than thresholdTokens ({})",
-                        shown(retain),
-                        shown(threshold)
-                    ),
-                )];
-            }
-            return Vec::new();
+            );
         }
         _ => {}
-    }
-    let threshold = threshold_tokens.unwrap_or_else(|| (window * threshold_ratio).floor());
-    let retain = retain_tokens.unwrap_or_else(|| (window * retain_ratio).floor());
-    if retain < threshold {
-        return Vec::new();
     }
     let (path, tail) = match retain_tokens {
         Some(tokens) => (
@@ -201,7 +252,7 @@ fn scope_problems(
         None => (
             format!("{prefix}retainRatio"),
             format!(
-                "({}) of contextWindow {} is {} tokens, which",
+                "({}) of {window_name} {} is {} tokens, which",
                 shown(retain_ratio),
                 shown(window),
                 shown(retain)
@@ -211,13 +262,13 @@ fn scope_problems(
     let trigger = match threshold_tokens {
         Some(tokens) => format!("thresholdTokens ({})", shown(tokens)),
         None => format!(
-            "the threshold tokens ({} = thresholdRatio {} of contextWindow {})",
+            "the threshold tokens ({} = thresholdRatio {} of {window_name} {})",
             shown(threshold),
             shown(threshold_ratio),
             shown(window)
         ),
     };
-    vec![problem(path, format!("{tail} must be less than {trigger}"))]
+    problem(path, format!("{tail} must be less than {trigger}"))
 }
 
 #[cfg(test)]

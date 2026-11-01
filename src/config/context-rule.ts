@@ -1,5 +1,7 @@
 import { RETAIN_RATIO, THRESHOLD_RATIO } from '../context/budget.ts'
 
+import { retainNotBelow } from './budget-words.ts'
+
 /**
  * The context row's values, judged where they are written (issue #212).
  *
@@ -98,17 +100,10 @@ function scopeProblems(prefix: string, merged: Scope, window: number): readonly 
   const retainTokens = number(merged.retainTokens)
   const thresholdRatio = number(merged.thresholdRatio) ?? THRESHOLD_RATIO
   const retainRatio = number(merged.retainRatio) ?? RETAIN_RATIO
-  if (thresholdTokens === undefined && retainTokens === undefined) {
-    if (retainRatio >= thresholdRatio) return [`${prefix}retainRatio (${retainRatio}) must be less than the resolved thresholdRatio (${thresholdRatio})`]
-  } else if (thresholdTokens !== undefined && retainTokens !== undefined) {
-    if (retainTokens >= thresholdTokens) return [`${prefix}retainTokens (${retainTokens}) must be less than thresholdTokens (${thresholdTokens})`]
-    return []
-  }
   const threshold = thresholdTokens ?? Math.floor(window * thresholdRatio)
   const retain = retainTokens ?? Math.floor(window * retainRatio)
-  if (retain < threshold) return []
-  const tail = retainTokens !== undefined ? `retainTokens (${retainTokens})` : `retainRatio (${retainRatio}) of contextWindow ${window} is ${retain} tokens, which`
-  const trigger =
-    thresholdTokens !== undefined ? `thresholdTokens (${thresholdTokens})` : `the threshold tokens (${threshold} = thresholdRatio ${thresholdRatio} of contextWindow ${window})`
-  return [`${prefix}${tail} must be less than ${trigger}`]
+  // Ratios alone are judged whatever the window, as DSH's validateRatioRetention judges them at load.
+  const ratiosConflict = thresholdTokens === undefined && retainTokens === undefined && retainRatio >= thresholdRatio
+  if (!ratiosConflict && retain < threshold) return []
+  return [retainNotBelow({ prefix, windowName: 'contextWindow', window, thresholdTokens, retainTokens, thresholdRatio, retainRatio, threshold, retain })]
 }
