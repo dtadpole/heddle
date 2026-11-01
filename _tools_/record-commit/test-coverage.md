@@ -35,11 +35,14 @@ not only git's last line.
 
 ## Parking by default
 
-Five tests use an origin that accepts main and logs every ref pushed to it. By default a record is parked and the
-only ref pushed is `records/<seat>`, so main is never even attempted. The seat comes from the roster, and a second
-record appends. No seat, or a seat that is not a branch name, refuses before anything is committed or pushed. A dry
-run names the branch it would park on, and `--main` pushes main. The tests written before this pass `--main`, so they
-still judge the direct push and its fallback to parking.
+Five tests use an origin that accepts main and logs every pushed ref. By default the only ref pushed is
+`records/<seat>`: main is never attempted. The seat comes from the roster and a second record appends; no seat, or a
+bad one, refuses before the commit. A dry run names the branch, and `--main` pushes main. The earlier tests pass
+`--main`, so they still judge the direct push and its fallback.
+
+Four tests judge the validator against a main that already fails it, as reflection main did after the GHE
+convergence (35 errors). Such an error is counted, not blocking, even in the file the record edits. An error the
+record adds still refuses it, named apart from main's. A validator that fails without an error line still refuses.
 
 ## A dry run against the real record
 

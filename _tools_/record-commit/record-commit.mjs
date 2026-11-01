@@ -316,6 +316,26 @@ export function findPython(explicit, repo = null) {
   return null
 }
 
+// Run fn with the given files as origin/main has them (absent where origin lacks them),
+// then put the record's content back, whatever fn did.
+function withOriginContent(tmp, prepared, fn) {
+  for (const file of prepared) {
+    const target = join(tmp, file.path)
+    if (file.origin === null) rmSync(target, { force: true })
+    else writeFileSync(target, file.origin)
+  }
+  try {
+    return fn()
+  } finally {
+    for (const file of prepared) {
+      const target = join(tmp, file.path)
+      mkdirSync(dirname(target), { recursive: true })
+      writeFileSync(target, file.expected)
+      if (file.mode !== 0) chmodSync(target, file.mode)
+    }
+  }
+}
+
 function cleanupWorktree(repo, root) {
   const removed = git(repo, ['worktree', 'remove', '--force', join(root, 'tree')], { allowFailure: true })
   if (removed.status !== 0) git(repo, ['worktree', 'prune'], { allowFailure: true })
@@ -501,18 +521,40 @@ function attempt({ config, report, rebuild = false }) {
         report.push(`  python: ${found.command} (${found.why})`)
         commandArgs = [validatorPath, '--root', tmp]
       }
-      const run = spawnSync(command, commandArgs, { cwd: tmp, encoding: 'utf8' })
-      const lines = `${run.stdout ?? ''}${run.stderr ?? ''}`.trim().split('\n').filter(Boolean)
-      const errors = lines.filter((line) => /^error\b/.test(line))
-      const warnings = lines.filter((line) => /^warning\b/.test(line))
-      const summary = lines.filter((line) => /^checked \d+ file\(s\)/.test(line))
-      for (const line of errors) report.push(`  frontmatter: ${line}`)
-      if (errors.length > 0 || run.status !== 0) {
-        for (const line of lines.filter((l) => !/^warning\b/.test(l) && !/^checked \d/.test(l))) report.push(`  frontmatter: ${line}`)
+      const validate = () => {
+        const run = spawnSync(command, commandArgs, { cwd: tmp, encoding: 'utf8' })
+        const lines = `${run.stdout ?? ''}${run.stderr ?? ''}`.trim().split('\n').filter(Boolean)
+        return { status: run.status, lines, errors: lines.filter((line) => /^error\b/.test(line)) }
+      }
+      const after = validate()
+      const warnings = after.lines.filter((line) => /^warning\b/.test(line))
+      const summary = after.lines.filter((line) => /^checked \d+ file\(s\)/.test(line))
+      // An error origin/main already has is not this record's, and a seat cannot fix main:
+      // on 2026-11-01 the GHE convergence left main with 35 errors, and every record was
+      // refused for them. Only the errors this record adds refuse it; the validator runs
+      // again with the given files as origin has them to tell the two apart. A failure
+      // with no error line at all is a broken validator, and still refuses.
+      let added = after.errors
+      let inherited = []
+      if (after.errors.length > 0) {
+        const had = new Set(withOriginContent(tmp, prepared, validate).errors)
+        added = after.errors.filter((line) => !had.has(line))
+        inherited = after.errors.filter((line) => had.has(line))
+      }
+      if (added.length > 0 || (after.status !== 0 && after.errors.length === 0)) {
+        for (const line of added) report.push(`  frontmatter: ${line}`)
+        if (added.length === 0) {
+          for (const line of after.lines.filter((l) => !/^warning\b/.test(l) && !/^checked \d/.test(l))) report.push(`  frontmatter: ${line}`)
+        }
+        if (inherited.length > 0) report.push(`  frontmatter: ${inherited.length} more error(s) already on ${mainRef}, not this record's`)
         report.push('  frontmatter: the validator failed; nothing committed')
         return { code: REFUSED, files: prepared, report }
       }
       for (const line of summary) report.push(`  frontmatter: ${line}`)
+      if (inherited.length > 0) {
+        if (config.verbose) for (const line of inherited) report.push(`  frontmatter: already on ${mainRef}: ${line}`)
+        else report.push(`  frontmatter: ${inherited.length} error(s) already on ${mainRef}, none added by this record, so none blocking (--verbose lists them)`)
+      }
       if (warnings.length > 0) {
         if (config.verbose) for (const line of warnings) report.push(`  frontmatter: ${line}`)
         else report.push(`  frontmatter: ${warnings.length} warning(s), none blocking (--verbose lists them)`)

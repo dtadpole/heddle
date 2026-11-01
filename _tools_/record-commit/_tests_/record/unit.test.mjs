@@ -76,8 +76,19 @@ function world(t) {
   writeFileSync(validator, '#!/bin/sh\nexit 0\n')
   chmodSync(validator, 0o755)
   const failingValidator = join(root, 'validator-fail.sh')
-  writeFileSync(failingValidator, '#!/bin/sh\necho "error   fixture: no frontmatter"\nexit 1\n')
+  // Fails on what the record writes (a note saying 'worse'), so the error is the record's own.
+  writeFileSync(failingValidator, '#!/bin/sh\nif grep -q worse "$2/_projects_/x/note.md" 2>/dev/null; then echo "error   _projects_/x/note.md: no frontmatter"; exit 1; fi\nexit 0\n')
   chmodSync(failingValidator, 0o755)
+  // main already fails this one (other.md), and a note saying BAD adds an error of the record's.
+  const inheritedValidator = join(root, 'validator-inherited.sh')
+  writeFileSync(
+    inheritedValidator,
+    '#!/bin/sh\necho "error   _projects_/x/other.md: missing required field level"\nif grep -q BAD "$2/_projects_/x/note.md" 2>/dev/null; then echo "error   _projects_/x/note.md: BAD"; fi\necho "checked 3 file(s)"\nexit 1\n',
+  )
+  chmodSync(inheritedValidator, 0o755)
+  const crashingValidator = join(root, 'validator-crash.sh')
+  writeFileSync(crashingValidator, '#!/bin/sh\necho "Traceback (most recent call last): boom" >&2\nexit 2\n')
+  chmodSync(crashingValidator, 0o755)
   const recordingValidator = join(root, 'validator-record.sh')
   writeFileSync(
     recordingValidator,
@@ -89,7 +100,7 @@ function world(t) {
   writeFileSync(warningValidator, '#!/bin/sh\necho "warning fixture: a link does not resolve"\necho "checked 9 file(s): 0 error(s), 1 warning(s)"\nexit 0\n')
   chmodSync(warningValidator, 0o755)
 
-  return { root, origin, seed, live, writer, validator, failingValidator, recordingValidator, warningValidator, validatorLog: join(root, 'validator.log') }
+  return { root, origin, seed, live, writer, validator, failingValidator, inheritedValidator, crashingValidator, recordingValidator, warningValidator, validatorLog: join(root, 'validator.log') }
 }
 
 function pushFrom(w, files, message = 'writer') {
@@ -237,6 +248,60 @@ test('the frontmatter validator sees the whole tree, and its failure refuses the
   assert.match(refused.output, /frontmatter: the validator failed; nothing committed/)
   assert.equal(git(w.origin, ['rev-parse', 'main']), landed, 'the refused edit did not land')
   assert.equal(originShow(w, '_projects_/x/note.md'), 'one\nvalidated\n', 'origin still holds the accepted edit')
+})
+
+// 2026-11-01 15:38 PST: the GHE convergence left reflection main with 35 validator errors,
+// and every record was refused for errors that were not its own.
+test('an error main already has does not refuse a record, and is counted, not hidden', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/x/note.md', 'one\nfine\n')
+  const r = run(w, ['--message', 'docs(test): on a broken main', '--file', '_projects_/x/note.md', '--validator', w.inheritedValidator, '--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  assert.ok(parkedLine(r, 'dev-one'), r.output)
+  assert.match(r.output, /frontmatter: 1 error\(s\) already on origin\/main, none added by this record, so none blocking \(--verbose lists them\)/)
+  assert.deepEqual(pushed(), ['refs/heads/records/dev-one'])
+  write(w.live, '_projects_/x/note.md', 'one\nfine\nverbose\n')
+  const loud = run(w, ['--message', 'docs(test): verbose', '--file', '_projects_/x/note.md', '--validator', w.inheritedValidator, '--seat', 'dev-one', '--verbose'])
+  assert.equal(loud.status, OK, loud.output)
+  assert.match(loud.output, /frontmatter: already on origin\/main: error {3}_projects_\/x\/other\.md: missing required field level/)
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('an error the record adds still refuses it, named apart from the ones main already has', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/x/note.md', 'one\nBAD\n')
+  const r = run(w, ['--message', 'docs(test): a record that breaks', '--file', '_projects_/x/note.md', '--validator', w.inheritedValidator, '--seat', 'dev-one'])
+  assert.equal(r.status, REFUSED, r.output)
+  assert.match(r.output, /frontmatter: error {3}_projects_\/x\/note\.md: BAD/)
+  assert.doesNotMatch(r.output, /frontmatter: error {3}_projects_\/x\/other\.md/, 'main\'s own error is counted, not listed as the record\'s')
+  assert.match(r.output, /frontmatter: 1 more error\(s\) already on origin\/main, not this record's/)
+  assert.match(r.output, /frontmatter: the validator failed; nothing committed/)
+  assert.deepEqual(pushed(), [])
+  assert.equal(read(w.live, '_projects_/x/note.md'), 'one\nBAD\n', 'the live edit is kept')
+  assert.equal(worktreeCount(w), 1)
+})
+
+test('an error main has in the very file a record edits is still main\'s', (t) => {
+  const w = world(t)
+  pushFrom(w, { '_projects_/x/note.md': 'one\nBAD on main\n' })
+  git(w.live, ['pull', '-q'])
+  write(w.live, '_projects_/x/note.md', 'one\nBAD on main\nand more\n')
+  const r = run(w, ['--message', 'docs(test): edit a broken file', '--file', '_projects_/x/note.md', '--validator', w.inheritedValidator, '--seat', 'dev-one'])
+  assert.equal(r.status, OK, r.output)
+  assert.match(r.output, /2 error\(s\) already on origin\/main, none added/)
+})
+
+test('a validator that fails without naming an error still refuses the record', (t) => {
+  const w = world(t)
+  const pushed = logPushes(w)
+  write(w.live, '_projects_/x/note.md', 'one\ncrash\n')
+  const r = run(w, ['--message', 'docs(test): a broken validator', '--file', '_projects_/x/note.md', '--validator', w.crashingValidator, '--seat', 'dev-one'])
+  assert.equal(r.status, REFUSED, r.output)
+  assert.match(r.output, /frontmatter: Traceback \(most recent call last\): boom/)
+  assert.match(r.output, /frontmatter: the validator failed; nothing committed/)
+  assert.deepEqual(pushed(), [])
 })
 
 test('validator warnings are counted, not dumped, unless --verbose asks for them', (t) => {

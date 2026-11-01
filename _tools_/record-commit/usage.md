@@ -42,6 +42,6 @@ gate reads messages.
 | Code | Meaning |
 |---|---|
 | `0` | parked and read back, the last line `parked on records/<seat> <sha>`; or, with `--main`, committed, read back, live tree synced (or `--no-sync`) |
-| `1` | refused before the commit: a stale base on the first attempt (the caller's own old edit), validator error, bad arguments; or no seat is known to park on |
+| `1` | refused before the commit: a stale base on the first attempt (the caller's own old edit), a validator error the record adds, bad arguments; or no seat is known to park on |
 | `2` | the record would not carry every given file — refused, nothing committed: a file unchanged, or a file another writer changed while this run was pushing — or the pushed commit does not carry it as expected |
 | `3` | committed and read back, but the live tree was not fast-forwarded: the record is safe and the live tree is retried next pass |

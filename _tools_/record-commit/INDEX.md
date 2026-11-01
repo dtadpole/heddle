@@ -43,7 +43,7 @@ node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
-Last run 2026-11-01 15:39 PST, on 6b53922d0 (main 6157062 plus the protected-main park) with parking as the default: 42 passed, 0 failed.
+Last run 2026-11-01 15:47 PST, on 6b53922d0 (main 6157062 plus the protected-main park) with parking as the default and only a record's own validator errors refusing it: 46 passed, 0 failed. A dry run against reflection main after the GHE convergence (35 errors on main) would park.
 
 ## Read next
 

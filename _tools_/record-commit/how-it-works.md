@@ -19,7 +19,7 @@ once lost when an edit made on a lagging checkout replaced content that had land
 
 ## What it does, in order
 
-1. **Fetch**, then create a temporary worktree of the live checkout at the fetched `origin/main`.
+1. **Fetch**, then make a temporary worktree at the fetched `origin/main`.
 2. **Copy only the given files** there; nothing else in the live tree is read or written.
 3. **Check each file's base** against `origin/main`. A normal file whose base differs is refused: its edit
    was made on content origin no longer has. `--file` uses the live checkout's `HEAD:path` as the base;
@@ -27,8 +27,8 @@ once lost when an edit made on a lagging checkout replaced content that had land
 4. **Union append-only logs** (`_logs_/**.jsonl`, `execution-review-log.jsonl`, plus any `--append PATH`):
    origin's lines in their order, then the staged lines origin lacks. A log is never replaced; every line of
    both sides is verified present.
-5. **Run the frontmatter validator on the whole tree** in the temporary worktree. Errors refuse the commit;
-   warnings are counted and only listed with `--verbose`.
+5. **Run the frontmatter validator on the whole tree** there. Only errors the record adds refuse it; errors
+   `origin/main` already has, and warnings, are counted and listed with `--verbose`.
 6. **Commit with explicit paths** as `D.Tadpole <gsk390@gmail.com>` (D-018), **park it** on `records/<seat>`
    (with `--main`, push `main`), then **read back** that the branch is that commit and that it carries every
    staged byte (and, for a log, every line).
