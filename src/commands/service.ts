@@ -113,7 +113,8 @@ async function compactNow(ctx: Context, handle: SessionHandle): Promise<Compacti
    * The compaction holds the session the way a turn does (#140). A turn sent while it runs is queued (the registry's
    * `enqueue` waits until the session is idle) instead of starting beside it, as DSH's `runMaintenance` latch holds a
    * prompt until its compaction ends. The session reads as running meanwhile, and its Stop reaches the summary call
-   * through the registration's signal (#154).
+   * through the registration's signal (#154). Nothing awaits between the running check above and this registration, so
+   * a queued turn cannot pass the registry's idle wait in between (developer-ten's review).
    */
   const live = turns?.begin(handle.id)
   try {

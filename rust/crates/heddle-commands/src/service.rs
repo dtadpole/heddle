@@ -394,7 +394,8 @@ impl CompactionHost for ServiceCompaction {
             // The compaction holds the session the way a turn does (#140): a turn sent while it runs queues
             // behind it instead of starting beside it, as DSH's `runMaintenance` latch holds a prompt. The session
             // reads as running meanwhile, and its Stop reaches the summary call through the token (#154). The
-            // guard settles the hold when it drops, however this returns.
+            // guard settles the hold when it drops, however this returns. Nothing awaits between the running check
+            // above and this hold, so a queued turn cannot pass the registry's idle wait in between.
             let held = self.turn_hold.as_ref().map(|hold| hold(&session.id));
             let cancel = held.as_ref().map(|(token, _)| token);
             let Some(context) = self.context.as_ref() else {

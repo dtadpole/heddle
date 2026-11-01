@@ -362,3 +362,50 @@ test('a turn sent while /compact runs waits for it, and starts once the compacti
     await double.close()
   }
 })
+
+test('a Stop while /compact runs with a turn waiting behind it cancels both: the compaction says so, and the waiting turn ends stopped with no model call (#140, #154)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  /**
+   * developer-ten's edge on #140. One Stop reaches the compaction (it holds the session in the live-turn registry) and
+   * the turn queued behind it. DSH answers the stopped command "Compaction cancelled." (dsh-command-compact
+   * `cancelled`), and a turn cancelled while it waits still records its prompt, with the stop and no model call.
+   */
+  const double = await holdingDouble()
+  try {
+    await withHome('compaction-hold-stop', double, async (start, log) => {
+      const server = await start()
+      const session = await firstTurn(server)
+
+      double.state.hold = true
+      const compact = request(server, `/api/sessions/${encodeURIComponent(session)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/compact' }) })
+      assert.ok(await until(() => double.state.summaryAt !== null, 20_000), `/compact asked for its summary\n${secondTurn(log(session)).types.join(' ')}`)
+      const callsBefore = double.state.turnCalls.length
+      const waiting = await postTurn(server, { session, prompt: 'queued behind a compaction that is then stopped' })
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+
+      const stop = await request(server, `/api/sessions/${encodeURIComponent(session)}/stop`, { method: 'POST', body: '{}' })
+      assert.equal(stop.status, 200, 'the stop was accepted')
+      const answered = await compact
+      const body = await answered.json()
+      assert.equal(body.kind, 'error', `the stopped /compact is an error (${JSON.stringify(body)})`)
+      assert.equal(body.text, 'Compaction cancelled.', "in DSH's words")
+      assert.ok(await until(() => double.state.summaryDropped !== null, 5000), 'its summary call was dropped')
+      const text = await Promise.race([waiting.done, new Promise((resolve) => setTimeout(() => resolve(null), 15_000))])
+      assert.notEqual(text, null, 'the waiting turn ended')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      assert.equal(double.state.turnCalls.length, callsBefore, 'and no model call was made, for either')
+
+      const events = log(session)
+      const types = events.map((event) => event.type)
+      assert.ok(!types.includes('compaction/end'), `no replacement landed\n${types.join(' ')}`)
+      const prompt = events.findIndex((event) => event.type === 'message' && event.message?.role === 'user' && JSON.stringify(event.message).includes('queued behind a compaction'))
+      assert.ok(prompt >= 0, `the waiting turn's prompt is recorded\n${types.join(' ')}`)
+      const after = events.slice(prompt + 1)
+      assert.ok(!after.some((event) => event.type === 'model/request'), `with no model request after it\n${types.join(' ')}`)
+      const completed = after.find((event) => event.type === 'assistant/completed')
+      assert.match(String(completed?.ended?.join(' ')), /stopped by the caller/, `and it is ended as stopped\n${types.join(' ')}`)
+    })
+  } finally {
+    await double.close()
+  }
+})
