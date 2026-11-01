@@ -50,8 +50,10 @@ Run from the repository root; build the selected CLI through its corresponding r
 [`check-footnotes.mjs`](check-footnotes.mjs) judges functional Markdown footnotes through the actual
 `/api/file` renderer against either built CLI, honoring `HEDDLE_BIN`. Its isolated, offline document
 cites one note twice and includes multiple paragraphs, bold text, a list and safe/unsafe URLs. It
-checks one rendered note body, two visible numeric citations, safe return links, and sanitized
-markup. This is not full Markdown grammar parity or an exact DSH/Rust/TypeScript anchor DOM contract.
+checks one rendered note body, two plain numeric superscripts, one plain ↩ return marker per
+occurrence, no generated footnote IDs or click hrefs, and sanitized markup. This follows DSH's
+plain-footnote policy rather than anchors that can jump into another answer. Ordinary note-body
+links remain links. This is not full Markdown grammar parity.
 
 **No browser by default.** The optional actual File-panel check runs **headless** only when
 `HEDDLE_FOOTNOTE_BROWSER=1` and the shared browser gate permits it; `HEDDLE_VERIFY_UI=0` skips it
