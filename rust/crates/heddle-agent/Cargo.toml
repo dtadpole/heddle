@@ -10,6 +10,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The agent presets' roster and rules (inventory A96): a turn narrows its tools and persona to its session's preset.
+heddle-config.workspace = true
 heddle-context.workspace = true
 heddle-llm.workspace = true
 heddle-session.workspace = true
@@ -25,7 +27,6 @@ tracing.workspace = true
 tokio-util = "0.7"
 
 [dev-dependencies]
-heddle-config.workspace = true
 # The in-memory context store, so the context adapter is judged against the real service.
 heddle-context = { workspace = true, features = ["testing"] }
 # The real sandbox, so the turn command's tests run the real built-ins inside a scratch workspace.

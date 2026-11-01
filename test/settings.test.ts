@@ -5,16 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { compose, defaultLayers, type NamedLayer } from '../src/config/schema.ts'
-import {
-  handleSettingsRequest,
-  SETTINGS_BEGIN,
-  SETTINGS_END,
-  SettingsError,
-  SettingsService,
-  settingsTarget,
-  type LayerOptions,
-  type SettingsWrite,
-} from '../src/config/settings.ts'
+import { handleSettingsRequest, SETTINGS_BEGIN, SETTINGS_END, SettingsError, SettingsService, settingsTarget, type LayerOptions, type SettingsWrite, isSecretKey, isSecretContainer } from '../src/config/settings.ts'
 import type { ValidationResult } from '../src/config/validate.ts'
 
 /**
@@ -236,5 +227,82 @@ test('the routes answer as DSH settings calls do', async () => {
   assert.equal((await call('GET', '/api/settings/nowhere')).status, 404)
   assert.equal((await call('DELETE', '/api/settings/tools')).status, 405)
   assert.equal(await handleSettingsRequest(service, 'GET', '/api/status', ''), undefined)
+  f.done()
+})
+
+test('with an applier a write is applied to the running tree at once and reported live', async () => {
+  const f = fixture('live')
+  const options: LayerOptions = { profile: 'dev' }
+  const layers = defaultLayers({ ...options, env: f.env })
+  const applied: [string, unknown][] = []
+  const service = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf, async (ns, config) => {
+    applied.push([ns, config])
+  })
+  assert.equal((await service.describe()).namespaces.find((entry) => entry.ns === 'tools')?.applies, 'live')
+  const entry = await service.write('tools', update({ bashTimeoutMs: 60000 }))
+  assert.deepEqual(applied, [['tools', { bashTimeoutMs: 60000, label: 'plain' }]], 'the composed config, as the next boot would give it')
+  assert.equal(entry.applyError, undefined)
+  await service.write('keys', update({ label: 'edited' }))
+  assert.deepEqual(applied[1], ['keys', { token: 'secret-value', label: 'edited' }], 'resolved, so the running entry gets the value, not the reference')
+  f.done()
+})
+
+test('a write the running tree refuses is still written and says so', async () => {
+  const f = fixture('live-refused')
+  const options: LayerOptions = { profile: 'dev' }
+  const layers = defaultLayers({ ...options, env: f.env })
+  const service = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf, async () => {
+    throw new Error('the entry could not be re-applied')
+  })
+  const entry = await service.write('tools', update({ bashTimeoutMs: 60000 }))
+  assert.equal(entry.applyError, 'the entry could not be re-applied')
+  assert.match(readFileSync(f.patchFile, 'utf8'), /"bashTimeoutMs": 60000/, 'the next boot still applies it')
+  const plain = new SettingsService(layers, settingsTarget(options, layers, f.env), f.env, validate, schemaOf)
+  assert.equal((await plain.describe()).namespaces.find((entry) => entry.ns === 'tools')?.applies, 'restart', 'without an applier the next boot applies a write')
+  f.done()
+})
+
+test('credential names are secret by ending or part, and headers hold only secrets (issue #118)', () => {
+  for (const name of ['apiKey', 'api_key', 'API-Key', 'apiToken', 'token', 'accessToken', 'refreshToken', 'secret', 'clientSecret', 'password', 'dbPassword', 'privateKey', 'apiKeyFile', 'authorization', 'credentials']) {
+    assert.ok(isSecretKey(name), `${name} is a credential name`)
+  }
+  for (const name of ['maxOutputTokens', 'contextWindow', 'model', 'baseUrl', 'keyboard', 'headers']) assert.ok(!isSecretKey(name), `${name} is not`)
+  assert.ok(isSecretContainer('headers') && !isSecretContainer('header'))
+})
+
+test('a hand edit that breaks the patch keeps the forms on the running configuration and refuses only a write (#165)', async () => {
+  const f = fixture('broken-patch')
+  const service = f.service()
+  await service.write('tools', update({ bashTimeoutMs: 45000 }))
+  const good = (await service.describe()).namespaces.find((entry) => entry.ns === 'tools')
+  const text = readFileSync(f.patchFile, 'utf8')
+  writeFileSync(f.patchFile, `${text}proxyKey: sk-live-ABCDEF0123456789\nbroken: [unclosed\n`)
+  const view = await service.describe()
+  assert.ok(typeof view.documentError === 'string', 'the view says why the patch could not be read')
+  assert.match(view.documentError ?? '', /is not valid YAML: .+\(line \d+, column \d+\)$/, 'with its position')
+  assert.doesNotMatch(view.documentError ?? '', /sk-live|proxyKey|unclosed/, 'and none of the file')
+  const tools = view.namespaces.find((entry) => entry.ns === 'tools')
+  assert.deepEqual(tools?.value, good?.value, 'the forms show the running configuration, as last read whole')
+  await assert.rejects(service.write('tools', update({ label: 'x' })), (error: Error) => {
+    assert.ok(error.message.includes('is not valid YAML'), error.message)
+    assert.doesNotMatch(error.message, /sk-live/)
+    return true
+  })
+  assert.equal(readFileSync(f.patchFile, 'utf8'), `${text}proxyKey: sk-live-ABCDEF0123456789\nbroken: [unclosed\n`, 'and the file is left as the person left it')
+  const answer = await handleSettingsRequest(service, 'GET', '/api/settings', '')
+  assert.equal(answer?.status, 200, 'the route still answers the forms')
+  writeFileSync(f.patchFile, text)
+  assert.equal((await service.describe()).documentError, undefined, 'a fixed file reads whole again')
+  f.done()
+})
+
+test('a patch broken before any read falls back to the boot configuration (#165)', async () => {
+  const f = fixture('broken-at-boot')
+  writeFileSync(f.patchFile, '- patch:\n    - id: tools\n      config: {bashTimeoutMs: 7}\n')
+  const service = f.service()
+  writeFileSync(f.patchFile, '- patch:\n    - id: tools\n      config: {bashTimeoutMs: [7\n')
+  const view = await service.describe()
+  assert.ok(view.documentError !== undefined)
+  assert.equal((view.namespaces.find((entry) => entry.ns === 'tools')?.value as Record<string, unknown>).bashTimeoutMs, 7, 'the value the run booted with')
   f.done()
 })

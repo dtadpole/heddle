@@ -24,7 +24,8 @@ use heddle_team::ports::{
     ChildSession, PortError, SessionMetaView, TeamRunner, TeamSource, TeamStore, TurnFuture,
     UuidIds,
 };
-use heddle_team::service::{TeamDeps, TeamLimits};
+use heddle_team::service::{SpawnRequest, TeamDeps, TeamLimits};
+use heddle_team::state::TeamMemberContext;
 use heddle_team::tool::TeamToolOptions;
 use heddle_team::{TeamService, TeamTools, fold_team};
 use serde_json::{Value, json};
@@ -64,6 +65,7 @@ impl TeamStore for SessionTeamStore {
             endpoint: meta.endpoint().map(str::to_owned),
             model: meta.model().map(str::to_owned),
             team_id: meta.team_id().map(str::to_owned),
+            preset: meta.preset().map(str::to_owned),
         })
     }
 
@@ -146,6 +148,13 @@ impl TeamStore for SessionTeamStore {
         let parent = self.handle(parent)?;
         let child = self.handle(child)?;
         heddle_session::inherit_recorded_mode::<Value>(&self.store, &parent, &child)
+            .map(|_| ())
+            .map_err(port)
+    }
+
+    fn record_preset(&self, session: &str, preset: &str) -> Result<(), PortError> {
+        self.store
+            .record_preset(session, preset)
             .map(|_| ())
             .map_err(port)
     }
@@ -364,6 +373,50 @@ async fn boot_settles_and_delivers_what_a_typescript_process_left_behind() {
     )
     .expect("the log folds after a restart");
     assert_eq!(state.delivered, vec!["team-message-left-1".to_owned()]);
+}
+
+/// Inventory A96, over the real store: a teammate records its Lead's preset after it is created, fresh or forked.
+#[tokio::test]
+async fn a_teammate_runs_under_its_leads_preset_in_the_real_store() {
+    let home = Scratch::new("preset-home");
+    let work = Scratch::new("preset-work");
+    let store = open_store(&home.0.join("sessions"));
+    let lead = store
+        .store
+        .create(CreateOptions {
+            cwd: Some(work.text()),
+            endpoint: Some("scripted".to_owned()),
+            preset: Some("reader".to_owned()),
+            ..CreateOptions::default()
+        })
+        .expect("the Lead session")
+        .id;
+    let service = service_over(&store);
+    for (name, context) in [
+        ("fresh", TeamMemberContext::Fresh),
+        ("forked", TeamMemberContext::Fork),
+    ] {
+        let member = service
+            .spawn(
+                &lead,
+                SpawnRequest {
+                    name: name.to_owned(),
+                    description: "x".to_owned(),
+                    prompt: "go".to_owned(),
+                    context,
+                },
+            )
+            .expect("the teammate is spawned");
+        assert_eq!(
+            store
+                .store
+                .meta(&member.id)
+                .and_then(|meta| meta.preset().map(str::to_owned))
+                .as_deref(),
+            Some("reader"),
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test]

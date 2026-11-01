@@ -446,7 +446,8 @@ test('a provider that refused the call gets one reduction and one retry, and onl
     })
     request.on('end', () => {
       requests.push(body)
-      const wantsSummary = body.includes('Summarise the conversation above')
+      // The summariser's directive: DSH's since #77, the older four-sentence request before it.
+      const wantsSummary = body.includes('acting as a compaction engine') || body.includes('Summarise the conversation above')
       const answer = (text) => {
         response.writeHead(200, { 'content-type': 'text/event-stream' })
         response.write(`data: ${JSON.stringify({ choices: [{ delta: { role: 'assistant', content: text }, finish_reason: null }] })}\n\n`)

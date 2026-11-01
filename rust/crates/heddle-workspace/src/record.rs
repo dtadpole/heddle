@@ -48,6 +48,11 @@ pub struct WorkspaceStoreShape {
     /// Workspace ids in the collection's own order — newest registration first.
     pub workspace_ids: Vec<String>,
     pub workspaces: IndexMap<String, WorkspaceRecord>,
+    /// The workspace first use created ([`crate::WorkspaceService::initialize_default`]), kept after its
+    /// registration is deleted — DSH's `defaultWorkspaceId`. Written last, and only once a first use has
+    /// happened, so a record that never had one keeps its bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_workspace_id: Option<String>,
 }
 
 impl Default for WorkspaceStoreShape {
@@ -56,6 +61,7 @@ impl Default for WorkspaceStoreShape {
             version: 3,
             workspace_ids: Vec::new(),
             workspaces: IndexMap::new(),
+            default_workspace_id: None,
         }
     }
 }
@@ -112,6 +118,30 @@ pub struct WorkspaceView {
     pub created_at: String,
     pub updated_at: String,
     pub session_ids: Vec<String>,
+    /// Whether the folder is there — DSH's `Workspace.status()`. Set by `WorkspaceService::views`, which reads the
+    /// disk; the pure `workspace_views` leaves it out, and then it is not written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<FolderStatus>,
+}
+
+/// DSH's `Workspace.status()` (dsh-workspace lib/index.js:154-160, lib/types/types.d.ts:131-136): `ok` when the path is
+/// a directory now, `missing-dir` otherwise. Read live and never written into the record, because a folder that is gone
+/// may only be away for a while (#141).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FolderStatus {
+    Ok,
+    MissingDir,
+}
+
+impl FolderStatus {
+    /// Stat `path` as DSH's `status()` does: a directory is `ok`; anything else, or nothing, is `missing-dir`.
+    pub fn of(path: &std::path::Path) -> Self {
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => FolderStatus::Ok,
+            _ => FolderStatus::MissingDir,
+        }
+    }
 }
 
 /// A record with the ids of the sessions it accounts for — one row of `heddle workspaces --json`.
@@ -160,6 +190,23 @@ mod tests {
             shape.to_file_text(),
             "{\n  \"version\": 3,\n  \"workspaceIds\": [\n    \"w-1\"\n  ],\n  \"workspaces\": {\n    \"w-1\": {\n      \"id\": \"w-1\",\n      \"path\": \"/work/one\",\n      \"title\": \"one\",\n      \"origin\": \"added\",\n      \"createdAt\": \"2026-10-22T18:17:41.123Z\",\n      \"updatedAt\": \"2026-10-22T18:17:41.123Z\"\n    }\n  }\n}\n"
         );
+    }
+
+    #[test]
+    fn the_default_workspace_id_is_written_last_and_only_when_there_is_one() {
+        let shape = WorkspaceStoreShape {
+            workspace_ids: vec!["w-1".to_string()],
+            workspaces: IndexMap::from([("w-1".to_string(), record())]),
+            default_workspace_id: Some("w-1".to_string()),
+            ..Default::default()
+        };
+        let text = shape.to_file_text();
+        assert!(
+            text.ends_with("\n  },\n  \"defaultWorkspaceId\": \"w-1\"\n}\n"),
+            "after the workspaces, as the TypeScript spread writes it: {text}"
+        );
+        let plain = WorkspaceStoreShape::default().to_file_text();
+        assert!(!plain.contains("defaultWorkspaceId"));
     }
 
     #[test]

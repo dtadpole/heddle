@@ -290,6 +290,7 @@ mod tests {
             endpoint: lead_endpoint.map(str::to_owned),
             model: Some("m".to_owned()),
             team_id: None,
+            preset: None,
         });
         let agent = Arc::new(FakeAgent {
             default: default_endpoint,

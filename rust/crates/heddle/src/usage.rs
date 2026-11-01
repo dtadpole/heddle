@@ -117,6 +117,14 @@ pub const LINES: &[(&str, Capability)] = &[
         Capability::Config,
     ),
     (
+        "      --from-default-profile <template>",
+        Capability::Config,
+    ),
+    (
+        "                             replace that profile with a fresh copy of a shipped template (default), then boot it",
+        Capability::Config,
+    ),
+    (
         "      --patch <path>         apply an extra layer after it (repeatable)",
         Capability::Config,
     ),

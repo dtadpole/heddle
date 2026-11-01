@@ -1,6 +1,6 @@
 ---
 title: LLM
-version: 1.2.0
+version: 1.3.0
 description: The model service, its wire adapters and the HTTP client they share.
 grounded_in:
   - source: human-authored
@@ -21,7 +21,7 @@ An endpoint's `kind` names its wire shape, and `adapterFor` in `adapters.ts` pic
 
 | `kind` | Route | Reasoning level on the wire |
 |---|---|---|
-| `openai-chat` | `POST {baseUrl}/chat/completions` | `reasoning_effort` |
+| `openai-chat` | `POST {baseUrl}/chat/completions` | `reasoning_effort`; on a `deepseek.com` base URL with reasoning on, every replayed assistant message carries `reasoning_content` (its thinking, or `""`) as DSH sends it (`replaysReasoningContent`, developer-ten-3) |
 | `openai-responses` | `POST {baseUrl}/responses` (always streamed) | `reasoning.effort`, with `summary: 'auto'` when the models reason |
 | `anthropic-messages` | `POST {baseUrl}/messages`, `x-api-key` and `anthropic-version` headers | summarized thinking: adaptive + `output_config.effort` for a string value, `budget_tokens` for a number |
 | `anthropic-vertex` | `{baseUrl}/projects/…/publishers/anthropic/models/{model}:streamRawPredict` | adaptive summarized thinking + `output_config.effort` |

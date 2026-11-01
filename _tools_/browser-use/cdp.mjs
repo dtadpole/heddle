@@ -24,6 +24,9 @@ import net from 'node:net'
 /** The largest frame this client accepts, so a runaway page cannot exhaust memory. */
 const MAX_FRAME_BYTES = 256 * 1024 * 1024
 
+/** How long `connect` waits for the WebSocket handshake unless the caller names a bound. */
+export const CONNECT_TIMEOUT_MS = 10_000
+
 /**
  * Encode one masked frame.
  *
@@ -85,8 +88,15 @@ export function decodeFrame(buffer) {
  * The endpoint the browser prints on startup is the **browser** target. Page commands must either name
  * a session attached to that connection (`sessionId`) or go to the page's own endpoint; this client
  * supports both, and `send` takes the session as an option so one connection can carry every page.
+ *
+ * The handshake is **bounded** (`options.timeoutMs`, default `CONNECT_TIMEOUT_MS`), and a socket that
+ * closes before it rejects too. A listening socket completes the TCP connect in the kernel whether or
+ * not the browser ever reads it, so a busy or dying Chrome took the connection and never answered the
+ * upgrade: the connect promise then never settled, and `stopChrome`, which connects before it signals,
+ * waited forever instead of falling through to SIGTERM.
  */
 export async function connect(url, options = {}) {
+  const handshakeMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS
   const parsed = new URL(url)
   const key = randomBytes(16).toString('base64')
   const socket = net.connect(Number(parsed.port), parsed.hostname)
@@ -208,7 +218,18 @@ export async function connect(url, options = {}) {
   }
 
   await new Promise((resolvePromise, reject) => {
-    socket.once('error', reject)
+    const fail = (error) => {
+      clearTimeout(timer)
+      socket.destroy()
+      reject(error)
+    }
+    const timer = setTimeout(
+      () => fail(new Error(`the devtools endpoint at ${parsed.host} did not answer the websocket handshake within ${handshakeMs}ms`)),
+      handshakeMs,
+    )
+    const closedEarly = () => fail(new Error(`the devtools endpoint at ${parsed.host} closed the connection before the websocket handshake`))
+    socket.once('error', fail)
+    socket.once('close', closedEarly)
     socket.once('connect', () => {
       socket.write(
         `GET ${parsed.pathname}${parsed.search} HTTP/1.1\r\nHost: ${parsed.host}\r\nUpgrade: websocket\r\n` +
@@ -217,8 +238,12 @@ export async function connect(url, options = {}) {
       )
     })
     socket.once('data', (chunk) => {
+      clearTimeout(timer)
+      socket.off('error', fail)
+      socket.off('close', closedEarly)
       const text = chunk.toString('utf8')
       if (!text.includes('101')) {
+        socket.destroy()
         reject(new Error(`the devtools handshake failed: ${text.split('\r\n')[0]}`))
         return
       }

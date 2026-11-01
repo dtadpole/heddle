@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { trackScratch, untrackScratch } from './scratch.mjs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -47,7 +48,7 @@ export { browserPath }
  * because a check that opens a window steals focus on the machine it runs on. The caller must `close()`.
  */
 export async function openBrowser(options = {}) {
-  const profile = mkdtempSync(join(tmpdir(), 'heddle-check-browser-'))
+  const profile = trackScratch(mkdtempSync(join(tmpdir(), 'heddle-check-browser-')))
   let browser
   try {
     browser = await openToolBrowser({
@@ -62,12 +63,30 @@ export async function openBrowser(options = {}) {
     rmSync(profile, { recursive: true, force: true })
     throw error
   }
+  trackScratch(profile, browser.running?.child) // a check that never calls close() still leaves no profile
   const page = browser.page()
   return {
     /** The page-level protocol call, for the one thing the wrapper does not cover. */
     send: (method, params) => page.send(method, params),
     /** Navigate and resolve once the new document can be read. */
     async goto(url, timeoutMs = 20_000) {
+      await page.navigate({ url, timeoutMs })
+      return this
+    },
+    /**
+     * Open the Web UI at `url` with the session `sessionId` as the one it opens, the way a person comes back to a
+     * session they had open: the page's saved selection (`heddle.sessions.current`, `{ sessionId }`, DSH's
+     * `dsh.sessions.current`) is written first, so the page's startup restores it.
+     *
+     * The page opens nothing on its own beyond that: with nothing saved, a load starts a fresh session (#17, DSH's
+     * `restoreSelection`), so a check that seeds a session and wants it on screen names it here rather than relying
+     * on it being the newest. The entry is written from `/healthz`, a document of the same origin that runs none of
+     * the page's script, so no load before it starts a session of its own; then the page loads once.
+     */
+    async gotoSession(url, sessionId, timeoutMs = 20_000) {
+      if (typeof sessionId !== 'string' || sessionId.length === 0) throw new Error(`gotoSession needs a session id, not ${JSON.stringify(sessionId)}`)
+      await page.navigate({ url: new URL('/healthz', url).href, timeoutMs })
+      await page.evaluate(`localStorage.setItem('heddle.sessions.current', ${JSON.stringify(JSON.stringify({ sessionId }))})`, { timeoutMs })
       await page.navigate({ url, timeoutMs })
       return this
     },
@@ -102,6 +121,7 @@ export async function openBrowser(options = {}) {
       for (let attempt = 0; attempt < 20; attempt += 1) {
         try {
           rmSync(profile, { recursive: true, force: true })
+          untrackScratch(profile)
           return
         } catch {
           await new Promise((resolvePromise) => setTimeout(resolvePromise, 100))

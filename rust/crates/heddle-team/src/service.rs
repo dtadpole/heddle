@@ -380,6 +380,13 @@ impl TeamService {
             let _ = self.settle_failed(&lead, &member, &error.0);
             return Err(error.into());
         }
+        // And the Lead's agent preset (inventory A96), so a narrowed Lead cannot widen its team's tools.
+        if let Some(preset) = lead_meta.as_ref().and_then(|meta| meta.preset.as_deref())
+            && let Err(error) = self.deps.store.record_preset(&member.id, preset)
+        {
+            let _ = self.settle_failed(&lead, &member, &error.0);
+            return Err(error.into());
+        }
         let source = TeamSource::Prompt {
             team_id: lead.clone(),
             member_id: member.id.clone(),
@@ -1038,6 +1045,7 @@ mod tests {
             endpoint: Some("scripted".to_owned()),
             model: Some("m".to_owned()),
             team_id: None,
+            preset: None,
         });
         let live = Arc::new(FakeLive::new());
         // The runner does not register turns live here: a test controls the registry explicitly, the way the
@@ -1190,6 +1198,44 @@ mod tests {
         assert_eq!(begun[0].prompt, "start working");
         assert_eq!(begun[0].source["kind"], "team-prompt");
         assert_eq!(begun[0].source["memberId"], view.id);
+    }
+
+    /// Inventory A96: a teammate runs under its Lead's agent preset, fresh or forked, so a narrowed Lead cannot widen
+    /// its team's tools; a Lead with none gives none.
+    #[tokio::test]
+    async fn a_teammate_records_its_leads_preset_fresh_or_forked() {
+        let h = harness();
+        let plain = h
+            .service
+            .spawn(&h.lead, spawn_request("plain", "go"))
+            .unwrap();
+        assert_eq!(h.store.session(&plain.id).unwrap().meta.preset, None);
+
+        h.store
+            .record_preset(&h.lead, "reader")
+            .expect("the Lead records a preset");
+        let fresh = h
+            .service
+            .spawn(&h.lead, spawn_request("fresh", "go"))
+            .unwrap();
+        let forked = h
+            .service
+            .spawn(
+                &h.lead,
+                SpawnRequest {
+                    context: TeamMemberContext::Fork,
+                    ..spawn_request("forked", "go")
+                },
+            )
+            .unwrap();
+        for member in [&fresh, &forked] {
+            assert_eq!(
+                h.store.session(&member.id).unwrap().meta.preset.as_deref(),
+                Some("reader"),
+                "{} runs under the Lead's preset",
+                member.name
+            );
+        }
     }
 
     #[tokio::test]
@@ -1758,6 +1804,7 @@ mod tests {
             endpoint: Some("scripted".to_owned()),
             model: Some("scripted".to_owned()),
             team_id: None,
+            preset: None,
         });
         store
             .create(&child_of(lead, "session-recover-active"))

@@ -32,6 +32,7 @@ backticks, while the same document in the other tab looked right.
 | 5 | a file with no renderer is shown as text, with no markup invented for it | inventing markup for plain text is how a file becomes unreadable |
 | 6 | the preview is **styled**: a bordered table, an inline code span with a background, a heading larger than its body | markup can be entirely right while every rule names another pane |
 | 7 | a file outside every workspace root is refused | a preview that can be asked for any path is disclosure with a renderer in front |
+| 8 | only an `.html` or `.htm` file is previewed as a page; a Word document or a text file is refused (`415`), as DSH frames a page only through its HTML renderer | decoding a binary file as text and framing it looks like a preview while showing garbage, and a text file framed as a page runs its words as markup |
 
 ## How it is judged
 

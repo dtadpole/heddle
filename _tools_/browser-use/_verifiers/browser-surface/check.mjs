@@ -60,7 +60,7 @@ const PAGE = `<!doctype html>
   </label>
   <textarea id="notes" rows="2" placeholder="notes"></textarea>
   <div id="rich" contenteditable="true">editable text</div>
-  <div><button id="greet">Greet</button> <button id="fail">Fail</button> <button id="alert">Alert</button> <button id="confirm">Confirm</button> <button id="prompt">Prompt</button> <button id="open">Open tab</button></div>
+  <div><button id="greet">Greet</button> <button id="fail">Fail</button> <button id="alert">Alert</button> <button id="confirm">Confirm</button> <button id="prompt">Prompt</button> <button id="open">Open tab</button> <button id="spacebar">Space target</button></div>
   <div><input id="keylog" placeholder="type here"><input id="file" type="file" multiple></div>
   <div id="hoverTarget">hover target</div>
   <div id="stage">
@@ -90,6 +90,7 @@ const PAGE = `<!doctype html>
       output.textContent = 'prompt:' + prompt('prompt message', 'default answer')
     })
     document.getElementById('open').addEventListener('click', () => { window.open('/second', 'second tab') })
+    document.getElementById('spacebar').addEventListener('click', () => { output.textContent = 'activated:spacebar' })
     document.getElementById('hoverTarget').addEventListener('mouseenter', (event) => {
       event.currentTarget.setAttribute('data-hovered', 'yes')
     })
@@ -261,6 +262,15 @@ test('type_text and press_key reach a keyboard listener', async (t) => {
   await tools.press_key({ pageId, key: 'Enter' })
   const pressed = await tools.evaluate_script({ pageId, function: `() => document.getElementById('output').textContent` })
   assert.equal(pressed.value, 'key:Enter')
+})
+
+test('press_key Space activates a focused native button, as the space bar does', async (t) => {
+  if (!skipUnless(t, browserAvailable(), 'no browser binary was found')) return
+  // Focused by script rather than clicked: a click would activate the button by itself.
+  await tools.evaluate_script({ pageId, function: `() => { document.getElementById('output').textContent = 'idle'; document.getElementById('spacebar').focus() }` })
+  await tools.press_key({ pageId, key: 'Space' })
+  const activated = await tools.evaluate_script({ pageId, function: `() => document.getElementById('output').textContent` })
+  assert.equal(activated.value, 'activated:spacebar', 'the button answered key " ", which the name Space must send')
 })
 
 test('hover moves the mouse over the element', async (t) => {

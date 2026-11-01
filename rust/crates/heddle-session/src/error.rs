@@ -41,8 +41,10 @@ pub enum SessionError {
         source: std::io::Error,
     },
     /// A transcript line that does not parse: the load fails naming its position rather than skipping it.
-    /// `<transcript>:<line> is not valid JSON — <message>`
-    #[error("{path}:{line} is not valid JSON — {message}")]
+    /// `<transcript file name>:<line> is not valid JSON — <message>`. The log is named by its file name alone, as the
+    /// TypeScript store names it (`SessionLogUnreadableError`): the text reaches HTTP answers, and the absolute path put the
+    /// store root, home directory included, into a turn's `error` frame (#130). `path` keeps the whole path.
+    #[error("{}:{line} is not valid JSON — {message}", file_name(.path))]
     InvalidLine {
         path: String,
         line: usize,
@@ -108,6 +110,29 @@ pub enum SessionError {
     /// the lock names one. `session "<id>" is already owned by an active write handle (process <pid>)`
     #[error("session \"{id}\" is already owned by an active write handle{}", holder_suffix(.pid))]
     AlreadyOwned { id: String, pid: Option<u32> },
+    /// A branch heddle may not write, so a session cannot be filed in it (#106):
+    /// `cannot write to "<folder>": permission denied`, the folder by its name and never its absolute path
+    /// (the I/O error carried the definition's path). DSH files no session in the folder, so the code is
+    /// heddle's, `session/unwritable`, in DSH's `session/` family; the sentence follows DSH's file backend
+    /// (`cannot write "<path>": …`, dsh-fs-local lib/index.js:495).
+    #[error("cannot write to \"{folder}\": permission denied")]
+    Unwritable { folder: String },
+    /// A session's folder that is no longer there — deleted or moved outside heddle, or now a file (#56) —
+    /// refused rather than recreated: `This workspace's folder no longer exists: "<folder>"`, the folder by its
+    /// name and never its absolute path, as [`SessionError::Unwritable`] names it. The code is heddle's,
+    /// `session/folder-missing`, in DSH's `session/` family: DSH has no such refusal (its turn fails with
+    /// `working-directory: directory does not exist: "<path>"`, dsh-working-directory lib/index.js:123-131, and its
+    /// create makes the folder). `MissingFolderError` in the TypeScript build, word for word.
+    #[error("This workspace's folder no longer exists: \"{folder}\"")]
+    MissingFolder { folder: String },
+}
+
+/// The last component of a path, or the path itself when it has none.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map_or_else(
+        || path.to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// ` (process <pid>)` when the lock named its holder, nothing otherwise.
@@ -118,12 +143,37 @@ fn holder_suffix(pid: &Option<u32>) -> String {
 
 impl SessionError {
     /// The code DSH's session controller answers a held session with (`session/writer-held`), for
-    /// [`SessionError::AlreadyOwned`]; `None` for every other error.
+    /// [`SessionError::AlreadyOwned`]; heddle's `session/unwritable` for [`SessionError::Unwritable`] and
+    /// `session/folder-missing` for [`SessionError::MissingFolder`]; `None` for every other error.
     pub fn code(&self) -> Option<&'static str> {
         match self {
             SessionError::AlreadyOwned { .. } => Some("session/writer-held"),
+            SessionError::Unwritable { .. } => Some("session/unwritable"),
+            SessionError::MissingFolder { .. } => Some("session/folder-missing"),
             _ => None,
         }
+    }
+
+    /// [`SessionError::MissingFolder`] for the folder at `path`, named by its last component (#56).
+    pub fn missing_folder(path: &str) -> Self {
+        SessionError::MissingFolder {
+            folder: file_name(path),
+        }
+    }
+
+    /// [`SessionError::Unwritable`] for a permission error met writing into `branch`, naming the folder by
+    /// its name; any other error as it is.
+    pub fn unwritable_in(self, branch: &str) -> Self {
+        if let SessionError::Io { source, .. } = &self
+            && source.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            let folder = std::path::Path::new(branch)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| branch.to_string());
+            return SessionError::Unwritable { folder };
+        }
+        self
     }
 
     /// Wrap an I/O failure with the path it happened on.

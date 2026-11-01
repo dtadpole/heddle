@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { trackScratch } from './scratch.mjs'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -182,6 +183,24 @@ export async function run(command, args, options = {}) {
 export const EXIT_GRACE_MS = 1500
 
 /**
+ * Stop a harness a check started and wait until it has gone, within a bound.
+ *
+ * SIGTERM first, so the harness runs its own shutdown; SIGKILL if it is still there after `graceMs`. Measured on
+ * 31 Oct: checks that waited for `exit` after SIGTERM with no bound could only end at the lane's 300 s limit when a
+ * harness was slow to exit under load, which named no test. Resolves `'exited'`, `'killed'`, or `'stuck'` when even
+ * SIGKILL left no exit within a further second; a harness that had already exited resolves `'exited'` at once.
+ */
+export async function endChild(child, { graceMs = 5000 } = {}) {
+  if (child.exitCode !== null || child.signalCode !== null) return 'exited'
+  const exited = new Promise((resolve) => child.once('exit', () => resolve(true)))
+  const within = (ms) => Promise.race([exited, new Promise((resolve) => setTimeout(() => resolve(false), ms).unref())])
+  child.kill('SIGTERM')
+  if (await within(graceMs)) return 'exited'
+  child.kill('SIGKILL')
+  return (await within(1000)) ? 'killed' : 'stuck'
+}
+
+/**
  * The command that runs the harness under test, as `[file, argv]`.
  *
  * By default it is the TypeScript build, `node dist/cli.js`. `HEDDLE_BIN` names any other build of the same
@@ -310,6 +329,31 @@ export function httpConfig(options) {
   })
 }
 
+/**
+ * The words a session's automatic **title** request opens its system prompt with (`src/session/title.ts`, DSH's
+ * first-prompt provider, `dsh-session-title-first-prompt-llm` lib/index.js:44-52).
+ */
+export const TITLE_REQUEST_MARK = 'Create a concise title for an AI coding-assistant session'
+
+/**
+ * Whether a body a double received is a session's title request rather than a turn's.
+ *
+ * A new session's first prompt is titled by its own route, as DSH's is (#68): one more request to the same endpoint,
+ * started when the turn's own request is recorded, so it usually arrives **first**. A double that answers a turn's
+ * requests in order, or counts them, answers this one with {@link refuseTitleRequest} and leaves it out, as `chatDouble`
+ * leaves out the model list. Refused, the title call fails and the session keeps its fallback name; nothing that reads
+ * a double's requests is about titles.
+ */
+export function isTitleRequest(body) {
+  return typeof body === 'string' && body.includes(TITLE_REQUEST_MARK)
+}
+
+/** Refuse a title request with a 400, which no retry policy repeats (`INVALID_REQUEST`). */
+export function refuseTitleRequest(response) {
+  response.writeHead(400, { 'content-type': 'application/json' })
+  response.end(JSON.stringify({ error: { message: 'this double answers turns, not session titles' } }))
+}
+
 /** A minimal OpenAI-compatible chat double, streamed in the provider's shape. */
 export async function chatDouble(options = {}) {
   const { createServer } = await import('node:http')
@@ -326,6 +370,7 @@ export async function chatDouble(options = {}) {
        */
       const pathname = new URL(request.url ?? '/', 'http://x').pathname
       const isModelList = pathname.endsWith('/models')
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       if (!isModelList) requests.push({ url: request.url ?? '', body, headers: request.headers })
       const message = options.toolCall
         ? {
@@ -428,6 +473,7 @@ export async function responsesDouble(options = {}) {
       body += chunk
     })
     request.on('end', () => {
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       requests.push({ url: request.url ?? '', body, headers: request.headers })
       const content = options.content ?? 'double answer'
       response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -481,9 +527,9 @@ export function parseJson(stdout) {
   return null
 }
 
-/** The temp directory a check may use for artifacts it is judging. */
+/** The temp directory a check may use for artifacts it is judging; removed when the process ends. */
 export function tempDir(prefix = 'heddle-check-') {
-  return mkdtempSync(join(tmpdir(), prefix))
+  return trackScratch(mkdtempSync(join(tmpdir(), prefix)))
 }
 
 /** Every session directory under a store root. */

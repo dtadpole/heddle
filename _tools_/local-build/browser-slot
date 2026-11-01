@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fair FIFO queue for the team's one browser slot; see browser-slot.md.
+#   _tools_/local-build/browser-slot take --seat <key> [--purpose <text>] [--wait <seconds>]
+#   _tools_/local-build/browser-slot release --seat <key>
+#   _tools_/local-build/browser-slot run --seat <key> -- <command...>
+#   _tools_/local-build/browser-slot status
+exec node "$(dirname "$0")/browser-slot.mjs" "$@"

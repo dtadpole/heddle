@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -21,10 +21,11 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedCon
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, steps = [{ text: 'an answer' }]) {
   const home = isolatedHome(`file-view-${label}`)
   const work = fixtureDir(`file-view-${label}-work`)
-  const { config } = scriptedConfig({ home, steps: [{ text: 'an answer' }] })
+  /** An answer that names the work folder itself (an absolute link) is written once that folder is known. */
+  const { config } = scriptedConfig({ home, steps: typeof steps === 'function' ? steps(work) : steps })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
     { env: { HEDDLE_HOME: home, HEDDLE_CONFIG: config } },
@@ -270,8 +271,22 @@ test('every answer of the raw and upload routes is sandboxed and never sniffed, 
     ]
     const uploaded = await headersOf('/api/uploads?name=evil.svg', { method: 'POST', body: HOSTILE_SVG })
     assert.equal(uploaded.status, 200, `the upload was stored (${uploaded.status})`)
-    const leaf = String(JSON.parse(uploaded.body).path ?? '').split('/').pop()
-    cases.push(['an uploaded SVG', `/api/uploads/${encodeURIComponent(leaf)}`, 200])
+    const stored = String(JSON.parse(uploaded.body).path ?? '')
+    const leaf = stored.split('/').pop()
+    /**
+     * An upload is read only for a session whose log references it (R-developer-two-10, DSH's session/attachment), so
+     * a turn sends the SVG first; the served answer and the refusal for no session are both sandboxed and unsniffed.
+     */
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'the logo', folder: server.work, attachments: [stored] }),
+    })
+    const turnText = await turn.text()
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(turnText)?.[1]
+    assert.ok(session !== undefined, `the turn that sends the SVG names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
+    cases.push(['an uploaded SVG, read for the session that sent it', `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, 200])
+    cases.push(['an uploaded SVG read for no session', `/api/uploads/${encodeURIComponent(leaf)}`, 404])
     for (const [what, path, status] of cases) {
       const answer = await headersOf(path)
       assert.equal(answer.status, status, `${what} answers ${status} (${answer.status})`)
@@ -327,4 +342,573 @@ test('an SVG opened directly runs no script and cannot reach the API, while the 
     browser.close()
     await server.close()
   }
+})
+
+
+test('an old HTML response cannot replace the latest file under its newer title', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('html-selection-ticket')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'old.html'), '<!doctype html><html><head></head><body><h1>OLD HTML</h1></body></html>')
+    writeFileSync(join(server.work, 'latest.md'), '# LATEST FILE\n\nLatest selected document.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('old.html')} !== undefined && ${row('latest.md')} !== undefined`, 15000)
+    await browser.evaluate(`(() => {
+      const real = window.fetch.bind(window)
+      window.__htmlWaiting = false
+      window.fetch = async (input, options) => {
+        const response = await real(input, options)
+        if (String(input).startsWith('/api/html?')) {
+          window.__htmlWaiting = true
+          await new Promise((resolve) => { window.__releaseHtml = resolve })
+        }
+        return response
+      }
+    })()`)
+    await browser.evaluate(`${row('old.html')}.click()`)
+    await browser.waitFor('window.__htmlWaiting === true', 10000)
+    await browser.evaluate(`${row('latest.md')}.click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('LATEST FILE')`, 10000)
+    await browser.evaluate('window.__releaseHtml()')
+    // Let both the resumed network continuation and potential lazy sanitizer settle before checking publication.
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const displayed = JSON.parse(await browser.evaluate(`JSON.stringify({
+      title: document.getElementById('file-head').textContent,
+      text: document.getElementById('file-body').textContent,
+      textHidden: document.getElementById('file-body').hidden,
+      htmlHidden: document.getElementById('file-html').hidden,
+    })`))
+    assert.ok(displayed.text.includes('LATEST FILE'), JSON.stringify(displayed))
+    assert.equal(displayed.textHidden, false, 'Refs #110: latest file remains visible')
+    assert.equal(displayed.htmlHidden, true, 'stale HTML cannot take over the pane')
+  } finally { browser.close(); await server.close() }
+})
+
+
+test('an invalid file refusal is visible after a settled HTML preview', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('preview-refusal-visible')
+  const browser = await openBrowser({ width: 1280, height: 900 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'old.html'), '<!doctype html><html><head></head><body><h1>OLD PREVIEW</h1></body></html>')
+    writeFileSync(join(server.work, 'invalid.txt'), Buffer.from([0xff, 0xfe, 0x41]))
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('old.html')} !== undefined && ${row('invalid.txt')} !== undefined`, 15000)
+    await browser.evaluate(`${row('old.html')}.click()`)
+    await browser.waitFor(`!document.getElementById('file-html').hidden && document.getElementById('html-view').srcdoc.includes('OLD PREVIEW')`, 15000)
+    await browser.evaluate(`${row('invalid.txt')}.click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('not UTF-8')`, 10000)
+    assert.equal(await browser.evaluate(`document.getElementById('file-body').hidden`), false, 'Refs #113: refusal is visible')
+    assert.equal(await browser.evaluate(`document.getElementById('file-html').hidden`), true, 'old preview is hidden under failed filename')
+  } finally { browser.close(); await server.close() }
+})
+
+test('a file named beyond ASCII downloads whole under its real name, with only ASCII in its disposition', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * Live issues developer-two-2 (P1) and developer-two-3, measured on 8082 and 3097 on 2026-10-29: the raw route and
+   * the upload route wrote a download's own name into `content-disposition`. The TypeScript server's writeHead threw
+   * on `说明.txt` part-way and then wrote a 404 over the started 200, still declaring the file's length; `café.txt`
+   * went out as a raw Latin-1 byte, and the Rust binary sent `说明.txt` as raw UTF-8. A header must be visible ASCII;
+   * the real name travels in `filename*=UTF-8''…` (RFC 6266, RFC 5987) beside an ASCII fallback.
+   */
+  const server = await startServer('unicode-names')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const files = [['说明.txt', '第一行\n'], ['café.txt', 'x\n'], ['notes.txt', 'plain\n']]
+    for (const [name, text] of files) writeFileSync(join(server.work, name), text)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    /** Read one download, turning a broken answer (a body that never matches its length) into a failed assertion. */
+    const download = async (what, path, expected) => {
+      let response
+      let body
+      try {
+        response = await fetch(new URL(path, server.url), { headers: { cookie } })
+        body = Buffer.from(await response.arrayBuffer())
+      } catch (error) {
+        assert.fail(`${what}: the answer could not be read whole (${error.cause?.code ?? error.message})`)
+      }
+      assert.equal(response.status, 200, `${what} answers 200 (${response.status}: ${body.toString('utf8').slice(0, 40)})`)
+      assert.equal(body.toString('utf8'), expected, `${what}: the body is the whole file`)
+      assert.equal(response.headers.get('content-length'), String(Buffer.byteLength(expected)), `${what}: the length it declares is the file's`)
+      const disposition = response.headers.get('content-disposition') ?? ''
+      assert.match(disposition, /^attachment; filename="[\x20-\x7e]*"/, `${what}: an attachment with an ASCII filename (${JSON.stringify(disposition)})`)
+      assert.match(disposition, /^[\x20-\x7e]*$/, `${what}: only visible ASCII in the header (${JSON.stringify(disposition)})`)
+      const encoded = /filename\*=UTF-8''([^;]*)$/.exec(disposition)?.[1]
+      return encoded === undefined ? /filename="([^"]*)"/.exec(disposition)?.[1] : decodeURIComponent(encoded)
+    }
+    for (const [name, text] of files) {
+      const named = await download(`the raw route for ${name}`, `/api/raw?path=${encodeURIComponent(join(server.work, name))}`, text)
+      assert.equal(named, name, `the raw route's disposition names ${name} as it is`)
+    }
+    // The upload route serves a stored file through the same answer; it is read for the session that sent it.
+    const stored = await fetch(new URL(`/api/uploads?name=${encodeURIComponent('说明.txt')}`, server.url), { method: 'POST', headers: { cookie }, body: '第一行\n' })
+    const storedPath = String((await stored.json()).path ?? '')
+    const leaf = storedPath.split('/').pop()
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'the notes', folder: server.work, attachments: [storedPath] }),
+    })
+    const turnText = await turn.text()
+    const session = /"session":"(session-[0-9a-f-]{36})"/.exec(turnText)?.[1]
+    assert.ok(session !== undefined, `the turn that sends the upload names its session (HTTP ${turn.status}: ${turnText.slice(0, 160)})`)
+    const named = await download(`the upload route for ${leaf}`, `/api/uploads/${encodeURIComponent(leaf)}?session=${session}`, '第一行\n')
+    assert.equal(named, leaf, `the upload route's disposition names the stored file ${leaf} as it is`)
+  } finally {
+    await server.close()
+  }
+})
+
+/**
+ * An HTML file's preview loads its relative stylesheet through `/api/raw`, and a browser refuses a stylesheet whose
+ * type is not `text/css` in a standards-mode document. Measured 2026-10-29 (DSH parity R-developer-twelve-14): the
+ * route served `.css` as a download type, so every preview showed unstyled. A stylesheet runs no script, so it may be
+ * inline; a page or a script must still never be.
+ */
+const STYLED_PAGE = '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Styled</h1><script>window.__ran = true; document.title = "RAN"</script></body></html>\n'
+const STYLESHEET = 'h1 { color: rgb(255, 0, 0); }\n'
+
+test('the raw route serves a stylesheet inline as CSS, and a page or a script only as a download', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('raw-types')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'style.css'), STYLESHEET)
+    writeFileSync(join(server.work, 'page.html'), STYLED_PAGE)
+    writeFileSync(join(server.work, 'app.js'), 'window.__ran = true\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const raw = async (name) => {
+      const response = await fetch(new URL(`/api/raw?path=${encodeURIComponent(join(server.work, name))}`, server.url), { headers: { cookie } })
+      await response.arrayBuffer()
+      return { status: response.status, type: response.headers.get('content-type'), disposition: response.headers.get('content-disposition') }
+    }
+    const css = await raw('style.css')
+    assert.equal(css.status, 200)
+    assert.match(String(css.type), /^text\/css\b/, `a stylesheet is served as CSS (${css.type})`)
+    assert.equal(css.disposition, 'inline', 'and inline, so a document can apply it')
+    for (const name of ['page.html', 'app.js']) {
+      const answer = await raw(name)
+      assert.equal(answer.type, 'application/octet-stream', `${name} is never served as something a browser runs (${answer.type})`)
+      assert.match(String(answer.disposition), /^attachment;/, `${name} is offered as a download`)
+    }
+  } finally {
+    await server.close()
+  }
+})
+
+test('a file that cannot be read answers 404 at once, and never leaves the request hanging', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, process.getuid?.() !== 0, 'a user whom file permissions bind (not root)')) return
+  /**
+   * Live issue developer-two-13 (2026-10-29): the TypeScript raw route wrote its 200 head before reading the file,
+   * so a file without read permission threw after the head was out, the catch's 404 threw in turn, and the response
+   * was never ended: the request hung with no status at all. The Rust binary answered 404 at once.
+   */
+  const server = await startServer('unreadable')
+  try {
+    mkdirSync(server.work, { recursive: true })
+    const locked = join(server.work, 'locked.txt')
+    writeFileSync(locked, 'secret\n')
+    chmodSync(locked, 0o000)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    let response
+    try {
+      response = await fetch(new URL(`/api/raw?path=${encodeURIComponent(locked)}`, server.url), { headers: { cookie }, signal: AbortSignal.timeout(5000) })
+    } catch (error) {
+      assert.fail(`the raw route never answered for an unreadable file (${error.name}: ${error.message})`)
+    } finally {
+      chmodSync(locked, 0o644)
+    }
+    const body = await response.text()
+    assert.equal(response.status, 404, `an unreadable file answers 404 (${response.status}: ${body.slice(0, 40)})`)
+    assert.equal(body, 'no such asset\n', 'with the route\'s own sentence')
+    assert.equal(response.headers.get('content-security-policy'), FILE_POLICY, 'sandboxed, as every answer of the route')
+  } finally {
+    await server.close()
+  }
+})
+
+test('an HTML preview applies its relative stylesheet and does not run its script', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('styled-page')
+  const browser = await openBrowser()
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'style.css'), STYLESHEET)
+    writeFileSync(join(server.work, 'page.html'), STYLED_PAGE)
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(
+      await browser.waitFor(`Array.from(document.querySelectorAll('#tree .row')).some((row) => row.dataset.path.endsWith('page.html'))`, 10_000),
+      'the page is in the tree',
+    )
+    await browser.evaluate(`Array.from(document.querySelectorAll('#tree .row')).find((row) => row.dataset.path.endsWith('page.html')).click()`)
+    assert.ok(
+      await browser.waitFor(`(() => {
+        const frame = document.querySelector('#file iframe')
+        const h1 = frame && frame.contentDocument && frame.contentDocument.querySelector('h1')
+        return !!h1 && getComputedStyle(h1).color === 'rgb(255, 0, 0)'
+      })()`, 10_000).catch(() => false),
+      'the preview applies the page\'s relative stylesheet (its h1 turns red)',
+    )
+    const inert = await browser.evaluate(`(() => {
+      const frame = document.querySelector('#file iframe')
+      return { frameRan: frame.contentWindow.__ran === true, frameTitle: frame.contentDocument.title, pageRan: window.__ran === true }
+    })()`)
+    assert.deepEqual(inert, { frameRan: false, frameTitle: '', pageRan: false }, 'and the page\'s script does not run')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * C62 in the parity inventory: a file link in a chat answer opens the file rather than leaving the page. DSH opens it
+ * in its right sidebar; heddle's one preview surface is the panel (the owner's rule above), so the link opens there.
+ * Measured before this test: the answer's `README.md` link navigated the page to the server's `not found`. A remote
+ * link keeps its own tab, which is what DSH does without its in-app browser.
+ */
+test('a file link in a chat answer opens the file in the preview, and does not leave the page', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const answer = 'See [the readme](README.md), [the guide](docs/guide.md#install) and [the site](https://example.com/).'
+  const server = await startServer('chat-links', [{ text: answer }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'README.md'), '# Heddle readme\n\nA line to read.\n')
+    mkdirSync(join(server.work, 'docs'), { recursive: true })
+    writeFileSync(join(server.work, 'docs', 'guide.md'), '# Guide\n\nIntro.\n\n## Install\n\nRun it.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where is the readme', folder: server.work, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]") !== null', 10_000), 'the answer carries the file link')
+    const before = await browser.evaluate('location.href')
+    await browser.evaluate('document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]").click()')
+    assert.ok(await browser.waitFor('document.getElementById("file-body").innerText.includes("A line to read.")', 10_000), 'the file opens in the preview')
+    assert.equal(await browser.evaluate('location.href'), before, 'and the page did not navigate away')
+    assert.match(await browser.evaluate('document.getElementById("file-head").textContent'), /README\.md/, 'the preview names the file')
+
+    // Back to the chat, then the link with a fragment: the file opens at the heading it names.
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    await browser.waitFor('document.querySelector("#log .turn.assistant a[href=\\"docs/guide.md#install\\"]") !== null', 10_000)
+    await browser.evaluate('document.querySelector("#log .turn.assistant a[href=\\"docs/guide.md#install\\"]").click()')
+    assert.ok(await browser.waitFor('document.getElementById("file-body").innerText.includes("Run it.")', 10_000), 'a nested path resolves against the session folder')
+    assert.equal(await browser.evaluate('location.href'), before)
+
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    /**
+     * Back in the chat, the transcript is redrawn from the session's history (showSession clears and refills it). A
+     * click dispatched while that redraw was in flight read as cancelled about one run in two on TS, so the probe waits
+     * for the redrawn answer to be the only one and settled.
+     */
+    await browser.waitFor('document.querySelectorAll("#log .turn.assistant a[href^=\\"https:\\"]").length === 1', 10_000)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const remote = await browser.evaluate(`(() => {
+      const link = document.querySelector('#log .turn.assistant a[href^="https:"]')
+      let prevented = null
+      const probe = (event) => { prevented = event.defaultPrevented; event.preventDefault() }
+      window.addEventListener('click', probe, { once: true })
+      link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }))
+      return JSON.stringify({ prevented, target: link.getAttribute('target') })
+    })()`).then(JSON.parse)
+    assert.equal(remote.prevented, false, 'a remote link is left to the browser')
+    assert.equal(remote.target, '_blank', 'which opens it in its own tab')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('after a reload restores the session, a relative link in its answer still opens the file from the session folder', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * #41, developer-two's live acceptance run on 8e7dedbd: the link handler resolved a relative link against activeFolder,
+   * which only a row click or a workspace action sets. A reload that restores the saved session opens it by id, so after
+   * a reload the folder was unset or another one, and the browser followed the link away from the page. The link must
+   * mean the session's own folder: here a nested one, with a different README.md at the workspace root.
+   */
+  const server = await startServer('chat-links-reload', [{ text: 'See [the readme](README.md).' }])
+  const browser = await openBrowser()
+  try {
+    const app = join(server.work, 'app')
+    mkdirSync(app, { recursive: true })
+    writeFileSync(join(server.work, 'README.md'), '# Root readme\n\nThe workspace root.\n')
+    writeFileSync(join(app, 'README.md'), '# App readme\n\nThe session folder.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: app }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where is the readme', folder: app, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    assert.equal(await browser.evaluate(`(async () => await showSession(${JSON.stringify(session)}))()`), true, 'the session opens, and is kept as the one to restore')
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    const link = 'document.querySelector("#log .turn.assistant a[href=\\"README.md\\"]")'
+    assert.ok(await browser.waitFor(`${link} !== null`, 15_000), 'the reload restores the session and its answer with the link')
+    const before = await browser.evaluate('location.href')
+    await browser.evaluate(`${link}.click()`)
+    assert.ok(await browser.waitFor('document.getElementById("file-body")?.innerText.includes("The session folder.") === true', 10_000), `the link opens the session folder's file (the preview reads ${JSON.stringify(await browser.evaluate('document.getElementById("file-body")?.innerText ?? null'))})`)
+    assert.equal(await browser.evaluate('location.href'), before, 'and the page did not navigate away')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * The line at the top of the preview: a code file's first visible numbered row, or the plain-text line under the
+ * panel's top edge. Read in the browser, so it judges what the reader sees rather than a scroll offset.
+ */
+const TOP_LINE = `(() => {
+  const body = document.getElementById('file-body')
+  const box = body.getBoundingClientRect()
+  if (body.dataset.renderer === 'code') {
+    const row = [...body.querySelectorAll('.line')].find((line) => line.getBoundingClientRect().bottom > box.top + 2)
+    return row === undefined ? 0 : Number(row.querySelector('.ln')?.textContent ?? 0)
+  }
+  const caret = document.caretRangeFromPoint(box.left + 12, box.top + 6)
+  if (caret === null || !body.contains(caret.startContainer)) return 0
+  /** A point in the panel's own top padding lands on the panel, before its text: that is the first line. */
+  if (caret.startContainer === body) return caret.startOffset === 0 ? 1 : 0
+  if (caret.startContainer.nodeType !== Node.TEXT_NODE) return 0
+  return caret.startContainer.data.slice(0, caret.startOffset).split('\\n').length
+})()`
+
+test('a chat link to #L120 or #L80-L90 opens the file at that line, and an absolute link opens its file at the top', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('chat-lines', (work) => [
+    { text: `See [the notes](notes.txt#L120), [the same notes](${work}/notes.txt) and [the code](src/app.ts#L80-L90).` },
+  ])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    mkdirSync(join(server.work, 'src'), { recursive: true })
+    writeFileSync(join(server.work, 'src', 'app.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where are the notes', folder: server.work, session }),
+    })
+    await turn.text()
+
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    const before = await browser.evaluate('location.href')
+    const follow = async (href, text) => {
+      await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+      const find = `[...document.querySelectorAll('#log .turn.assistant a[href]')].find((link) => link.getAttribute('href') === ${JSON.stringify(href)})`
+      assert.ok(await browser.waitFor(`${find} !== undefined`, 10_000), `the answer carries the link ${href}`)
+      await browser.evaluate(`${find}.click()`)
+      assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes(${JSON.stringify(text)})`, 10_000), `${href} opens in the preview`)
+      await new Promise((done) => setTimeout(done, 300))
+      assert.equal(await browser.evaluate('location.href'), before, `${href} leaves the page where it is`)
+      return Number(await browser.evaluate(TOP_LINE))
+    }
+
+    const atLine = await follow('notes.txt#L120', 'line 200 of the notes')
+    assert.ok(Math.abs(atLine - 120) <= 1, `#L120 shows line 120 at the top of a plain-text file (top line ${atLine})`)
+    const atTop = await follow(`${server.work}/notes.txt`, 'line 200 of the notes')
+    assert.equal(atTop, 1, 'an absolute link with no line opens its file at the top, even after a line link scrolled it')
+    const inCode = await follow('src/app.ts#L80-L90', 'value200')
+    assert.ok(Math.abs(inCode - 80) <= 1, `#L80-L90 shows line 80 at the top of a code file (top line ${inCode})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a chat link whose file arrives after a newer link opened leaves the newer file where it is', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * developer-two's review of #41: the chat-link click placed the reader after openPath resolved, with no ticket. A link
+   * clicked first whose file arrived late scrolled the newer file to the old link's line. The page's fetch holds the
+   * first file until a second link has opened its own.
+   */
+  const server = await startServer('chat-link-race', () => [{ text: 'See [the notes](notes.txt#L120) and [the code](src/app.ts).' }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    mkdirSync(join(server.work, 'src'), { recursive: true })
+    writeFileSync(join(server.work, 'src', 'app.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'where are the notes', folder: server.work, session }),
+    })
+    await turn.text()
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await browser.waitFor(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"]') !== null`, 10_000)
+    await browser.evaluate(`document.querySelector('#tree li[data-kind="session"][data-session-id="${session}"] > .row').click()`)
+    const link = (href) => `[...document.querySelectorAll('#log .turn.assistant a[href]')].find((anchor) => anchor.getAttribute('href') === ${JSON.stringify(href)})`
+    assert.ok(await browser.waitFor(`${link('notes.txt#L120')} !== undefined && ${link('src/app.ts')} !== undefined`, 10_000), 'the answer carries both links')
+    /** The notes file is held until the code file has opened. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('/api/file') && address.includes('notes.txt')) {
+          held = false
+          return new Promise((resolve) => { window.__releaseNotes = () => resolve(original(input, init)) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${link('notes.txt#L120')}.click()`)
+    assert.ok(await browser.waitFor('typeof window.__releaseNotes === "function"', 10_000), 'the notes are in flight')
+    await browser.evaluate(`${link('src/app.ts')}.click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes('value200')`, 10_000), 'the newer link opened its file')
+    assert.equal(Number(await browser.evaluate(TOP_LINE)), 1, 'it opens at the top')
+    await browser.evaluate('window.__releaseNotes()')
+    await new Promise((done) => setTimeout(done, 800))
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({ code: document.getElementById('file-body').innerText.includes('value200'), top: ${TOP_LINE} })`))
+    assert.ok(state.code, 'the newer file is still the one shown')
+    assert.equal(Number(state.top), 1, `the late notes link does not scroll the newer file to its line (top line ${state.top})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a link in the preview whose file arrives after a newer selection leaves the newer file where it is', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * developer-two's review of #41, the preview's own handler: a link in a previewed document placed the reader after
+   * awaiting openPath, with no ticket, so a newer selection made meanwhile was scrolled to the old link's line.
+   */
+  const server = await startServer('preview-link-race', () => [{ text: 'ok' }])
+  const browser = await openBrowser()
+  try {
+    writeFileSync(join(server.work, 'notes.txt'), Array.from({ length: 200 }, (_, index) => `line ${index + 1} of the notes`).join('\n') + '\n')
+    writeFileSync(join(server.work, 'code.ts'), Array.from({ length: 200 }, (_, index) => `export const value${index + 1} = ${index + 1}`).join('\n') + '\n')
+    writeFileSync(join(server.work, 'guide.md'), '# Guide\n\nSee [the notes](notes.txt#L120).\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    /** Files open from the tree, as a reader opens them. */
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((row) => (row.dataset.path ?? '').endsWith(${JSON.stringify('/' + name)}))`
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 10_000), 'the workspace row is drawn')
+    await browser.evaluate(`(() => {
+      const row = document.querySelector('#tree .row')
+      if (row.closest('li').dataset.open === 'false') row.click()
+      return true
+    })()`)
+    assert.ok(await browser.waitFor(`${row('guide.md')} !== undefined && ${row('code.ts')} !== undefined`, 10_000), 'the tree lists the guide and the code')
+    await browser.evaluate(`${row('guide.md')}.click()`)
+    const link = `[...document.querySelectorAll('#file-body a')].find((anchor) => anchor.textContent === 'the notes')`
+    assert.ok(await browser.waitFor(`${link} !== undefined`, 10_000), 'the guide shows its link to the notes')
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let held = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (held && address.includes('/api/file') && address.includes('notes.txt')) {
+          held = false
+          return new Promise((resolve) => { window.__releaseNotes = () => resolve(original(input, init)) })
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await browser.evaluate(`${link}.click()`)
+    assert.ok(await browser.waitFor('typeof window.__releaseNotes === "function"', 10_000), 'the notes are in flight')
+    await browser.evaluate(`${row('code.ts')}.click()`)
+    assert.ok(await browser.waitFor(`document.getElementById('file-body').innerText.includes('value200')`, 10_000), 'the newer selection opened its file')
+    assert.equal(Number(await browser.evaluate(TOP_LINE)), 1, 'it opens at the top')
+    await browser.evaluate('window.__releaseNotes()')
+    await new Promise((done) => setTimeout(done, 800))
+    const state = JSON.parse(await browser.evaluate(`JSON.stringify({ code: document.getElementById('file-body').innerText.includes('value200'), top: ${TOP_LINE} })`))
+    assert.ok(state.code, 'the newer file is still the one shown')
+    assert.equal(Number(state.top), 1, `the late preview link does not scroll the newer file to its line (top line ${state.top})`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+
+test('a Chinese heading fragment reaches the second heading on both renderer outputs', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('unicode-heading')
+  const browser = await openBrowser({ width: 1280, height: 700 })
+  try {
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'link.md'), '[Go to second](target.md#第二节)\n')
+    writeFileSync(join(server.work, 'target.md'), '# 第一节\n\n' + Array.from({length:50}, (_,i) => `paragraph ${i}\n\n`).join('') + '# 第二节\n\nRequested target.\n')
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    await browser.goto(server.url)
+    const row = (name) => `Array.from(document.querySelectorAll('#tree .row')).find((entry) => (entry.dataset.path ?? '').endsWith(${JSON.stringify(name)}))`
+    await browser.waitFor(`${row('link.md')} !== undefined`, 15000)
+    await browser.evaluate(`${row('link.md')}.click()`)
+    await browser.waitFor(`document.querySelector('#file-body a') !== null`, 10000)
+    await browser.evaluate(`document.querySelector('#file-body a').click()`)
+    await browser.waitFor(`document.getElementById('file-body').textContent.includes('Requested target.')`, 10000)
+    const target = await browser.evaluate(`(() => {
+      const pane = document.getElementById('file-body')
+      const heading = Array.from(pane.querySelectorAll('h1')).find((node) => node.textContent === '第二节')
+      return { top: heading.getBoundingClientRect().top, floor: pane.getBoundingClientRect().bottom, scroll: pane.scrollTop }
+    })()`)
+    assert.ok(target.top >= 0 && target.top < target.floor, `Refs #121: requested second heading is visible (${JSON.stringify(target)})`)
+    assert.ok(target.scroll > 0, 'did not wrongly select first heading')
+  } finally { browser.close(); await server.close() }
 })

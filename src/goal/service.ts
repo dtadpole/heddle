@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 
-import type { SessionEvent, SessionHandle, SessionStore } from '../session/store.ts'
+import type { SessionEvent, SessionHandle, SessionMeta, SessionStore } from '../session/store.ts'
 
 /**
  * Goal management, modelled on DSH's `dsh-goal` — read as
@@ -348,6 +348,23 @@ export class GoalService extends Service {
     return this.view(handle, foldGoal(this.store.read(handle)))
   }
 
+  /**
+   * The session's log, as the goal tools read it to decide **who is asking**.
+   *
+   * Authority is judged on the same log the fold reads, and through the same store: a direct human turn is a
+   * person's message in the open turn, and a goal round is the driver's sourced message for the goal's current
+   * revision and round. Reading it here keeps the tools on the service they already hold rather than on a second
+   * handle to the store.
+   */
+  sessionEvents(handle: SessionHandle): readonly SessionEvent[] {
+    return this.store.read(handle)
+  }
+
+  /** The session's metadata record, which says whether it is a delegated (subagent or teammate) session. */
+  sessionMeta(handle: SessionHandle): SessionMeta | undefined {
+    return this.store.list().find((meta) => meta.id === handle.id)
+  }
+
   /** Remove process-local continuation authority without changing phase or revision. */
   disarm(handle: SessionHandle): GoalView | undefined {
     const folded = foldGoal(this.store.read(handle))
@@ -376,7 +393,8 @@ export class GoalService extends Service {
     const folded = foldGoal(this.store.read(handle))
     const current = this.expectCurrent(folded, ref)
     if (request.objective === undefined && request.maxGoalRounds === undefined) {
-      throw new GoalError('an edit needs an objective and/or maxGoalRounds', 'GOAL_INVALID_EDIT')
+      /** DSH's sentence (dsh-goal `edit`), which the model reads back through `update_goal`. */
+      throw new GoalError('goal edit requires objective and/or maxGoalRounds', 'GOAL_INVALID_EDIT')
     }
     const goal: GoalSnapshot = {
       ...current,

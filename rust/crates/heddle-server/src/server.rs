@@ -47,7 +47,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
-use axum::http::{Method, StatusCode, header::HOST};
+use axum::http::{HeaderMap, Method, StatusCode, header, header::HOST};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{delete, get, patch, post};
@@ -58,14 +58,17 @@ use tokio::sync::mpsc;
 use crate::fence;
 use crate::page;
 use crate::preview;
-use crate::respond::{self, JsonBody, SessionId, SessionPath, canonical_path};
+use crate::respond::{self, JsonBody, JsonObject, SessionId, SessionPath, canonical_path};
 use crate::runs::{RunRegistry, iso_time};
 use crate::selection::{SessionSelection, session_request_selection, turn_selection};
 use crate::services::{
     ApprovalOutcome, FlagPatch, ForkOutcome, GoalAction, GoalAnswer, GoalRef, Harness, OpenAt,
-    ServiceError, SessionMeta, StartSession,
+    ServiceError, SessionMeta, SessionService, StartSession,
 };
-use crate::stream::{EventHub, SseFrame, names, sse_response};
+use crate::stream::{self, EventHub, SseFrame, names, sse_response};
+use crate::terminals::{
+    CreateRefusal, InputResult, ResizeResult, TerminalEvent, TerminalRegistry, TerminalSpawn,
+};
 use crate::token::{
     self, Credentials, Door, TOKEN_QUERY, cookie_header, cookie_name, mint_cookie, read_cookie,
 };
@@ -86,8 +89,10 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/"),
     ("GET", "/api/events"),
     ("GET", "/api/status"),
+    ("GET", "/api/presets"),
     ("GET", "/api/sessions"),
     ("POST", "/api/sessions"),
+    ("GET", "/api/sessions/search"),
     ("GET", "/api/sessions/{id}"),
     ("POST", "/api/sessions/{id}/fork"),
     ("POST", "/api/sessions/{id}/flags"),
@@ -95,21 +100,33 @@ pub const CORE_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/sessions/{id}/permission"),
     ("POST", "/api/sessions/{id}/steer"),
     ("POST", "/api/sessions/{id}/stop"),
+    ("GET", "/api/sessions/{id}/terminals"),
+    ("POST", "/api/sessions/{id}/terminals"),
+    ("DELETE", "/api/sessions/{id}/terminals/{terminal}"),
+    ("GET", "/api/sessions/{id}/terminals/{terminal}/stream"),
+    ("POST", "/api/sessions/{id}/terminals/{terminal}/input"),
+    ("POST", "/api/sessions/{id}/terminals/{terminal}/resize"),
     ("POST", "/api/folders/session"),
     ("POST", "/api/turn"),
     ("GET", "/api/tree"),
     ("GET", "/api/workspaces"),
     ("POST", "/api/workspaces"),
+    ("POST", "/api/workspaces/default"),
     ("PATCH", "/api/workspaces/{id}"),
     ("DELETE", "/api/workspaces/{id}"),
+    ("POST", "/api/workspaces/insertBefore"),
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/{id}"),
     ("GET", "/api/goal"),
     ("POST", "/api/goal"),
+    ("GET", "/api/questions"),
+    ("POST", "/api/questions/{id}"),
+    ("POST", "/api/questions/{id}/hold"),
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
     ("GET", "/vendor/purify.js"),
+    ("GET", "/vendor/highlight/core.js"),
 ];
 
 /// How the server is started — the flags of `heddle web` that reach it.
@@ -129,6 +146,11 @@ pub struct ServerOptions {
     pub default_endpoint: Option<String>,
     /// Installation roots searched for `node_modules/dompurify` ([`crate::preview::purify_path`]).
     pub asset_roots: Vec<PathBuf>,
+    /// D-068 explicit Browser capability (`HEDDLE_WEB_BROWSER=1`), off by default as DSH's Web profile
+    /// ships it: the page policy then allows HTTP(S) frames, and `/api/status` reports `browser: true`
+    /// so the page offers its Browser tab (#86). Default framing stays same-origin. The server never
+    /// fetches, proxies or probes a page.
+    pub browser: bool,
 }
 
 impl ServerOptions {
@@ -235,6 +257,11 @@ struct Shared {
     launch_token: String,
     secret: String,
     port: u16,
+    /// The page's interactive terminals, per session (#85).
+    terminals: TerminalRegistry,
+    /// Whether the session service announces every title it writes, which this server pushes as `session/renamed`
+    /// (#33). When it does not, the rename route pushes its own rename.
+    renames_announced: bool,
 }
 
 impl AppState {
@@ -267,6 +294,11 @@ impl AppState {
     /// A registered session view by name.
     pub fn session_view(&self, name: &str) -> Option<Arc<dyn SessionView>> {
         self.inner.views.get(name).cloned()
+    }
+
+    /// Each session's interactive terminals (#85).
+    pub fn terminals(&self) -> &TerminalRegistry {
+        &self.inner.terminals
     }
 }
 
@@ -359,6 +391,21 @@ impl ServerBuilder {
             .token
             .clone()
             .unwrap_or_else(token::create_launch_token);
+        // Every title the session store writes reaches every page as `session/renamed` (#33). DSH records each title
+        // change and every view of the session follows (inventory-shell S16). That covers a person's rename, the first
+        // message's fallback and the title model's answer, so the push comes from the store, as `web.ts` hears its
+        // `session/renamed` event, not from the rename route alone.
+        let renames_announced = {
+            let hub = self.events.clone();
+            self.harness
+                .sessions
+                .on_renamed(Arc::new(move |session: &str, title: &str| {
+                    hub.push(
+                        "sessions",
+                        &json!({"type": "session/renamed", "session": session, "title": title}),
+                    );
+                }))
+        };
         let state = AppState {
             inner: Arc::new(Shared {
                 harness: self.harness,
@@ -369,6 +416,8 @@ impl ServerBuilder {
                 launch_token,
                 secret,
                 port,
+                terminals: TerminalRegistry::default(),
+                renames_announced,
             }),
         };
 
@@ -379,7 +428,9 @@ impl ServerBuilder {
             .route("/", get(page_route))
             .route("/api/events", get(events_route))
             .route("/api/status", get(status))
+            .route("/api/presets", get(list_presets))
             .route("/api/sessions", get(list_sessions).post(create_session))
+            .route("/api/sessions/search", get(search_sessions))
             .route("/api/sessions/{id}", get(session_view_route))
             .route("/api/sessions/{id}/fork", post(fork_session))
             .route("/api/sessions/{id}/flags", post(flags_session))
@@ -387,19 +438,55 @@ impl ServerBuilder {
             .route("/api/sessions/{id}/permission", post(permission_session))
             .route("/api/sessions/{id}/steer", post(steer_session))
             .route("/api/sessions/{id}/stop", post(stop_session))
+            .route(
+                "/api/sessions/{id}/terminals",
+                get(list_terminals).post(create_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}",
+                delete(close_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/stream",
+                get(stream_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/input",
+                post(input_terminal),
+            )
+            .route(
+                "/api/sessions/{id}/terminals/{terminal}/resize",
+                post(resize_terminal),
+            )
             .route("/api/folders/session", post(folder_session))
             .route("/api/turn", post(turn))
             .route("/api/tree", get(tree))
             .route("/api/workspaces", get(list_workspaces).post(add_workspace))
+            .route(
+                "/api/workspaces/default",
+                post(initialize_default_workspace),
+            )
             .route("/api/workspaces/{id}", patch(rename_workspace))
             .route("/api/workspaces/{id}", delete(remove_workspace))
+            .route(
+                "/api/workspaces/insertBefore",
+                post(insert_workspace_before),
+            )
             .route("/api/approvals", get(list_approvals))
             .route("/api/approvals/{id}", post(answer_approval))
             .route("/api/goal", get(get_goal).post(post_goal))
+            .route("/api/questions", get(get_questions))
+            .route("/api/questions/{id}", post(answer_question))
+            .route("/api/questions/{id}/hold", post(hold_question))
             .route("/api/todo", get(get_todo))
             .route("/api/team", get(get_team))
             .route("/api/html", get(html_preview))
-            .route("/vendor/purify.js", get(purify));
+            .route("/vendor/purify.js", get(purify))
+            .route("/vendor/highlight/core.js", get(highlight_core))
+            .route(
+                "/vendor/highlight/languages/{grammar}",
+                get(highlight_grammar),
+            );
         for feature in self.features {
             let name = feature.name();
             let routes = feature.routes();
@@ -466,9 +553,26 @@ impl ServerBuilder {
                     }
                 })
             });
+        // The heartbeat: every interval each `/api/events` subscriber gets a `heartbeat` frame, and a connection
+        // whose writes stay pending for two intervals is closed (DSH's dead-peer rule, `stall.rs`).
+        let interval = stream::heartbeat_interval();
+        let heartbeat = {
+            let hub = state.events().clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(interval);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    hub.publish(SseFrame::heartbeat());
+                }
+            })
+        };
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(without_nagle(listener), router)
+            let listener =
+                crate::stall::GuardedListener::new(without_nagle(listener), interval * 2);
+            let _ = axum::serve(listener, router)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
@@ -485,6 +589,7 @@ impl ServerBuilder {
             task: Some(task),
             detach_approvals,
             approval_relay,
+            heartbeat: Some(heartbeat),
         })
     }
 }
@@ -502,7 +607,12 @@ pub struct WebServer {
     detach_approvals: Option<Box<dyn FnOnce() + Send>>,
     /// The task relaying the approval service's published questions into the hub.
     approval_relay: Option<tokio::task::JoinHandle<()>>,
+    /// The task writing a heartbeat to every stream once per interval.
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
 }
+
+/// How long a shutdown waits for stopped turns to settle: DSH's 3 s kill grace plus room to write the results.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl WebServer {
     /// `http://<host>:<port>/?token=<token>`.
@@ -555,11 +665,27 @@ impl WebServer {
     /// and close the connections that remain — an event stream is open by design, so waiting for it to
     /// end on its own would never return.
     pub async fn close(mut self) {
+        // A restart stops the running turns first, as a Stop does, and gives them DSH's grace to settle, so each
+        // running command's process group is ended and its call is recorded as interrupted before the process
+        // goes (live-testing issue #6; DSH cancels its agents at teardown, dsh-bash-local graceMs 3000).
+        let runs = self.state.runs().clone();
+        if runs.abort_all() > 0 {
+            let deadline = tokio::time::Instant::now() + SHUTDOWN_GRACE;
+            while runs.any_running() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }
+        // Then the terminals end, and their processes with them, so a restart leaves no orphan shell (#85). After the
+        // turns' grace, so a terminal opened during it is ended too.
+        self.state.terminals().close_all().await;
         if let Some(detach) = self.detach_approvals.take() {
             detach();
         }
         if let Some(relay) = self.approval_relay.take() {
             relay.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
         }
         self.state.events().close();
         if let Some(shutdown) = self.shutdown.take() {
@@ -725,7 +851,16 @@ async fn door(State(state): State<AppState>, request: Request, next: Next) -> Re
     if path == "/" && method == Method::GET {
         let access = page::page_access(decision.is_ok(), offered.cookie);
         if access.status == 200 {
-            return respond::html(StatusCode::OK, page::page());
+            let lang = page_language(&state, request.headers());
+            let html = page::with_language(page::page(), lang);
+            let policy = page::page_policy_with_browser(&html, state.options().browser);
+            let mut answer = respond::html(StatusCode::OK, html);
+            if let Ok(value) = axum::http::HeaderValue::from_str(&policy) {
+                answer
+                    .headers_mut()
+                    .insert("content-security-policy", value);
+            }
+            return answer;
         }
         return respond::html(
             StatusCode::UNAUTHORIZED,
@@ -834,12 +969,61 @@ async fn healthz(State(state): State<AppState>) -> Response {
     healthz_body(state.port())
 }
 
-async fn page_route() -> Response {
-    respond::html(StatusCode::OK, page::page())
+async fn page_route(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    respond::html(
+        StatusCode::OK,
+        page::with_language(page::page(), page_language(&state, &headers)),
+    )
 }
 
-async fn events_route(State(state): State<AppState>) -> Response {
-    sse_response(state.events().subscribe())
+/// The served page's `<html lang>` (issue #80): the language the `locale` row stores, else the first supported one
+/// the browser's `Accept-Language` asks for, else English, as DSH's dsh-client-locale selects it; Chinese is `zh-CN`.
+fn page_language(state: &AppState, headers: &HeaderMap) -> &'static str {
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok());
+    let locale = state
+        .harness()
+        .locale
+        .unwrap_or_default()
+        .for_request(accept);
+    heddle_config::document_language(locale)
+}
+
+async fn events_route(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    // The follow cursor: `Last-Event-ID` from the browser's own retries, `?cursor=` from the page's reconnects
+    // (web.ts reads the header first). Subscribed and replayed under one lock, before the body starts.
+    let presented = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| query.get("cursor").cloned())
+        .filter(|cursor| !cursor.is_empty());
+    let mut follow = state.events().subscribe_from(presented.as_deref());
+    // A question answered while the client was away is not put back on its page: only waiting ones replay.
+    let waiting: std::collections::HashSet<String> = state
+        .harness()
+        .approvals
+        .as_ref()
+        .map(|approvals| approvals.pending_requests())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|request| request.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+    follow.replay = follow
+        .replay
+        .map(|frames| stream::without_settled_approvals(frames, &waiting));
+    sse_response(stream::follow_frames(
+        follow,
+        presented.is_some(),
+        &stream::new_client_id(),
+        &stream::host_home(),
+        stream::heartbeat_interval().as_millis() as u64,
+    ))
 }
 
 /// One session's meta as a listing entry: the store's record plus this server's run state.
@@ -870,14 +1054,110 @@ async fn list_sessions(State(state): State<AppState>) -> Response {
     respond::json(StatusCode::OK, &Value::Array(sessions))
 }
 
+/// `GET /api/sessions/search?q=` — content search, DSH's `session.search` (dsh-api-session-controller
+/// lib/index.js:2010-2123): `{"items":[{"sessionId","snippet"}],"hasMore"}`, at most 20, ranked and quoted by
+/// `heddle_session::search`. A query DSH refuses answers `400` with its sentence. The static segment wins over
+/// `/api/sessions/{id}`, which would otherwise answer it as "not a session id".
+async fn search_sessions(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let raw = params.get("q").map(String::as_str).unwrap_or("");
+    let query = match heddle_session::normalize_search_query(raw) {
+        Ok(query) => query,
+        Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal.message),
+    };
+    match state.harness().sessions.search(&query) {
+        Ok(page) => respond::json(StatusCode::OK, &page),
+        Err(error) => respond::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session search failed: {}", error.message),
+        ),
+    }
+}
+
 async fn status(State(state): State<AppState>) -> Response {
-    respond::json(
-        StatusCode::OK,
-        &json!({
-            "sandbox": {"mode": state.harness().sandbox.default_mode()},
-            "cwd": state.harness().sandbox.workspace_root(),
-        }),
+    let mut body = json!({
+        "sandbox": {"mode": state.harness().sandbox.default_mode()},
+        "cwd": state.harness().sandbox.workspace_root(),
+    });
+    // Present only when the operator enabled the Browser tab, so a default answer keeps its bytes.
+    if state.options().browser {
+        body["browser"] = json!(true);
+    }
+    respond::json(StatusCode::OK, &body)
+}
+
+/// The roster requests are checked against, and whether it is the implicit one of a profile without the `presets` row
+/// (inventory A96), which declares only `standard`.
+fn preset_roster_of(state: &AppState) -> (heddle_config::PresetRoster, bool) {
+    match state.harness().presets.as_ref() {
+        Some(roster) => ((**roster).clone(), false),
+        None => (
+            heddle_config::preset_roster(None).unwrap_or_else(|_| heddle_config::PresetRoster {
+                default: heddle_config::standard_preset().id,
+                presets: vec![heddle_config::standard_preset()],
+            }),
+            true,
+        ),
+    }
+}
+
+/// `GET /api/presets` (inventory A96): DSH's `agentPresets/list`, the roster and its default, for the new-session
+/// picker and the Settings roster. Each preset says what it narrows: the tools its sessions are offered (absent means
+/// every tool) and its persona. A profile without the `presets` row answers its one implicit preset, marked so.
+async fn list_presets(State(state): State<AppState>) -> Response {
+    let (roster, implicit) = preset_roster_of(&state);
+    let mut body = Map::new();
+    body.insert("default".into(), Value::String(roster.default));
+    body.insert(
+        "presets".into(),
+        serde_json::to_value(&roster.presets).unwrap_or(Value::Array(Vec::new())),
+    );
+    if implicit {
+        body.insert("implicit".into(), Value::Bool(true));
+    }
+    respond::json(StatusCode::OK, &Value::Object(body))
+}
+
+/// The agent preset a request names (inventory A96), checked before anything is written: `Ok(None)` when it names
+/// none (absent, not a string, or blank), the declared id, or the sentence a `400` answers — DSH's
+/// dsh-agent-preset-registry `Unknown agent preset: <id>`, with what is declared.
+fn requested_preset(state: &AppState, body: &JsonBody) -> Result<Option<String>, String> {
+    let Some(wanted) = body.trimmed("preset") else {
+        return Ok(None);
+    };
+    let declared = preset_roster_of(state).0.ids();
+    if !declared.iter().any(|id| id == wanted) {
+        return Err(format!(
+            "Unknown agent preset: {wanted}; declared: {}",
+            declared.join(", ")
+        ));
+    }
+    Ok(Some(wanted.to_owned()))
+}
+
+/// The `409` for another preset named for a session that recorded one: a session keeps the preset it was created with.
+fn preset_fixed(recorded: &str) -> Response {
+    respond::error_with_code(
+        StatusCode::CONFLICT,
+        format!(
+            "the session runs the preset '{recorded}'; a session keeps the preset it was created with"
+        ),
+        "session/preset-fixed",
     )
+}
+
+/// The preset a new session is created under: the one the request named, else the profile's default (none for a
+/// profile without the `presets` row).
+fn new_session_preset(state: &AppState, named: Option<&str>) -> Option<String> {
+    named.map(str::to_owned).or_else(|| {
+        state
+            .harness()
+            .presets
+            .as_ref()
+            .map(|roster| roster.default.clone())
+    })
 }
 
 fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
@@ -901,10 +1181,15 @@ async fn create_session(State(state): State<AppState>, body: JsonBody) -> Respon
             format!("{} is not under any workspace root", branch.display()),
         );
     }
+    let named = match requested_preset(&state, &body) {
+        Ok(named) => named,
+        Err(refusal) => return respond::error(StatusCode::BAD_REQUEST, refusal),
+    };
+    let preset = new_session_preset(&state, named.as_deref());
     match state
         .harness()
         .sessions
-        .create_at(&branch, body.non_empty("title"))
+        .create_at(&branch, body.non_empty("title"), preset.as_deref())
     {
         Ok(created) => respond::json(
             StatusCode::OK,
@@ -935,6 +1220,7 @@ async fn folder_session(State(state): State<AppState>, body: JsonBody) -> Respon
         fresh: body.bool("new") == Some(true),
         title: None,
         selection: SessionSelection::default(),
+        preset: None,
     };
     match state.harness().sessions.open_at(&folder, options) {
         Ok(id) => {
@@ -978,6 +1264,8 @@ async fn session_view_route(
     let meta = sessions.meta(id.as_str());
     let mode = sessions.effective_mode(id.as_str(), &state.harness().sandbox.default_mode());
     let mut turns = crate::transcript::transcript_turns(&events);
+    // Each card names this session: the upload route serves a file only to a session whose log references it.
+    crate::transcript::scope_attachment_urls(&mut turns, id.as_str());
     if let Some(markdown) = state.harness().markdown.as_ref() {
         for turn in &mut turns {
             if turn.kind == crate::transcript::TurnKind::Assistant {
@@ -1008,6 +1296,14 @@ async fn session_view_route(
             .map(Value::String)
             .unwrap_or(Value::Null),
     );
+    // The agent preset the session runs under (inventory A96); `null` until a turn records one.
+    body.insert(
+        "preset".into(),
+        meta.as_ref()
+            .and_then(|meta| meta.preset())
+            .map(|preset| Value::String(preset.to_owned()))
+            .unwrap_or(Value::Null),
+    );
     body.insert(
         "title".into(),
         meta.as_ref()
@@ -1027,20 +1323,77 @@ async fn session_view_route(
         "turns".into(),
         serde_json::to_value(&turns).unwrap_or(Value::Array(Vec::new())),
     );
+    // How far this transcript reaches: the last recorded event's `seq`, or 0 (web.ts's `seq`). A page opening the
+    // session keeps the events the stream delivers during this read aside and draws only those past it, so an event
+    // in both reads once (live-testing draft developer-eleven-1).
+    let seq = events
+        .iter()
+        .rev()
+        .find_map(|event| event.get("seq").and_then(Value::as_u64))
+        .unwrap_or(0);
+    body.insert("seq".into(), Value::from(seq));
     if let Some(stats) = state.harness().stats.as_ref() {
         body.insert("stats".into(), stats.stats(id.as_str(), &events));
     }
     respond::json(StatusCode::OK, &Value::Object(body))
 }
 
-async fn fork_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    match state.harness().sessions.fork(id.as_str()) {
+/// The largest integer a JavaScript number holds exactly: DSH's `atSeq` must be a safe integer.
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// DSH's `atSeq` from a fork body: `Ok(None)` when absent, `Err(())` when it is not a non-negative
+/// safe integer (dsh-api-session-controller/lib/index.js:856-861). `1.0` reads as 1, as `JSON.parse` does.
+fn fork_cut(body: &JsonBody) -> Result<Option<u64>, ()> {
+    let Some(value) = body.get("atSeq") else {
+        return Ok(None);
+    };
+    if let Some(whole) = value.as_u64() {
+        return if whole <= MAX_SAFE_INTEGER {
+            Ok(Some(whole))
+        } else {
+            Err(())
+        };
+    }
+    match value.as_f64() {
+        Some(number)
+            if number.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER as f64).contains(&number) =>
+        {
+            Ok(Some(number as u64))
+        }
+        _ => Err(()),
+    }
+}
+
+async fn fork_session(
+    State(state): State<AppState>,
+    SessionPath(id): SessionPath,
+    // A body that is not a JSON object is refused before anything is cut, as `readJson` refuses it for the
+    // TypeScript route (`400 the body must be a JSON object`); `JsonBody` would read it as `{}` and fork.
+    JsonObject(body): JsonObject,
+) -> Response {
+    // An optional `atSeq` is DSH's inclusive cut: the chat's Branch action sends the seq that ended its turn.
+    let Ok(at_seq) = fork_cut(&body) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "atSeq must be a non-negative safe integer",
+        );
+    };
+    match state.harness().sessions.fork(id.as_str(), at_seq) {
         ForkOutcome::NotFound => respond::no_session(id.as_str()),
+        ForkOutcome::NoSuchEvent { at_seq, last_seq } => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "event {at_seq} does not exist in session \"{id}\" (last seq: {})",
+                last_seq.map_or_else(|| "none".to_owned(), |seq| seq.to_string())
+            ),
+            "unavailable".to_owned(),
+        ),
         ForkOutcome::Unavailable { code } => respond::error_with_code(
             StatusCode::CONFLICT,
             format!("session {id} has no completed turn to fork from"),
             code,
         ),
+        ForkOutcome::Refused(error) => service_refusal(error, StatusCode::BAD_REQUEST),
         ForkOutcome::Forked(created) => respond::json(
             StatusCode::OK,
             &json!({
@@ -1063,18 +1416,62 @@ async fn flags_session(
     if pinned.is_none() && archived.is_none() {
         return respond::error(StatusCode::BAD_REQUEST, "pinned or archived is required");
     }
-    if archived == Some(true) && state.runs().is_running(id.as_str()) {
-        if body.bool("stop") != Some(true) {
-            return respond::json(
-                StatusCode::CONFLICT,
-                &json!({
-                    "error": format!("session {id} is running; pass stop: true to stop it and archive"),
+    // The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace`
+    // `archiveSession`, `details.activity`): the turn in progress, the session's live background jobs, its
+    // running subagent descendants and its active reminders, in DSH's listener order
+    // (`heddle_session::session_activity`), which the page's stop-and-archive dialog lists. The jobs and the
+    // reminders are what the rows behind the activity port report; the jobs are also listed as `jobs`, the jobs
+    // row's own field, which the page's older confirm reads. A turn is running when this server started it or the
+    // agent runtime holds one (a subagent's, a teammate's, a notice's). `src/server/web.ts` keeps the same rule.
+    //
+    // With `stop: true` every family is stopped only once the archive is written — DSH's order: it writes the
+    // archive set, then asks every `workspace/session-stop` listener and awaits them
+    // (`dsh-workspace/lib/index.js:527-541`, `:621-628`). The turn and its running subagents are cancelled, then
+    // the port's work. A write that is refused, finds no session or fails stops nothing, as a throwing `setState`
+    // in DSH never reaches `stopSessionActivity`; nor can a cancelled child's settlement notice start a parent turn
+    // before the archived flag is on disk.
+    let port = state.harness().activity.clone();
+    let stop = archived == Some(true) && body.bool("stop") == Some(true);
+    let runs = state.runs();
+    let runner = state.harness().turns.clone();
+    // The sessions a successful write stops: the session and the subagents its activity named.
+    let mut stop_sessions: Vec<String> = Vec::new();
+    if archived == Some(true) {
+        let is_running = |session: &str| runs.is_running(session) || runner.is_live(session);
+        let metas: Vec<heddle_session::LineageMeta> = state
+            .harness()
+            .sessions
+            .list()
+            .iter()
+            .filter_map(|meta| serde_json::to_value(meta).ok())
+            .filter_map(|value| {
+                value
+                    .as_object()
+                    .and_then(heddle_session::LineageMeta::from_map)
+            })
+            .collect();
+        let rows = row_activity(port.as_deref(), id.as_str());
+        let jobs: Vec<Value> = rows
+            .jobs
+            .iter()
+            .map(|item| json!({ "id": item.id, "label": item.label }))
+            .collect();
+        let activity = heddle_session::session_activity(id.as_str(), &metas, is_running, rows);
+        if !activity.is_empty() {
+            if !stop {
+                let mut refusal = json!({
+                    "error": heddle_session::refusal_sentence(id.as_str(), &activity),
                     "code": "active",
-                    "running": state.runs().running(id.as_str()),
-                }),
-            );
+                    "running": runs.running(id.as_str()),
+                    "activity": activity,
+                });
+                if !jobs.is_empty() {
+                    refusal["jobs"] = Value::Array(jobs);
+                }
+                return respond::json(StatusCode::CONFLICT, &refusal);
+            }
+            stop_sessions = heddle_session::activity_sessions(id.as_str(), &activity);
         }
-        state.runs().abort(id.as_str());
     }
     match state
         .harness()
@@ -1082,12 +1479,49 @@ async fn flags_session(
         .set_flags(id.as_str(), FlagPatch { pinned, archived })
     {
         Ok(None) => respond::no_session(id.as_str()),
-        Ok(Some(meta)) => respond::json(StatusCode::OK, &meta),
+        Ok(Some(meta)) => {
+            for session in &stop_sessions {
+                runs.abort(session);
+                runner.interrupt(session);
+            }
+            if let (true, Some(port)) = (stop, port.as_ref()) {
+                port.stop(id.as_str()).await;
+            }
+            // Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end
+            // with their owner (#85).
+            if archived == Some(true) {
+                state.terminals().close_session(id.as_str()).await;
+            }
+            respond::json(StatusCode::OK, &meta)
+        }
         Err(error) => {
             let code = error.code.clone().unwrap_or_else(|| "archived".to_owned());
             respond::error_with_code(StatusCode::CONFLICT, error.message, code)
         }
     }
+}
+
+/// The activity port's items as the families `heddle_session::session_activity` places in DSH's order: each
+/// `job` and `schedule` item, labelled. Turns and subagents are the server's own count, so the port's items of
+/// those kinds are not read here.
+fn row_activity(
+    port: Option<&dyn crate::services::SessionActivity>,
+    session: &str,
+) -> heddle_session::RowActivity {
+    use crate::services::ActivityKind;
+    let mut rows = heddle_session::RowActivity::default();
+    for item in port.map(|port| port.active(session)).unwrap_or_default() {
+        let entry = heddle_session::ActivityItem {
+            id: item.id,
+            label: Some(item.label),
+        };
+        match item.kind {
+            ActivityKind::Job => rows.jobs.push(entry),
+            ActivityKind::Schedule => rows.schedules.push(entry),
+            ActivityKind::Turn | ActivityKind::Subagent => {}
+        }
+    }
+    rows
 }
 
 async fn title_session(
@@ -1099,6 +1533,20 @@ async fn title_session(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     let title = title.to_owned();
+    // A title with nothing visible left once cleaned is refused, as DSH's rename refuses it
+    // (`dsh-session-title` lib/index.js:298-299; `dsh-api-session-controller` lib/index.js:838); the
+    // store cleans what it accepts (`heddle_session::title_text`). An unknown session is still a `404`
+    // first, as DSH resolves the session before it judges the title.
+    if heddle_session::title_text::clean_session_title(&title).is_empty() {
+        if !state.harness().sessions.exists(id.as_str()) {
+            return respond::no_session(id.as_str());
+        }
+        return respond::error_with_code(
+            StatusCode::BAD_REQUEST,
+            heddle_session::title_text::TITLE_INVALID_MESSAGE,
+            heddle_session::title_text::TITLE_INVALID_CODE,
+        );
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     if let Some(folder) = folder.as_ref()
         && state.harness().sessions.definition_id(folder).as_deref() != Some(id.as_str())
@@ -1118,6 +1566,16 @@ async fn title_session(
                     .update_definition_title(folder, &title)
             {
                 return service_refusal(error, StatusCode::BAD_REQUEST);
+            }
+            // A store that announces its titles has pushed this one already (#33). Otherwise the push names the
+            // title cleaned as the store cleans what it keeps, as the announcing store and the TypeScript server do,
+            // not the raw body.
+            if !state.inner.renames_announced {
+                let kept = heddle_session::title_text::clean_session_title(&title);
+                state.events().push(
+                    "sessions",
+                    &json!({"type": "session/renamed", "session": id.as_str(), "title": kept}),
+                );
             }
             respond::json(StatusCode::OK, &meta)
         }
@@ -1147,6 +1605,11 @@ async fn permission_session(
         ),
         Ok(mode) => match sessions.set_mode(id.as_str(), &mode, &fallback) {
             Ok(written) => {
+                // A terminal is confined by the mode it was opened under, and a mode change (a narrowing above all)
+                // must not leave a wider shell running, so the session's terminals end with the change (#85).
+                if written.changed {
+                    state.terminals().close_session(id.as_str()).await;
+                }
                 let mut body = Map::new();
                 body.insert("session".into(), Value::String(id.to_string()));
                 body.insert("mode".into(), Value::String(written.mode));
@@ -1198,13 +1661,27 @@ async fn steer_session(
 }
 
 async fn stop_session(State(state): State<AppState>, SessionPath(id): SessionPath) -> Response {
-    let stopped = state.runs().abort(id.as_str());
+    // Every turn of the session, not only the ones this server started (#93): a goal round, a reminder's turn and a
+    // job notice's turn are registered with the agent runtime's live-turn registry, not with `runs`. A turn the
+    // server started is in both and is counted once.
+    let live = state
+        .harness()
+        .interrupter
+        .as_ref()
+        .is_some_and(|interrupter| interrupter.interrupt(id.as_str()));
+    let stopped = state.runs().abort(id.as_str()).max(usize::from(live));
     respond::json(
         StatusCode::OK,
         &json!({"stopped": stopped, "session": id.to_string()}),
     )
 }
 
+/// One level of the folder tree (web.ts's `GET /api/tree`): the registered roots without a `path`,
+/// else the children of `path` — and only when a registered root owns it. A path outside every root
+/// is refused with web.ts's `400 {"error": "<canonical> is not under any workspace root"}` before
+/// anything is read, as the CLI's `tree` and the file routes refuse it. The path is canonical
+/// first, so `..` and a symlink that leads out of a root are judged where they land. An empty
+/// `path` is the roots, as in web.ts.
 async fn tree(
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
@@ -1212,7 +1689,38 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
-    let path = query.get("path").map(canonical_path);
+    // A folder that is gone (#141) is judged before it is read, as web.ts does: under a root it is `404` with DSH's
+    // `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the
+    // folder is gone instead of listing it empty; outside every root it is the `400` below. It is placed through
+    // the real path of what still exists, so a spelling through a link (`/tmp/x/w` for `/private/tmp/x/w`) is the
+    // same folder.
+    if let Some(raw) = query.get("path").filter(|path| !path.is_empty()) {
+        let located = heddle_config::canonical_path_through_ancestors(std::path::Path::new(raw));
+        if !located.exists() {
+            return if workspaces.owns(&located) {
+                respond::error_with_code(
+                    StatusCode::NOT_FOUND,
+                    format!("no entry at \"{}\"", located.display()),
+                    "workspace-file/not-found",
+                )
+            } else {
+                respond::error(
+                    StatusCode::BAD_REQUEST,
+                    format!("{} is not under any workspace root", located.display()),
+                )
+            };
+        }
+    }
+    let path = query
+        .get("path")
+        .filter(|path| !path.is_empty())
+        .map(canonical_path);
+    if let Some(path) = path.as_deref().filter(|path| !workspaces.owns(path)) {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            format!("{} is not under any workspace root", path.display()),
+        );
+    }
     let archived =
         crate::services::ArchivedFilter::from_query(query.get("archived").map(String::as_str));
     let sessions = state.harness().sessions.list();
@@ -1283,11 +1791,40 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
         }
     }
     match workspaces.add(&path, name) {
-        Ok((record, created)) => respond::json(
-            StatusCode::OK,
-            &json!({"record": record, "created": created}),
-        ),
+        Ok((record, created)) => {
+            if created {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/added", "workspace": record}),
+                );
+            }
+            respond::json(
+                StatusCode::OK,
+                &json!({"record": record, "created": created}),
+            )
+        }
         Err(error) => service_refusal(error, StatusCode::BAD_REQUEST),
+    }
+}
+
+/// First use (web.ts's `POST /api/workspaces/default`, DSH's `workspace/initializeDefault`): `{workspace}`, the
+/// record or `null` when this install is not a first use; `500 {error, code: "workspace/default-failed"}` when
+/// the folder cannot be made; `503` without a workspace plugin.
+async fn initialize_default_workspace(State(state): State<AppState>) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let sessions = state.harness().sessions.list();
+    match workspaces.initialize_default(&sessions) {
+        Ok(record) => respond::json(
+            StatusCode::OK,
+            &json!({"workspace": record.unwrap_or(Value::Null)}),
+        ),
+        Err(error) => respond::error_with_code(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error.message,
+            "workspace/default-failed",
+        ),
     }
 }
 
@@ -1303,7 +1840,13 @@ async fn rename_workspace(
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
     match workspaces.rename(&id, title) {
-        Ok(Some(record)) => respond::json(StatusCode::OK, &record),
+        Ok(Some(record)) => {
+            state.events().push(
+                "workspace",
+                &json!({"type": "workspace/renamed", "workspace": record}),
+            );
+            respond::json(StatusCode::OK, &record)
+        }
         Ok(None) => respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}")),
         Err(error) if error.code.as_deref() == Some("workspace/name-conflict") => {
             service_refusal(error, StatusCode::CONFLICT)
@@ -1324,8 +1867,54 @@ async fn remove_workspace(
     }
     let sessions = state.harness().sessions.list();
     match workspaces.remove(&id, &sessions) {
-        Ok(outcome) => respond::json(StatusCode::OK, &outcome),
+        Ok(outcome) => {
+            state
+                .events()
+                .push("workspace", &json!({"type": "workspace/removed", "id": id}));
+            respond::json(StatusCode::OK, &outcome)
+        }
         Err(error) => service_refusal(error, StatusCode::CONFLICT),
+    }
+}
+
+/// Move a workspace in the stored order — DSH's `workspace/insertBefore` (dsh-api-workspace-controller
+/// lib/index.js:262-269), web.ts's `POST /api/workspaces/insertBefore`: `{workspaceId, beforeWorkspaceId?}`
+/// (an id or a path each), answered `{workspaceIds}`, the complete order; a workspace or anchor not in the
+/// order is `404 workspace/not-found` with DSH's sentence.
+async fn insert_workspace_before(State(state): State<AppState>, body: JsonBody) -> Response {
+    let Some(workspaces) = state.harness().workspaces.as_ref() else {
+        return respond::plugin_missing("workspace");
+    };
+    let Some(id) = body.non_empty("workspaceId") else {
+        return respond::error(StatusCode::BAD_REQUEST, "a workspaceId is required");
+    };
+    let before = match body.get("beforeWorkspaceId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(before)) if !before.is_empty() => Some(before.as_str()),
+        Some(_) => {
+            return respond::error(
+                StatusCode::BAD_REQUEST,
+                "beforeWorkspaceId must be a workspace id",
+            );
+        }
+    };
+    match workspaces.reorder(id, before) {
+        Ok((order, moved)) => {
+            // Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an
+            // added, renamed or removed workspace is; a move that changes nothing is not announced, as DSH's
+            // registry writes nothing then (dsh-workspace lib/index.js:484, :492). web.ts pushes the same frame.
+            if moved {
+                state.events().push(
+                    "workspace",
+                    &json!({"type": "workspace/reordered", "workspaceIds": order}),
+                );
+            }
+            respond::json(StatusCode::OK, &json!({"workspaceIds": order}))
+        }
+        Err(error) if error.code.as_deref() == Some("workspace/not-found") => {
+            service_refusal(error, StatusCode::NOT_FOUND)
+        }
+        Err(error) => service_refusal(error, StatusCode::INTERNAL_SERVER_ERROR),
     }
 }
 
@@ -1380,6 +1969,10 @@ async fn answer_approval(
         return approval_not_waiting();
     };
     if service.answer(&id, outcome) {
+        state.events().push(
+            "approval-settled",
+            &json!({"type": "approval/settled", "id": id, "outcome": outcome}),
+        );
         respond::json_compact(StatusCode::OK, &json!({"answered": true}))
     } else {
         approval_not_waiting()
@@ -1405,6 +1998,51 @@ async fn get_goal(
     }
     let goal = goals.get(&session);
     respond::json(StatusCode::OK, &json!({"session": session, "goal": goal}))
+}
+
+/// `GET /api/questions?session=<id>[&all=1]`: the session's answerable questions (`ask_user_question`).
+async fn get_questions(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let all = query.get("all").is_some_and(|value| value == "1");
+    let (status, body) = questions.get(query.get("session").map(String::as_str), all);
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        body,
+    )
+}
+
+/// `POST /api/questions/<id>`: one answer batch. A late answer comes back in the body for the page to deliver.
+async fn answer_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, false, body)
+}
+
+/// `POST /api/questions/<id>/hold`: Take time on a timed wait.
+async fn hold_question(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: JsonBody,
+) -> Response {
+    question_post(&state, &id, true, body)
+}
+
+fn question_post(state: &AppState, id: &str, hold: bool, body: JsonBody) -> Response {
+    let Some(questions) = state.harness().questions.as_ref() else {
+        return respond::plugin_missing("questions");
+    };
+    let (status, text) = questions.post(id, hold, &Value::Object(body.0));
+    respond::raw_json(
+        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        text,
+    )
 }
 
 async fn get_todo(
@@ -1532,6 +2170,14 @@ async fn html_preview(
             "that path is not under any workspace root",
         );
     }
+    // Only an .html or .htm file is a page (DSH's HTML renderer extensions); anything else, binary or
+    // not, is refused, as web.ts does.
+    if !preview::is_html_document(&path) {
+        return respond::error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            preview::NOT_AN_HTML_DOCUMENT,
+        );
+    }
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => metadata,
         _ => return respond::error(StatusCode::NOT_FOUND, "not a file"),
@@ -1550,22 +2196,49 @@ async fn html_preview(
     respond::json(StatusCode::OK, &document)
 }
 
+/// `GET /vendor/highlight/core.js`: highlight.js's core for the page's code blocks ([`preview::highlight_asset`]).
+async fn highlight_core(State(state): State<AppState>) -> Response {
+    highlight_module(&state, "core.js")
+}
+
+/// `GET /vendor/highlight/languages/<name>.js`: one of the grammars the TypeScript server registers.
+async fn highlight_grammar(
+    State(state): State<AppState>,
+    axum::extract::Path(grammar): axum::extract::Path<String>,
+) -> Response {
+    highlight_module(&state, &format!("languages/{grammar}"))
+}
+
+fn highlight_module(state: &AppState, name: &str) -> Response {
+    match preview::highlight_asset(&state.options().asset_roots, name) {
+        Some(module) => Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/javascript; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(module))
+            .expect("a response builder with static headers"),
+        None => respond::text(
+            StatusCode::NOT_FOUND,
+            "that highlighter module is not served\n",
+        ),
+    }
+}
+
 async fn purify(State(state): State<AppState>) -> Response {
     // The browser loads this as a script, so it is served as JavaScript rather than through the
     // inline/download file answer: an `attachment` content-disposition here would leave the preview
     // page without a sanitiser.
-    let Some(path) = preview::purify_path(&state.options().asset_roots) else {
-        return respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n");
-    };
-    match std::fs::read(&path) {
-        Ok(bytes) => Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/javascript; charset=utf-8")
-            .header("cache-control", "no-store")
-            .body(Body::from(bytes))
-            .expect("a response builder with static headers"),
-        Err(_) => respond::text(StatusCode::NOT_FOUND, "the sanitiser is not installed\n"),
-    }
+    // An installed package wins, so a checkout serves the version the TypeScript build serves; without one the binary
+    // serves its own copy (live issue #39), so a Rust deployment does not depend on a Node install.
+    let bytes = preview::purify_path(&state.options().asset_roots)
+        .and_then(|path| std::fs::read(path).ok())
+        .unwrap_or_else(|| preview::EMBEDDED_PURIFY.as_bytes().to_vec());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/javascript; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Body::from(bytes))
+        .expect("a response builder with static headers")
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1585,8 +2258,54 @@ fn without_nagle(
     })
 }
 
+/// The body of the `409` a turn into a one-shot subagent's session gets, or `None` when the session takes turns —
+/// web.ts `subagentTurnRefusal`.
+///
+/// DSH's generic session route leaves a subagent's child to subagent routing and refuses a prompt into it with
+/// `session/agent-busy`, `session "<id>" is owned by subagent routing`, reason `use subagent delivery for this child
+/// session` (dsh-api-session-controller `lib/index.js:128-142`, reached from `prompt` at `:925-926`). A one-shot child
+/// has no delivery at all: `delegate` runs it for one task and settles it. Phase A measured both builds answering
+/// `200` and growing the child's log (R-developer-eight-26). A teammate (`teamId`) is a continuable child, as DSH's
+/// teammates are, and this route is the delivery the page uses for it, so it is not refused.
+fn subagent_turn_refusal(meta: Option<&SessionMeta>) -> Option<Value> {
+    let meta = meta?;
+    if meta.rest.get("origin").and_then(Value::as_str) != Some("subagent") {
+        return None;
+    }
+    if meta
+        .rest
+        .get("teamId")
+        .and_then(Value::as_str)
+        .is_some_and(|team| !team.is_empty())
+    {
+        return None;
+    }
+    Some(json!({
+        "error": format!("session \"{}\" is owned by subagent routing", meta.id),
+        "code": "session/agent-busy",
+        "reason": "use subagent delivery for this child session",
+    }))
+}
+
+/// A turn asked for during the shutdown grace: the running turns were already stopped, so one started now would run a
+/// command nothing ends before the process goes (developer-nine's follow-up to issue #6).
+fn closing_refusal() -> Response {
+    respond::error_with_code(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the server is shutting down",
+        "server/closing",
+    )
+}
+
 async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
-    let Some(prompt) = body.str("prompt").filter(|prompt| !prompt.is_empty()) else {
+    if state.runs().is_closing() {
+        return closing_refusal();
+    }
+    // A prompt of only whitespace is no prompt (#32), as DSH's `hasPromptContent` refuses blank text.
+    let Some(prompt) = body
+        .str("prompt")
+        .filter(|prompt| !prompt.trim().is_empty())
+    else {
         return respond::text(StatusCode::BAD_REQUEST, "a prompt is required\n");
     };
     let attachments = match state.harness().attachments.as_ref() {
@@ -1613,6 +2332,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         );
     }
 
+    // The agent preset the request names (inventory A96), checked before a session exists, as the endpoint is.
+    let named_preset = match requested_preset(&state, &body) {
+        Ok(named) => named,
+        Err(refusal) => return respond::text(StatusCode::BAD_REQUEST, format!("{refusal}\n")),
+    };
+    let born_preset = new_session_preset(&state, named_preset.as_deref());
     let born = SessionSelection {
         endpoint: requested_endpoint.map(str::to_owned),
         model: requested_model.map(str::to_owned),
@@ -1620,8 +2345,43 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
     };
     let sessions = &state.harness().sessions;
     let resume = body.str("session").filter(|id| !id.is_empty());
+    // A turn for a session that does not exist is the client's mistake, answered the way DSH answers it
+    // (`session/not-found`, dsh-api-session-controller) and the way the other session routes do (`404`,
+    // `no session <id>`), with the same shape as web.ts. It used to reach the resume and come back as a
+    // `400` naming the session root on disk (DSH parity R-developer-seven-2). A string that is not a
+    // session id names no session either, and is not echoed back or used as a path.
+    if let Some(resume) = resume {
+        let well_formed = SessionId::parse(resume).is_some();
+        if !well_formed || !sessions.exists(resume) {
+            let message = if well_formed {
+                format!("no session {resume}")
+            } else {
+                "no session with that id".to_owned()
+            };
+            return respond::error_with_code(StatusCode::NOT_FOUND, message, "session/not-found");
+        }
+    }
     let folder = body.non_empty("folder").map(canonical_path);
-    let title: String = prompt.chars().take(60).collect();
+    // A session this route opens is born untitled, as DSH's is (#68): its first message writes the fallback name and
+    // the session layer's title coordinator asks the model for the title (heddle_session::title). A title given here
+    // would read as a person's name, and no title would ever be generated.
+    // A one-shot subagent's session takes no turn from here, refused before the session is opened so the child's log
+    // gets nothing (web.ts asks `subagentTurnRefusal` at the same point).
+    if let Some(resume) = resume {
+        let resumed = sessions.meta(resume);
+        if let Some(refusal) = subagent_turn_refusal(resumed.as_ref()) {
+            return respond::json_compact(StatusCode::CONFLICT, &refusal);
+        }
+        // A session keeps the preset it was created with (DSH): another one named for it is refused before it is
+        // opened.
+        if let (Some(named), Some(recorded)) = (
+            named_preset.as_deref(),
+            resumed.as_ref().and_then(|meta| meta.preset()),
+        ) && recorded != named
+        {
+            return preset_fixed(recorded);
+        }
+    }
     let session = if let Some(resume) = resume {
         // A resumed session keeps the selection it recorded; only a session this request creates is
         // born with the request's choice (web.ts passes `{ resume }` alone).
@@ -1630,6 +2390,7 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             cwd: None,
             title: None,
             selection: SessionSelection::default(),
+            preset: None,
         })
     } else if let Some(folder) = folder.as_ref() {
         // web.ts opens the folder's session whether or not a workspace owns the folder, then adopts it
@@ -1639,16 +2400,18 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
             folder,
             OpenAt {
                 fresh: body.bool("new") == Some(true),
-                title: Some(title),
+                title: None,
                 selection: born.clone(),
+                preset: born_preset.clone(),
             },
         )
     } else {
         sessions.start(StartSession {
             resume: None,
             cwd: Some(state.harness().cwd.clone()),
-            title: Some(title),
+            title: None,
             selection: born.clone(),
+            preset: born_preset.clone(),
         })
     };
     let session = match session {
@@ -1659,6 +2422,17 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         && let Some(workspaces) = state.harness().workspaces.as_ref()
     {
         workspaces.ensure_owner(folder);
+    }
+    // The same rule for a folder's existing session, which is only known once it is opened: another preset named for
+    // it is refused rather than silently ignored or applied. A session that recorded none takes the named one, but only
+    // once the endpoint checks below have passed, so a refused turn records nothing.
+    let recorded_preset = sessions
+        .meta(&session)
+        .and_then(|meta| meta.preset().map(str::to_owned));
+    if let (Some(named), Some(recorded)) = (named_preset.as_deref(), recorded_preset.as_deref())
+        && recorded != named
+    {
+        return preset_fixed(recorded);
     }
 
     let meta = sessions.meta(&session);
@@ -1696,7 +2470,18 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         };
         sessions.set_model(&session, &recorded_selection);
     }
+    // The preset the request named, for a session that recorded none: now that nothing above refused the turn.
+    if let Some(named) = named_preset.as_deref()
+        && recorded_preset.is_none()
+    {
+        sessions.record_preset(&session, named);
+    }
 
+    // Checked again here: the shutdown may have begun while the session was opened. A turn that slips past this
+    // starts stopped (`RunRegistry::begin`).
+    if state.runs().is_closing() {
+        return closing_refusal();
+    }
     let guard = state.runs().begin(&session);
     let cancel = guard.cancellation();
     let request = crate::services::TurnRequest {
@@ -1710,6 +2495,49 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         reasoning_effort: selection.reasoning_effort.clone(),
     };
     let runner = state.harness().turns.clone();
+    let sessions = state.harness().sessions.clone();
+    if body.bool("detach") == Some(true) {
+        // Detached (#128): the answer is `202 {session, turn}` once the turn's first event is in the log, normally
+        // its prompt, and the turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six
+        // connections per host, shared by every tab, and a turn that holds its own response open for minutes
+        // holds one of them, so five running turns stalled every other request of the page. Answering only after
+        // the first event keeps what the streamed answer's first frame meant: the page adopts a session it created
+        // from this answer and redraws the log from its history, so an earlier answer lost the person's message.
+        // The verdict goes through the hub's log after every event the turn published, so it is replayed to a page
+        // that reconnects and never arrives before the answer it closes. Without `detach` the response streams.
+        let turn_id = stream::new_client_id();
+        let hub = state.events().clone();
+        let mut first = Box::pin(state.events().subscribe().for_session(session.clone()));
+        let (ended, ended_signal) = tokio::sync::oneshot::channel::<()>();
+        let turn_session = session.clone();
+        let verdict_turn = turn_id.clone();
+        tokio::spawn(async move {
+            let outcome = runner.run_turn(request).await;
+            let _ = ended.send(());
+            drop(guard);
+            let (outcome_name, mut verdict, failure) =
+                turn_verdict(outcome, cancel.is_cancelled(), &turn_session, false);
+            verdict.insert("turn".into(), Value::String(verdict_turn));
+            verdict.insert("outcome".into(), Value::String(outcome_name.to_owned()));
+            hub.push(names::TURN, &Value::Object(verdict));
+            if let Some(message) = failure {
+                record_turn_failure(sessions.as_ref(), &turn_session, message);
+            }
+        });
+        // The first event, the turn's end, or 10 s behind another turn of the session, whichever comes first.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            use futures::StreamExt;
+            tokio::select! {
+                _ = first.next() => {}
+                _ = ended_signal => {}
+            }
+        })
+        .await;
+        return respond::json(
+            StatusCode::ACCEPTED,
+            &json!({"session": session, "turn": turn_id}),
+        );
+    }
     let mut frames = Box::pin(state.events().subscribe().for_session(session.clone()));
     let (sender, receiver) = mpsc::unbounded_channel::<SseFrame>();
     let stream_session = session.clone();
@@ -1754,45 +2582,12 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         // stream had taken the text (16db838) made a page more likely to handle `done` mid-answer, which is
         // the window in which page.html's renderSettledAnswers overwrites a growing row (80 check-chat-view
         // #16): measured on a cold-browser harness, 5 failures in 200 with the wait and 1 in 200 without.
-        let stopped = || {
-            SseFrame::new(
-                names::CANCELLED,
-                &json!({"session": stream_session, "message": "stopped"}),
-            )
-        };
-        match outcome {
-            None => {}
-            Some(Ok(outcome)) => {
-                if cancel.is_cancelled() {
-                    let _ = sender.send(stopped());
-                } else {
-                    let mut done = Map::new();
-                    done.insert("session".into(), Value::String(stream_session));
-                    done.insert("text".into(), Value::String(outcome.text));
-                    done.insert("finishReason".into(), Value::String(outcome.finish_reason));
-                    done.insert("rounds".into(), Value::from(outcome.rounds));
-                    done.insert("denials".into(), Value::Array(outcome.denials));
-                    if let Some(ended) = outcome.ended {
-                        done.insert(
-                            "ended".into(),
-                            Value::Array(ended.into_iter().map(Value::String).collect()),
-                        );
-                    }
-                    if let Some(usage) = outcome.usage {
-                        done.insert("usage".into(), usage);
-                    }
-                    let _ = sender.send(SseFrame::new(names::DONE, &Value::Object(done)));
-                }
-            }
-            Some(Err(error)) => {
-                if cancel.is_cancelled() {
-                    let _ = sender.send(stopped());
-                } else {
-                    let _ = sender.send(SseFrame::new(
-                        names::ERROR,
-                        &json!({"session": stream_session, "message": error.message}),
-                    ));
-                }
+        if let Some(outcome) = outcome {
+            let (name, frame, failure) =
+                turn_verdict(outcome, cancel.is_cancelled(), &stream_session, true);
+            let _ = sender.send(SseFrame::new(name, &Value::Object(frame)));
+            if let Some(message) = failure {
+                record_turn_failure(sessions.as_ref(), &stream_session, message);
             }
         }
     });
@@ -1800,6 +2595,486 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         receiver.recv().await.map(|frame| (frame, receiver))
     });
     sse_response(stream)
+}
+
+/// The frame a turn ends with, `(name, data, failure)`: `done` with what the loop returned, `cancelled` for a
+/// stopped turn (including a loop that noticed the abort and returned a result), or `error`, whose message
+/// comes back as `failure` for the caller to record as `turn/failed`. `with_text` is false for a detached
+/// turn's verdict on `/api/events`, which already carried the answer as the session's own events, so the
+/// stream's log does not keep a second copy (web.ts's `turnVerdict` is the same rule).
+fn turn_verdict(
+    outcome: Result<crate::services::TurnOutcome, ServiceError>,
+    cancelled: bool,
+    session: &str,
+    with_text: bool,
+) -> (&'static str, Map<String, Value>, Option<String>) {
+    let mut frame = Map::new();
+    frame.insert("session".into(), Value::String(session.to_owned()));
+    if cancelled {
+        frame.insert("message".into(), Value::String("stopped".into()));
+        return (names::CANCELLED, frame, None);
+    }
+    match outcome {
+        Ok(outcome) => {
+            if with_text {
+                frame.insert("text".into(), Value::String(outcome.text));
+            }
+            frame.insert("finishReason".into(), Value::String(outcome.finish_reason));
+            frame.insert("rounds".into(), Value::from(outcome.rounds));
+            frame.insert("denials".into(), Value::Array(outcome.denials));
+            if let Some(ended) = outcome.ended {
+                frame.insert(
+                    "ended".into(),
+                    Value::Array(ended.into_iter().map(Value::String).collect()),
+                );
+            }
+            if let Some(usage) = outcome.usage {
+                frame.insert("usage".into(), usage);
+            }
+            (names::DONE, frame, None)
+        }
+        Err(error) => {
+            frame.insert("message".into(), Value::String(error.message.clone()));
+            (names::ERROR, frame, Some(error.message))
+        }
+    }
+}
+
+/// Record a failed turn as `turn/failed`, so the failure reaches every client and every later read
+/// (R-developer-six-2, DSH's api-session/error); web.ts appends the same record.
+fn record_turn_failure(sessions: &dyn SessionService, session: &str, message: String) {
+    if let Err(failure) = sessions.record(session, "turn/failed", json!({"message": message})) {
+        eprintln!(
+            "heddle web: the failed turn could not be recorded: {}",
+            failure.message
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Terminals (#85)
+
+/// Whether a write says it is JSON (`/^application\/json\s*(;|$)/i`, as web.ts judges it). A page sends JSON,
+/// and a form on another site cannot.
+fn json_write(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.strip_prefix("application/json").is_some_and(|rest| {
+                let rest = rest.trim_start();
+                rest.is_empty() || rest.starts_with(';')
+            })
+        })
+}
+
+fn not_json_write() -> Response {
+    respond::error(
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "a terminal request must be sent as application/json",
+    )
+}
+
+/// The checks every terminal route makes after the door, in web.ts's order:
+/// - the session id's shape (`400`);
+/// - the session is this server's (`404`) and its folder sits under one of its workspace roots (`403`);
+/// - an archived session is refused (`409`).
+///
+/// `lenient` is for listing and closing, which stay open to an archived session and to one whose workspace was
+/// removed, so its terminals can still be ended.
+fn terminal_session(
+    state: &AppState,
+    raw: &str,
+    lenient: bool,
+) -> Result<(SessionId, SessionMeta), Box<Response>> {
+    let id = SessionId::parse(raw).ok_or_else(|| Box::new(respond::not_a_session_id()))?;
+    let meta = state
+        .harness()
+        .sessions
+        .meta(id.as_str())
+        .ok_or_else(|| Box::new(respond::no_session(id.as_str())))?;
+    if let Some(workspaces) = &state.harness().workspaces
+        && !lenient
+        && !workspaces.owns(&canonical_path(meta.cwd.as_deref().unwrap_or("")))
+    {
+        return Err(Box::new(respond::error_with_code(
+            StatusCode::FORBIDDEN,
+            format!("session {id} is not under any workspace root of this server"),
+            "not-owned",
+        )));
+    }
+    if is_archived(&meta) && !lenient {
+        return Err(Box::new(respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!("session {id} is archived"),
+            "archived",
+        )));
+    }
+    Ok((id, meta))
+}
+
+fn is_archived(meta: &SessionMeta) -> bool {
+    meta.rest.get("archived").and_then(Value::as_bool) == Some(true)
+}
+
+/// A write's JSON body, read after the checks as web.ts reads it: over `MAX_JSON_BODY` is `413 request too large`,
+/// empty is `{}`, a non-object is `{}`, and anything else is `400 the body must be JSON`.
+async fn terminal_body(body: Body) -> Result<Map<String, Value>, Box<Response>> {
+    let Ok(bytes) = axum::body::to_bytes(body, respond::MAX_JSON_BODY).await else {
+        return Err(Box::new(respond::text(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "request too large\n",
+        )));
+    };
+    if bytes.is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Object(map)) => Ok(map),
+        Ok(_) => Ok(Map::new()),
+        Err(_) => Err(Box::new(respond::text(
+            StatusCode::BAD_REQUEST,
+            "the body must be JSON\n",
+        ))),
+    }
+}
+
+fn no_terminal(terminal: &str, session: &SessionId) -> Response {
+    respond::error(
+        StatusCode::NOT_FOUND,
+        format!("no terminal {terminal} in session {session}"),
+    )
+}
+
+fn terminal_size_refusal(state: &AppState) -> Response {
+    let limits = state.terminals().limits();
+    respond::error(
+        StatusCode::BAD_REQUEST,
+        format!(
+            "cols and rows must be whole numbers from 1 to {} and {}",
+            limits.max_cols, limits.max_rows
+        ),
+    )
+}
+
+async fn list_terminals(
+    State(state): State<AppState>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> Response {
+    let (id, _) = match terminal_session(&state, &raw, true) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    respond::json_compact(
+        StatusCode::OK,
+        &json!({
+            "terminals": state.terminals().list(id.as_str()),
+            "limits": state.terminals().limits(),
+        }),
+    )
+}
+
+async fn create_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(raw): axum::extract::Path<String>,
+    body: Body,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, meta) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(body).await {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let size = |key: &str, default: f64| match body.get(key) {
+        None => Some(default),
+        Some(value) => value.as_f64(),
+    };
+    let (Some(cols), Some(rows)) = (size("cols", 80.0), size("rows", 24.0)) else {
+        return terminal_size_refusal(&state);
+    };
+    let limits = state.terminals().limits();
+    if !limits.fits(cols, rows) {
+        return terminal_size_refusal(&state);
+    }
+    let sandbox = state.harness().sandbox.clone();
+    let mode = state
+        .harness()
+        .sessions
+        .effective_mode(id.as_str(), &sandbox.default_mode());
+    let root = sandbox.root_for(meta.cwd.as_deref().map(std::path::Path::new));
+    if !root.is_dir() {
+        return respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "the session's folder {} is not an available directory",
+                root.display()
+            ),
+            "cwd-missing",
+        );
+    }
+    let spawn = TerminalSpawn {
+        session: id.as_str().to_owned(),
+        cwd: root.clone(),
+        mode: mode.clone(),
+        cols: cols as u32,
+        rows: rows as u32,
+        shell: None,
+    };
+    match state
+        .terminals()
+        .create(spawn, |argv| sandbox.confine(argv, &mode, &root))
+    {
+        Ok(info) => {
+            // An archive that landed while this request was in flight found nothing to close, so the archive is
+            // read again now that the terminal exists, and a terminal on an archived session is ended at once.
+            let archived_now = state
+                .harness()
+                .sessions
+                .meta(id.as_str())
+                .is_some_and(|meta| is_archived(&meta));
+            if archived_now {
+                state.terminals().close(id.as_str(), &info.id).await;
+                return respond::error_with_code(
+                    StatusCode::CONFLICT,
+                    format!("session {id} is archived"),
+                    "archived",
+                );
+            }
+            // The same race for the permission mode: a mode change that landed during the spawn closed only the
+            // terminals already inserted, so this one would keep the old, possibly wider, confinement. It is ended
+            // and refused rather than kept. TypeScript needs no twin: its create is synchronous after the mode read.
+            let mode_now = state
+                .harness()
+                .sessions
+                .effective_mode(id.as_str(), &sandbox.default_mode());
+            if mode_now != mode {
+                state.terminals().close(id.as_str(), &info.id).await;
+                return respond::error_with_code(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "session {id}'s permission mode changed to {mode_now} while the terminal was starting; open it again"
+                    ),
+                    "mode-changed",
+                );
+            }
+            respond::json_compact(StatusCode::CREATED, &json!({ "terminal": info }))
+        }
+        Err(CreateRefusal::Closed) => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the server is shutting down",
+            "shutting-down",
+        ),
+        Err(CreateRefusal::Limit) => respond::error_with_code(
+            StatusCode::CONFLICT,
+            format!(
+                "session {id} already holds {} terminals; close one first",
+                limits.max_terminals
+            ),
+            "limit",
+        ),
+        Err(CreateRefusal::Sandbox(message)) => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            message,
+            "sandbox-unavailable",
+        ),
+        Err(CreateRefusal::Spawn(message)) => respond::internal_error(message),
+    }
+}
+
+async fn close_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, true) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    if !state.terminals().close(id.as_str(), &terminal).await {
+        return no_terminal(&terminal, &id);
+    }
+    respond::json_compact(
+        StatusCode::OK,
+        &json!({ "closed": true, "terminal": terminal }),
+    )
+}
+
+async fn input_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+    body: Body,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(body).await {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let Some(data) = body.get("data").and_then(Value::as_str) else {
+        return respond::error(StatusCode::BAD_REQUEST, "data must be a string");
+    };
+    match state.terminals().input(id.as_str(), &terminal, data).await {
+        InputResult::Ok => respond::json_compact(StatusCode::OK, &json!({ "ok": true })),
+        InputResult::Missing => no_terminal(&terminal, &id),
+        InputResult::Exited => {
+            respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
+        }
+        InputResult::Busy => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the terminal has too much input waiting; try again",
+            "busy",
+        ),
+        InputResult::TooLarge => respond::error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "input is limited to {} bytes per request",
+                state.terminals().limits().max_input_bytes
+            ),
+        ),
+    }
+}
+
+async fn resize_terminal(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+    body: Body,
+) -> Response {
+    if !json_write(&headers) {
+        return not_json_write();
+    }
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let body = match terminal_body(body).await {
+        Ok(body) => body,
+        Err(refusal) => return *refusal,
+    };
+    let (Some(cols), Some(rows)) = (
+        body.get("cols").and_then(Value::as_f64),
+        body.get("rows").and_then(Value::as_f64),
+    ) else {
+        return respond::error(
+            StatusCode::BAD_REQUEST,
+            "cols and rows are required numbers",
+        );
+    };
+    match state
+        .terminals()
+        .resize(id.as_str(), &terminal, cols, rows)
+        .await
+    {
+        ResizeResult::Ok => respond::json_compact(
+            StatusCode::OK,
+            &json!({ "ok": true, "cols": cols as u32, "rows": rows as u32 }),
+        ),
+        ResizeResult::Missing => no_terminal(&terminal, &id),
+        ResizeResult::Exited => {
+            respond::error_with_code(StatusCode::CONFLICT, "the terminal has exited", "exited")
+        }
+        ResizeResult::OutOfRange => terminal_size_refusal(&state),
+        ResizeResult::Unavailable => respond::error_with_code(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the terminal could not be resized",
+            "unavailable",
+        ),
+    }
+}
+
+/// One frame of a terminal stream, as web.ts writes it: `event: <type>` and the event's JSON.
+fn terminal_frame(event: &TerminalEvent) -> String {
+    let name = match event {
+        TerminalEvent::Output { .. } => "output",
+        TerminalEvent::Exit { .. } => "exit",
+    };
+    format!(
+        "event: {name}\ndata: {}\n\n",
+        serde_json::to_string(event).expect("a terminal event serializes")
+    )
+}
+
+/// One terminal's output as an event stream: a `snapshot` of the retained tail first, then `output` frames and
+/// one `exit`, after which the stream ends. The listener is attached before the snapshot is taken, so no output
+/// falls between them. A heartbeat comment keeps an idle stream open; dropping the body detaches.
+async fn stream_terminal(
+    State(state): State<AppState>,
+    axum::extract::Path((raw, terminal)): axum::extract::Path<(String, String)>,
+) -> Response {
+    use futures::StreamExt;
+
+    let (id, _) = match terminal_session(&state, &raw, false) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let Some((snapshot, receiver, hold)) = state.terminals().attach(id.as_str(), &terminal) else {
+        return no_terminal(&terminal, &id);
+    };
+    let opening = format!(
+        "{}event: snapshot\ndata: {}\n\n",
+        stream::STREAM_OPEN,
+        serde_json::to_string(&snapshot).expect("a snapshot serializes")
+    );
+    let ended = snapshot.exited;
+    let closing = ended.then(|| {
+        terminal_frame(&TerminalEvent::Exit {
+            code: snapshot.exit_code,
+        })
+    });
+    let mut ticker = tokio::time::interval(stream::heartbeat_interval());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let live = futures::stream::unfold(
+        (receiver, hold, ticker, ended, false),
+        |(mut receiver, hold, mut ticker, ended, primed)| async move {
+            if ended {
+                return None;
+            }
+            let mut primed = primed;
+            if !primed {
+                // The first tick of an interval completes at once; it is spent here, not sent.
+                ticker.tick().await;
+                primed = true;
+            }
+            tokio::select! {
+                event = receiver.recv() => match event {
+                    Some(event) => {
+                        let last = matches!(event, TerminalEvent::Exit { .. });
+                        Some((terminal_frame(&event), (receiver, hold, ticker, last, primed)))
+                    }
+                    None => None,
+                },
+                _ = ticker.tick() => Some((": heartbeat\n\n".to_owned(), (receiver, hold, ticker, false, primed))),
+            }
+        },
+    );
+    let body = futures::stream::once(async move { opening })
+        .chain(futures::stream::iter(closing))
+        .chain(live)
+        .map(Ok::<_, std::io::Error>);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-store")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(body))
+        .expect("a response builder with static headers")
 }
 
 #[cfg(test)]
@@ -1816,9 +3091,46 @@ mod tests {
     use std::path::Path;
     use tower::ServiceExt;
 
+    #[test]
+    fn a_fork_cut_is_a_non_negative_safe_integer_or_absent() {
+        // DSH's `atSeq` (dsh-api-session-controller/lib/index.js:856-861).
+        let body = |value: Value| JsonBody(value.as_object().cloned().unwrap_or_default());
+        assert_eq!(fork_cut(&body(json!({}))), Ok(None));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 13}))), Ok(Some(13)));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 13.0}))), Ok(Some(13)));
+        assert_eq!(fork_cut(&body(json!({"atSeq": 0}))), Ok(Some(0)));
+        for bad in [
+            json!(-1),
+            json!(1.5),
+            json!("13"),
+            json!(null),
+            json!(9_007_199_254_740_992_u64),
+        ] {
+            assert_eq!(
+                fork_cut(&body(json!({"atSeq": bad}))),
+                Err(()),
+                "refused: {bad}"
+            );
+        }
+    }
+
     struct Sessions {
         metas: Vec<SessionMeta>,
         events: HashMap<String, Vec<Value>>,
+        /// Answers for successive `effective_mode` reads, first to last; the fallback once it is empty.
+        modes: std::sync::Mutex<Vec<String>>,
+        /// Every `record` call, as `(session, type, fields)`.
+        recorded: std::sync::Mutex<Vec<(String, String, Value)>>,
+        /// What a flags write answers.
+        flags: FlagsAnswer,
+    }
+
+    /// A flags write's outcome: the record, no such session, or the store's refusal of a pin on an archived session.
+    #[derive(Clone, Copy, Debug)]
+    enum FlagsAnswer {
+        Written,
+        Missing,
+        Refused,
     }
 
     impl Sessions {
@@ -1833,11 +3145,21 @@ mod tests {
                     ..SessionMeta::default()
                 }],
                 events: HashMap::new(),
+                modes: std::sync::Mutex::new(Vec::new()),
+                recorded: std::sync::Mutex::new(Vec::new()),
+                flags: FlagsAnswer::Written,
             }
         }
     }
 
     impl SessionService for Sessions {
+        fn record(&self, id: &str, kind: &str, fields: Value) -> Result<(), ServiceError> {
+            self.recorded
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), kind.to_owned(), fields));
+            Ok(())
+        }
         fn list(&self) -> Vec<SessionMeta> {
             self.metas.clone()
         }
@@ -1857,6 +3179,7 @@ mod tests {
             &self,
             _branch: &Path,
             _title: Option<&str>,
+            _preset: Option<&str>,
         ) -> Result<CreatedSession, ServiceError> {
             Ok(CreatedSession {
                 session: self.metas[0].id.clone(),
@@ -1865,15 +3188,22 @@ mod tests {
                 log: "log.zst".into(),
             })
         }
-        fn fork(&self, _id: &str) -> ForkOutcome {
+        fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
             ForkOutcome::NotFound
         }
         fn set_flags(
             &self,
-            _id: &str,
+            id: &str,
             _patch: FlagPatch,
         ) -> Result<Option<SessionMeta>, ServiceError> {
-            Ok(self.metas.first().cloned())
+            match self.flags {
+                FlagsAnswer::Written => Ok(self.metas.first().cloned()),
+                FlagsAnswer::Missing => Ok(None),
+                FlagsAnswer::Refused => Err(ServiceError::with_code(
+                    format!("session {id} is archived and cannot be pinned"),
+                    "archived",
+                )),
+            }
         }
         fn rename(&self, _id: &str, _title: &str) -> Option<SessionMeta> {
             self.metas.first().cloned()
@@ -1892,7 +3222,12 @@ mod tests {
             self.metas.first().cloned()
         }
         fn effective_mode(&self, _id: &str, fallback: &str) -> String {
-            fallback.to_owned()
+            let mut modes = self.modes.lock().unwrap();
+            if modes.is_empty() {
+                fallback.to_owned()
+            } else {
+                modes.remove(0)
+            }
         }
         fn set_mode(
             &self,
@@ -2048,10 +3383,59 @@ mod tests {
         harness
     }
 
+    /// A folder a test made under the system temp dir, removed when it is dropped.
+    struct TempFolder(PathBuf);
+
+    impl Drop for TempFolder {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    thread_local! {
+        /// The temp folders of the test running on this thread. The harness runs each test on its own thread, and a
+        /// thread's locals are dropped when it ends, after a panic's unwinding too, so a failing test cleans up as a
+        /// passing one does. Before, every run left its `heddle-server-test-*` folders in TMPDIR (1,218 counted).
+        static TEMP_FOLDERS: std::cell::RefCell<Vec<TempFolder>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A secret path in a folder of its own, owned by the calling test: labels are unique per test, so no two
+    /// running tests share a folder, and the folder goes when the test's thread ends.
     fn temp_secret(label: &str) -> PathBuf {
-        std::env::temp_dir()
-            .join(format!("heddle-server-test-{label}-{}", std::process::id()))
-            .join("web-secret")
+        let folder =
+            std::env::temp_dir().join(format!("heddle-server-test-{label}-{}", std::process::id()));
+        TEMP_FOLDERS.with(|folders| folders.borrow_mut().push(TempFolder(folder.clone())));
+        folder.join("web-secret")
+    }
+
+    #[test]
+    fn a_tests_temp_folder_is_removed_when_its_thread_ends() {
+        let folder = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe");
+            let folder = secret.parent().unwrap().to_path_buf();
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(&secret, "s").unwrap();
+            assert!(folder.exists());
+            folder
+        })
+        .join()
+        .unwrap();
+        assert!(
+            !folder.exists(),
+            "the folder went with the thread that made it"
+        );
+        let panicked = std::thread::spawn(|| {
+            let secret = temp_secret("cleanup-probe-panic");
+            std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+            panic!("a failing test");
+        })
+        .join();
+        assert!(panicked.is_err());
+        let folder = std::env::temp_dir().join(format!(
+            "heddle-server-test-cleanup-probe-panic-{}",
+            std::process::id()
+        ));
+        assert!(!folder.exists(), "and a panicking test cleans up too");
     }
 
     fn app(label: &str) -> (Router, AppState) {
@@ -2349,6 +3733,99 @@ mod tests {
                 "parent": null, "createdAt": "a", "updatedAt": "a", "sessionIds": ids}]),
             )
         }
+        fn initialize_default(
+            &self,
+            sessions: &[SessionMeta],
+        ) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(
+                json!({"id": "w-default", "title": "default-workspace", "seen": sessions.len()}),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn first_use_answers_the_registry_default_and_null_from_a_double_that_has_none() {
+        let (router, _) = app("workspaces-default-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, _) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no plugin, no first use"
+        );
+
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-default")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::POST,
+            "/api/workspaces/default",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["workspace"]["id"], "w-default", "{body}");
+        assert_eq!(
+            body["workspace"]["seen"], 1,
+            "the route hands the registry the store's sessions: {body}"
+        );
+        // The trait's own default — a registry that does not model first use — answers `null`.
+        let none = crate::services::WorkspaceService::initialize_default(&NoDefault, &[]).unwrap();
+        assert_eq!(none, None);
+    }
+
+    /// A registry double that keeps every trait default, so the default `initialize_default` is the one judged.
+    struct NoDefault;
+
+    impl crate::services::WorkspaceService for NoDefault {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            false
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
     }
 
     #[tokio::test]
@@ -2390,6 +3867,559 @@ mod tests {
         );
     }
 
+    /// A registry double for the reorder route: an order of three ids, moved as DSH's `insertBefore` does,
+    /// recording what the route handed it.
+    #[derive(Default)]
+    struct OrderWorkspaces {
+        asked: std::sync::Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl crate::services::WorkspaceService for OrderWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn insert_before(
+            &self,
+            id: &str,
+            before: Option<&str>,
+        ) -> Result<Vec<String>, ServiceError> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((id.to_owned(), before.map(str::to_owned)));
+            let order = ["w-1", "w-2", "w-3"];
+            for key in std::iter::once(id).chain(before) {
+                if !order.contains(&key) {
+                    return Err(crate::services::workspace_not_found(key));
+                }
+            }
+            let mut moved: Vec<String> = order
+                .iter()
+                .filter(|each| **each != id)
+                .map(|each| (*each).to_owned())
+                .collect();
+            let at = before
+                .and_then(|anchor| moved.iter().position(|each| each == anchor))
+                .unwrap_or(moved.len());
+            moved.insert(at, id.to_owned());
+            Ok(moved)
+        }
+    }
+
+    #[tokio::test]
+    async fn the_reorder_route_answers_the_complete_order_and_dshs_not_found() {
+        // Without the plugin: the same refusal every workspace route gives.
+        let (router, _) = app("workspaces-order-missing");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _) = post_json(
+            &router,
+            "/api/workspaces/insertBefore",
+            &cookie,
+            r#"{"workspaceId":"w-1"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let registry = Arc::new(OrderWorkspaces::default());
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-order")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let post = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            async move {
+                let (status, bytes) =
+                    post_json(&router, "/api/workspaces/insertBefore", &cookie, body).await;
+                (status, String::from_utf8(bytes).unwrap())
+            }
+        };
+
+        // Before an anchor: `{workspaceIds}`, the complete order, as web.ts writes it.
+        let (status, text) = post(r#"{"workspaceId":"w-3","beforeWorkspaceId":"w-1"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert_eq!(
+            text,
+            "{\n  \"workspaceIds\": [\n    \"w-3\",\n    \"w-1\",\n    \"w-2\"\n  ]\n}\n"
+        );
+        // No anchor, or a null one, appends.
+        let (_, text) = post(r#"{"workspaceId":"w-1"}"#).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&text).unwrap()["workspaceIds"],
+            json!(["w-2", "w-3", "w-1"])
+        );
+        let (status, _) = post(r#"{"workspaceId":"w-1","beforeWorkspaceId":null}"#).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // An unknown workspace or anchor: 404 with DSH's code and sentence, naming the one missing.
+        let (status, text) = post(r#"{"workspaceId":"w-9","beforeWorkspaceId":"w-1"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            text,
+            "{\"error\":\"Workspace \\\"w-9\\\" not found\",\"code\":\"workspace/not-found\"}\n"
+        );
+        let (status, text) = post(r#"{"workspaceId":"w-1","beforeWorkspaceId":"w-8"}"#).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(text.contains(r#"Workspace \"w-8\" not found"#), "{text}");
+
+        // A request without a workspace, or with an anchor that is not an id, is refused before the
+        // registry is asked.
+        let asked = registry.asked.lock().unwrap().len();
+        for body in [
+            r#"{}"#,
+            r#"{"workspaceId":""}"#,
+            r#"{"workspaceId":3}"#,
+            r#"{"workspaceId":"w-1","beforeWorkspaceId":7}"#,
+            r#"{"workspaceId":"w-1","beforeWorkspaceId":""}"#,
+        ] {
+            let (status, text) = post(body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {text}");
+        }
+        assert_eq!(registry.asked.lock().unwrap().len(), asked);
+        assert_eq!(
+            registry.asked.lock().unwrap()[0],
+            ("w-3".to_owned(), Some("w-1".to_owned()))
+        );
+    }
+
+    /// A registry double that keeps an order and says whether a move moved it, as `heddle_workspace`'s
+    /// `reorder` does.
+    struct KeptOrder {
+        order: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::WorkspaceService for KeptOrder {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn reorder(
+            &self,
+            id: &str,
+            before: Option<&str>,
+        ) -> Result<(Vec<String>, bool), ServiceError> {
+            let mut order = self.order.lock().unwrap();
+            if before == Some(id) {
+                return Ok((order.clone(), false));
+            }
+            let mut moved: Vec<String> = order.iter().filter(|each| *each != id).cloned().collect();
+            let at = before
+                .and_then(|anchor| moved.iter().position(|each| each == anchor))
+                .unwrap_or(moved.len());
+            moved.insert(at, id.to_owned());
+            let changed = moved != *order;
+            *order = moved.clone();
+            Ok((moved, changed))
+        }
+    }
+
+    /// A move is pushed to every open page as a `workspace` frame naming the order (#136), as an added, renamed
+    /// or removed workspace is; a move that changes nothing pushes nothing, as DSH's registry writes nothing then
+    /// (dsh-workspace lib/index.js:484, :492).
+    #[tokio::test]
+    async fn a_workspace_move_is_pushed_and_a_move_that_moves_nothing_is_not() {
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(KeptOrder {
+            order: std::sync::Mutex::new(vec!["w-1".into(), "w-2".into(), "w-3".into()]),
+        }));
+        let (router, state) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-order-push")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let post = |body: &'static str| {
+            let router = router.clone();
+            let cookie = cookie.clone();
+            async move {
+                let (status, _) =
+                    post_json(&router, "/api/workspaces/insertBefore", &cookie, body).await;
+                status
+            }
+        };
+
+        assert_eq!(
+            post(r#"{"workspaceId":"w-3","beforeWorkspaceId":"w-1"}"#).await,
+            StatusCode::OK
+        );
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "workspace");
+        assert_eq!(
+            data,
+            json!({"type": "workspace/reordered", "workspaceIds": ["w-3", "w-1", "w-2"]})
+        );
+        assert!(id.is_some(), "numbered, so a reconnecting page is given it");
+
+        // Itself as the anchor, then the last one last: answered, and nothing pushed for either.
+        for body in [
+            r#"{"workspaceId":"w-2","beforeWorkspaceId":"w-2"}"#,
+            r#"{"workspaceId":"w-2"}"#,
+        ] {
+            assert_eq!(post(body).await, StatusCode::OK, "{body}");
+        }
+        assert_eq!(post(r#"{"workspaceId":"w-3"}"#).await, StatusCode::OK);
+        let (_, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            data["workspaceIds"],
+            json!(["w-1", "w-2", "w-3"]),
+            "the next frame is the next real move: the two that moved nothing pushed nothing"
+        );
+    }
+
+    /// A registry with one root: it owns what is at or under that folder, and records every tree it
+    /// is asked for, so a test can tell a refusal from a listing that was read and then dropped.
+    struct OneRoot {
+        root: PathBuf,
+        asked: std::sync::Mutex<Vec<Option<PathBuf>>>,
+    }
+
+    impl crate::services::WorkspaceService for OneRoot {
+        fn owns(&self, path: &std::path::Path) -> bool {
+            path.starts_with(&self.root)
+        }
+        fn tree(
+            &self,
+            path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            self.asked.lock().unwrap().push(path.map(Path::to_path_buf));
+            Ok(json!({"children": ["listed"]}))
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({}), false))
+        }
+        fn find(&self, _id: &str) -> bool {
+            false
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(None)
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// Percent-encode a path for a query string, every byte outside the unreserved set.
+    fn query_value(path: &Path) -> String {
+        path.to_string_lossy()
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    (byte as char).to_string()
+                }
+                _ => format!("%{byte:02X}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_tree_route_refuses_a_path_outside_every_root_as_web_ts_does() {
+        let base = std::env::temp_dir().join(format!("heddle-tree-owner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("root").join("inner")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::fs::write(base.join("elsewhere").join("not-yours.txt"), "x\n").unwrap();
+        std::os::unix::fs::symlink(base.join("elsewhere"), base.join("root").join("way-out"))
+            .unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        let root = base.join("root");
+        let elsewhere = base.join("elsewhere");
+        let registry = Arc::new(OneRoot {
+            root: root.clone(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_root = harness();
+        with_root.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_root,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("tree-owner")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let tree = |path: &Path| format!("/api/tree?path={}", query_value(path));
+        let refusal = format!(
+            "{{\"error\":\"{} is not under any workspace root\"}}\n",
+            elsewhere.display()
+        );
+
+        // A folder outside every root, a symlink in the root that leads to it, and a `..` walk out
+        // of the root: each is web.ts's 400 naming the canonical path, and nothing is listed.
+        for (what, uri) in [
+            ("a folder outside every root", tree(&elsewhere)),
+            ("a symlink that leads out", tree(&root.join("way-out"))),
+            ("a dot-dot walk", tree(&root.join("..").join("elsewhere"))),
+        ] {
+            let (status, headers, bytes) = call(&router, Method::GET, &uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what} is refused");
+            assert_eq!(headers["content-type"], "application/json");
+            assert_eq!(body_text(&bytes), refusal, "{what} gets web.ts's answer");
+        }
+        assert!(
+            registry.asked.lock().unwrap().is_empty(),
+            "a refused path is never handed to the tree: {:?}",
+            registry.asked.lock().unwrap()
+        );
+
+        // Inside the root it lists, and no path (or an empty one, as web.ts reads it) is the roots.
+        for (uri, expected) in [
+            (tree(&root.join("inner")), Some(root.join("inner"))),
+            (tree(&root), Some(root.clone())),
+            ("/api/tree".to_owned(), None),
+            ("/api/tree?path=".to_owned(), None),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}: {}", body_text(&bytes));
+            assert_eq!(
+                registry.asked.lock().unwrap().pop(),
+                Some(expected),
+                "{uri}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A folder that is gone (#141): under a root it is web.ts's `404 workspace-file/not-found`, DSH's code
+    /// (dsh-api-workspace-files lib/index.js:568), however it is spelled — the stored path, or one through a link,
+    /// which the lexical fallback of `canonical_path` keeps once the folder is gone; behind a link out of every root,
+    /// or outside them, it is the `400` naming where it lands. Nothing is handed to the tree.
+    #[tokio::test]
+    async fn the_tree_route_says_a_folder_that_is_gone_is_not_found_under_its_root() {
+        let base = std::env::temp_dir().join(format!(
+            "heddle-tree-gone-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(base.join("real").join("root").join("inner")).unwrap();
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(base.join("real"), base.join("alias")).unwrap();
+        std::os::unix::fs::symlink(
+            base.join("elsewhere"),
+            base.join("real").join("root").join("way-out"),
+        )
+        .unwrap();
+        let canonical = std::fs::canonicalize(&base).unwrap();
+        let root = canonical.join("real").join("root");
+        let registry = Arc::new(OneRoot {
+            root: root.clone(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_root = harness();
+        with_root.workspaces = Some(registry.clone());
+        let (router, _) = ServerBuilder::new(
+            with_root,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("tree-gone")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let tree = |path: &Path| format!("/api/tree?path={}", query_value(path));
+
+        for (what, asked, at) in [
+            (
+                "a folder never made inside the root",
+                root.join("never-made"),
+                root.join("never-made"),
+            ),
+            (
+                "the same spelled through a link",
+                base.join("alias").join("root").join("never-made"),
+                root.join("never-made"),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &tree(&asked), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{what}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"no entry at \\\"{}\\\"\",\"code\":\"workspace-file/not-found\"}}\n",
+                    at.display()
+                ),
+                "{what} gets DSH's code and web.ts's sentence"
+            );
+        }
+        for (what, asked, at) in [
+            (
+                "a folder that is gone behind a link out of the root",
+                root.join("way-out").join("never-made"),
+                canonical.join("elsewhere").join("never-made"),
+            ),
+            (
+                "a folder that is gone outside every root",
+                canonical.join("nowhere").join("deeper"),
+                canonical.join("nowhere").join("deeper"),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, Method::GET, &tree(&asked), Some(&cookie)).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{what}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                format!(
+                    "{{\"error\":\"{} is not under any workspace root\"}}\n",
+                    at.display()
+                ),
+                "{what} is judged where it lands"
+            );
+        }
+        assert!(
+            registry.asked.lock().unwrap().is_empty(),
+            "a folder that is gone is never handed to the tree"
+        );
+
+        // The root's own folder, gone: still the root's, and not found.
+        std::fs::remove_dir_all(&root).unwrap();
+        let (status, _, bytes) = call(&router, Method::GET, &tree(&root), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("workspace-file/not-found"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn the_html_route_previews_only_an_html_document() {
+        let dir = std::env::temp_dir().join(format!("heddle-html-only-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("page.html"), "<h1>page</h1>").unwrap();
+        // A real Word document is a zip; a text file is valid UTF-8. Neither is a page.
+        std::fs::write(
+            dir.join("report.docx"),
+            b"PK\x03\x04\x14\x00\x00\x00\x08\x00binary",
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "plain words").unwrap();
+        let mut with_registry = harness();
+        with_registry.workspaces = Some(Arc::new(ViewWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            with_registry,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("html-only")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = |leaf: &str| {
+            format!(
+                "/api/html?path={}",
+                dir.join(leaf).to_string_lossy().replace('/', "%2F")
+            )
+        };
+        let (status, _, bytes) = call(&router, Method::GET, &uri("page.html"), Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert!(body_text(&bytes).contains("page"), "{}", body_text(&bytes));
+        for leaf in ["report.docx", "notes.txt"] {
+            let (status, _, bytes) = call(&router, Method::GET, &uri(leaf), Some(&cookie)).await;
+            assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{leaf}");
+            assert_eq!(
+                body_text(&bytes),
+                format!("{{\"error\":\"{}\"}}\n", preview::NOT_AN_HTML_DOCUMENT),
+                "{leaf}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[tokio::test]
     async fn status_names_the_deployment_mode_and_root() {
         let (router, _) = app("status");
@@ -2403,6 +4433,85 @@ mod tests {
             body_text(&bytes),
             "{\n  \"sandbox\": {\n    \"mode\": \"workspace-write\"\n  },\n  \"cwd\": \"/work\"\n}\n"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_terminal_whose_mode_changed_while_it_started_is_ended_and_refused() {
+        // #85 R1: create reads the mode, spawns (milliseconds of fork/exec), then inserts. A permission change in
+        // that window closes only inserted terminals, so create reads the mode again and refuses a mismatch. The
+        // first read answers the mode the spawn uses; the second, the mode a concurrent change wrote.
+        let folder = std::env::temp_dir().join(format!("heddle-r1-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let sessions = Sessions {
+            metas: vec![SessionMeta {
+                id: id.into(),
+                cwd: Some(folder.to_string_lossy().into_owned()),
+                turns: 1,
+                ..SessionMeta::default()
+            }],
+            events: HashMap::new(),
+            modes: std::sync::Mutex::new(vec!["danger-full-access".into(), "read-only".into()]),
+            recorded: std::sync::Mutex::new(Vec::new()),
+            flags: FlagsAnswer::Written,
+        };
+        let harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        let (router, state) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("terminal-mode-changed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/terminals"),
+            &cookie,
+            "{}",
+        )
+        .await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(body["code"], "mode-changed", "{body}");
+        assert!(
+            state.terminals().list(id).is_empty(),
+            "the terminal that started under the old mode is gone"
+        );
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_browser_tab_only_when_the_operator_enabled_it() {
+        // #86: the page's Browser tab is opt-in; the default answer above carries no `browser` key.
+        let (router, _) = ServerBuilder::new(
+            harness(),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("status-browser")),
+                browser: true,
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/status", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["browser"], serde_json::json!(true));
+        assert_eq!(body["sandbox"]["mode"], "workspace-write");
     }
 
     #[tokio::test]
@@ -2515,6 +4624,16 @@ mod tests {
             body_text(&bytes),
             "{\"error\":\"this service is not loaded yet\"}\n"
         );
+        // A prompt of only whitespace is refused before anything else, as an empty one is (#32).
+        for blank in [
+            r#"{"prompt":""}"#,
+            r#"{"prompt":"   "}"#,
+            r#"{"prompt":"\n\t "}"#,
+        ] {
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, blank).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{blank}");
+            assert_eq!(body_text(&bytes), "a prompt is required\n", "{blank}");
+        }
     }
 
     #[tokio::test]
@@ -2677,6 +4796,127 @@ mod tests {
         builder.into_router(3082).expect("the test router")
     }
 
+    /// The jobs row's archive admission, as a double: one live job until it is stopped.
+    #[derive(Default)]
+    struct OneJob {
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for OneJob {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                vec![crate::services::ActivityItem {
+                    kind: crate::services::ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }]
+            }
+        }
+        fn stop(&self, session: &str) -> BoxFuture<'static, ()> {
+            self.stopped.lock().unwrap().push(session.to_owned());
+            Box::pin(async {})
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_background_job_blocks_the_archive_until_stop_and_stop_kills_it_after_the_write()
+    {
+        let activity = Arc::new(OneJob::default());
+        let mut with_jobs = harness();
+        with_jobs.activity = Some(activity.clone());
+        let (router, _) = ServerBuilder::new(
+            with_jobs,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-jobs")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let flags = "/api/sessions/session-00000000-0000-0000-0000-000000000001/flags";
+
+        let (status, bytes) = post_json(&router, flags, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(refusal["code"], "active");
+        assert_eq!(
+            refusal["error"],
+            "session session-00000000-0000-0000-0000-000000000001 has running background jobs; pass stop: true to stop them and archive"
+        );
+        assert_eq!(refusal["running"], 0);
+        assert_eq!(
+            refusal["jobs"],
+            json!([{ "id": "bash-0123456789abcdef", "label": "sleep 30" }])
+        );
+        assert!(
+            activity.stopped.lock().unwrap().is_empty(),
+            "nothing stopped without stop: true"
+        );
+
+        let (status, _) =
+            post_json(&router, flags, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *activity.stopped.lock().unwrap(),
+            ["session-00000000-0000-0000-0000-000000000001"]
+        );
+
+        // Pinning is not archiving: it never consults the activity.
+        let (status, _) = post_json(&router, flags, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(activity.stopped.lock().unwrap().len(), 1);
+    }
+
+    /// The agent runtime's live-turn registry, as a double: one turn this server did not start.
+    #[derive(Default)]
+    struct OneRowTurn {
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::TurnInterrupter for OneRowTurn {
+        fn interrupt(&self, session: &str) -> bool {
+            let mut seen = self.interrupted.lock().unwrap();
+            seen.push(session.to_owned());
+            seen.len() == 1
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_reaches_a_turn_a_row_started_such_as_a_goal_round() {
+        let rows = Arc::new(OneRowTurn::default());
+        let mut with_rows = harness();
+        with_rows.interrupter = Some(rows.clone());
+        let (router, _) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("stop-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let stop = "/api/sessions/session-00000000-0000-0000-0000-000000000001/stop";
+        let (status, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["stopped"], 1,
+            "the goal round was stopped, though the server never started it"
+        );
+        let (_, bytes) = post_json(&router, stop, &cookie, "{}").await;
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["stopped"], 0, "nothing left to stop");
+        assert_eq!(rows.interrupted.lock().unwrap().len(), 2);
+    }
+
     async fn post_json(
         router: &Router,
         uri: &str,
@@ -2826,6 +5066,255 @@ mod tests {
         assert!(body_text(&bytes).contains("event: done"));
     }
 
+    /// A runner that writes what the agent loop writes first into a real store: the prompt as the user message.
+    struct RecordingTurns(heddle_session::SessionService);
+
+    impl TurnRunner for RecordingTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let service = self.0.clone();
+            Box::pin(async move {
+                let handle = service
+                    .open(&request.session)
+                    .expect("the session the route opened");
+                service
+                    .user(&handle, &request.prompt, None)
+                    .expect("the user message");
+                Ok(TurnOutcome::default())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_the_turn_route_opens_is_born_untitled_so_its_first_prompt_names_it() {
+        // #68: DSH writes no title when a session is created. dsh-session-title writes the fallback from the first
+        // eligible human message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session
+        // with no title yet (:387). The turn route opened its session titled with the prompt's first sixty characters,
+        // so the first message wrote no fallback and the title coordinator asked nothing (heddle_session::title).
+        use crate::adapters::StoreSessions;
+        const PROMPT: &str = "Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.";
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-turn-route-title-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(scratch.join("ws")).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let inner = heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        );
+        let harness = Harness::new(
+            Arc::new(StoreSessions::new(inner.clone())),
+            Arc::new(Models),
+            Arc::new(RecordingTurns(inner.clone())),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-route-title")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let fallback = heddle_session::title_from(PROMPT);
+        let cut: String = PROMPT.chars().take(60).collect();
+        for body in [
+            json!({"prompt": PROMPT, "folder": scratch.join("ws"), "new": true}),
+            json!({"prompt": PROMPT}),
+        ] {
+            let before: Vec<String> = inner
+                .list()
+                .iter()
+                .map(|meta| meta.id().to_owned())
+                .collect();
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+            let made: Vec<Option<String>> = inner
+                .list()
+                .iter()
+                .filter(|meta| !before.iter().any(|id| id == meta.id()))
+                .map(|meta| meta.title().map(str::to_owned))
+                .collect();
+            assert_eq!(made.len(), 1, "{body}: the turn opened one new session");
+            assert_eq!(
+                made[0].as_deref(),
+                Some(fallback.as_str()),
+                "{body}: the first message wrote the fallback, cut at a word, which a generated title may replace"
+            );
+            assert_ne!(made[0].as_deref(), Some(cut.as_str()), "{body}");
+        }
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A runner that counts the turns it is asked to run.
+    struct CountingTurns(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl TurnRunner for CountingTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(TurnOutcome::default()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_turn_into_a_one_shot_subagent_session_is_refused_in_dshs_words() {
+        // DSH parity C23 (R-developer-eight-26): dsh-api-session-controller refuses a prompt into a subagent's child
+        // with `session/agent-busy` (`lib/index.js:128-142`); phase A measured `/api/turn` answering 200 and running it.
+        // A teammate is a continuable child and still takes the turn.
+        // Well-formed session ids: /api/turn answers an id that is not one with `session/not-found` before it
+        // looks for a subagent (R-developer-seven-2), so the refusal under test needs ids a store could hold.
+        let child = "session-33333333-3333-3333-3333-333333333333";
+        let mate = "session-44444444-4444-4444-4444-444444444444";
+        let meta = |id: &str, rest: Value| SessionMeta {
+            id: id.into(),
+            cwd: Some("/work".into()),
+            endpoint: Some("double".into()),
+            turns: 1,
+            rest: rest.as_object().cloned().unwrap_or_default(),
+            ..SessionMeta::default()
+        };
+        let sessions = Sessions {
+            metas: vec![
+                meta(
+                    child,
+                    json!({"parentSession": "session-p", "origin": "subagent", "delegationDepth": 1}),
+                ),
+                meta(
+                    mate,
+                    json!({"parentSession": "session-l", "origin": "subagent", "delegationDepth": 1, "teamId": "session-l"}),
+                ),
+            ],
+            events: HashMap::new(),
+            modes: std::sync::Mutex::new(Vec::new()),
+            recorded: std::sync::Mutex::new(Vec::new()),
+            flags: FlagsAnswer::Written,
+        };
+        let ran = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut harness = Harness::new(
+            Arc::new(sessions),
+            Arc::new(Models),
+            Arc::new(CountingTurns(Arc::clone(&ran))),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        harness.approvals = Some(Arc::new(Approvals));
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("subagent-turn-refusal")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let into_child = json!({"session": child, "prompt": "write into child"});
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, &into_child.to_string()).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!(
+                "{{\"error\":\"session \\\"{child}\\\" is owned by subagent routing\",\"code\":\"session/agent-busy\",\"reason\":\"use subagent delivery for this child session\"}}\n"
+            )
+        );
+        assert_eq!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no turn ran in the child"
+        );
+
+        let into_mate = json!({"session": mate, "prompt": "a message for the teammate"});
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, &into_mate.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        assert_eq!(subagent_turn_refusal(None), None);
+        assert_eq!(
+            subagent_turn_refusal(Some(&meta("session-plain", json!({})))),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_for_an_unknown_session_is_session_not_found_and_a_held_one_continues() {
+        // DSH answers a session it does not hold with `session/not-found`; web.ts and this route answer
+        // `404 {"error": "no session <id>", "code": "session/not-found"}`. Before, this route reached the
+        // resume and answered `400` naming the session root on disk, and web.ts a `500` (R-developer-seven-2).
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let runner = Arc::new(StreamingTurns {
+            hub: Arc::clone(&hub),
+            text: "hello".into(),
+        });
+        let (router, _) = app_with_runner("turn-unknown-session", runner);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let unknown = "session-22222222-2222-2222-2222-222222222222";
+        let body = serde_json::json!({"prompt": "hi", "session": unknown});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", body_text(&bytes));
+        assert_eq!(
+            body_text(&bytes),
+            format!("{{\"error\":\"no session {unknown}\",\"code\":\"session/not-found\"}}\n")
+        );
+
+        for raw in ["session-does-not-exist", "../../etc/passwd"] {
+            let body = serde_json::json!({"prompt": "hi", "session": raw});
+            let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{raw}: {}",
+                body_text(&bytes)
+            );
+            assert_eq!(
+                body_text(&bytes),
+                "{\"error\":\"no session with that id\",\"code\":\"session/not-found\"}\n",
+                "{raw} is not echoed back"
+            );
+        }
+
+        let (status, bytes) =
+            post_json(&router, "/api/turn", &cookie, r#"{"prompt":"first"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let (_, _, listed) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        let listed: Value = serde_json::from_str(&body_text(&listed)).expect("the list is JSON");
+        let held = listed[0]["id"]
+            .as_str()
+            .expect("the first turn made a session")
+            .to_owned();
+        let body = serde_json::json!({"prompt": "again", "session": held});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a held session continues: {}",
+            body_text(&bytes)
+        );
+        assert!(body_text(&bytes).contains("event: done"));
+    }
+
     #[tokio::test]
     async fn a_turn_streams_its_sessions_events_and_ends_with_done() {
         let hub = Arc::new(std::sync::OnceLock::new());
@@ -2888,6 +5377,177 @@ mod tests {
         assert!(!state.runs().is_running(&session));
     }
 
+    /// A turn runner that publishes one delta, then waits until the test releases it, so a detached turn can be
+    /// watched while it is still running (#128).
+    struct HeldTurns {
+        hub: Arc<std::sync::OnceLock<EventHub>>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl TurnRunner for HeldTurns {
+        fn run_turn(
+            &self,
+            request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            let hub = Arc::clone(&self.hub);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                let publish = |event: Value| {
+                    if let Some(hub) = hub.get() {
+                        hub.publish_session_event(&request.session, &event);
+                    }
+                };
+                publish(
+                    json!({"type": "assistant/chunk", "chunk": {"type": "text-delta", "text": "held"}}),
+                );
+                release.notified().await;
+                publish(json!({"type": "turn/completed"}));
+                Ok(TurnOutcome {
+                    text: "held".into(),
+                    finish_reason: "stop".into(),
+                    rounds: 1,
+                    denials: vec![json!({"tool": "bash", "code": "denied", "message": "no"})],
+                    ended: Some(vec!["max-rounds".into()]),
+                    usage: None,
+                })
+            })
+        }
+    }
+
+    /// A browser allows six connections per host across all its tabs, so a turn that keeps its response open
+    /// holds one for as long as it runs (#128). Detached, the turn answers `202 {session, turn}` while it is
+    /// still running, and its verdict is a numbered `turn` frame on `/api/events`, after the turn's own events
+    /// and without the answer's text.
+    #[tokio::test]
+    async fn a_detached_turn_answers_at_acceptance_and_its_verdict_follows_its_events() {
+        let hub = Arc::new(std::sync::OnceLock::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut held = harness();
+        held.turns = Arc::new(HeldTurns {
+            hub: Arc::clone(&hub),
+            release: Arc::clone(&release),
+        });
+        let builder = ServerBuilder::new(
+            held,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached")),
+                ..ServerOptions::default()
+            },
+        );
+        let _ = hub.set(builder.events());
+        let (router, state) = builder.into_router(3082).expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let (status, bytes) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            post_json(
+                &router,
+                "/api/turn",
+                &cookie,
+                r#"{"prompt":"go","detach":true}"#,
+            ),
+        )
+        .await
+        .expect("the answer came while the turn was still running");
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let session = body["session"].as_str().expect("the session").to_owned();
+        let turn = body["turn"].as_str().expect("the turn id").to_owned();
+        assert!(!turn.is_empty());
+        assert!(state.runs().is_running(&session), "accepted and running");
+        // The answer came after the turn's first event, which is already on the stream.
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            (event.as_str(), data["event"]["type"].as_str()),
+            ("session", Some("assistant/chunk")),
+            "the turn's first event precedes its 202"
+        );
+
+        release.notify_one();
+        let mut seen = Vec::new();
+        let verdict = loop {
+            let (event, data, id) = next_pushed(&mut pushed).await;
+            match event.as_str() {
+                "turn" => {
+                    assert!(id.is_some(), "numbered, so a reconnect replays it");
+                    break data;
+                }
+                "session" => seen.push(data["event"]["type"].as_str().unwrap_or("").to_owned()),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            seen,
+            vec!["turn/completed"],
+            "the verdict follows the turn's own events"
+        );
+        assert_eq!(verdict["turn"], json!(turn));
+        assert_eq!(verdict["outcome"], json!("done"));
+        assert_eq!(verdict["session"], json!(session));
+        assert_eq!(verdict["denials"][0]["tool"], json!("bash"));
+        assert_eq!(verdict["ended"], json!(["max-rounds"]));
+        assert!(verdict.get("text").is_none(), "{verdict}");
+        assert!(!state.runs().is_running(&session));
+    }
+
+    /// A detached turn that fails pushes an `error` verdict with the failure, and records `turn/failed` as the
+    /// streaming route does.
+    #[tokio::test]
+    async fn a_detached_turn_that_fails_pushes_an_error_verdict_and_is_recorded() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, state) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-detached-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let mut pushed = state.events().subscribe();
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session, "detach": true}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
+        let verdict = loop {
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            if event == "turn" {
+                break data;
+            }
+        };
+        assert_eq!(verdict["outcome"], json!("error"));
+        assert_eq!(verdict["session"], json!(session));
+        assert_eq!(verdict["message"], json!("upstream answered 502"));
+        for _ in 0..100 {
+            if !sessions.recorded.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            sessions.recorded.lock().unwrap().clone(),
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
+        );
+    }
+
     #[tokio::test]
     async fn a_stop_cancels_the_running_turn() {
         let (router, state) = app("stop");
@@ -2905,6 +5565,371 @@ mod tests {
         assert!(text.contains(id), "{text}");
         assert!(guard.is_cancelled(), "the turn's token is cancelled");
         drop(guard);
+    }
+
+    /// DSH's `workspace/session-active` refusal names the running work (`details.activity`); the page's
+    /// stop-and-archive dialog lists it, and `{stop: true}` stops it and archives (R-developer-eight-13).
+    #[tokio::test]
+    async fn archiving_a_running_session_is_refused_with_its_activity_until_stop_is_said() {
+        let (router, state) = app("archive-activity");
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let guard = state.runs().begin(id);
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let uri = format!("/api/sessions/{id}/flags");
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "active");
+        assert_eq!(body["activity"], json!([{ "kind": "turn" }]), "{body}");
+        assert!(!guard.is_cancelled(), "a refusal stops nothing");
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(guard.is_cancelled(), "stop: true cancels the turn");
+        drop(guard);
+    }
+
+    /// The activity port as a double: the work it reports for one session until that session is stopped.
+    struct RowWork {
+        items: Vec<crate::services::ActivityItem>,
+        stopped: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl crate::services::SessionActivity for RowWork {
+        fn active(&self, session: &str) -> Vec<crate::services::ActivityItem> {
+            if self.stopped.lock().unwrap().iter().any(|id| id == session) {
+                Vec::new()
+            } else {
+                self.items.clone()
+            }
+        }
+        fn stop(&self, session: &str) -> BoxFuture<'static, ()> {
+            self.stopped.lock().unwrap().push(session.to_owned());
+            Box::pin(async {})
+        }
+    }
+
+    /// DSH's schedule plugin is an activity provider (`dsh-schedule/lib/index.js:2043-2064`): an active reminder
+    /// refuses a plain archive even of an idle session, the families come in DSH's listener order (turn, job,
+    /// subagent, schedule), and `stop: true` asks the port to stop once the archive is written.
+    #[tokio::test]
+    async fn the_ports_reminders_and_jobs_are_listed_in_dsh_order_and_stopped_by_stop_true() {
+        use crate::services::{ActivityItem, ActivityKind};
+        let id = "session-00000000-0000-0000-0000-000000000001";
+        let port = Arc::new(RowWork {
+            items: vec![
+                ActivityItem {
+                    kind: ActivityKind::Schedule,
+                    id: "schedule-1".into(),
+                    label: "Stand-up".into(),
+                },
+                ActivityItem {
+                    kind: ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                },
+            ],
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut with_rows = harness();
+        with_rows.activity = Some(port.clone());
+        let (router, state) = ServerBuilder::new(
+            with_rows,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-rows")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = format!("/api/sessions/{id}/flags");
+
+        let guard = state.runs().begin(id);
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["activity"],
+            json!([
+                { "kind": "turn" },
+                { "kind": "job", "items": [{ "id": "bash-0123456789abcdef", "label": "sleep 30" }] },
+                { "kind": "schedule", "items": [{ "id": "schedule-1", "label": "Stand-up" }] }
+            ]),
+            "{body}"
+        );
+        drop(guard);
+
+        let reminders_only = Arc::new(RowWork {
+            items: port.items[..1].to_vec(),
+            stopped: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut idle = harness();
+        idle.activity = Some(reminders_only.clone());
+        let (router, _) = ServerBuilder::new(
+            idle,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-reminder")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "an idle session with a reminder"
+        );
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "active");
+        assert_eq!(
+            body["error"],
+            format!(
+                "session {id} has active scheduled reminders; pass stop: true to stop them and archive"
+            )
+        );
+        assert_eq!(
+            body["activity"],
+            json!([{ "kind": "schedule", "items": [{ "id": "schedule-1", "label": "Stand-up" }] }]),
+            "{body}"
+        );
+        assert!(
+            reminders_only.stopped.lock().unwrap().is_empty(),
+            "a refusal stops nothing"
+        );
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(*reminders_only.stopped.lock().unwrap(), [id]);
+        let (status, _) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "with the reminder stopped, nothing blocks"
+        );
+
+        let (status, _) = post_json(&router, &uri, &cookie, r#"{"pinned":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            reminders_only.stopped.lock().unwrap().len(),
+            1,
+            "pinning never stops anything"
+        );
+    }
+
+    /// A runner whose agent runtime holds turns the server did not start, and records what it was asked to stop.
+    struct LiveTurns {
+        live: Vec<String>,
+        interrupted: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl TurnRunner for LiveTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Ok(TurnOutcome::default()) })
+        }
+        fn is_live(&self, session: &str) -> bool {
+            self.live.iter().any(|id| id == session)
+        }
+        fn interrupt(&self, session: &str) -> bool {
+            self.interrupted.lock().unwrap().push(session.to_owned());
+            self.is_live(session)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_session_with_a_running_subagent_is_refused_and_the_stop_reaches_the_child() {
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        let mut sessions = Sessions::with_one();
+        let mut rest = Map::new();
+        rest.insert("parentSession".into(), Value::String(parent.into()));
+        rest.insert("origin".into(), Value::String("subagent".into()));
+        sessions.metas.push(SessionMeta {
+            id: child.into(),
+            title: Some("look things up".into()),
+            rest,
+            ..SessionMeta::default()
+        });
+        let runner = Arc::new(LiveTurns {
+            live: vec![child.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner.clone(),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("archive-subagent")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+        let uri = format!("/api/sessions/{parent}/flags");
+        let (status, bytes) = post_json(&router, &uri, &cookie, r#"{"archived":true}"#).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["activity"],
+            json!([{ "kind": "subagent", "items": [{ "id": child, "label": "look things up" }] }]),
+            "{body}"
+        );
+        assert!(runner.interrupted.lock().unwrap().is_empty());
+
+        let (status, _) =
+            post_json(&router, &uri, &cookie, r#"{"archived":true,"stop":true}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            *runner.interrupted.lock().unwrap(),
+            vec![parent.to_owned(), child.to_owned()]
+        );
+    }
+
+    /// The fork reads a body (its `atSeq`), and the TypeScript route's `readJson` refuses JSON that is not an
+    /// object: `400 the body must be a JSON object`. This route read `null`, `[]`, `5` and `"x"` as `{}` and
+    /// forked; DSH's gateway refuses such args too (dsh-api-gateway lib/index.js:1746).
+    #[tokio::test]
+    async fn a_fork_body_that_is_not_a_json_object_is_refused_before_anything_is_cut() {
+        let (router, _) = app("fork-body");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let uri = "/api/sessions/session-00000000-0000-0000-0000-000000000001/fork";
+        for body in ["null", "[]", "5", r#""x""#] {
+            let (status, bytes) = post_json(&router, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(
+                body_text(&bytes),
+                "the body must be a JSON object\n",
+                "{body}"
+            );
+        }
+        // An object, or no body at all, reaches the fork; the double has no such session to cut.
+        for body in ["{}", ""] {
+            let (status, _) = post_json(&router, uri, &cookie, body).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body:?}");
+        }
+        // A body that is not JSON keeps its own sentence.
+        let (status, bytes) = post_json(&router, uri, &cookie, "{").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(&bytes), "the body must be JSON\n");
+    }
+
+    /// DSH's `archiveSession` with `stopActivity` writes the archive set and only then asks the
+    /// `workspace/session-stop` listeners (`dsh-workspace/lib/index.js:527-541`): a write that throws stops
+    /// nothing. Here a refused write (`409`, a pin on an archived session) and a missing session (`404`) leave
+    /// the turn, the running subagent and the port's work as they were.
+    #[tokio::test]
+    async fn a_stop_and_archive_whose_write_is_refused_or_finds_no_session_stops_nothing() {
+        use crate::services::{ActivityItem, ActivityKind};
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        for (answer, expected) in [
+            (FlagsAnswer::Refused, StatusCode::CONFLICT),
+            (FlagsAnswer::Missing, StatusCode::NOT_FOUND),
+            (FlagsAnswer::Written, StatusCode::OK),
+        ] {
+            let mut sessions = Sessions::with_one();
+            sessions.flags = answer;
+            let mut rest = Map::new();
+            rest.insert("parentSession".into(), Value::String(parent.into()));
+            rest.insert("origin".into(), Value::String("subagent".into()));
+            sessions.metas.push(SessionMeta {
+                id: child.into(),
+                title: Some("look things up".into()),
+                rest,
+                ..SessionMeta::default()
+            });
+            let runner = Arc::new(LiveTurns {
+                live: vec![child.to_owned()],
+                interrupted: std::sync::Mutex::new(Vec::new()),
+            });
+            let port = Arc::new(RowWork {
+                items: vec![ActivityItem {
+                    kind: ActivityKind::Job,
+                    id: "bash-0123456789abcdef".into(),
+                    label: "sleep 30".into(),
+                }],
+                stopped: std::sync::Mutex::new(Vec::new()),
+            });
+            let mut harness = Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner.clone(),
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            );
+            harness.activity = Some(port.clone());
+            let (router, state) = ServerBuilder::new(
+                harness,
+                ServerOptions {
+                    token: Some("test-token".into()),
+                    secret_path: Some(temp_secret(&format!("archive-write-{answer:?}"))),
+                    ..ServerOptions::default()
+                },
+            )
+            .into_router(3082)
+            .expect("the test router");
+            let guard = state.runs().begin(parent);
+            let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+            let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+
+            let uri = format!("/api/sessions/{parent}/flags");
+            let (status, bytes) = post_json(
+                &router,
+                &uri,
+                &cookie,
+                r#"{"archived":true,"pinned":true,"stop":true}"#,
+            )
+            .await;
+            assert_eq!(status, expected, "{answer:?}: {}", body_text(&bytes));
+            match answer {
+                FlagsAnswer::Written => {
+                    assert!(guard.is_cancelled(), "a written archive stops the turn");
+                    assert_eq!(
+                        *runner.interrupted.lock().unwrap(),
+                        vec![parent.to_owned(), child.to_owned()]
+                    );
+                    assert_eq!(*port.stopped.lock().unwrap(), [parent]);
+                }
+                FlagsAnswer::Refused | FlagsAnswer::Missing => {
+                    if let FlagsAnswer::Refused = answer {
+                        let body: Value = serde_json::from_slice(&bytes).unwrap();
+                        assert_eq!(body["code"], "archived", "{body}");
+                    }
+                    assert!(!guard.is_cancelled(), "{answer:?}: the turn keeps running");
+                    assert!(
+                        runner.interrupted.lock().unwrap().is_empty(),
+                        "{answer:?}: no turn or subagent is interrupted"
+                    );
+                    assert!(
+                        port.stopped.lock().unwrap().is_empty(),
+                        "{answer:?}: the port's work is not stopped"
+                    );
+                }
+            }
+            drop(guard);
+        }
     }
 
     /// One raw HTTP/1.1 exchange, because the verifiers speak over a socket rather than through
@@ -3019,16 +6044,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sanitiser_is_javascript_or_a_plain_404() {
-        // Not installed: the TypeScript sentence, in plain text rather than a JSON error.
+    async fn the_sanitiser_is_javascript_whether_installed_or_not() {
+        // Not installed: the binary's own copy (live issue #39: this answered 404, and every HTML preview showed its
+        // source on a deployment without node_modules).
         let (router, _) = app("purify-missing");
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
         let (status, headers, bytes) =
             call(&router, Method::GET, "/vendor/purify.js", Some(&cookie)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(headers["content-type"], "text/plain");
-        assert_eq!(body_text(&bytes), "the sanitiser is not installed\n");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "text/javascript; charset=utf-8");
+        assert!(
+            body_text(&bytes).starts_with("/*! @license DOMPurify "),
+            "the sanitiser itself, not a refusal"
+        );
 
         // Installed under an asset root: served as a script a browser will run, not as a download.
         let root = std::env::temp_dir().join(format!(
@@ -3187,6 +6216,339 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(body_text(&bytes), "not found\n");
+    }
+
+    /// `/api/events` opens with its comment and then DSH's `ready` frame, and a frame published after the
+    /// subscription was registered (before any byte was read) arrives after `ready`, not lost.
+    #[tokio::test]
+    async fn the_event_stream_opens_with_ready_and_then_carries_what_is_published() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-ready");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/events")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"type": "message"}));
+        let mut text = String::new();
+        while !text.contains("event: session\n") {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                .await
+                .expect("a frame in time")
+                .expect("the stream stays open")
+                .expect("a body frame");
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+        assert!(text.starts_with(": heddle stream open\n\n"), "{text}");
+        let rest = &text[": heddle stream open\n\n".len()..];
+        assert!(rest.starts_with("event: ready\ndata: "), "{text}");
+        let data: Value =
+            serde_json::from_str(rest.lines().nth(1).unwrap().trim_start_matches("data: "))
+                .unwrap();
+        assert_eq!(data["type"], "ready");
+        let client = data["clientId"].as_str().unwrap();
+        assert!(
+            client.len() == 32 && client.chars().all(|c| c.is_ascii_hexdigit()),
+            "{client}"
+        );
+        assert_eq!(
+            data["host"]["home"],
+            std::env::var("HOME").unwrap_or_default()
+        );
+        assert!(
+            rest.find("event: ready").unwrap() < rest.find("event: session").unwrap(),
+            "{text}"
+        );
+    }
+
+    /// A reconnect with `Last-Event-ID` is given the frames it missed after `ready`; a cursor from another
+    /// server start is given `reset`.
+    #[tokio::test]
+    async fn the_event_stream_replays_after_a_cursor_and_resets_an_unknown_one() {
+        use http_body_util::BodyExt;
+        let (router, state) = app("events-follow");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 1}));
+        let seen = state.events().cursor();
+        state
+            .events()
+            .publish_session_event("session-1", &serde_json::json!({"n": 2}));
+        async fn read_until(router: &Router, cookie: &str, cursor: &str, marker: &str) -> String {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(Method::GET)
+                        .uri("/api/events")
+                        .header("cookie", cookie)
+                        .header("last-event-id", cursor)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let mut body = response.into_body();
+            let mut text = String::new();
+            while !text.contains(marker) {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(5), body.frame())
+                    .await
+                    .expect("a frame in time")
+                    .expect("the stream stays open")
+                    .expect("a body frame");
+                if let Ok(data) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            text
+        }
+        let text = read_until(&router, &cookie, &seen, "\"n\":2").await;
+        assert!(text.contains("\"resumed\":true"), "{text}");
+        assert!(
+            !text.contains("\"n\":1"),
+            "nothing before the cursor is repeated: {text}"
+        );
+        assert!(
+            text.find("event: ready").unwrap() < text.find("\"n\":2").unwrap(),
+            "{text}"
+        );
+        let text = read_until(&router, &cookie, "0000-1", "event: reset").await;
+        assert!(text.contains("\"resumed\":false"), "{text}");
+    }
+
+    /// An approval double whose questions are always waiting, so an answer settles one.
+    struct AnsweringApprovals;
+
+    impl ApprovalService for AnsweringApprovals {
+        fn attach_answerer(&self) -> Box<dyn FnOnce() + Send> {
+            Box::new(|| {})
+        }
+        fn pending_requests(&self) -> Vec<Value> {
+            Vec::new()
+        }
+        fn answer(&self, _id: &str, _outcome: ApprovalOutcome) -> bool {
+            true
+        }
+    }
+
+    /// A workspace double whose add creates, whose rename finds and whose remove succeeds.
+    struct EditableWorkspaces;
+
+    impl crate::services::WorkspaceService for EditableWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            true
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            Ok(json!({}))
+        }
+        fn add(
+            &self,
+            path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            Ok((json!({"id": "w-2", "path": path, "title": "added"}), true))
+        }
+        fn find(&self, _id: &str) -> bool {
+            true
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!({"removed": true}))
+        }
+        fn rename(&self, id: &str, title: &str) -> Result<Option<Value>, ServiceError> {
+            Ok(Some(json!({"id": id, "title": title})))
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {}
+        fn views(&self, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            Ok(json!([]))
+        }
+    }
+
+    /// The next frame a subscription holds, as `(event, data)`, within a second.
+    async fn next_pushed(
+        subscription: &mut crate::stream::Subscription,
+    ) -> (String, Value, Option<String>) {
+        let frame =
+            tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next_frame())
+                .await
+                .expect("a frame in time")
+                .expect("the hub is open");
+        (
+            frame.event,
+            serde_json::from_str(&frame.data).unwrap(),
+            frame.id,
+        )
+    }
+
+    /// The changes that never reach a session's log are pushed to the stream, numbered like every frame:
+    /// a renamed session, an added, renamed and removed workspace, and a settled approval (phase B item 4).
+    #[tokio::test]
+    async fn renames_workspace_edits_and_settled_approvals_are_pushed() {
+        let mut with_services = harness();
+        with_services.workspaces = Some(Arc::new(EditableWorkspaces));
+        with_services.approvals = Some(Arc::new(AnsweringApprovals));
+        let (router, state) = ServerBuilder::new(
+            with_services,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("pushes")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let mut pushed = state.events().subscribe();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{session}/title"),
+            &cookie,
+            r#"{"title":"  renamed \u0007  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, id) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "sessions");
+        assert_eq!(
+            data,
+            json!({"type": "session/renamed", "session": session, "title": "renamed"}),
+            "the push names the title cleaned as the store keeps it, not the raw body"
+        );
+        assert!(
+            id.is_some(),
+            "a push is numbered, so it is replayed to a reconnecting client"
+        );
+
+        let folder = std::env::temp_dir();
+        let body = json!({"path": folder}).to_string();
+        let (status, _) = post_json(&router, "/api/workspaces", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(
+            (event.as_str(), data["type"].as_str()),
+            ("workspace", Some("workspace/added"))
+        );
+
+        for (method, expected) in [
+            (Method::PATCH, "workspace/renamed"),
+            (Method::DELETE, "workspace/removed"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri("/api/workspaces/w-2")
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"title":"retitled"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let (event, data, _) = next_pushed(&mut pushed).await;
+            assert_eq!(
+                (event.as_str(), data["type"].as_str()),
+                ("workspace", Some(expected))
+            );
+        }
+
+        let (status, _) = post_json(
+            &router,
+            "/api/approvals/approval-00000000-0000-0000-0000-000000000000",
+            &cookie,
+            r#"{"outcome":"rejected"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (event, data, _) = next_pushed(&mut pushed).await;
+        assert_eq!(event, "approval-settled");
+        assert_eq!(
+            data,
+            json!({"type": "approval/settled", "id": "approval-00000000-0000-0000-0000-000000000000", "outcome": "rejected"})
+        );
+    }
+
+    /// A runner whose turn fails, as a provider's 502 does.
+    struct FailingTurns;
+
+    impl TurnRunner for FailingTurns {
+        fn run_turn(
+            &self,
+            _request: TurnRequest,
+        ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
+            Box::pin(async { Err(ServiceError::new("upstream answered 502")) })
+        }
+    }
+
+    /// A failed turn tells the client that started it and is recorded as `turn/failed`, so it reaches every
+    /// client and every later read (R-developer-six-2).
+    #[tokio::test]
+    async fn a_failed_turn_is_recorded_for_every_client_as_well_as_streamed_to_its_own() {
+        let sessions = Arc::new(Sessions::with_one());
+        let mut failing = Harness::new(
+            sessions.clone(),
+            Arc::new(Models),
+            Arc::new(FailingTurns),
+            Arc::new(Sandbox),
+            PathBuf::from("/work"),
+        );
+        failing.approvals = Some(Arc::new(Approvals));
+        let (router, _) = ServerBuilder::new(
+            failing,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("turn-failed")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let session = "session-00000000-0000-0000-0000-000000000001";
+        let body = json!({"prompt": "fail please", "session": session}).to_string();
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let text = body_text(&bytes);
+        assert!(
+            text.contains("event: error\n") && text.contains("upstream answered 502"),
+            "{text}"
+        );
+        let recorded = sessions.recorded.lock().unwrap().clone();
+        assert_eq!(
+            recorded,
+            vec![(
+                session.to_owned(),
+                "turn/failed".to_owned(),
+                json!({"message": "upstream answered 502"})
+            )]
+        );
     }
 
     /// Every route in [`CORE_ROUTES`] answers as a route rather than as the fallback.
@@ -3436,6 +6798,152 @@ mod tests {
                 .any(|turn| turn["kind"] == "user" && turn["text"] == "remember the word loom"),
             "{turns:?}"
         );
+
+        // #33: a store that announces its titles pushes a person's rename exactly once, as the store kept it
+        // (cleaned); the route adds no second push.
+        let mut renamed = state.events().subscribe();
+        let (status, _) = post_json(
+            &router,
+            &format!("/api/sessions/{id}/title"),
+            &cookie,
+            r#"{"title":"  Loom   notes  "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut pushed = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), renamed.next_frame()).await
+        {
+            if frame.event == "sessions"
+                && frame.data.contains("session/renamed")
+                && frame.data.contains("Loom")
+            {
+                pushed.push(frame.data);
+            }
+        }
+        assert_eq!(pushed.len(), 1, "one push per rename: {pushed:?}");
+        let data: Value = serde_json::from_str(&pushed[0]).unwrap();
+        assert_eq!(data["session"], id.as_str());
+        assert_eq!(data["title"], "Loom notes", "the title the store kept");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Content search over the real store (R-developer-eight-19): a phrase in an answer finds its session, in
+    /// DSH's order (more phrase marks first), with its snippet; a token fragment is no match; a refused query
+    /// answers DSH's sentence; and a session id is still a session.
+    #[tokio::test]
+    async fn content_search_finds_a_phrase_inside_an_answer() {
+        use crate::adapters::StoreSessions;
+        use crate::services::SessionService as _;
+
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-content-search-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let sessions = StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        let builder = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("content-search")),
+                ..ServerOptions::default()
+            },
+        );
+        let (router, _) = builder.into_router(3082).expect("the test router");
+
+        let answered = |folder: &str, text: &str| -> String {
+            let cwd = scratch.join(folder);
+            std::fs::create_dir_all(&cwd).unwrap();
+            let id = sessions
+                .start(StartSession {
+                    cwd: Some(cwd),
+                    ..StartSession::default()
+                })
+                .unwrap();
+            let store = sessions.inner().store();
+            let handle = store.open(&id).unwrap();
+            store
+                .message(
+                    &handle,
+                    heddle_session::Message {
+                        role: heddle_session::Role::Assistant,
+                        tool_call_id: None,
+                        content: vec![heddle_session::ContentPart::Text {
+                            text: text.to_string(),
+                        }],
+                        source: None,
+                    },
+                )
+                .unwrap();
+            id
+        };
+        let one = answered("one", "The quokka ledger is balanced.");
+        let two = answered("two", "A quokka ledger here, another QUOKKA LEDGER there.");
+        answered("three", "quokkaledger, or the quokka and its ledger.");
+
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=Quokka%20Ledger",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            page,
+            json!({
+                "items": [
+                    {"sessionId": two, "snippet": "A quokka ledger here, another QUOKKA LEDGER there."},
+                    {"sessionId": one, "snippet": "The quokka ledger is balanced."},
+                ],
+                "hasMore": false,
+            })
+        );
+
+        let (status, _, bytes) = call(
+            &router,
+            Method::GET,
+            "/api/sessions/search?q=quokkaled",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(page, json!({"items": [], "hasMore": false}));
+
+        for path in ["/api/sessions/search", "/api/sessions/search?q=%20%20"] {
+            let (status, _, bytes) = call(&router, Method::GET, path, Some(&cookie)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(refusal["error"], "session search query must not be empty");
+        }
+        let (status, _, _) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{one}"),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "a session id is still a session");
         std::fs::remove_dir_all(&scratch).ok();
     }
 
@@ -3473,6 +6981,267 @@ mod tests {
             }
             other => panic!("expected a route conflict, got {other:?}"),
         }
+    }
+
+    // ---- Agent presets (inventory A96): web.ts's GET /api/presets and the preset a request creates a session under,
+    // over the real session store. ----
+
+    /// The test's `presets` row: `standard` (every tool, the default) and `reader` (one tool and a persona).
+    fn preset_roster() -> Arc<heddle_config::PresetRoster> {
+        Arc::new(
+            heddle_config::preset_roster(Some(&json!({
+                "default": "standard",
+                "presets": [
+                    { "id": "standard", "name": "Standard" },
+                    { "id": "reader", "name": "Reader", "tools": ["read_file"], "persona": "You review." }
+                ]
+            })))
+            .unwrap(),
+        )
+    }
+
+    /// A router over a real store in a scratch folder, every folder owned, with `presets` as the profile's roster.
+    async fn preset_app(
+        label: &str,
+        presets: Option<Arc<heddle_config::PresetRoster>>,
+    ) -> (Router, crate::adapters::StoreSessions, PathBuf, String) {
+        let scratch = std::env::temp_dir().join(format!(
+            "heddle-server-presets-{label}-{}-{}",
+            std::process::id(),
+            token::now_ms()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let scratch = std::fs::canonicalize(&scratch).unwrap();
+        let sessions = crate::adapters::StoreSessions::new(heddle_session::SessionService::new(
+            &heddle_session::SessionConfig {
+                root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
+            },
+            &heddle_config::Env::default(),
+            None,
+        ));
+        let mut harness = Harness::new(
+            Arc::new(sessions.clone()),
+            Arc::new(Models),
+            Arc::new(Turns),
+            Arc::new(Sandbox),
+            scratch.clone(),
+        );
+        harness.workspaces = Some(Arc::new(ViewWorkspaces));
+        harness.presets = presets;
+        let (router, _) = ServerBuilder::new(
+            harness,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret(&format!("presets-{label}"))),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        (router, sessions, scratch, cookie)
+    }
+
+    fn preset_of(sessions: &crate::adapters::StoreSessions, id: &str) -> Option<String> {
+        use crate::services::SessionService as _;
+        sessions
+            .meta(id)
+            .and_then(|meta| meta.preset().map(str::to_owned))
+    }
+
+    #[tokio::test]
+    async fn the_presets_route_answers_the_roster_and_marks_the_implicit_one() {
+        let (router, _, scratch, cookie) = preset_app("route-implicit", None).await;
+        let (status, headers, bytes) =
+            call(&router, Method::GET, "/api/presets", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["content-type"], "application/json");
+        let implicit: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            implicit,
+            json!({
+                "default": "standard",
+                "presets": [serde_json::to_value(heddle_config::standard_preset()).unwrap()],
+                "implicit": true
+            })
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+
+        let (router, _, scratch, cookie) =
+            preset_app("route-declared", Some(preset_roster())).await;
+        let (status, _, bytes) = call(&router, Method::GET, "/api/presets", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let declared: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(declared["default"], "standard");
+        assert_eq!(
+            declared.get("implicit"),
+            None,
+            "a declared roster is not marked"
+        );
+        assert_eq!(declared["presets"][1]["id"], "reader");
+        assert_eq!(declared["presets"][1]["tools"], json!(["read_file"]));
+        assert_eq!(
+            declared["presets"][0].get("tools"),
+            None,
+            "absent means every tool"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn a_turn_creates_its_session_under_the_named_preset_or_the_default_and_refuses_an_undeclared_one()
+     {
+        use crate::services::SessionService as _;
+        let (router, sessions, scratch, cookie) = preset_app("turn", Some(preset_roster())).await;
+
+        // An undeclared preset is refused before anything is written, in DSH's words, as plain text.
+        let (status, bytes) = post_json(
+            &router,
+            "/api/turn",
+            &cookie,
+            r#"{"prompt":"hello","preset":"nope"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "Unknown agent preset: nope; declared: standard, reader\n"
+        );
+        assert!(
+            sessions.list().is_empty(),
+            "the refused request wrote nothing"
+        );
+
+        // A new session runs under the preset the request names, and the session view says so.
+        let (status, bytes) = post_json(
+            &router,
+            "/api/turn",
+            &cookie,
+            r#"{"prompt":"read it","preset":" reader "}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let reader = sessions.list()[0].id.clone();
+        assert_eq!(preset_of(&sessions, &reader).as_deref(), Some("reader"));
+        let (_, _, bytes) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{reader}"),
+            Some(&cookie),
+        )
+        .await;
+        let view: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["preset"], "reader");
+
+        // The session keeps it: another preset named for it is refused, the same one is fine.
+        let other = json!({"prompt": "again", "session": reader, "preset": "standard"});
+        let (status, bytes) = post_json(&router, "/api/turn", &cookie, &other.to_string()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"the session runs the preset 'reader'; a session keeps the preset it was created with\",\"code\":\"session/preset-fixed\"}\n"
+        );
+        let same = json!({"prompt": "again", "session": reader, "preset": "reader"});
+        let (status, _) = post_json(&router, "/api/turn", &cookie, &same.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // A request that names none creates its session under the default.
+        let before: Vec<String> = sessions.list().into_iter().map(|meta| meta.id).collect();
+        let (status, _) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"plain"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let plain = sessions
+            .list()
+            .into_iter()
+            .map(|meta| meta.id)
+            .find(|id| !before.contains(id))
+            .expect("a new session");
+        assert_eq!(preset_of(&sessions, &plain).as_deref(), Some("standard"));
+
+        // A session that recorded none takes the one a request names.
+        let older = sessions
+            .start(StartSession {
+                cwd: Some(scratch.clone()),
+                ..StartSession::default()
+            })
+            .unwrap();
+        assert_eq!(preset_of(&sessions, &older), None);
+        let (_, _, bytes) = call(
+            &router,
+            Method::GET,
+            &format!("/api/sessions/{older}"),
+            Some(&cookie),
+        )
+        .await;
+        let view: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(view["preset"], Value::Null);
+        let named = json!({"prompt": "now", "session": older, "preset": "reader"});
+        let (status, _) = post_json(&router, "/api/turn", &cookie, &named.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(preset_of(&sessions, &older).as_deref(), Some("reader"));
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn without_the_presets_row_a_turn_names_only_the_implicit_preset_and_creates_none() {
+        use crate::services::SessionService as _;
+        let (router, sessions, scratch, cookie) = preset_app("turn-implicit", None).await;
+        let (status, bytes) = post_json(
+            &router,
+            "/api/turn",
+            &cookie,
+            r#"{"prompt":"hello","preset":"reader"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "Unknown agent preset: reader; declared: standard\n"
+        );
+        let (status, _) = post_json(&router, "/api/turn", &cookie, r#"{"prompt":"plain"}"#).await;
+        assert_eq!(status, StatusCode::OK);
+        let plain = sessions.list()[0].id.clone();
+        assert_eq!(preset_of(&sessions, &plain), None, "no roster, no preset");
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[tokio::test]
+    async fn a_new_session_route_creates_under_the_named_preset_and_refuses_an_undeclared_one() {
+        use crate::services::SessionService as _;
+        let (router, sessions, scratch, cookie) =
+            preset_app("sessions", Some(preset_roster())).await;
+        let branch = scratch.join("branch");
+        std::fs::create_dir_all(&branch).unwrap();
+
+        let refused = json!({"branch": branch, "preset": "nope"});
+        let (status, bytes) =
+            post_json(&router, "/api/sessions", &cookie, &refused.to_string()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_text(&bytes),
+            "{\"error\":\"Unknown agent preset: nope; declared: standard, reader\"}\n"
+        );
+        assert!(
+            sessions.list().is_empty(),
+            "the refused request wrote nothing"
+        );
+
+        let named = json!({"branch": branch, "preset": "reader", "title": "reading"});
+        let (status, bytes) =
+            post_json(&router, "/api/sessions", &cookie, &named.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let id = created["session"].as_str().unwrap().to_owned();
+        assert_eq!(preset_of(&sessions, &id).as_deref(), Some("reader"));
+
+        let plain = json!({"branch": branch});
+        let (status, bytes) =
+            post_json(&router, "/api/sessions", &cookie, &plain.to_string()).await;
+        assert_eq!(status, StatusCode::OK, "{}", body_text(&bytes));
+        let created: Value = serde_json::from_slice(&bytes).unwrap();
+        let id = created["session"].as_str().unwrap().to_owned();
+        assert_eq!(preset_of(&sessions, &id).as_deref(), Some("standard"));
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     // `to_bytes` is used by `call`'s siblings in other modules; the import is kept explicit here.

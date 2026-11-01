@@ -202,6 +202,8 @@ export class TeamService {
       if (child === null) throw new TeamError(`the Lead session '${lead.id}' could not be read to fork from`, 'TEAM_INVALID_EVENT')
       /** A teammate inherits the Lead's mode: a read-only team cannot spawn a teammate that writes. */
       inheritRecordedMode(this.deps.store, lead, child)
+      /** And the Lead's agent preset (inventory A96), so a narrowed Lead cannot widen its team's tools. */
+      if (leadMeta?.preset !== undefined) this.deps.store.recordPreset(child.id, leadMeta.preset)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.journal(lead, { type: 'team/member', member: { ...member, phase: 'failed', error: message } })

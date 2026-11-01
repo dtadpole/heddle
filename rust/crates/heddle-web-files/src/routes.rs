@@ -27,9 +27,9 @@
 //!
 //! | Method and path | Answers |
 //! |---|---|
-//! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text |
-//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf without ">"` · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
-//! | `GET /api/uploads/{leaf}` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
+//! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text · `400 {error, code: "workspace-file/unreadable"}` text-read permission denied (basename only, like #106) · `500 {error, code: "workspace-file/read-failed"}` unexpected text-read I/O |
+//! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf>"`, or for a leaf beyond visible ASCII (or with `"` or `\`) `attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded leaf>` (`attachment_disposition`) · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
+//! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
 //! | `POST /api/markdown` | body `{"text": string}` · `413 text "request too large\n"` over 10 MiB · `400 text "the body must be JSON\n"` · `400 {error: "text is required"}` · `200` compact `{"html": render_markdown(text)}` (no base) |
 //! | `POST /api/workspaces/pick` | `501 {error: reason}` when unavailable · `200` pretty [`PickerOutcome`] (`picked` or `cancelled`) |
@@ -56,8 +56,8 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
-use crate::code::{Rendered, render_source};
-use crate::host::{FileReading, FilesHost, WorkspaceAnswer};
+use crate::code::{Rendered, RendererName, render_source, renderer_for};
+use crate::host::{FileReadError, FileReading, FilesHost, WorkspaceAnswer};
 use crate::picker::{CommandRunner, PickerOutcome, Platform, SystemRunner, pick_folder};
 use crate::uploads::{MAX_UPLOAD_BYTES, save_upload, upload_directory};
 
@@ -161,6 +161,9 @@ pub struct FileQuery {
     path: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
+    /// The session an upload is read for (`GET /api/uploads/{leaf}?session=`).
+    #[serde(default)]
+    pub session: Option<String>,
 }
 
 /// The same query, read by the upload route (it uses `name`; the rest ignore it).
@@ -205,6 +208,31 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
         }
         WorkspaceAnswer::Owned => {}
     }
+    if renderer_for(&wanted).renderer == RendererName::Image {
+        let metadata = match std::fs::metadata(&wanted) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => {
+                return json_error(
+                    StatusCode::NOT_FOUND,
+                    &format!("{} is not a file", wanted.display()),
+                );
+            }
+        };
+        // PNG never goes through the UTF-8 reader. The raw route independently rechecks
+        // the workspace and the enclosing server's authentication when these bytes load.
+        let path = wanted.to_string_lossy();
+        let answer = serde_json::json!({
+            "path": path,
+            "name": crate::node_path::basename(&path),
+            "bytes": metadata.len(),
+            "renderer": "image",
+            "image": {
+                "src": format!("/api/raw?path={}", crate::markdown::percent_encode(&path)),
+                "mediaType": "image/png",
+            },
+        });
+        return json(StatusCode::OK, &format!("{}\n", answer));
+    }
     match files.host.read_file_text(&wanted) {
         Ok(reading) => {
             let rendered = render_source(Path::new(&reading.path), &reading.text);
@@ -218,15 +246,33 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
                 ),
             )
         }
-        Err(error) => {
-            let message = error.to_string();
-            let status = if message.contains("is not a file") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::UNSUPPORTED_MEDIA_TYPE
-            };
-            json_error(status, &message)
+        Err(error) => file_read_error(error),
+    }
+}
+
+/// Scoped Heddle policy (#45), not a DSH HTTP status contract.
+fn file_read_error(error: FileReadError) -> Response {
+    let (status, code) = match &error {
+        FileReadError::Unreadable { .. } => {
+            (StatusCode::BAD_REQUEST, Some("workspace-file/unreadable"))
         }
+        FileReadError::ReadFailed => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("workspace-file/read-failed"),
+        ),
+        FileReadError::NotAFile(_) => (StatusCode::NOT_FOUND, None),
+        FileReadError::NotText(_) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, None),
+    };
+    if let Some(code) = code {
+        json(
+            status,
+            &format!(
+                "{}\n",
+                serde_json::json!({ "error": error.to_string(), "code": code })
+            ),
+        )
+    } else {
+        json_error(status, &error.to_string())
     }
 }
 
@@ -273,14 +319,31 @@ fn raw_answer(files: &FilesRoutes, path: Option<String>) -> Response {
     serve_bytes(&wanted, &leaf)
 }
 
-/// `GET /api/uploads/{leaf}`: an uploaded file's bytes, confined to the upload directory, every answer hardened.
-async fn uploaded(State(files): State<FilesRoutes>, AxumPath(leaf): AxumPath<String>) -> Response {
-    hardened(uploaded_answer(&files, &leaf))
+/// `GET /api/uploads/{leaf}?session=`: an uploaded file's bytes, served only to a session whose log references it,
+/// confined to the upload directory, every answer (refusals included) hardened.
+async fn uploaded(
+    State(files): State<FilesRoutes>,
+    AxumPath(leaf): AxumPath<String>,
+    Query(params): Query<Params>,
+) -> Response {
+    hardened(uploaded_answer(&files, &leaf, params.session.as_deref()))
 }
 
-fn uploaded_answer(files: &FilesRoutes, leaf: &str) -> Response {
+fn uploaded_answer(files: &FilesRoutes, leaf: &str, session: Option<&str>) -> Response {
     if leaf.is_empty() || leaf == "." || leaf == ".." || leaf.contains('/') || leaf.contains('\\') {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
+    }
+    // As DSH's `session/attachment` authorizes a read against that session's events: no session, an unknown one, or
+    // one whose log does not carry this leaf is the same 404, so the route does not say which uploads exist.
+    let referenced = session
+        .filter(|id| is_session_id(id))
+        .and_then(|id| files.host.session_events(id))
+        .is_some_and(|events| crate::uploads::upload_referenced(&events, leaf));
+    if !referenced {
+        return text(
+            StatusCode::NOT_FOUND,
+            &format!("{}\n", crate::uploads::UPLOAD_NOT_REFERENCED),
+        );
     }
     let directory = upload_directory(&files.host.heddle_home());
     let wanted = directory.join(leaf);
@@ -288,6 +351,13 @@ fn uploaded_answer(files: &FilesRoutes, leaf: &str) -> Response {
         return text(StatusCode::NOT_FOUND, "no such asset\n");
     }
     serve_bytes(&wanted, leaf)
+}
+
+/// `session-` and a 36-character UUID, as `web.ts`'s `/^session-[0-9a-f-]{36}$/i`.
+fn is_session_id(id: &str) -> bool {
+    id.strip_prefix("session-").is_some_and(|rest| {
+        rest.len() == 36 && rest.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    })
 }
 
 /// `POST /api/uploads?name=`: the browser's bytes, stored under the harness's own home.
@@ -440,6 +510,38 @@ fn owned(host: &Arc<dyn FilesHost>, path: &Path) -> bool {
     host.workspace_owner(path) == WorkspaceAnswer::Owned
 }
 
+/// The `attachment` disposition for a file's own name, with nothing but visible ASCII in the header. A name of
+/// visible ASCII without `"` or `\` is sent as it is. Any other name keeps an ASCII `filename="…"` fallback, each
+/// other character (per code point) replaced by `_`, and carries the real name in `filename*=UTF-8''…` (RFC 6266,
+/// RFC 5987). The percent-encoding keeps only letters, digits and `-_.!~`, which is exactly JavaScript's
+/// `encodeURIComponent` with `'()*` also encoded, so the TypeScript server's `attachmentDisposition` writes the same
+/// bytes. Before this, a name such as `说明.txt` went into the header as raw UTF-8 bytes, which browsers decode
+/// differently and a strict proxy may refuse (live issue developer-two-3).
+pub(crate) fn attachment_disposition(name: &str) -> String {
+    let fallback: String = name
+        .chars()
+        .map(|c| {
+            if (' '..='~').contains(&c) && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if fallback == name {
+        return format!("attachment; filename=\"{name}\"");
+    }
+    let mut encoded = String::with_capacity(name.len() * 3);
+    for byte in name.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("attachment; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
 /// Serve one file's bytes with the type its extension names, and a download for anything a browser would run.
 fn serve_bytes(path: &Path, download_name: &str) -> Response {
     let metadata = match std::fs::metadata(path) {
@@ -453,10 +555,7 @@ fn serve_bytes(path: &Path, download_name: &str) -> Response {
     let inline = inline_content_type(&path.to_string_lossy());
     let disposition = match inline {
         Some(_) => "inline".to_string(),
-        None => format!(
-            "attachment; filename=\"{}\"",
-            download_name.replace('"', "")
-        ),
+        None => attachment_disposition(download_name),
     };
     let content_type = inline.unwrap_or("application/octet-stream");
     let mut response = Response::new(Body::from(bytes));
@@ -545,8 +644,12 @@ pub(crate) fn inline_content_type(path: &str) -> Option<&'static str> {
         .map(|(_, mime)| *mime)
 }
 
-/// Images, video, audio, fonts and PDF — what an `<img>`, a `<video>` or an `@font-face` needs. Nothing a browser
-/// would run as a page or a script.
+/// Images, video, audio, fonts, PDF and stylesheets — what an `<img>`, a `<video>`, an `@font-face` or a
+/// `<link rel="stylesheet">` needs. Nothing a browser would run as a page or a script.
+///
+/// A stylesheet is here because an HTML preview's `<link rel="stylesheet">` is rewritten to `/api/raw`, and a browser
+/// refuses a stylesheet whose type is not `text/css` in a standards-mode document: measured 2026-10-29 (DSH parity
+/// R-developer-twelve-14), a preview's relative CSS never applied because it arrived as a download type.
 pub(crate) const INLINE_TYPES: &[(&str, &str)] = &[
     (".png", "image/png"),
     (".jpg", "image/jpeg"),
@@ -567,6 +670,7 @@ pub(crate) const INLINE_TYPES: &[(&str, &str)] = &[
     (".ttf", "font/ttf"),
     (".otf", "font/otf"),
     (".pdf", "application/pdf"),
+    (".css", "text/css; charset=utf-8"),
 ];
 
 #[cfg(test)]
@@ -578,6 +682,19 @@ mod tests {
         assert_eq!(inline_content_type("/w/heddle.svg"), Some("image/svg+xml"));
         assert_eq!(inline_content_type("/w/SHOT.PNG"), Some("image/png"));
         assert_eq!(inline_content_type("/w/doc.pdf"), Some("application/pdf"));
+    }
+
+    #[test]
+    fn a_stylesheet_is_served_inline_as_css_so_an_html_preview_can_apply_it() {
+        // DSH parity R-developer-twelve-14: served as a download type, a preview's relative CSS never applied.
+        assert_eq!(
+            inline_content_type("/w/style.css"),
+            Some("text/css; charset=utf-8")
+        );
+        assert_eq!(
+            inline_content_type("/w/THEME.CSS"),
+            Some("text/css; charset=utf-8")
+        );
     }
 
     #[test]
@@ -602,6 +719,42 @@ mod tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
+    #[tokio::test]
+    async fn named_read_failures_have_scoped_status_and_no_host_details() {
+        for (error, status, code, message) in [
+            (
+                FileReadError::Unreadable {
+                    name: "denied.txt".into(),
+                },
+                Status::BAD_REQUEST,
+                "workspace-file/unreadable",
+                "cannot read \"denied.txt\": permission denied",
+            ),
+            (
+                FileReadError::ReadFailed,
+                Status::INTERNAL_SERVER_ERROR,
+                "workspace-file/read-failed",
+                "cannot read file: I/O error",
+            ),
+        ] {
+            let response = file_read_error(error);
+            assert_eq!(response.status(), status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({ "error": message, "code": code })
+            );
+        }
+        assert_eq!(
+            file_read_error(FileReadError::NotAFile("nonfile".into())).status(),
+            Status::NOT_FOUND
+        );
+        assert_eq!(
+            file_read_error(FileReadError::NotText("not text".into())).status(),
+            Status::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
+
     /// A host over a real temporary tree: the routes read bytes and text through it, and nothing touches the
     /// operator's home.
     struct DoubleHost {
@@ -611,9 +764,40 @@ mod tests {
         /// Judge containment on the string the request wrote, as a host that forgot to canonicalise would.
         naive: bool,
         reads: std::sync::Mutex<Vec<String>>,
+        /// Session logs by id, for the upload route's reference check.
+        logs: std::sync::Mutex<Vec<(String, Vec<serde_json::Value>)>>,
+    }
+
+    /// A session id the double's logs use.
+    const SESSION_A: &str = "session-00000000-0000-4000-8000-00000000000a";
+    const SESSION_B: &str = "session-00000000-0000-4000-8000-00000000000b";
+
+    impl DoubleHost {
+        /// Record a session whose log carries one image part for each leaf.
+        fn log_referencing(&self, id: &str, leaves: &[&str]) {
+            let content: Vec<serde_json::Value> = leaves
+                .iter()
+                .map(|leaf| {
+                    serde_json::json!({"type": "image", "path": self.home.join("uploads").join(leaf)})
+                })
+                .collect();
+            let events = vec![
+                serde_json::json!({"type": "message", "message": {"role": "user", "content": content}}),
+            ];
+            self.logs.lock().unwrap().push((id.to_owned(), events));
+        }
     }
 
     impl FilesHost for DoubleHost {
+        fn session_events(&self, id: &str) -> Option<Vec<serde_json::Value>> {
+            self.logs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(known, _)| known == id)
+                .map(|(_, events)| events.clone())
+        }
+
         fn heddle_home(&self) -> PathBuf {
             self.home.clone()
         }
@@ -721,6 +905,7 @@ mod tests {
             loaded: true,
             naive: false,
             reads: std::sync::Mutex::new(Vec::new()),
+            logs: std::sync::Mutex::new(Vec::new()),
         };
         (base, host)
     }
@@ -781,6 +966,66 @@ mod tests {
             .to_bytes()
             .to_vec();
         (status, headers, bytes)
+    }
+
+    #[tokio::test]
+    async fn png_metadata_skips_text_reader_and_keeps_raw_workspace_boundary() {
+        let (base, host) = scratch("png-preview");
+        let path = host.root.join("pixel & 雪.PNG");
+        let png = [0x89, b'P', b'N', b'G', 13, 10, 26, 10];
+        std::fs::write(&path, png).unwrap();
+        let host = Arc::new(host);
+        let app = FilesRoutes::new(host.clone()).router();
+        let (status, _, bytes) =
+            call(app.clone(), "GET", &query(&path.to_string_lossy()), None).await;
+        assert_eq!(status, Status::OK);
+        let answer: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["renderer"], "image");
+        assert_eq!(answer["image"]["mediaType"], "image/png");
+        assert!(answer.get("text").is_none());
+        assert!(answer.get("lines").is_none());
+        assert!(
+            host.reads.lock().unwrap().is_empty(),
+            "PNG must not reach UTF-8 reader"
+        );
+        let source = answer["image"]["src"].as_str().unwrap();
+        let (status, headers, bytes) = call(app.clone(), "GET", source, None).await;
+        assert_eq!(status, Status::OK);
+        assert_eq!(headers["content-type"], "image/png");
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(bytes, png);
+        let outside = base.join("outside.png");
+        std::fs::write(&outside, png).unwrap();
+        assert_eq!(
+            call(app.clone(), "GET", &query(&outside.to_string_lossy()), None)
+                .await
+                .0,
+            Status::BAD_REQUEST
+        );
+        let raw = format!(
+            "/api/raw?path={}",
+            crate::markdown::percent_encode(&outside.to_string_lossy())
+        );
+        assert_eq!(
+            call(app.clone(), "GET", &raw, None).await.0,
+            Status::NOT_FOUND
+        );
+        assert_eq!(
+            call(
+                app,
+                "GET",
+                &query(
+                    &canonical_path(&host.root)
+                        .join("missing.png")
+                        .to_string_lossy()
+                ),
+                None
+            )
+            .await
+            .0,
+            Status::NOT_FOUND
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     fn body_text(bytes: &[u8]) -> String {
@@ -982,6 +1227,8 @@ mod tests {
             "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
         )
         .unwrap();
+        // An upload is read only for a session whose log references it (R-developer-two-10).
+        host.log_referencing(SESSION_A, &["stored.svg"]);
         let app = routes_of(host);
         let raw = |name: &str| {
             format!(
@@ -1000,12 +1247,17 @@ mod tests {
             ),
             (
                 "an uploaded SVG",
-                "/api/uploads/stored.svg".to_owned(),
+                format!("/api/uploads/stored.svg?session={SESSION_A}"),
                 Status::OK,
             ),
             (
                 "a missing upload",
                 "/api/uploads/no-such-file.svg".to_owned(),
+                Status::NOT_FOUND,
+            ),
+            (
+                "an upload read for no session",
+                "/api/uploads/stored.svg".to_owned(),
                 Status::NOT_FOUND,
             ),
         ];
@@ -1060,6 +1312,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    #[test]
+    fn a_download_name_reaches_the_header_as_visible_ascii_with_the_real_name_encoded() {
+        assert_eq!(
+            attachment_disposition("notes.txt"),
+            "attachment; filename=\"notes.txt\""
+        );
+        assert_eq!(
+            attachment_disposition("说明.txt"),
+            "attachment; filename=\"__.txt\"; filename*=UTF-8''%E8%AF%B4%E6%98%8E.txt"
+        );
+        assert_eq!(
+            attachment_disposition("café.txt"),
+            "attachment; filename=\"caf_.txt\"; filename*=UTF-8''caf%C3%A9.txt"
+        );
+        assert_eq!(
+            attachment_disposition("say \"hi\"\\now.txt"),
+            "attachment; filename=\"say _hi__now.txt\"; filename*=UTF-8''say%20%22hi%22%5Cnow.txt"
+        );
+        assert_eq!(
+            attachment_disposition("line\nbreak (1)'*.txt"),
+            "attachment; filename=\"line_break (1)'*.txt\"; filename*=UTF-8''line%0Abreak%20%281%29%27%2A.txt"
+        );
+        assert_eq!(
+            attachment_disposition("🦀.bin"),
+            "attachment; filename=\"_.bin\"; filename*=UTF-8''%F0%9F%A6%80.bin"
+        );
+        for name in ["说明.txt", "café.txt", "a\"b\\c\n.txt", "🦀.bin"] {
+            let value = attachment_disposition(name);
+            assert!(
+                value.bytes().all(|b| (0x20..0x7f).contains(&b)),
+                "only visible ASCII in the header for {name:?}: {value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_named_beyond_ascii_downloads_whole_under_its_real_name() {
+        let (base, host) = scratch("raw-unicode-name");
+        let path = host.root.join("说明.txt");
+        std::fs::write(&path, "第一行\n").unwrap();
+        let (status, headers, bytes) = call(
+            routes_of(host),
+            "GET",
+            &format!(
+                "/api/raw?path={}",
+                crate::markdown::percent_encode(&path.to_string_lossy())
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(status, Status::OK);
+        assert_eq!(body_text(&bytes), "第一行\n", "the whole file is the body");
+        let disposition = headers
+            .get(header::CONTENT_DISPOSITION)
+            .expect("a download carries a disposition")
+            .as_bytes();
+        assert!(
+            disposition.iter().all(|b| (0x20..0x7f).contains(b)),
+            "no raw byte beyond ASCII in the header: {:?}",
+            String::from_utf8_lossy(disposition)
+        );
+        assert_eq!(
+            disposition,
+            b"attachment; filename=\"__.txt\"; filename*=UTF-8''%E8%AF%B4%E6%98%8E.txt"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test]
     async fn a_path_outside_every_root_is_not_served() {
         let (base, host) = scratch("raw-outside");
@@ -1086,7 +1406,8 @@ mod tests {
     async fn an_upload_is_stored_and_served_back_from_the_upload_directory() {
         let (base, host) = scratch("uploads");
         let home = host.home.clone();
-        let routes = routes_of(host);
+        let host = Arc::new(host);
+        let routes = FilesRoutes::new(host.clone() as Arc<dyn FilesHost>).router();
         let (status, _, bytes) = call(
             routes.clone(),
             "POST",
@@ -1106,8 +1427,36 @@ mod tests {
         );
         let path = saved["path"].as_str().unwrap();
         let leaf = crate::node_path::basename(path);
-        let (status, headers, served) =
-            call(routes.clone(), "GET", &format!("/api/uploads/{leaf}"), None).await;
+        // Stored, but referenced by no session yet: refused whether or not a session is named.
+        for uri in [
+            format!("/api/uploads/{leaf}"),
+            format!("/api/uploads/{leaf}?session={SESSION_A}"),
+        ] {
+            let (status, _, body) = call(routes.clone(), "GET", &uri, None).await;
+            assert_eq!(status, Status::NOT_FOUND, "{uri}");
+            assert_eq!(
+                body_text(&body),
+                "this upload is not referenced by this session\n"
+            );
+        }
+        host.log_referencing(SESSION_A, &[leaf]);
+        host.log_referencing(SESSION_B, &["other.png"]);
+        // Another session's read, a malformed id, or no session at all stays refused.
+        for uri in [
+            format!("/api/uploads/{leaf}?session={SESSION_B}"),
+            format!("/api/uploads/{leaf}?session=not-a-session"),
+            format!("/api/uploads/{leaf}"),
+        ] {
+            let (status, _, _) = call(routes.clone(), "GET", &uri, None).await;
+            assert_eq!(status, Status::NOT_FOUND, "{uri}");
+        }
+        let (status, headers, served) = call(
+            routes.clone(),
+            "GET",
+            &format!("/api/uploads/{leaf}?session={SESSION_A}"),
+            None,
+        )
+        .await;
         assert_eq!(status, Status::OK);
         assert_eq!(
             headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
@@ -1330,8 +1679,14 @@ mod tests {
         let directory = host.home.join("uploads");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("a b.png"), b"png").unwrap();
-        let (status, headers, bytes) =
-            call(routes_of(host), "GET", "/api/uploads/a%20b.png", None).await;
+        host.log_referencing(SESSION_A, &["a b.png"]);
+        let (status, headers, bytes) = call(
+            routes_of(host),
+            "GET",
+            &format!("/api/uploads/a%20b.png?session={SESSION_A}"),
+            None,
+        )
+        .await;
         assert_eq!(status, Status::OK, "{}", body_text(&bytes));
         assert_eq!(
             headers.get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
@@ -1531,7 +1886,15 @@ mod tests {
         let outside = base.join("secret.txt");
         std::fs::write(&outside, b"secret").unwrap();
         std::os::unix::fs::symlink(&outside, directory.join("link.txt")).unwrap();
-        let (status, _, bytes) = call(routes_of(host), "GET", "/api/uploads/link.txt", None).await;
+        // Even a session that references the leaf is not served a file outside the directory.
+        host.log_referencing(SESSION_A, &["link.txt"]);
+        let (status, _, bytes) = call(
+            routes_of(host),
+            "GET",
+            &format!("/api/uploads/link.txt?session={SESSION_A}"),
+            None,
+        )
+        .await;
         assert_eq!(status, Status::NOT_FOUND);
         assert_eq!(body_text(&bytes), "no such asset\n");
         let _ = std::fs::remove_dir_all(&base);

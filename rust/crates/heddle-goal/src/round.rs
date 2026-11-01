@@ -242,6 +242,7 @@ mod tests {
             tools: Arc::new(heddle_tools::ToolRegistry::new(gates)),
             hooks: Arc::new(heddle_agent::NoTurnHooks),
             turns: None,
+            presets: None,
         };
         Fixture {
             root,

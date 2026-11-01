@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import net from 'node:net'
 import { test } from 'node:test'
 
-import { decodeFrame, encodeFrame } from '../../cdp.mjs'
-import { browserPath, releaseChromeOutput, stateDir } from '../../chrome.mjs'
+import { connect, decodeFrame, encodeFrame } from '../../cdp.mjs'
+import { browserPath, chromeArgs, releaseChromeOutput, stateDir, stopChrome } from '../../chrome.mjs'
 import { keyDescription, parseKey } from '../../actions.mjs'
 import { parseGeolocation, parseHeaders, parseViewport } from '../../emulate.mjs'
 import {
   formatConsoleList,
+  formatNetworkList,
   formatNetworkRequest,
   formatPages,
   groupConsoleMessages,
@@ -16,6 +19,7 @@ import {
   networkStatus,
 } from '../../format.mjs'
 import { attributesOf, formatSnapshot } from '../../snapshot.mjs'
+import { Page } from '../../page.mjs'
 import { TOOL_NAMES } from '../../tools.mjs'
 
 /**
@@ -104,6 +108,14 @@ test('key descriptions carry the protocol codes for named, letter, digit and pun
   assert.deepEqual(keyDescription('/'), { key: '/', code: 'Slash', keyCode: 191, text: '/' })
   assert.deepEqual(keyDescription('F5'), { key: 'F5', code: 'F5', keyCode: 116 })
   assert.throws(() => keyDescription('NonsenseKey'), /does not know the key/)
+})
+
+/** A key's name is not always its DOM value: a button answers the space bar only for `key: ' '`. */
+test('the named Space key sends the DOM value a literal space, the same as pressing " "', () => {
+  assert.deepEqual(keyDescription('Space'), { key: ' ', code: 'Space', keyCode: 32, text: ' ' })
+  assert.deepEqual(keyDescription('Space'), keyDescription(' '), 'the name and the character are one key')
+  assert.deepEqual(parseKey('Shift+Space'), { key: 'Space', modifiers: 8 })
+  assert.equal(keyDescription(parseKey('Shift+Space').key).key, ' ', 'a chord keeps the DOM value')
 })
 
 /** The snapshot's text form: indentation, uid first, role rules, quoted values, collapsed text. */
@@ -195,7 +207,7 @@ test('console messages group only when they are consecutive and identical', () =
 /** A console list is a header, the message lines, and nothing parsed from the page's own text. */
 test('the console listing formats a message and says when there are none', () => {
   const page = {
-    browser: { navigationEpoch: 1 },
+    navigationEpoch: 1,
     console: [
       { msgid: 1, type: 'log', text: 'hello', args: ['hello'], navigation: 1 },
       { msgid: 2, type: 'error', text: 'broken', args: [], navigation: 1 },
@@ -210,7 +222,7 @@ test('the console listing formats a message and says when there are none', () =>
   assert.doesNotMatch(listed.text, /old page/, 'a previous document is not in the reading')
   const preserved = formatConsoleList(page, { includePreservedMessages: true })
   assert.match(preserved.text, /old page/, 'unless the caller asks for preserved messages')
-  const empty = formatConsoleList({ browser: { navigationEpoch: 1 }, console: [], network: [] })
+  const empty = formatConsoleList({ navigationEpoch: 1, console: [], network: [] })
   assert.match(empty.text, /<no console messages found>/)
 })
 
@@ -301,6 +313,19 @@ test('an explicit browser path wins over discovery', () => {
   assert.equal(browserPath('/definitely/not/a/browser'), '/definitely/not/a/browser')
 })
 
+/**
+ * A fresh profile downloads Chrome's default apps into the user TMPDIR, and a killed browser leaves each
+ * download there as a hidden .com.google.Chrome.XXXXXX file: 30,000 of them, 5.3 GiB, by 31 October 2026.
+ */
+test('every start disables the default apps, headless or windowed, and keeps the caller\'s own flags last', () => {
+  for (const headless of [true, false]) {
+    const args = chromeArgs({ profile: '/p', headless, args: ['--lang=fr'] })
+    assert.ok(args.includes('--disable-default-apps'), `headless ${headless}: ${args.join(' ')}`)
+    assert.ok(args.includes('--user-data-dir=/p'))
+    assert.deepEqual(args.slice(-2), ['--lang=fr', 'about:blank'])
+  }
+})
+
 
 test('closing a stopped Chrome releases only its owned output streams', () => {
   const calls = []
@@ -313,4 +338,109 @@ test('closing a stopped Chrome releases only its owned output streams', () => {
   assert.deepEqual(calls, ['stdout', 'stderr'])
   releaseChromeOutput(undefined)
   releaseChromeOutput({ stdout: null, stderr: null })
+})
+
+/**
+ * Each page counts its own navigations. With one counter for the browser, a navigation in a background tab
+ * made the selected page's live entries look like an earlier document's, and four of them hid even the
+ * preserved ones (developer-two, 2026-10-31).
+ */
+test('a navigation in another tab never hides this page\'s console messages or requests', () => {
+  const handlers = []
+  const browser = { navigationEpoch: 0, connection: { on: (method, handler) => handlers.push({ method, handler }) } } // the counter the browser once kept
+  const fire = (sessionId, method, params) => {
+    for (const h of handlers) if (h.method === method) h.handler(params, { sessionId })
+  }
+  const navigate = (sessionId, url) => fire(sessionId, 'Page.frameNavigated', { frame: { id: `top-${sessionId}`, url } })
+  const log = (sessionId, text) => fire(sessionId, 'Runtime.consoleAPICalled', { type: 'log', args: [{ type: 'string', value: text }], timestamp: 1 })
+  const request = (sessionId, url) =>
+    fire(sessionId, 'Network.requestWillBeSent', { requestId: url, type: 'Image', timestamp: 1, request: { url, method: 'GET', headers: {} } })
+  const selected = new Page(browser, { targetId: 'a', sessionId: 'A', pageId: 1 })
+  const background = new Page(browser, { targetId: 'b', sessionId: 'B', pageId: 2 })
+
+  navigate('A', 'http://x/a')
+  log('A', 'selected page says hi')
+  request('A', 'http://x/a.png')
+  for (let i = 0; i < 5; i++) navigate('B', `http://x/b${i}`)
+  assert.equal(background.navigationEpoch, 5)
+  assert.equal(selected.navigationEpoch, 1, 'a navigation counts on its own page only')
+  assert.match(formatConsoleList(selected).text, /selected page says hi/)
+  assert.match(formatConsoleList(selected, { includePreservedMessages: true }).text, /selected page says hi/)
+  assert.match(formatNetworkList(selected).text, /http:\/\/x\/a\.png/)
+  assert.match(formatNetworkList(selected, { includePreservedRequests: true }).text, /http:\/\/x\/a\.png/)
+
+  navigate('A', 'http://x/a2')
+  assert.doesNotMatch(formatConsoleList(selected).text, /selected page says hi/, 'its own navigation still starts a fresh reading')
+  assert.doesNotMatch(formatNetworkList(selected).text, /a\.png/)
+  assert.match(formatNetworkList(selected, { includePreservedRequests: true }).text, /a\.png/, 'and the old document stays preserved')
+})
+
+/**
+ * An endpoint that takes the TCP connection and then says nothing, or hangs up: what a busy or dying Chrome
+ * looks like from `connect`, because the kernel completes a connect to a listening socket whether or not the
+ * browser reads it. `onSocket` decides what the endpoint does with each connection.
+ *
+ * Every connection is hung up after `holdMs` as a backstop: a test that times out never reaches its `finally`,
+ * so a client whose bound is broken would otherwise hold the socket, and the whole file, open for good.
+ */
+async function silentEndpoint(onSocket = () => {}, holdMs = 8_000) {
+  const sockets = new Set()
+  const server = net.createServer((socket) => {
+    sockets.add(socket)
+    socket.on('error', () => {})
+    setTimeout(() => socket.destroy(), holdMs).unref()
+    onSocket(socket)
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise))
+  server.unref()
+  return {
+    url: `ws://127.0.0.1:${server.address().port}/devtools/browser/silent`,
+    close() {
+      for (const socket of sockets) socket.destroy()
+      server.close()
+    },
+  }
+}
+
+/**
+ * Two Rust browser checks hung to the lane's 300 s timeout under 3-4 busy browser slots (integrator-one,
+ * 2026-10-31); every page-level wait is bounded, and the handshake was not. A connect that never settles must
+ * fail by name instead.
+ */
+test('a connect to an endpoint that never answers the handshake rejects within its bound', { timeout: 10_000 }, async () => {
+  const endpoint = await silentEndpoint()
+  try {
+    const at = Date.now()
+    await assert.rejects(connect(endpoint.url, { timeoutMs: 300 }), /did not answer the websocket handshake within 300ms/)
+    assert.ok(Date.now() - at < 3_000, `rejected after ${Date.now() - at}ms`)
+  } finally {
+    endpoint.close()
+  }
+})
+
+test('a connect whose endpoint hangs up before the handshake rejects at once, not at the bound', { timeout: 10_000 }, async () => {
+  const endpoint = await silentEndpoint((socket) => socket.once('data', () => socket.end())) // reads the upgrade, then a clean FIN
+  try {
+    const at = Date.now()
+    await assert.rejects(connect(endpoint.url, { timeoutMs: 5_000 }), /closed the connection before the websocket handshake/)
+    assert.ok(Date.now() - at < 2_000, `rejected after ${Date.now() - at}ms`)
+  } finally {
+    endpoint.close()
+  }
+})
+
+test('stopping a browser whose endpoint never answers falls through to the signal within seconds', { timeout: 15_000 }, async () => {
+  const endpoint = await silentEndpoint()
+  const child = spawn('sleep', ['30'], { stdio: ['ignore', 'pipe', 'pipe'] })
+  try {
+    const at = Date.now()
+    await stopChrome({ child, wsUrl: endpoint.url })
+    const took = Date.now() - at
+    if (child.exitCode === null && child.signalCode === null) await new Promise((resolvePromise) => child.once('exit', resolvePromise))
+    assert.equal(child.signalCode, 'SIGTERM')
+    assert.ok(took < 6_000, `stopChrome took ${took}ms`)
+  } finally {
+    child.kill('SIGKILL')
+    endpoint.close()
+  }
 })

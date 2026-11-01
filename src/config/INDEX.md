@@ -40,6 +40,15 @@ result is visible. Recording which layer supplied each field costs one array per
 "where did this come from" answerable, which is the question an operator actually has. DSH's
 equivalent answer is the patch view the loader keeps; this is the same idea made printable.
 
+## The plugin inventory
+
+[`plugin-inventory.ts`](plugin-inventory.ts) is DSH's read-only `pluginInventory/list`, served as
+`GET /api/plugin-inventory`: every non-group loader entry in loader order, with the module name **the layer
+wrote** (paired back from the composed rows, because `boot` hands the loader a resolved `file://` URL), whether
+it is enabled, and its fiber's phase, read from the loader on every request. There is no
+`managementAvailable`, because nothing here can change the profile. The Rust port is `heddle-config`'s
+`plugin_inventory`, over the rows and the loader's entries.
+
 ## Read next
 
 [`../boot.ts`](../boot.ts) for what starts the composed tree, and

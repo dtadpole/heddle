@@ -26,6 +26,7 @@ import {
   fixtureOnly,
   expectedSeatLabel,
   healthSessionExpired,
+  ownSessionPlaced,
   lowestEffort,
   modelLabel,
   REAL_MODEL,
@@ -406,4 +407,23 @@ test('with the deployment conversation on, the turn check claims both messages',
   assert.equal(broken.conversation.verdict, 'unjudged')
   // Without the flag nothing changes.
   assert.equal(deploymentTurnWithConversation(first, undefined), first)
+})
+
+test("an own health session is used only when its server lists it in the monitor's own workspace", () => {
+  const workspace = '/home/monitor/.heddle-live-monitor/health'
+  const id = 'session-own'
+  // Listed in the health folder: the turn may go there.
+  assert.deepEqual(ownSessionPlaced({ listed: [{ id: 'session-x', cwd: '/elsewhere' }, { id, cwd: workspace }], id, workspace }), { ok: true })
+  // The 2026-10-31 case: the session exists but sits in a tester's workspace.
+  const foreign = ownSessionPlaced({ listed: [{ id, cwd: '/home/monitor/.heddle-testers/developer-six' }], id, workspace })
+  assert.equal(foreign.ok, false)
+  assert.match(foreign.reason, /not the monitor's own/)
+  assert.doesNotMatch(foreign.reason, /developer-six|\//, 'the published reason names no path')
+  // Not listed, listed without a workspace, or no readable list: no turn.
+  assert.equal(ownSessionPlaced({ listed: [{ id: 'session-x', cwd: workspace }], id, workspace }).ok, false)
+  assert.equal(ownSessionPlaced({ listed: [{ id, cwd: null }], id, workspace }).ok, false)
+  assert.equal(ownSessionPlaced({ listed: [{ id, cwd: '' }], id, workspace }).ok, false)
+  assert.equal(ownSessionPlaced({ listed: null, id, workspace }).ok, false)
+  // A prefix of the folder is not the folder.
+  assert.equal(ownSessionPlaced({ listed: [{ id, cwd: `${workspace}-other` }], id, workspace }).ok, false)
 })

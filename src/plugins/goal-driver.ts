@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
-import { GoalDriver } from '../goal/driver.ts'
+import { GoalDriver, isBlockedTurnEnd, turnEndOf, type TurnEndEvidence } from '../goal/driver.ts'
 
 /** Name this plugin is registered and logged under. */
 export const name = 'goal-driver'
@@ -46,17 +46,31 @@ export function apply(ctx: Context): void {
    * condition decides. That is why there are several edges and why none of them carries meaning:
    *
    * - `turn/completed` — a turn settled, so the session is idle and a round may be started;
+   * - `turn/failed` — a turn's other end (the archived-session gate's `blocked`, a teammate's failed turn): the session
+   *   is idle again, so the busy span ends here too, but **no round is requested**. DSH's driver is ready again at
+   *   every idle, whatever ended the turn (dsh-goal-round-driver lib/index.js:84-86, 223-241); a turn that wrote
+   *   `turn/failed` was refused or failed, and a round started from its end would meet the same refusal, so the next
+   *   round waits for an edge that can change the outcome — a goal change, or a turn that completes. Measured: a
+   *   variant that requested a round here started 353 refused rounds in 300 ms on an archived session. The gate's
+   *   refusal (`{ kind: 'blocked' }`, DSH's `turn/end` `blocked`) leaves the goal armed, so a refused goal round can
+   *   block it `prompt-rejected` in the driver; any other `turn/failed` is a failure and **disarms** continuation, as
+   *   DSH's `agent/error` listener does (lib/index.js:211-213) and a failed `turn/completed` does here (#93);
    * - `goal/change` **while the session is at rest** — a goal was created, edited, resumed, paused, completed
    *   or cleared by a person or by the API. Without this edge, a goal resumed while idle would wait for a
    *   turn that may never come, which is the fragility of an event-only trigger;
    * - `goal/change` **during a turn** is ignored here on purpose: the running turn must not have a second
-   *   turn started inside it, and its own completion edge will re-evaluate the condition.
+   *   turn started inside it, and its own completion edge will re-evaluate the condition. A turn that ends
+   *   `turn/failed` instead re-evaluates nothing, so such a change waits for the next edge.
    *
    * The idle half is read from the log because heddle has no agent-status field: a turn's own events mark
-   * the session busy, `turn/completed` marks it idle again. It is the equivalent of DSH's
-   * `agent.status === 'idle'` in `readyToDrive`.
+   * the session busy, `turn/completed` or `turn/failed` marks it idle again. It is the equivalent of DSH's
+   * `agent.status === 'idle'` in `readyToDrive`. Measured before `turn/failed` ended the span (developer-five's
+   * review of the archived-session gate, issue #26): a turn refused at a later step left its session busy, so a goal
+   * resumed or edited after the unarchive was ignored until some other turn completed.
    */
   const inTurn = new Set<string>()
+  /** Each session's last `assistant/completed`, read at its `turn/completed` to tell how the turn ended. */
+  const lastCompleted = new Map<string, TurnEndEvidence>()
   const requestFor = (session: string): void => {
     const handle = ctx.session.store.open(session)
     if (handle === null) return
@@ -65,9 +79,30 @@ export function apply(ctx: Context): void {
     })
   }
   ctx.on('session/event', ({ session, event }) => {
+    if (event.type === 'assistant/completed') {
+      lastCompleted.set(session, event as TurnEndEvidence)
+      return
+    }
     if (event.type === 'turn/completed') {
       inTurn.delete(session)
+      /**
+       * How the turn ended decides what may follow it (#93, DSH's turn/end listener): a stopped goal round pauses its
+       * goal, and any other stopped, failed or length-cut turn disarms continuation, so no round starts after it.
+       */
+      const end = turnEndOf(lastCompleted.get(session), event as TurnEndEvidence)
+      lastCompleted.delete(session)
+      const handle = ctx.session.store.open(session)
+      if (handle !== null) driver.turnEnded(handle, end)
       requestFor(session)
+      return
+    }
+    if (event.type === 'turn/failed') {
+      inTurn.delete(session)
+      lastCompleted.delete(session)
+      if (!isBlockedTurnEnd(event)) {
+        const handle = ctx.session.store.open(session)
+        if (handle !== null) driver.turnEnded(handle, 'failed')
+      }
       return
     }
     /**

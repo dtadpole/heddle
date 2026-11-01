@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { createApp } from './app.ts'
 import { boot, failedEntries, settle } from './boot.ts'
@@ -13,7 +14,9 @@ import { defaultSessionRoot } from './session/store.ts'
 import { readFileText, tree, type TreeNode } from './session/tree.ts'
 import type { WorkspaceService } from './workspace/service.ts'
 import { printStream } from './stream/printer.ts'
-import { heddleHome } from './config/schema.ts'
+import { declaredModuleNames } from './config/plugin-inventory.ts'
+import { resetProfileFromTemplate } from './config/profile-template.ts'
+import { ConfigError, heddleHome, profilesDir } from './config/schema.ts'
 
 /**
  * `FiberState` is a `const enum`, so it has no runtime object to read names from.
@@ -28,6 +31,8 @@ interface Args {
   help: boolean
   config?: string
   profile?: string
+  /** `--from-default-profile <template>`: replace the `--profile` with a fresh copy of a shipped template first. */
+  fromDefaultProfile?: string
   patch: string[]
   turn?: string
   resume?: string
@@ -67,6 +72,8 @@ usage: heddle [options] [command]
 options:
   -c, --config <path>        boot from this configuration layer instead of the default profile
       --profile <name>       boot a named profile from $HEDDLE_HOME/profiles
+      --from-default-profile <template>
+                             replace that profile with a fresh copy of a shipped template (default), then boot it
       --patch <path>         apply an extra layer after it (repeatable)
       --dry-run              report what a run would do and stop before doing it
       --sandbox-root <path>  confine file effects to this directory instead of the working one
@@ -147,6 +154,9 @@ function parseArgs(argv: readonly string[]): Args {
         args.profile = looksLikePath ? resolve(value) : value
         break
       }
+      case '--from-default-profile':
+        args.fromDefaultProfile = next() ?? ''
+        break
       case '--patch':
         args.patch.push(next() ?? '')
         break
@@ -420,10 +430,25 @@ function describeTree(node: TreeNode): string[] {
   return { patches: args.patch, includeProjectPatch: false }
 }
 
-/** Boot from the default profile or from the flags. **/
-async function bootFromArgs(args: Args) {
+/**
+ * Boot from the default profile or from the flags.
+ *
+ * `machineOutput` is a one-shot run whose stdout is `--json`'s document. Its plugins, and a turn it runs, log errors
+ * only: the console exporter writes `info` to stdout, and measured on 2026-10-29 `heddle goal <session> --json`
+ * printed `model: 1 endpoint(s) — …`, `tools: 4 registered, …` and `team: durable team service ready` ahead of the
+ * JSON — and a `--turn` added `turn: wrote …` for a `write_file` call — so stdout did not parse. The Rust binary
+ * prints those lines on neither stream, so this matches it; an error a row logs still reaches stderr. `web` does
+ * not ask for it — its `--json` line follows human lines, and its log is a server's — and a run without `--json`
+ * prints exactly what it did.
+ */
+async function bootFromArgs(args: Args, options: { readonly machineOutput?: boolean } = {}) {
+  return boot({ ...bootOptions(args), ...(options.machineOutput === true ? { logLevel: 0 } : {}) })
+}
+
+/** The layers and overrides a command line boots, which the settings surface must judge writes against. */
+function bootOptions(args: Args) {
   const layers = baseLayer(args)
-  return boot({
+  return {
     configDir: process.cwd(),
     ...(args.profile !== undefined ? { profile: args.profile } : {}),
     ...(layers.base !== undefined ? { base: layers.base } : {}),
@@ -449,7 +474,7 @@ async function bootFromArgs(args: Args) {
           ],
         }
       : {}),
-  })
+  }
 }
 
 function hasProfile(args: Args): boolean {
@@ -492,14 +517,32 @@ async function runWeb(args: Args): Promise<void> {
       return
     }
 
+    const { settingsServiceFor } = await import('./config/settings.ts')
     const server = await startWebServer(app.ctx, {
+      settings: settingsServiceFor(bootOptions(args)),
+      // Browser framing and the page's Browser tab are opt-in, as DSH's Web profile ships them (D-068, #86); exactly
+      // `1` enables them.
+      browser: process.env['HEDDLE_WEB_BROWSER'] === '1',
       ...(args.port !== undefined ? { port: args.port } : { port: DEFAULT_PORT }),
       ...(args.host !== undefined ? { host: args.host } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
       // The endpoint the flag named becomes the server's default, so a turn posted without one
       // is answered by the endpoint the operator chose rather than by whichever is first.
       ...(args.endpoint !== undefined ? { defaultEndpoint: args.endpoint } : {}),
+      // The plugin inventory reports each row's module name as the layer wrote it, not as `boot` resolved it.
+      pluginModuleNames: declaredModuleNames(app),
     })
+    /**
+     * The sessions the startup sweeps read: every listed one whose log reads whole. A log that does not is named once
+     * and left out (`SessionStore.loads`), because these sweeps run after the listener is up and before the login line:
+     * one throw here used to unwind this function into `app.dispose()`, leaving a listener with every plugin gone and
+     * no link printed (#130).
+     */
+    const sweepHandles = () =>
+      app.ctx.session
+        .list()
+        .map((meta) => app.ctx.session.store.open(meta.id))
+        .filter((handle): handle is NonNullable<typeof handle> => handle !== null && app.ctx.session.store.loads(handle))
     /**
      * A restarted harness picks up the goals it finds still active.
      *
@@ -509,10 +552,7 @@ async function runWeb(args: Args): Promise<void> {
      * the startup edge that asks it.
      */
     if (app.ctx.goalDriver !== undefined) {
-      const handles = app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const handles = sweepHandles()
       const resumed = await app.ctx.goalDriver.resumeAtStart(handles)
       if (resumed.requested > 0) process.stdout.write(`heddle web: resuming ${resumed.requested} active goal(s)\n`)
     }
@@ -522,15 +562,23 @@ async function runWeb(args: Args): Promise<void> {
      * turns for teams it is not working on.
      */
     if (app.ctx.team !== undefined) {
-      const handles = app.ctx.session
-        .list()
-        .map((meta) => app.ctx.session.store.open(meta.id))
-        .filter((handle): handle is NonNullable<typeof handle> => handle !== null)
+      const handles = sweepHandles()
       const recovered = await app.ctx.team.recoverAll(handles)
       if (recovered.recovered > 0 || recovered.failed > 0) {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
       }
     }
+    /**
+     * And for background children: a child the previous process left mid-turn is closed and reported to its parent as
+     * interrupted, which the process that ran it can no longer do (#170). Only the server does this, for the same
+     * reason as the sweeps above; the parents' turns are not awaited here.
+     */
+    if (app.ctx.get('subagents') !== undefined) {
+      const reported = app.ctx.subagents.reportInterrupted(sweepHandles())
+      if (reported > 0) process.stdout.write(`heddle web: reported ${reported} interrupted subagent(s) to their parent(s)\n`)
+    }
+    /** Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule). */
+    if (app.ctx.get('schedule') !== undefined) app.ctx.schedule.startDelivery()
     process.stdout.write(`heddle web: ${server.url}\n`)
     process.stdout.write(`heddle web: serving on ${server.host}:${server.port}; pass --port to change it\n`)
     if (args.json) process.stdout.write(`${JSON.stringify({ url: server.url, host: server.host, port: server.port, token: server.token })}\n`)
@@ -640,7 +688,7 @@ function applyToolAllowList(ctx: { tools?: { filterTo?: (allow: readonly string[
 }
 
 async function runCommand(command: string, target: string | undefined, json: boolean, args: Args): Promise<boolean> {
-  const app = await bootFromArgs(args)
+  const app = await bootFromArgs(args, { machineOutput: json })
   try {
     await settle(app.ctx)
     /**
@@ -912,6 +960,42 @@ async function runCommand(command: string, target: string | undefined, json: boo
   }
 }
 
+/**
+ * The profile a run boots when it names none (issue #74).
+ *
+ * A run that boots — `web`, a command, or a `--turn` — and names no profile, no `--config` and no `--patch`, from a
+ * folder with no project tree (`cordis.yml`), used to boot **nothing**: on a fresh home the page loaded with no
+ * session, model or workspace service, and the first message failed with an internal TypeError. DSH auto-initializes
+ * its shipped profiles from their templates on first use; heddle does the same for `default`: such a run boots
+ * `$HEDDLE_HOME/profiles/default`, created from the shipped template the first time, and says so on stderr. A profile a
+ * person already keeps under that name is booted as it is. `profiles` lists what exists and creates nothing. Answers
+ * false when the template could not be written (the reason is on stderr and the exit code is 1).
+ */
+function useDefaultProfile(args: Args): boolean {
+  if (args.profile !== undefined || args.config !== undefined || args.patch.length > 0) return true
+  /**
+   * `--from-default-profile` replaces a profile, so it must name one: the check below refuses it without `--profile`.
+   * Choosing `default` here first would turn that refusal into a reset of the default profile (developer-two's review).
+   */
+  if (args.fromDefaultProfile !== undefined) return true
+  if (args.command === undefined && args.turn === undefined) return true
+  if (args.command === 'profiles') return true
+  if (existsSync(resolve(process.cwd(), 'cordis.yml'))) return true
+  const dir = join(profilesDir(), 'default')
+  if (!existsSync(dir)) {
+    try {
+      resetProfileFromTemplate('default', 'default', { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return false
+    }
+    process.stderr.write(`heddle: created profile 'default' from the shipped template at ${dir}\n`)
+  }
+  args.profile = 'default'
+  return true
+}
+
 function hasProfileArgs(args: Args): boolean {
   return hasProfile(args)
 }
@@ -943,6 +1027,29 @@ async function main(): Promise<void> {
     return
   }
 
+  if (!useDefaultProfile(args)) return
+
+  /**
+   * DSH's `--profile <name> --from-default-profile <template>`: the named profile is replaced by a fresh copy of a
+   * shipped template, then the command boots it as usual. A profile named by a directory is not a profile this can
+   * replace, so the flag needs a plain name.
+   */
+  if (args.fromDefaultProfile !== undefined) {
+    if (args.profile === undefined || args.profile.startsWith('/')) {
+      process.stderr.write('heddle: --from-default-profile needs --profile <name>, a profile under $HEDDLE_HOME/profiles\n')
+      process.exitCode = 1
+      return
+    }
+    try {
+      resetProfileFromTemplate(args.profile, args.fromDefaultProfile, { checkout: resolve(dirname(fileURLToPath(import.meta.url)), '..') })
+    } catch (error) {
+      process.stderr.write(`heddle: ${error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message}\n`)
+      process.exitCode = 1
+      return
+    }
+    process.stderr.write(`heddle: profile '${args.profile}' replaced by a fresh copy of the '${args.fromDefaultProfile}' template\n`)
+  }
+
   if (args.command === 'web') {
     await runWeb(args)
     return
@@ -967,7 +1074,7 @@ async function main(): Promise<void> {
     return
   }
 
-  const app = await bootFromArgs(emptyArgs(args))
+  const app = await bootFromArgs(emptyArgs(args), { machineOutput: args.json && args.turn !== undefined })
   try {
     const pending = await settle(app.ctx)
     /**
@@ -1023,17 +1130,31 @@ async function main(): Promise<void> {
      *
      * `--resume` still addresses a session by id from anywhere, because a person who has an id is
      * asking about that session rather than about this folder.
+     *
+     * A new session is born untitled, as the turn route's is (#68): its first message writes the fallback name and
+     * the session layer asks the model for the title (`session/title.ts`).
      */
     const folder = canonicalPath(process.cwd())
+    /**
+     * A new session that names neither an endpoint nor a model starts with the configured default selection (the
+     * model row's defaultModel and defaultEffort, checked against the default endpoint; DSH's default model
+     * selection). It is recorded when the session is created, so a later change of default leaves this session as
+     * it is, and a session that already exists keeps what it had.
+     */
+    const known = new Set(app.ctx.session.list().map((meta) => meta.id))
+    const defaults = args.endpoint === undefined && args.model === undefined && args.resume === undefined ? app.ctx.model.defaultSelection() : {}
     const handle =
       args.resume !== undefined
         ? app.ctx.session.start({ resume: args.resume })
         : app.ctx.session.openAt(folder, {
             fresh: args.fresh,
             endpoint,
-            ...(args.model !== undefined ? { model: args.model } : {}),
-            title: args.turn.slice(0, 60),
+            ...((args.model ?? defaults.model) !== undefined ? { model: args.model ?? defaults.model } : {}),
+            ...(defaults.reasoningEffort !== undefined ? { reasoningEffort: defaults.reasoningEffort } : {}),
           })
+    const created = !known.has(handle.id)
+    const startModel = args.model ?? (created ? defaults.model : undefined)
+    const startEffort = created ? defaults.reasoningEffort : undefined
 
     /**
      * A session always has a workspace — **when the profile has one at all**.
@@ -1054,7 +1175,8 @@ async function main(): Promise<void> {
       endpoint,
       prompt: args.turn,
       ...(args.system !== undefined ? { system: args.system } : {}),
-      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...(startModel !== undefined ? { model: startModel } : {}),
+      ...(startEffort !== undefined ? { reasoningEffort: startEffort } : {}),
       ...(args.maxRounds !== undefined ? { maxRounds: args.maxRounds } : {}),
       ...(args.maxOutputTokens !== undefined ? { maxOutputTokens: args.maxOutputTokens } : {}),
     })

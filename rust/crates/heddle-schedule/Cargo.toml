@@ -1,0 +1,39 @@
+[package]
+name = "heddle-schedule"
+description = "Heddle in Rust: durable reminders, their four tools, the store, delivery and the time context"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The page's reminder routes (`http::router`), mounted by the binary beside the other page routers.
+axum.workspace = true
+futures.workspace = true
+# A delivered reminder is a turn: `compose` starts it with `begin_turn` on the run's shared runtime.
+heddle-agent.workspace = true
+# The session store: a reminder's session, its delegation depth, its log (the delivery proof) and the
+# time-context note.
+heddle-session.workspace = true
+# The four tools join the run's registry; the tool answers are its `ToolResult`.
+heddle-tools.workspace = true
+serde.workspace = true
+# `preserve_order`: a view, a store row and a route body are written with the TypeScript build's key order,
+# as heddle-goal does.
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio.workspace = true
+tracing.workspace = true
+# Reminder ids are `schedule-<uuid v4>` and a synthesized message id `message-<uuid v4>`, as in the TypeScript
+# build. Not yet a workspace dependency; the same entry heddle-team declares.
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# The compose tests boot a real session store and a real turn on a scripted endpoint.
+heddle-config.workspace = true
+heddle-llm.workspace = true
+heddle-sandbox.workspace = true
+# The route tests drive the router in-process.
+tower = { version = "0.5", features = ["util"] }

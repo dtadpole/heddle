@@ -261,14 +261,21 @@ export async function drag(page, { fromUid, toUid }) {
   return { dragged: fromUid, to: toUid }
 }
 
-/** The protocol's key codes for the keys that are not a character. */
+/**
+ * The protocol's key codes for the keys that are not a character.
+ *
+ * A row's `key`, when present, is the DOM `KeyboardEvent.key` value and overrides the name. Only the
+ * space bar needs one: its name is `Space` but its `key` is a literal space, and Chrome activates a
+ * focused native button only for that value. Sent as `key: 'Space'`, the page saw a keydown that no
+ * button answered (developer-five, 2026-10-31).
+ */
 const KEY_CODES = {
   Enter: { code: 'Enter', keyCode: 13, text: '\r' },
   Tab: { code: 'Tab', keyCode: 9 },
   Backspace: { code: 'Backspace', keyCode: 8 },
   Delete: { code: 'Delete', keyCode: 46 },
   Escape: { code: 'Escape', keyCode: 27 },
-  Space: { code: 'Space', keyCode: 32, text: ' ' },
+  Space: { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
   ArrowUp: { code: 'ArrowUp', keyCode: 38 },
   ArrowDown: { code: 'ArrowDown', keyCode: 40 },
   ArrowLeft: { code: 'ArrowLeft', keyCode: 37 },

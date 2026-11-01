@@ -48,6 +48,10 @@ impl ModelComponent {
 struct ModelConfig {
     endpoints: Vec<EndpointPatch>,
     default: Option<String>,
+    /// The model a new session starts with when it names none (checked when a session starts, not here).
+    default_model: Option<String>,
+    /// The reasoning effort a new session starts with when it names none.
+    default_effort: Option<String>,
     read_local_config: bool,
 }
 
@@ -56,6 +60,8 @@ impl Default for ModelConfig {
         Self {
             endpoints: Vec::new(),
             default: None,
+            default_model: None,
+            default_effort: None,
             // `readLocalConfig` defaults to true: the machine's file is where a real endpoint lives.
             read_local_config: true,
         }
@@ -70,6 +76,8 @@ fn model_schema() -> Option<heddle_config::Schema> {
         "properties": {
             "endpoints": { "type": "array" },
             "default": { "type": "string" },
+            "defaultModel": { "type": "string" },
+            "defaultEffort": { "type": "string" },
             "readLocalConfig": { "type": "boolean" },
         },
     }))
@@ -104,6 +112,8 @@ impl Component for ModelComponent {
             composed.nominated.as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        // The model and effort a new session starts with when it names none (DSH parity A104).
+        service.set_defaults(config.default_model.clone(), config.default_effort.clone());
         // The machine's file applies to the next request without a restart, as `plugins/model.ts` keeps it: the
         // service asks before every read and call, and an edit that cannot be read keeps the previous endpoints.
         if config.read_local_config {
@@ -127,6 +137,10 @@ impl Component for ModelComponent {
         // `model/request` reaches the bus, where a hook may rewrite the request.
         if let Some(hooks) = bus_hooks(services) {
             service.add_hooks(Arc::new(hooks));
+        }
+        // A plan row that started first left its `model/request` hook for this row to register (`PlanComponent`).
+        if let Some(plan) = services.get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME) {
+            service.add_hooks(plan.model_hooks());
         }
         services.provide("model", Arc::clone(&service));
         services.provide(
@@ -410,6 +424,7 @@ impl SessionPort for SessionView {
                     model: options.model,
                     reasoning_effort: None,
                     title: Some(options.title),
+                    preset: None,
                 },
             )
             .map(handle_of)
@@ -430,6 +445,7 @@ impl SessionPort for SessionView {
                     endpoint: options.endpoint,
                     model: options.model,
                     reasoning_effort: None,
+                    preset: None,
                 },
             )
             .map_err(port_error)?;
@@ -481,7 +497,8 @@ impl SessionPort for SessionView {
             archived: heddle_workspace::ArchivedFilter::default(),
         };
         let wanted = wanted.map(|path| path.to_string_lossy().into_owned());
-        serde_json::to_value(heddle_workspace::tree(wanted.as_deref(), &input)).map_err(port_error)
+        let node = heddle_workspace::tree(wanted.as_deref(), &input).map_err(port_error)?;
+        serde_json::to_value(node).map_err(port_error)
     }
 
     fn read_file_text(&self, path: &std::path::Path) -> PortResult<Record> {
@@ -786,6 +803,139 @@ impl heddle_goal::SessionLog for StoreLog {
     ) -> Result<Value, heddle_goal::LogError> {
         StoreLog::append(self, session, event).map_err(heddle_goal::LogError)
     }
+
+    /// The session's record, so the goal tools see `delegationDepth`: a delegated session is never a direct human turn.
+    fn meta(&self, session: &str) -> Option<Value> {
+        self.sessions.meta(session).map(|meta| meta.to_value())
+    }
+}
+
+impl heddle_questions::QuestionLog for StoreLog {
+    fn open(&self, id: &str) -> Option<String> {
+        StoreLog::open(self, id)
+    }
+
+    fn read(&self, session: &str) -> Result<Vec<Value>, heddle_questions::LogError> {
+        StoreLog::read(self, session).map_err(heddle_questions::LogError)
+    }
+
+    fn append(
+        &self,
+        session: &str,
+        event: serde_json::Map<String, Value>,
+    ) -> Result<Value, heddle_questions::LogError> {
+        StoreLog::append(self, session, event).map_err(heddle_questions::LogError)
+    }
+}
+
+/// `src/questions/service.ts`: the questions a model asks a person, folded from the session log.
+pub struct QuestionsComponent;
+
+impl Component for QuestionsComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let log = StoreLog {
+            sessions: session_service(services, "questions")?,
+        };
+        let config = heddle_questions::QuestionConfig::from_value(Some(config));
+        services.provide(
+            "questions",
+            Arc::new(heddle_questions::QuestionService::new(
+                Arc::new(log),
+                config,
+            )),
+        );
+        // A plan row that started first is handed its review channel here (`hand_plan_review_channel`).
+        hand_plan_review_channel(services);
+        Ok(())
+    }
+}
+
+/// `src/plan/service.ts` `reviewChannel`: `exit_plan_mode` puts its plan to the person through the question
+/// service when that row is loaded, as DSH's plan mode asks through `userQuestions`, and refuses with DSH's sentence
+/// when it is not. The TypeScript plan service looks the service up per call; here whichever of the `plan` and
+/// `questions` rows starts second hands the channel over, so the rows' order does not matter.
+fn hand_plan_review_channel(services: &Services) {
+    let (Some(plan), Some(questions)) = (
+        services.get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME),
+        services.get::<Arc<heddle_questions::QuestionService>>("questions"),
+    ) else {
+        return;
+    };
+    plan.provide_review_channel(heddle_plan::questions_review_channel(Arc::new(
+        PlanReviewAsker(questions),
+    )));
+}
+
+/// The question service as the plan review's asker: its `ask`, with the answers in the plan crate's words.
+struct PlanReviewAsker(Arc<heddle_questions::QuestionService>);
+
+impl heddle_plan::QuestionAsker for PlanReviewAsker {
+    fn ask(
+        &self,
+        session: &heddle_session::SessionHandle,
+        questions: Value,
+        options: heddle_plan::AskOptions,
+    ) -> futures::future::BoxFuture<'static, Result<heddle_plan::QuestionOutcome, String>> {
+        let service = Arc::clone(&self.0);
+        let session = session.id.clone();
+        Box::pin(async move {
+            let timeout = options.timeout.map(Value::from);
+            match service
+                .ask(&session, &questions, timeout.as_ref(), options.cancel)
+                .await
+            {
+                Ok(heddle_questions::AskOutcome::Answered(answers)) => {
+                    Ok(heddle_plan::QuestionOutcome::Answered {
+                        answers: answers
+                            .into_iter()
+                            .map(|answer| heddle_plan::QuestionAnswer {
+                                id: answer.id,
+                                selected: answer.selected,
+                                custom: answer.custom,
+                            })
+                            .collect(),
+                    })
+                }
+                Ok(heddle_questions::AskOutcome::Pending { call_id }) => {
+                    Ok(heddle_plan::QuestionOutcome::Pending { call_id })
+                }
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+}
+
+/// `src/plugins/questions-tool.ts`: `ask_user_question` in the registry.
+pub struct QuestionsToolComponent;
+
+impl Component for QuestionsToolComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["questions".to_owned(), "tools".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let questions = services
+            .get::<Arc<heddle_questions::QuestionService>>("questions")
+            .ok_or_else(|| "questions-tool: the question service is not provided".to_owned())?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "questions-tool: the tool registry is not provided".to_owned())?;
+        registry
+            .register(Arc::new(heddle_questions::AskUserTool::new(questions)))
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// The session service a row injects, or the sentence naming it.
@@ -817,6 +967,9 @@ impl Component for ToolsComponent {
                 "allow": { "type": "array", "items": { "type": "string" } },
                 "includeBuiltins": { "type": "boolean" },
                 "bashTimeoutMs": { "type": "number" },
+                "bashMaxTimeoutMs": { "type": "number" },
+                "bashOutputLimit": { "type": "number" },
+                "maxParallelToolCalls": { "type": "number" },
             },
         }))
         .ok()
@@ -948,12 +1101,13 @@ impl Component for TodoComponent {
     }
 }
 
-/// `src/plugins/todo-tool.ts`: `todo_write` and `todo_read` in the registry.
-pub struct TodoToolComponent;
+/// `src/commands/service.ts`: the slash-command layer. The row is what turns it on, as `ctx.get('commands')` does in
+/// `web.ts`; the routes themselves are built by `web.rs` once every service a command drives has started.
+pub struct CommandsComponent;
 
-impl Component for TodoToolComponent {
+impl Component for CommandsComponent {
     fn requires(&self) -> Vec<String> {
-        vec!["todo".to_owned(), "tools".to_owned()]
+        vec!["session".to_owned()]
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
@@ -961,22 +1115,85 @@ impl Component for TodoToolComponent {
     }
 
     fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        services.provide("commands", Arc::new(heddle_commands::CommandsRow));
+        Ok(())
+    }
+}
+
+/// `src/plan/service.ts`: plan mode (developer-three). The row registers `exit_plan_mode` in the tool registry and
+/// the `model/request` hook that adds the plan-mode policy to every request of a session in plan mode, and provides
+/// the service as `plan`; `web.rs` adds `/plan` to the command registry and mounts `GET /api/sessions/{id}/plan`
+/// only when it is provided, as `web.ts` hands over only when `ctx.get('plan')` exists.
+///
+/// The TypeScript plugin listens on the bus (`ctx.on('model/request')`), which exists before any row; here the hook
+/// goes on the model service's own waterfall, which exists once the model row has started. Whichever of the two
+/// rows starts second registers it — this row when the model service is already provided, else the model row when
+/// it finds the plan service — so neither row waits for the other and the row's `inject` stays the TypeScript one.
+pub struct PlanComponent;
+
+impl Component for PlanComponent {
+    fn requires(&self) -> Vec<String> {
+        vec![
+            "session".to_owned(),
+            "commands".to_owned(),
+            "tools".to_owned(),
+        ]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "plan")?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "plan: the tool registry is not provided".to_owned())?;
+        let plan = heddle_plan::PlanService::new(Arc::clone(sessions.store()));
+        registry
+            .register(plan.exit_tool())
+            .map_err(|error| format!("plan: {error}"))?;
+        if let Some(models) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            models.add_hooks(plan.model_hooks());
+        }
+        services.provide(heddle_plan::NAME, plan);
+        // A questions row that started first hands its review channel over here (`hand_plan_review_channel`).
+        hand_plan_review_channel(services);
+        Ok(())
+    }
+}
+
+/// `src/plugins/todo-tool.ts`: `todo_write` in the registry, DSH's one todo tool, under the row's required
+/// `allowParallelInProgress`.
+pub struct TodoToolComponent;
+
+impl Component for TodoToolComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["todo".to_owned(), "tools".to_owned()]
+    }
+
+    /// The plugin's `Config`: an object that must hold the boolean `allowParallelInProgress`, the crate's schema.
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        heddle_config::Schema::from_json(heddle_todo::tool::todo_tool_config_schema()).ok()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // The setting is required with no default: a row without it fails to load, as Cordis refuses the
+        // TypeScript plugin's row against its `Config`, before anything is registered.
+        let config = heddle_todo::tool::TodoToolConfig::from_row(config)
+            .map_err(|error| format!("todo-tool: {error}"))?;
         let todo = services
             .get::<Arc<heddle_todo::TodoService>>("todo")
             .ok_or_else(|| "todo-tool: the todo service is not provided".to_owned())?;
         let registry = services
             .get::<Arc<heddle_tools::ToolRegistry>>("tools")
             .ok_or_else(|| "todo-tool: the tool registry is not provided".to_owned())?;
-        for spec in heddle_todo::tool::todo_tool_specs() {
-            let name = spec.name.clone();
+        // One spec, `todo_write`: there is no read tool, as in DSH.
+        for spec in heddle_todo::tool::todo_tool_specs(&config) {
             let todo = Arc::clone(&todo);
             let spec = serde_json::to_value(&spec).map_err(|error| error.to_string())?;
             register_answering(&registry, spec, move |session, args| {
-                let answer = if name == "todo_read" {
-                    heddle_todo::tool::run_todo_read(&todo, session)
-                } else {
-                    heddle_todo::tool::run_todo_write(&todo, session, args)
-                };
+                let answer = heddle_todo::tool::run_todo_write(&todo, &config, session, args);
                 serde_json::to_value(answer).unwrap_or(Value::Null)
             })?;
         }
@@ -993,7 +1210,8 @@ impl Component for GoalComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::goal_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1076,6 +1294,58 @@ impl Component for TurnsComponent {
     }
 }
 
+/// `src/plugins/locale.ts`: the interface language a person chose (issue #80). The settings API lists the row as
+/// namespace `locale` and validates `preference` against its schema (`en` or `zh`); a server reads the choice as
+/// [`heddle_config::LocalePreference`].
+pub struct LocaleComponent;
+
+impl Component for LocaleComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        heddle_config::locale_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let preference =
+            heddle_config::locale_preference(Some(config)).map_err(|error| error.to_string())?;
+        services.provide(
+            "locale",
+            Arc::new(heddle_config::LocalePreference(preference)),
+        );
+        Ok(())
+    }
+}
+
+/// `src/plugins/presets.ts`: the agent preset registry (inventory A96, DSH's dsh-agent-preset-registry).
+///
+/// Optional, like the live-turn registry: the turn and the server read it when the profile loads the row, and a
+/// profile without it runs every session with every tool and its own system prompt. The roster is validated when
+/// the row starts (`heddle_config::preset_roster`), so a duplicate id or a default nothing declares fails the row,
+/// and the run, at startup instead of at someone's first turn. The row's config reaches the roster as the loader
+/// hands it over: nothing fills in defaults, so a preset that names no `tools` keeps every tool.
+pub struct PresetsComponent;
+
+impl Component for PresetsComponent {
+    fn requires(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        // The roster's own sentences already name the row (`presets: …`).
+        let roster =
+            heddle_config::preset_roster(Some(config)).map_err(|error| error.to_string())?;
+        services.provide("presets", Arc::new(roster));
+        Ok(())
+    }
+}
+
 /// One shape to another through their shared serialization: the crates each declare the TypeScript
 /// message and request types, so a value crosses a crate boundary by its JSON.
 fn bridge<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Result<U, String> {
@@ -1143,7 +1413,8 @@ impl Component for ContextComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::context_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1322,7 +1593,8 @@ impl Component for SubagentToolComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::subagent_tool_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1437,13 +1709,12 @@ impl Component for GoalDriverComponent {
             let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
                 move |payload: &Value| {
                     let session = payload.get("session").and_then(Value::as_str);
-                    let kind = payload
-                        .get("event")
-                        .and_then(|event| event.get("type"))
-                        .and_then(Value::as_str);
-                    if let (Some(session), Some(kind)) = (session, kind) {
-                        // The chain runs on the process runtime; the append is not held open by it.
-                        if let Some(run) = trigger.on_session_event(session, kind) {
+                    let event = payload.get("event");
+                    if let (Some(session), Some(event)) = (session, event) {
+                        // The whole event, so the trigger can read how a turn ended (#93): a stopped goal round
+                        // pauses its goal, a failed one disarms continuation. The chain runs on the process
+                        // runtime; the append is not held open by it.
+                        if let Some(run) = trigger.on_event(session, event) {
                             crate::runtime::tokio().spawn(run);
                         }
                     }
@@ -1469,7 +1740,8 @@ impl Component for TeamComponent {
     }
 
     fn schema(&self) -> Option<heddle_config::Schema> {
-        None
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::team_schema()
     }
 
     fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
@@ -1490,6 +1762,158 @@ impl Component for TeamComponent {
         })?;
         services.provide("team", Arc::clone(&plugin.service));
         Ok(())
+    }
+}
+
+/// `src/plugins/schedule.ts`: reminders — the service, the four tools and delivery, which `heddle web` starts.
+pub struct ScheduleComponent {
+    env: Env,
+}
+
+impl ScheduleComponent {
+    /// The adapter for a run whose environment is this one.
+    pub fn new(env: Env) -> Self {
+        Self { env }
+    }
+}
+
+impl Component for ScheduleComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::schedule_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "schedule")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-schedule composes its own row: the store, the tools in the runtime's registry, and the driver.
+        let plugin = heddle_schedule::start_row(heddle_schedule::ScheduleRow {
+            config,
+            sessions,
+            runtime,
+            heddle_home: heddle_home(&self.env),
+            home: self.env.home_dir(),
+            async_runtime: Some(crate::runtime::tokio().handle().clone()),
+            warn: None,
+        })?;
+        // Without a live-turn registry, the session's own turn events say which sessions are busy.
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("schedule");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    let session = payload.get("session").and_then(Value::as_str);
+                    let kind = payload
+                        .get("event")
+                        .and_then(|event| event.get("type"))
+                        .and_then(Value::as_str);
+                    if let (Some(session), Some(kind)) = (session, kind) {
+                        forward.on_session_event(session, kind);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("schedule-listener", Arc::new((scope, listener)));
+        }
+        services.provide("schedule", plugin);
+        Ok(())
+    }
+}
+
+/// `src/plugins/jobs.ts`: background jobs — the registry, the three job tools, background `bash`, the completion
+/// notices, and the page's routes, which `heddle web` mounts.
+pub struct JobsComponent;
+
+impl Component for JobsComponent {
+    fn requires(&self) -> Vec<String> {
+        AGENT_SERVICES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect()
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        // The row's TypeScript Config, so a settings write is refused before it can fail the next boot (#125).
+        heddle_config::jobs_schema()
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "jobs")?;
+        let runtime = crate::runtime::shared_runtime(services)?;
+        // heddle-jobs composes its own row: the registry, the tools in the runtime's registry, background bash on
+        // the registry's sandbox, and the notices.
+        let plugin = heddle_jobs::start_row(heddle_jobs::JobsRow {
+            config,
+            sessions,
+            runtime,
+            async_runtime: Some(crate::runtime::tokio().handle().clone()),
+            warn: None,
+        })?;
+        // The session's own events: busy and idle without a live-turn registry, and a person's message resetting
+        // the wake count.
+        if let Some(bus) = services.get::<heddle_events::EventBus>("events") {
+            let scope = bus.scope("jobs");
+            let forward = Arc::clone(&plugin);
+            let listener = scope.on_emit::<heddle_events::bridge::SessionEvent>(
+                move |payload: &Value| {
+                    if let (Some(session), Some(event)) = (
+                        payload.get("session").and_then(Value::as_str),
+                        payload.get("event"),
+                    ) {
+                        forward.on_session_event(session, event);
+                    }
+                },
+                heddle_events::ListenOptions::default(),
+            );
+            services.provide("jobs-listener", Arc::new((scope, listener)));
+        }
+        // DSH's `tool:jobs` prompt section on every request that offers the job tools, through the model service's
+        // `model/request` hook; dropped with the boot's services, which removes the hook.
+        if let Some(model) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            services.provide(
+                "jobs-prompt-section",
+                Arc::new(heddle_jobs::attach_prompt_section(&model)),
+            );
+        }
+        // Dropped with the boot's services, so disposing the boot stops every live job (`ctx.effect` teardown).
+        services.provide(
+            "jobs-teardown",
+            Arc::new(heddle_jobs::JobsTeardown(Arc::clone(&plugin))),
+        );
+        services.provide("jobs", plugin);
+        Ok(())
+    }
+}
+
+/// `src/agent/loop.ts`'s `recordTimeContext`: the clock reading DSH's time context gives the model, recorded right
+/// after each round's runtime-context snapshot.
+pub struct TimeContextHook {
+    store: Arc<heddle_session::SessionStore>,
+}
+
+impl TimeContextHook {
+    /// The hook over the run's session store.
+    pub fn new(store: Arc<heddle_session::SessionStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl heddle_agent::TurnHooks for TimeContextHook {
+    fn record_step_context(
+        &self,
+        session: &heddle_session::SessionHandle,
+        step: u32,
+    ) -> Result<(), heddle_agent::PortError> {
+        heddle_schedule::time_context::record_time_context(&self.store, session, step, None, None)
+            .map(|_| ())
+            .map_err(heddle_agent::PortError)
     }
 }
 
@@ -1849,7 +2273,7 @@ mod tests {
             ("approvals", json!({})),
             ("tools", json!({})),
             ("todo", json!({})),
-            ("todo-tool", json!({})),
+            ("todo-tool", json!({ "allowParallelInProgress": true })),
             ("goal", json!({})),
             ("goal-tool", json!({})),
             ("turns", json!({})),
@@ -1890,7 +2314,6 @@ mod tests {
             "list_dir",
             "bash",
             "todo_write",
-            "todo_read",
             "create_goal",
             "get_goal",
             "update_goal",
@@ -1903,6 +2326,10 @@ mod tests {
                 "{expected} in {names:?}"
             );
         }
+        assert!(
+            !names.contains(&"todo_read".to_owned()),
+            "no todo_read, as in DSH: {names:?}"
+        );
         assert!(services.goal().is_some());
         assert!(services.provides("turns"));
         assert!(
@@ -1918,6 +2345,314 @@ mod tests {
             .expect("the greeting service");
         assert_eq!(greeting.greet("heddle"), "hello, heddle?");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A `model/stream` hook that records what an adapter would be sent, and sends nothing.
+    struct SentRecorder(Arc<std::sync::Mutex<Vec<heddle_llm::GenerateRequest>>>);
+
+    impl heddle_llm::ModelHooks for SentRecorder {
+        fn stream(
+            &self,
+            request: &heddle_llm::GenerateRequest,
+            _next: Box<dyn FnOnce() -> heddle_llm::ChunkStream + Send>,
+        ) -> heddle_llm::ChunkStream {
+            self.0.lock().unwrap().push(request.clone());
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    /// The plan row's three effects, with the model row started before it and after it.
+    #[test]
+    fn the_plan_row_registers_its_tool_and_its_hook_whichever_of_it_and_the_model_row_starts_first()
+    {
+        use crate::builtins::{BuiltinCatalog, Catalog, resolve_component};
+        use futures::StreamExt;
+        for model_first in [true, false] {
+            let home = scratch(if model_first {
+                "plan-after-model"
+            } else {
+                "plan-before-model"
+            });
+            let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+            let mut services = Services::new();
+            let mut rows = vec![
+                ("session", json!({ "root": home.join("sessions") })),
+                ("sandbox", json!({})),
+                ("approvals", json!({})),
+                ("tools", json!({})),
+                ("commands", json!({})),
+                ("plan", json!({})),
+            ];
+            let model = ("model", json!({ "readLocalConfig": false }));
+            if model_first {
+                rows.insert(0, model);
+            } else {
+                rows.push(model);
+            }
+            for (bare, config) in rows {
+                let reference =
+                    resolve_component(&heddle_config::ComponentName::Bare(bare.to_owned()));
+                let component = catalog
+                    .component(&reference)
+                    .unwrap_or_else(|| panic!("{bare} has an adapter"));
+                for name in component.requires() {
+                    assert!(services.provides(&name), "{bare} waits for {name}");
+                }
+                component
+                    .start(&config, &mut services)
+                    .unwrap_or_else(|error| panic!("{bare} starts: {error}"));
+            }
+            let plan = services
+                .get::<Arc<heddle_plan::PlanService>>("plan")
+                .expect("the plan service is provided");
+            let tools = services
+                .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+                .expect("the registry");
+            assert!(
+                tools
+                    .describe()
+                    .iter()
+                    .any(|spec| spec.name == "exit_plan_mode"),
+                "exit_plan_mode is in the catalog in every mode"
+            );
+
+            let sessions = services
+                .get::<Arc<heddle_session::SessionService>>("session")
+                .expect("the session service");
+            let handle = sessions
+                .start(heddle_session::StartOptions {
+                    cwd: Some(home.to_string_lossy().into_owned()),
+                    ..heddle_session::StartOptions::default()
+                })
+                .expect("a session starts");
+            let models = services
+                .get::<Arc<heddle_llm::ModelService>>("model")
+                .expect("the model service");
+            let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+            models.add_hooks(Arc::new(SentRecorder(Arc::clone(&sent))));
+            let send = || {
+                let request = heddle_llm::GenerateRequest {
+                    endpoint: "scripted".to_owned(),
+                    messages: vec![heddle_llm::types::user_message("plan the change")],
+                    session_id: Some(handle.id.clone()),
+                    ..heddle_llm::GenerateRequest::default()
+                };
+                futures::executor::block_on(async {
+                    let mut stream = models.stream(request).expect("the endpoint exists");
+                    while stream.next().await.is_some() {}
+                });
+            };
+            send();
+            plan.set_mode(&handle, true).expect("plan mode on");
+            send();
+            let sent = sent.lock().unwrap();
+            let policies: Vec<bool> = sent
+                .iter()
+                .map(|request| {
+                    request.messages.first().is_some_and(|message| {
+                        message.role == heddle_llm::Role::System
+                            && message.content
+                                == vec![heddle_llm::ContentPart::text(
+                                    heddle_plan::PLAN_POLICY_SECTION,
+                                )]
+                    })
+                })
+                .collect();
+            assert_eq!(
+                policies,
+                [false, true],
+                "model first: {model_first} — the hook is registered exactly once either way"
+            );
+            assert_eq!(sent[1].messages.len(), 2, "one section, not two");
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
+    /// `exit_plan_mode` reviews through the question service when the `questions` row is loaded, whichever of it
+    /// and the `plan` row starts first, and has no review channel without it (`src/plan/service.ts` `reviewChannel`).
+    #[test]
+    fn the_plan_row_reviews_through_the_question_service_whichever_of_the_two_starts_first() {
+        use crate::builtins::{BuiltinCatalog, Catalog, resolve_component};
+        for (label, tail) in [
+            ("plan-then-questions", vec!["plan", "questions"]),
+            ("questions-then-plan", vec!["questions", "plan"]),
+            ("plan-alone", vec!["plan"]),
+        ] {
+            let home = scratch(label);
+            let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+            let mut services = Services::new();
+            let mut rows = vec![
+                ("session", json!({ "root": home.join("sessions") })),
+                ("sandbox", json!({})),
+                ("approvals", json!({})),
+                ("tools", json!({})),
+                ("commands", json!({})),
+            ];
+            rows.extend(tail.iter().map(|bare| (*bare, json!({}))));
+            for (bare, config) in rows {
+                let reference =
+                    resolve_component(&heddle_config::ComponentName::Bare(bare.to_owned()));
+                let component = catalog
+                    .component(&reference)
+                    .unwrap_or_else(|| panic!("{bare} has an adapter"));
+                component
+                    .start(&config, &mut services)
+                    .unwrap_or_else(|error| panic!("{bare} starts: {error}"));
+            }
+            let plan = services
+                .get::<Arc<heddle_plan::PlanService>>("plan")
+                .expect("the plan service is provided");
+            let expected = tail.contains(&"questions");
+            assert!(
+                format!("{plan:?}").contains(&format!("review_channel: {expected}")),
+                "{label}: a review channel exactly when the questions row is loaded ({plan:?})"
+            );
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
+    /// `(first, second)` pairs: a failed entry's id and name, or a tool's name and description.
+    type Pairs = Vec<(String, String)>;
+
+    /// The rows the todo tool needs, then a `todo-tool` row with `config` (`None` writes none), loaded
+    /// through the boot: the failed entries and the `todo_*` tools the registry then offers, with their
+    /// descriptions.
+    fn load_todo_tool(config: Option<Value>) -> (Pairs, Pairs) {
+        use crate::builtins::BuiltinCatalog;
+        let home = scratch("todo-tool");
+        let row = |id: &str, name: &str, config: Option<Value>| heddle_config::ComposedRow {
+            row: heddle_config::EntryRow {
+                id: Some(id.to_owned()),
+                name: name.to_owned(),
+                config,
+                ..heddle_config::EntryRow::default()
+            },
+            position: 0,
+            fields: Vec::new(),
+        };
+        let rows = vec![
+            row(
+                "session",
+                "./src/plugins/session.ts",
+                Some(json!({ "root": home.join("sessions") })),
+            ),
+            row("sandbox", "./src/sandbox/service.ts", None),
+            row("approvals", "./src/approvals/service.ts", None),
+            row("tools", "./src/plugins/tools.ts", None),
+            row("todo", "./src/todo/service.ts", None),
+            row("todo-tool", "./src/plugins/todo-tool.ts", config),
+        ];
+        let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+        let boot = crate::boot::load(rows, std::path::Path::new("/repo"), &catalog);
+        let failed = crate::boot::failed_entries(&boot);
+        let tools: Pairs = boot
+            .services
+            .tools()
+            .expect("ctx.tools")
+            .describe()
+            .iter()
+            .filter_map(|tool| {
+                let name = tool["name"].as_str()?;
+                name.starts_with("todo_").then(|| {
+                    (
+                        name.to_owned(),
+                        tool["description"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&home);
+        (failed, tools)
+    }
+
+    #[test]
+    fn a_todo_tool_row_without_the_setting_fails_to_load() {
+        let failed_row = vec![(
+            "todo-tool".to_owned(),
+            "./src/plugins/todo-tool.ts".to_owned(),
+        )];
+        for (config, why) in [
+            (None, "a row with no config fails"),
+            (Some(Value::Null), "a row with a null config fails"),
+            (Some(json!({})), "a row without the setting fails"),
+            (
+                Some(json!({ "allowParallelInProgress": "yes" })),
+                "a non-boolean fails",
+            ),
+        ] {
+            let (failed, tools) = load_todo_tool(config);
+            assert_eq!(failed, failed_row, "{why}");
+            assert!(tools.is_empty(), "{why}: nothing registered, {tools:?}");
+        }
+        for allow in [true, false] {
+            let (failed, tools) = load_todo_tool(Some(json!({ "allowParallelInProgress": allow })));
+            assert!(failed.is_empty(), "{allow}: {failed:?}");
+            assert_eq!(
+                tools,
+                vec![(
+                    "todo_write".to_owned(),
+                    heddle_todo::tool::describe_todo_write(allow)
+                )],
+                "todo_write alone, its description the clause the setting selects"
+            );
+        }
+    }
+
+    #[test]
+    fn a_todo_tool_start_without_the_setting_says_what_is_missing() {
+        let error = TodoToolComponent
+            .start(&json!({}), &mut Services::new())
+            .expect_err("the setting is required");
+        assert_eq!(
+            error,
+            "todo-tool: the todo tool requires allowParallelInProgress, a boolean with no default",
+            "the setting is read before the services it injects"
+        );
+    }
+
+    #[test]
+    fn the_todo_tool_row_schema_requires_the_boolean() {
+        let schema = TodoToolComponent
+            .schema()
+            .expect("the todo-tool row declares its schema");
+        assert_eq!(
+            schema
+                .check(&json!({}))
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["allowParallelInProgress is required"],
+            "config --validate names the missing setting"
+        );
+        assert_eq!(
+            schema
+                .check(&json!({ "allowParallelInProgress": "yes" }))
+                .len(),
+            1
+        );
+        assert!(
+            schema
+                .check(&json!({ "allowParallelInProgress": true }))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_shipped_profile_sets_allow_parallel_in_progress_true_as_every_dsh_preset_ships() {
+        let profile = include_str!("../../../../heddle.patch.yml");
+        let start = profile
+            .find("- id: todo-tool\n")
+            .expect("the profile mounts the todo tool");
+        let block: String = profile[start..]
+            .lines()
+            .skip(1)
+            .take_while(|line| line.starts_with("      "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(
+            block.contains("config:\n        allowParallelInProgress: true\n"),
+            "{block}"
+        );
     }
 
     #[test]

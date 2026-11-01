@@ -155,6 +155,7 @@ mod tests {
             endpoint: Some("scripted".to_owned()),
             model: Some("m".to_owned()),
             team_id: None,
+            preset: None,
         });
         let runner = Arc::new(RecordingRunner::new(Arc::clone(&store), None));
         let store_dependency: Arc<dyn TeamStore> = store.clone();

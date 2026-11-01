@@ -1,7 +1,7 @@
 ---
 title: The heddle-session port plan
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:24:41Z
+modified: 2026-10-31T07:16:34Z
 level: L1
 version: 1.0.0
 description: The nine steps of the port, the unit tests each one carries, and what each step unblocks.
@@ -27,5 +27,5 @@ is pushed to its owner's branch on its own.
 | 5 | `store` | create both files; append bytes are a prefix; torn tail repaired once and next append readable; legacy layout read and appended; replacement validation (system head, tool result); list newest first across layouts; flags/pin/archive; set_model replace; fork copies the projection; listener after write, transient delta not recorded | `heddle-agent`, `heddle-context`, `heddle-team`, `heddle-goal`, `heddle-todo` |
 | 6 | `mode` | last event wins; unknown word errors naming the seq; inherit | `heddle-tools`, `heddle-agent` |
 | 7 | `definition` | name from the local clock and its ordinals; `INDEX.md` texts; update keeps keys | `heddle session new` |
-| 8 | `service` | `title_from` (48 UTF-16 units, word cut, punctuation); `fork_title` (ASCII and full-width suffix, taken names); `open_at` one folder one session, `fresh`; `fork` → `Unavailable` without an answer; `set_mode` no-op appends nothing | the CLI and the server |
+| 8 | `service` | `title_from` (48 UTF-16 units, word cut, punctuation); `fork_title` (ASCII and full-width suffix, from the source title alone, exact for any length, `None` for a blank title, #67); `open_at` one folder one session, `fresh`; `fork` → `Unavailable` without an answer; `set_mode` no-op appends nothing | the CLI and the server |
 | 9 | interop | a log written by the TypeScript build (fixture bytes) reads here; a log written here decodes with `src/session/transcript.ts` on the host | `70-workspaces-sessions` through `HEDDLE_BIN` |

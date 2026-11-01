@@ -83,12 +83,20 @@ pub fn model_row_endpoints(
 /// settings apply that way. A run with `readLocalConfig: false` never reads the file, now or later.
 #[derive(Debug)]
 pub struct ModelRowSource {
-    row_endpoints: Vec<EndpointPatch>,
-    row_default: Option<String>,
-    read_local: bool,
+    row: std::sync::Mutex<RowInputs>,
+    /// Set when the row's own configuration was replaced ([`ModelRowSource::set_row`]).
+    dirty: std::sync::atomic::AtomicBool,
     env: Env,
     candidates: Vec<PathBuf>,
     stamp: std::sync::Mutex<String>,
+}
+
+/// The model row's own configuration: its endpoints, its default, and whether it reads the machine file.
+#[derive(Clone, Debug)]
+struct RowInputs {
+    endpoints: Vec<EndpointPatch>,
+    default: Option<String>,
+    read_local: bool,
 }
 
 impl ModelRowSource {
@@ -102,44 +110,99 @@ impl ModelRowSource {
         let candidates = local_config_candidates(&env);
         let stamp = std::sync::Mutex::new(stamp_of(&candidates));
         Self {
-            row_endpoints,
-            row_default,
-            read_local,
+            row: std::sync::Mutex::new(RowInputs {
+                endpoints: row_endpoints,
+                default: row_default,
+                read_local,
+            }),
+            dirty: std::sync::atomic::AtomicBool::new(false),
             env,
             candidates,
             stamp,
         }
     }
 
+    fn inputs(&self) -> RowInputs {
+        self.row
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Replace the row's own configuration, as a settings write to the model row does: the next
+    /// [`ModelRowSource::changed`] answers the recomposition whether or not a file moved, so the write applies to the
+    /// next request (DSH applies a settings write to the running tree).
+    pub fn set_row(
+        &self,
+        row_endpoints: Vec<EndpointPatch>,
+        row_default: Option<String>,
+        read_local: bool,
+    ) {
+        *self
+            .row
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = RowInputs {
+            endpoints: row_endpoints,
+            default: row_default,
+            read_local,
+        };
+        self.dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// [`ModelRowSource::set_row`] from the row's configuration as composed (`endpoints`, `default`,
+    /// `readLocalConfig`, which defaults to true), read as the model component reads it.
+    ///
+    /// # Errors
+    ///
+    /// A configuration that is not the model row's shape, named in a sentence.
+    pub fn set_row_config(&self, config: &serde_json::Value) -> Result<(), String> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Row {
+            #[serde(default)]
+            endpoints: Vec<EndpointPatch>,
+            #[serde(default)]
+            default: Option<String>,
+            #[serde(default = "read_local_default")]
+            read_local_config: bool,
+        }
+        fn read_local_default() -> bool {
+            true
+        }
+        let row: Row =
+            serde_json::from_value(config.clone()).map_err(|error| format!("model: {error}"))?;
+        self.set_row(row.endpoints, row.default, row.read_local_config);
+        Ok(())
+    }
+
     /// The composition as the files stand now ([`model_row_endpoints`]).
     pub fn compose(&self) -> Result<ModelRowEndpoints, ConfigError> {
+        let row = self.inputs();
         model_row_endpoints(
-            &self.row_endpoints,
-            self.row_default.as_deref(),
-            self.read_local,
+            &row.endpoints,
+            row.default.as_deref(),
+            row.read_local,
             &self.env,
         )
     }
 
-    /// `None` when nothing changed since the last look (or the row does not read the file); otherwise the
-    /// recomposition, which fails as [`model_row_endpoints`] fails — a caller keeps its previous endpoints
-    /// then. Either way the new stamp is kept, so one bad edit is reported once, not on every request.
+    /// `None` when nothing changed since the last look; otherwise the recomposition, which fails as
+    /// [`model_row_endpoints`] fails — a caller keeps its previous endpoints then. A change is a replaced row
+    /// configuration ([`ModelRowSource::set_row`]) or, when the row reads the machine file, an edit to it. Either
+    /// way the new stamp is kept, so one bad edit is reported once, not on every request.
     pub fn changed(&self) -> Option<Result<ModelRowEndpoints, ConfigError>> {
-        if !self.read_local {
-            return None;
-        }
-        let now = stamp_of(&self.candidates);
-        {
+        let replaced = self.dirty.swap(false, std::sync::atomic::Ordering::SeqCst);
+        let edited = self.inputs().read_local && {
+            let now = stamp_of(&self.candidates);
             let mut stamp = self
                 .stamp
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if *stamp == now {
-                return None;
-            }
+            let edited = *stamp != now;
             *stamp = now;
-        }
-        Some(self.compose())
+            edited
+        };
+        (replaced || edited).then(|| self.compose())
     }
 }
 
@@ -334,6 +397,38 @@ mod tests {
             None,
             "an empty row default is still written"
         );
+    }
+
+    #[test]
+    fn a_replaced_row_applies_once_without_a_file_edit() {
+        let root = scratch("set-row");
+        let env = machine(&root, MACHINE);
+        let source = ModelRowSource::new(Vec::new(), None, true, env);
+        assert!(source.changed().is_none());
+        source
+            .set_row_config(&serde_json::json!({ "default": "router-b" }))
+            .unwrap();
+        let changed = source
+            .changed()
+            .expect("a replaced row is a change")
+            .unwrap();
+        assert_eq!(
+            changed.nominated.as_deref(),
+            Some("router-b"),
+            "the row's default wins"
+        );
+        assert!(source.changed().is_none(), "and only once");
+        assert_eq!(
+            source.compose().unwrap().nominated.as_deref(),
+            Some("router-b"),
+            "a later machine-file edit recomposes with the replaced row, not the boot one"
+        );
+        assert!(
+            source
+                .set_row_config(&serde_json::json!({ "endpoints": "nope" }))
+                .is_err()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

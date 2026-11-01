@@ -1,0 +1,5 @@
+#!/bin/sh
+# Remove stale scratch folders, browser profiles and Chrome leftovers from the user TMPDIR (older than
+# 2 hours, never one a running process names), then print its five largest entries. See tmp-sweep.md;
+# --dry-run lists only. --worktrees also removes ~/heddle's stale, clean, pushed scratch worktrees.
+exec node "$(dirname "$0")/tmp-sweep.mjs" "$@"

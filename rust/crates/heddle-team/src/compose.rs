@@ -173,6 +173,7 @@ impl TeamStore for SessionTeamStore {
             endpoint: meta.endpoint().map(str::to_owned),
             model: meta.model().map(str::to_owned),
             team_id: meta.team_id().map(str::to_owned),
+            preset: meta.preset().map(str::to_owned),
         })
     }
 
@@ -255,6 +256,13 @@ impl TeamStore for SessionTeamStore {
         let parent = self.handle(parent)?;
         let child = self.handle(child)?;
         heddle_session::inherit_recorded_mode::<Value>(&self.store, &parent, &child)
+            .map(|_| ())
+            .map_err(port)
+    }
+
+    fn record_preset(&self, session: &str, preset: &str) -> Result<(), PortError> {
+        self.store
+            .record_preset(session, preset)
             .map(|_| ())
             .map_err(port)
     }

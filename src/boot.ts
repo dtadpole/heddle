@@ -43,6 +43,16 @@ export interface BootOptions {
   readonly target?: string
   /** Environment for references; the process environment by default. */
   readonly env?: NodeJS.ProcessEnv
+  /**
+   * The most verbose logger level a plugin's records reach an exporter at: `0` errors only, `1` (Cordis's
+   * default) adds `info`. Unset leaves Cordis's default.
+   *
+   * It exists for a command whose stdout is a machine's: `--json`. The console exporter writes `info` to stdout,
+   * so a plugin's boot line (`model: 1 endpoint(s) — …`) landed ahead of the JSON and the output did not parse.
+   * Setting it on the context the loader runs under is Cordis's own mechanism (`ctx.intercept('logger', …)`), so
+   * every row's logger inherits it with no plugin knowing about the flag; errors still reach stderr.
+   */
+  readonly logLevel?: number
 }
 
 /**
@@ -85,7 +95,15 @@ export async function boot(options: BootOptions = {}): Promise<Boot> {
   const anchor = layers[0]?.file ?? options.configDir ?? process.cwd()
   const baseUrl = pathToFileURL(anchor.replace(/[^/]*$/, '')).href
 
-  const ctx = new Context()
+  const root = new Context()
+  /**
+   * The loader, every row it creates, **and the caller** run under the requested logger level, so the handle
+   * returned is the intercepted child rather than the root. Measured: with the root returned, a `--turn --json`
+   * whose model called `write_file` still printed `turn: wrote …` ahead of the document, because the turn logs
+   * through the context its caller passes. The child inherits the root's services and fiber, so `dispose` still
+   * stops the whole tree.
+   */
+  const ctx = options.logLevel !== undefined ? root.intercept('logger', { level: options.logLevel }) : root
   await ctx.plugin(Loader, { baseUrl })
 
   const ids: string[] = []

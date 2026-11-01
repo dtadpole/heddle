@@ -129,7 +129,10 @@ test('an old log with a steer between a call and its result reaches the model re
       .map((message) => `${message.role}:${message.content.map((part) => (part.type === 'text' ? part.text : part.type === 'tool-call' ? `call(${part.id})` : '')).join('')}`)
 
   const stored = shapeOf(sessions.store.deriveMessages(session))
-  assert.deepEqual(stored, ['user:run long', 'assistant:call(call-bash)', 'user:queued steer', 'tool:error (EXIT): the command exited null'], 'the log keeps the bad order')
+  // The log keeps the order it was written in; the fold places the steer at the step boundary, after the result (#30).
+  const written = sessions.store.read(session).filter((event) => event.type === 'message').map((event) => (event.message as Message).role)
+  assert.deepEqual(written.slice(-2), ['user', 'tool'], 'the log keeps the bad order')
+  assert.deepEqual(stored, ['user:run long', 'assistant:call(call-bash)', 'tool:error (EXIT): the command exited null', 'user:queued steer'], 'and the surface reads it repaired')
 
   const context = new ContextService(ctx, sessions.store, { instructionsMaxBytes: 100_000, contextWindow: 100_000 })
   const report = await context.prepare(session, { cwd: oldLogs, endpoint: 'scripted' })

@@ -3,7 +3,7 @@ import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { isolatedHome, parseJson, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
+import { isolatedHome, isTitleRequest, parseJson, refuseTitleRequest, removeDir, runCli, skipUnless, writeJson } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Anthropic's own Messages API, offline against a double and then — if the machine has one — against the real
@@ -37,6 +37,8 @@ async function messagesDouble() {
       body += chunk
     })
     request.on('end', () => {
+      /** A new session's title request is not the turn's call this double records (#68). */
+      if (isTitleRequest(body)) return refuseTitleRequest(response)
       calls.push({ url: request.url ?? '', body, headers: request.headers })
       if (request.method !== 'POST' || (request.url ?? '') !== '/v1/messages') {
         response.writeHead(404, { 'content-type': 'application/json' })

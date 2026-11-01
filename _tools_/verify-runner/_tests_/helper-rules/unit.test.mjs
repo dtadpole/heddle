@@ -21,7 +21,11 @@ import {
   sessionsUnder,
   run,
   EXIT_GRACE_MS,
+  chatDouble,
+  isTitleRequest,
+  endChild,
 } from '../../lib.mjs'
+import { spawn } from 'node:child_process'
 
 /**
  * The check helpers' own **component tests**.
@@ -240,4 +244,46 @@ test('a harness killed at its timeout returns even when a child of it holds the 
   assert.equal(result.timedOut, true)
   assert.equal(result.failed, true)
   assert.ok(elapsed < 300 + EXIT_GRACE_MS + 3000, `returned in ${elapsed}ms, not after the 8 s sleep`)
+})
+
+test("a session's title request is refused by the doubles and left out of the requests a turn made", async () => {
+  // #68: a new session's first prompt sends DSH's title request to the turn's own endpoint, usually first. A double that
+  // answered it as a turn would hand the turn's scripted answer to the title and count one request too many.
+  const title = JSON.stringify({ messages: [{ role: 'system', content: 'Create a concise title for an AI coding-assistant session from the supplied human messages.' }, { role: 'user', content: 'hi' }] })
+  const turn = JSON.stringify({ messages: [{ role: 'user', content: 'Create a file' }] })
+  assert.equal(isTitleRequest(title), true)
+  assert.equal(isTitleRequest(turn), false)
+  assert.equal(isTitleRequest(undefined), false)
+  const double = await chatDouble()
+  try {
+    const post = (body) => fetch(`${double.baseUrl}/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    const refused = await post(title)
+    assert.equal(refused.status, 400, 'a 400, which no retry policy repeats')
+    await refused.text()
+    assert.equal(double.requests.length, 0, 'and not counted')
+    const answered = await post(turn)
+    assert.equal(answered.status, 200)
+    await answered.text()
+    assert.equal(double.requests.length, 1, 'the turn is')
+  } finally {
+    await double.close()
+  }
+})
+
+test('endChild stops a harness within its bound: SIGTERM first, SIGKILL for one that ignores it', async () => {
+  const polite = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  assert.equal(await endChild(polite, { graceMs: 2000 }), 'exited', 'a harness that honours SIGTERM exits on it')
+  assert.equal(await endChild(polite), 'exited', 'a harness that already exited answers at once')
+
+  const stubborn = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] })
+  try {
+    await new Promise((resolve) => stubborn.stdout.once('data', resolve))
+    const started = Date.now()
+    assert.equal(await endChild(stubborn, { graceMs: 300 }), 'killed', 'one that ignores SIGTERM is killed after the grace')
+    assert.ok(Date.now() - started < 3000, 'and the wait stays bounded')
+    assert.equal(stubborn.signalCode, 'SIGKILL')
+  } finally {
+    // A wrong endChild must fail this test, not leave a child that holds the test file open.
+    if (stubborn.exitCode === null && stubborn.signalCode === null) stubborn.kill('SIGKILL')
+  }
 })

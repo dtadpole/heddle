@@ -89,3 +89,37 @@ export function saveUpload(name: string, data: Buffer, options: { home?: string;
   writeFileSync(path, data, { mode: 0o600 })
   return { path, name: safe, bytes: data.length }
 }
+
+/**
+ * The sentence `GET /api/uploads/{leaf}` answers, with `404`, when the requesting session's log does not reference
+ * the upload (or no session was named).
+ */
+export const UPLOAD_NOT_REFERENCED = 'this upload is not referenced by this session'
+
+/**
+ * Whether a session's log references an upload by its leaf: some logged message carries an `image` or `file` part
+ * whose stored path ends in that leaf.
+ *
+ * DSH serves an attachment only through `session/attachment(sessionId, attachmentId)`, which reads that session's
+ * events and refuses with "Image is not referenced by this session." (`ATTACHMENT_NOT_REFERENCED`) unless a built-in
+ * event's declared content carries the image. heddle's events keep an attachment as a content part with the absolute
+ * path the upload route stored, so the reference is that part's leaf. Every logged `message` counts, whatever its
+ * role (a prompt, a steer, a tool result), because each is content the transcript can draw.
+ */
+export function uploadReferencedBy(
+  events: readonly { readonly type?: string; readonly message?: unknown; readonly [key: string]: unknown }[],
+  leaf: string,
+): boolean {
+  if (leaf.length === 0) return false
+  for (const event of events) {
+    const message = event.message as { readonly content?: unknown } | undefined
+    const content = message?.content
+    if (!Array.isArray(content)) continue
+    for (const part of content as readonly { readonly type?: unknown; readonly path?: unknown }[]) {
+      if (part === null || typeof part !== 'object') continue
+      if (part.type !== 'image' && part.type !== 'file') continue
+      if (typeof part.path === 'string' && basename(part.path) === leaf) return true
+    }
+  }
+  return false
+}

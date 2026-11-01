@@ -110,6 +110,7 @@ impl MemoryStore {
                     endpoint: child.endpoint.clone(),
                     model: child.model.clone(),
                     team_id: Some(child.team_id.clone()),
+                    preset: None,
                 },
                 child: Some(child.clone()),
                 events,
@@ -199,6 +200,18 @@ impl TeamStore for MemoryStore {
 
     fn inherit_recorded_mode(&self, _parent: &str, _child: &str) -> Result<(), PortError> {
         // The recorded permission mode is a session-store concern; the double has no modes to inherit.
+        Ok(())
+    }
+
+    fn record_preset(&self, session: &str, preset: &str) -> Result<(), PortError> {
+        // The store's rule: written only when the record has none, trimmed, and a blank one writes nothing.
+        let mut sessions = self.sessions.lock().expect("the store lock");
+        let stored = sessions
+            .get_mut(session)
+            .ok_or_else(|| PortError(format!("no session {session}")))?;
+        if stored.meta.preset.is_none() && !preset.trim().is_empty() {
+            stored.meta.preset = Some(preset.trim().to_owned());
+        }
         Ok(())
     }
 }

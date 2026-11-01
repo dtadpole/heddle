@@ -1,0 +1,44 @@
+[
+  {
+    "turn": 1,
+    "lane": "input",
+    "kind": "user",
+    "start": 0,
+    "end": 0,
+    "running": false
+  },
+  {
+    "turn": 1,
+    "lane": "tools",
+    "kind": "tool",
+    "start": 0.11764705882352941,
+    "end": 0.11764705882352941,
+    "running": false
+  },
+  {
+    "turn": 1,
+    "lane": "model",
+    "kind": "assistant",
+    "start": 0.29411764705882354,
+    "end": 0.6470588235294118,
+    "running": false,
+    "ttftMs": 300,
+    "decodingMs": 900
+  },
+  {
+    "turn": 2,
+    "lane": "input",
+    "kind": "user",
+    "start": 0.8823529411764706,
+    "end": 0.8823529411764706,
+    "running": false
+  },
+  {
+    "turn": 2,
+    "lane": "model",
+    "kind": "assistant",
+    "start": 1,
+    "end": 1,
+    "running": true
+  }
+]

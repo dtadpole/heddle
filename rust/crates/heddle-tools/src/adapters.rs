@@ -246,17 +246,9 @@ mod tests {
     use super::*;
     use crate::upstream::{EscalationRefusalCode, EscalationSubject};
 
-    fn scratch(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!(
-            "heddle-adapters-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
+    /// A scratch folder, removed when the guard drops.
+    fn scratch(label: &str) -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::new(&format!("adapters-{label}"))
     }
 
     /// A workspace-write service with no backend: the fence works through the paths, and confinement fails
@@ -448,7 +440,7 @@ mod tests {
             ..SandboxConfig::default()
         };
         let host = SandboxHost {
-            cwd: launch.clone(),
+            cwd: launch.to_path_buf(),
             harness_home: launch.join(".heddle"),
             platform: Platform::current(),
         };

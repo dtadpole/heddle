@@ -219,6 +219,10 @@ pub struct EndpointConfig {
     /// defaults it where a failed request is judged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<serde_json::Value>,
+    /// Whether an Anthropic route marks the prompt for caching (#70). Absent means on, as DSH caches by default;
+    /// `false` is the switch for a gateway that refuses `cache_control`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 /// A partial endpoint: what a layer, the local file or the environment restates. Every field optional;
@@ -265,6 +269,8 @@ pub struct EndpointPatch {
     pub timeout_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_policy: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<bool>,
 }
 
 impl EndpointConfig {
@@ -352,6 +358,36 @@ pub fn default_endpoints() -> Vec<EndpointConfig> {
         capabilities: Some(vec!["offline".into(), "tools".into()]),
         ..EndpointConfig::default()
     }]
+}
+
+/// Whether `endpoint` is the shipped offline fixture as [`default_endpoints`] ships it: same name, kind and
+/// script path (`isShippedFixture`). A machine that restated it with its own script is not.
+pub fn is_shipped_fixture(endpoint: &EndpointConfig) -> bool {
+    default_endpoints().iter().any(|shipped| {
+        shipped.name == endpoint.name
+            && shipped.kind == endpoint.kind
+            && shipped.base_url == endpoint.base_url
+    })
+}
+
+/// What a turn on the shipped fixture says when its script is not there (`unscriptedFixtureMessage`, issue #74).
+///
+/// That is what a home that configured nothing runs on, so the old "the script for 'scripted' could not be read
+/// at scripted.json" was the first thing a new user saw, and it named a test file. This names the machine file a
+/// run reads (the first of [`crate::local_config_candidates`]) and the shape to write there, as DSH's missing-key
+/// message names the credential and where to store it.
+pub fn unscripted_fixture_message(env: &Env) -> String {
+    let path = crate::local_config_candidates(env)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| heddle_home(env).join("heddle.json"));
+    format!(
+        "the offline test endpoint 'scripted' has no script at scripted.json. To talk to a model, pick another \
+         endpoint for this session, or declare one in {}, for example {{\"endpoints\": [{{\"name\": \"mine\", \
+         \"kind\": \"openai-chat\", \"baseUrl\": \"<url>\", \"model\": \"<model>\", \"apiKeyFile\": \"<key file>\"}}], \
+         \"default\": \"mine\"}}",
+        path.display()
+    )
 }
 
 /// `configPaths` from `src/endpoints.ts`: `[$HEDDLE_CONFIG]` when it is non-empty, else
@@ -464,6 +500,9 @@ fn apply_patch(endpoint: &mut EndpointConfig, patch: &EndpointPatch) {
     if let Some(value) = &patch.retry_policy {
         endpoint.retry_policy = Some(value.clone());
     }
+    if let Some(value) = patch.prompt_cache {
+        endpoint.prompt_cache = Some(value);
+    }
 }
 
 /// The trimmed contents of a key file (`~` expanded), or an error naming the **setting's path, never
@@ -575,27 +614,78 @@ pub struct EndpointsView {
     pub endpoints: Vec<Value>,
     /// The nominated endpoint when it is in the list, else `null`.
     pub default: Option<String>,
+    /// The model a new session starts with on the default endpoint ([`EndpointsView::with_selection`]).
+    #[serde(rename = "defaultModel", skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    /// The reasoning effort a new session starts with on the default endpoint.
+    #[serde(rename = "defaultEffort", skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
 }
 
-/// [`describe_endpoint`] over `endpoints`, with `nominated` kept only when the list holds it.
+impl EndpointsView {
+    /// The view with the default selection beside the default endpoint, so a composer opening a fresh session shows
+    /// and sends it (DSH parity A104). Kept only when `endpoint` is the view's default, so one endpoint's default
+    /// model is never paired with another's.
+    pub fn with_selection(
+        mut self,
+        endpoint: Option<&str>,
+        model: Option<String>,
+        effort: Option<String>,
+    ) -> Self {
+        if endpoint.is_some() && endpoint == self.default.as_deref() {
+            self.default_model = model;
+            self.default_effort = effort;
+        }
+        self
+    }
+}
+
+/// [`describe_page_endpoint`] over `endpoints`, with `nominated` kept only when the list holds it: the list a
+/// signed-in page reads (`GET /api/endpoints`).
 pub fn describe_endpoints(endpoints: &[EndpointConfig], nominated: Option<&str>) -> EndpointsView {
     let present =
         nominated.is_some_and(|name| endpoints.iter().any(|endpoint| endpoint.name == name));
     EndpointsView {
-        endpoints: endpoints.iter().map(describe_endpoint).collect(),
+        endpoints: endpoints.iter().map(describe_page_endpoint).collect(),
         default: if present {
             nominated.map(str::to_string)
         } else {
             None
         },
+        default_model: None,
+        default_effort: None,
     }
+}
+
+/// The fields of [`describe_endpoint`] a page reads to list and pick models.
+pub const PAGE_ENDPOINT_FIELDS: [&str; 10] = [
+    "name",
+    "kind",
+    "model",
+    "models",
+    "reasoning",
+    "capabilities",
+    "inputModalities",
+    "contextWindow",
+    "contextWindowSource",
+    "credential",
+];
+
+/// [`describe_endpoint`] cut to [`PAGE_ENDPOINT_FIELDS`]: a browser is told what it needs to list and pick models,
+/// and not the gateway address, proxy, project, region or header names the operator's own CLI listing shows.
+pub fn describe_page_endpoint(endpoint: &EndpointConfig) -> Value {
+    let Value::Object(mut map) = describe_endpoint(endpoint) else {
+        return Value::Object(Map::new());
+    };
+    map.retain(|field, _| PAGE_ENDPOINT_FIELDS.contains(&field.as_str()));
+    Value::Object(map)
 }
 
 /// A credential-free summary of an endpoint, safe to log or print: `name`, `kind`, `baseUrl`, `model`,
 /// `models` (always present, each `{ id, name, reasoning?, contextWindow? }` with levels by id and name
 /// only), `reasoning`, `project`, `region`, `proxy`, `capabilities`, `inputModalities`,
-/// `contextWindow` with `contextWindowSource: "config"`, `credential: "set"` for a present key,
-/// `credentialFile` for a key file's path, and `headers` as names only. Absent fields are left out.
+/// `contextWindow` with `contextWindowSource: "config"`, `credential: "set"` for a present key or key file
+/// (never its path), and `headers` as names only. Absent fields are left out.
 pub fn describe_endpoint(endpoint: &EndpointConfig) -> Value {
     let mut map = Map::new();
     map.insert("name".into(), Value::String(endpoint.name.clone()));
@@ -645,11 +735,10 @@ pub fn describe_endpoint(endpoint: &EndpointConfig) -> Value {
         map.insert("contextWindow".into(), Value::Number(Number::from(window)));
         map.insert("contextWindowSource".into(), Value::String("config".into()));
     }
-    if endpoint.api_key.is_some() {
+    // Presence only, for a key and for a key file alike: a key file's path names the account that holds it, and
+    // DSH lets only declared credential metadata cross, never a path (`dsh-api-settings-controller`).
+    if endpoint.api_key.is_some() || endpoint.api_key_file.is_some() {
         map.insert("credential".into(), Value::String("set".into()));
-    }
-    if let Some(file) = &endpoint.api_key_file {
-        map.insert("credentialFile".into(), Value::String(file.clone()));
     }
     if let Some(headers) = &endpoint.headers {
         map.insert(
@@ -1052,6 +1141,76 @@ mod tests {
     }
 
     #[test]
+    fn the_listing_names_the_default_selection_only_beside_its_own_endpoint() {
+        let view = describe_endpoints(&default_endpoints(), Some("scripted"));
+        let named =
+            view.clone()
+                .with_selection(Some("scripted"), Some("m".into()), Some("high".into()));
+        assert_eq!(named.default_model.as_deref(), Some("m"));
+        assert_eq!(named.default_effort.as_deref(), Some("high"));
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json["defaultModel"], json!("m"));
+        let elsewhere = view.with_selection(Some("other"), Some("m".into()), None);
+        assert_eq!(
+            elsewhere.default_model, None,
+            "another endpoint's default is not paired with this one"
+        );
+        assert!(
+            serde_json::to_value(&elsewhere)
+                .unwrap()
+                .get("defaultModel")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_page_listing_carries_only_what_a_page_needs_to_pick_a_model() {
+        let endpoint = EndpointConfig {
+            name: "gateway".into(),
+            kind: EndpointKind::OpenaiChat,
+            base_url: "http://gw.internal:8443/v1".into(),
+            model: Some("m".into()),
+            api_key_file: Some("/home/someone/.keys/gw".into()),
+            proxy: Some("http://proxy.internal:3128".into()),
+            project: Some("acct-project".into()),
+            headers: Some(BTreeMap::from([("X-Tenant".into(), "t".into())])),
+            context_window: Some(1000),
+            ..EndpointConfig::default()
+        };
+        let view = describe_endpoints(std::slice::from_ref(&endpoint), Some("gateway"));
+        let page = view.endpoints[0].as_object().unwrap();
+        let mut fields: Vec<&str> = page.keys().map(String::as_str).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "contextWindow",
+                "contextWindowSource",
+                "credential",
+                "kind",
+                "model",
+                "models",
+                "name"
+            ]
+        );
+        let text = view.endpoints[0].to_string();
+        for private in [
+            "gw.internal",
+            "/home/someone",
+            "proxy.internal",
+            "acct-project",
+            "X-Tenant",
+        ] {
+            assert!(!text.contains(private), "{private} does not reach a page");
+        }
+        assert_eq!(
+            describe_endpoint(&endpoint)["baseUrl"],
+            json!("http://gw.internal:8443/v1"),
+            "the operator's own CLI listing still names the gateway"
+        );
+    }
+
+    #[test]
     fn a_description_never_carries_a_secret() {
         let endpoint = EndpointConfig {
             name: "gateway".into(),
@@ -1067,10 +1226,22 @@ mod tests {
         let described = describe_endpoint(&endpoint);
         assert!(!described.to_string().contains("sk-secret"));
         assert_eq!(described["credential"], json!("set"));
-        assert_eq!(described["credentialFile"], json!("~/.keys/x"));
+        assert!(
+            !described.to_string().contains("~/.keys/x"),
+            "a key file's path names the account; only its presence crosses"
+        );
         assert_eq!(described["headers"], json!(["X-Tenant"]));
         assert_eq!(described["contextWindowSource"], json!("config"));
         assert_eq!(described["models"][0]["name"], json!("m"));
+        let file_only = describe_endpoint(&EndpointConfig {
+            api_key: None,
+            ..endpoint.clone()
+        });
+        assert_eq!(
+            file_only["credential"],
+            json!("set"),
+            "a key file alone is a credential"
+        );
 
         let view = describe_endpoints(&default_endpoints(), Some("nowhere"));
         assert_eq!(view.default, None);
@@ -1137,6 +1308,51 @@ mod tests {
                 PathBuf::from("/home/someone/.h/heddle.json"),
                 PathBuf::from("/home/someone/.heddle/heddle.json"),
             ]
+        );
+    }
+
+    #[test]
+    fn only_the_fixture_as_shipped_is_the_shipped_fixture() {
+        let shipped = default_endpoints().remove(0);
+        assert!(is_shipped_fixture(&shipped));
+        let scripted_elsewhere = EndpointConfig {
+            base_url: "/tmp/steps.json".into(),
+            ..shipped.clone()
+        };
+        assert!(!is_shipped_fixture(&scripted_elsewhere));
+        let renamed = EndpointConfig {
+            name: "double".into(),
+            ..shipped.clone()
+        };
+        assert!(!is_shipped_fixture(&renamed));
+        let other_kind = EndpointConfig {
+            kind: EndpointKind::OpenaiChat,
+            ..shipped
+        };
+        assert!(!is_shipped_fixture(&other_kind));
+    }
+
+    #[test]
+    fn the_unscripted_fixture_message_names_the_machine_file_a_run_reads() {
+        let home = Env::default()
+            .with("HOME", "/home/someone")
+            .with("HEDDLE_HOME", "/home/someone/.h");
+        let message = unscripted_fixture_message(&home);
+        assert!(
+            message.starts_with(
+                "the offline test endpoint 'scripted' has no script at scripted.json. To talk to a model,"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("declare one in /home/someone/.h/heddle.json, for example {\"endpoints\": [{\"name\": \"mine\", \"kind\": \"openai-chat\""),
+            "{message}"
+        );
+        assert!(message.ends_with("\"default\": \"mine\"}"), "{message}");
+        let named = home.with("HEDDLE_CONFIG", "/etc/heddle.json");
+        assert!(
+            unscripted_fixture_message(&named).contains("declare one in /etc/heddle.json,"),
+            "HEDDLE_CONFIG is the file a run reads first"
         );
     }
 }

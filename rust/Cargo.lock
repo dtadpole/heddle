@@ -638,12 +638,17 @@ dependencies = [
  "axum",
  "futures",
  "heddle-agent",
+ "heddle-commands",
  "heddle-config",
  "heddle-context",
  "heddle-events",
  "heddle-goal",
+ "heddle-jobs",
  "heddle-llm",
+ "heddle-plan",
+ "heddle-questions",
  "heddle-sandbox",
+ "heddle-schedule",
  "heddle-server",
  "heddle-session",
  "heddle-team",
@@ -679,6 +684,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-commands"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "futures",
+ "heddle-config",
+ "heddle-context",
+ "heddle-goal",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-session",
+ "heddle-web-files",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower",
+]
+
+[[package]]
 name = "heddle-config"
 version = "0.0.1"
 dependencies = [
@@ -700,6 +725,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "thiserror",
+ "tokio-util",
 ]
 
 [[package]]
@@ -737,6 +763,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "heddle-jobs"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "futures",
+ "heddle-agent",
+ "heddle-config",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-session",
+ "heddle-tools",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "heddle-llm"
 version = "0.0.1"
 dependencies = [
@@ -751,13 +798,67 @@ dependencies = [
 ]
 
 [[package]]
-name = "heddle-sandbox"
+name = "heddle-plan"
 version = "0.0.1"
 dependencies = [
+ "axum",
+ "futures",
+ "heddle-commands",
+ "heddle-config",
+ "heddle-llm",
+ "heddle-session",
+ "heddle-tools",
+ "serde_json",
+ "tokio",
+ "tower",
+]
+
+[[package]]
+name = "heddle-questions"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "futures",
+ "heddle-config",
+ "heddle-session",
+ "heddle-tools",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "heddle-sandbox"
+version = "0.0.1"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "heddle-schedule"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "futures",
+ "heddle-agent",
+ "heddle-config",
+ "heddle-llm",
+ "heddle-sandbox",
+ "heddle-session",
+ "heddle-tools",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -772,6 +873,7 @@ dependencies = [
  "heddle-config",
  "heddle-session",
  "http-body-util",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

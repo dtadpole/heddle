@@ -20,7 +20,7 @@ use crate::event::SessionId;
 ///
 /// Fields, as the TypeScript build declares them: `id`, `created`, `updated?`, `cwd`, `endpoint?`,
 /// `model?`, `reasoningEffort?`, `title?`, `turns`, `pinned?`, `pinnedAt?`, `archived?`,
-/// `parentSession?`, `origin?`, `delegationDepth?`, `teamId?`.
+/// `parentSession?`, `origin?`, `delegationDepth?`, `teamId?`, `preset?`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionMeta {
     raw: Map<String, Value>,
@@ -77,7 +77,7 @@ impl SessionMeta {
     pub fn created(&self) -> &str {
         self.string("created").unwrap_or("")
     }
-    /// When it was last written to — the age a row shows.
+    /// When a person last prompted or steered it — the age a row shows and what Last updated sorts by.
     pub fn updated(&self) -> Option<&str> {
         self.string("updated")
     }
@@ -125,6 +125,14 @@ impl SessionMeta {
     pub fn team_id(&self) -> Option<&str> {
         self.string("teamId")
     }
+    /// The agent preset this session runs under (inventory A96), recorded when it is created and never changed.
+    ///
+    /// DSH's rule: a session keeps the preset it was created with, so editing a preset or the default affects
+    /// sessions created afterwards. A session from before presets has none until its next turn records the current
+    /// default ([`crate::SessionStore::record_preset`]), after which it keeps that one too.
+    pub fn preset(&self) -> Option<&str> {
+        self.string("preset")
+    }
 }
 
 impl Serialize for SessionMeta {
@@ -140,6 +148,34 @@ impl<'de> Deserialize<'de> for SessionMeta {
     }
 }
 
+/// Whether a session, or a session above it in its **subagent** lineage, is archived — the question DSH's
+/// archived-session gate asks before every model step (`underArchivedSession`, dsh-api-session-controller
+/// lib/index.js:2528-2541); the TypeScript build's `underArchivedSession`.
+///
+/// The walk follows `parentSession` only through `origin: "subagent"` records, as DSH's follows its durable header:
+/// a delegated child of an archived session runs no step either, while a fork (a `parentSession` with no origin) is
+/// an independent conversation. A parent whose record cannot be read ends the walk unarchived, and so does a cycle.
+pub fn under_archived_session(lookup: impl Fn(&str) -> Option<SessionMeta>, id: &str) -> bool {
+    let mut visited = std::collections::HashSet::new();
+    let mut current = lookup(id);
+    while let Some(meta) = current {
+        if !visited.insert(meta.id().to_owned()) {
+            return false;
+        }
+        if meta.archived() {
+            return true;
+        }
+        if meta.origin() != Some(SessionOrigin::Subagent) {
+            return false;
+        }
+        let Some(parent) = meta.parent_session() else {
+            return false;
+        };
+        current = lookup(parent);
+    }
+    false
+}
+
 /// Where a delegated session came from. Only one origin exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -150,8 +186,8 @@ pub enum SessionOrigin {
 /// What `SessionStore::create` is told. Every field is optional; an absent one is not written.
 ///
 /// The record is written in this order — `id`, `created`, `cwd`, `endpoint`, `model`,
-/// `reasoningEffort`, `title`, `parentSession`, `origin`, `delegationDepth`, `teamId`, `turns` — which is
-/// the TypeScript build's.
+/// `reasoningEffort`, `title`, `parentSession`, `origin`, `delegationDepth`, `teamId`, `preset`, `turns` —
+/// which is the TypeScript build's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CreateOptions {
     /// The folder the session is bound to; the process's working directory when `None`.
@@ -164,6 +200,8 @@ pub struct CreateOptions {
     pub origin: Option<SessionOrigin>,
     pub delegation_depth: Option<u64>,
     pub team_id: Option<SessionId>,
+    /// The agent preset the session runs under (inventory A96); absent until a turn records the default.
+    pub preset: Option<String>,
     /// An id chosen by the caller, so a journal entry can name a session before it exists.
     /// `session-<uuid v4>` when `None`.
     pub id: Option<SessionId>,
@@ -221,7 +259,7 @@ mod tests {
     #[test]
     fn the_typed_getters_read_what_the_record_says() {
         let record = meta(
-            r#"{"id":"session-1","created":"2026-10-22T18:17:41.123Z","cwd":"/x","endpoint":"e","model":"m","reasoningEffort":"high","title":"T","turns":3,"pinned":true,"pinnedAt":"2026-10-22T18:18:00.000Z","archived":false,"parentSession":"session-0","origin":"subagent","delegationDepth":2,"teamId":"session-9"}"#,
+            r#"{"id":"session-1","created":"2026-10-22T18:17:41.123Z","cwd":"/x","endpoint":"e","model":"m","reasoningEffort":"high","title":"T","turns":3,"pinned":true,"pinnedAt":"2026-10-22T18:18:00.000Z","archived":false,"parentSession":"session-0","origin":"subagent","delegationDepth":2,"teamId":"session-9","preset":"reader"}"#,
         );
         assert_eq!(record.id(), "session-1");
         assert_eq!(record.created(), "2026-10-22T18:17:41.123Z");
@@ -239,6 +277,7 @@ mod tests {
         assert_eq!(record.origin(), Some(SessionOrigin::Subagent));
         assert_eq!(record.delegation_depth(), Some(2));
         assert_eq!(record.team_id(), Some("session-9"));
+        assert_eq!(record.preset(), Some("reader"));
     }
 
     #[test]
@@ -251,6 +290,7 @@ mod tests {
         assert!(!record.archived());
         assert_eq!(record.origin(), None);
         assert_eq!(record.delegation_depth(), None);
+        assert_eq!(record.preset(), None);
     }
 
     #[test]

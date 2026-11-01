@@ -1,14 +1,14 @@
 ---
 title: Live health - the checks
 level: L2
-version: 1.8.1
+version: 1.9.0
 description: What each check of a live-health pass claims - the deployment and the Rust preview - how it decides, and what its verdicts and exit codes mean.
 status: unverified
 grounded_in:
   - source: the live-monitor seat's responsibilities, 2026-10-22
   - source: the 96-deployment and 90-web-ui-token verifiers, whose claims the process, marker and door checks reuse
 created: 2026-10-23T05:10:55Z
-modified: 2026-10-29T10:00:00Z
+modified: 2026-10-31T01:30:00Z
 ---
 
 # The checks
@@ -24,7 +24,7 @@ A pass judges `8082`, the server behind it on `3082` (topology in
 | `door` | a bare request gets `401`; the launch token from `~/.heddle/web.log` gets a `303` and an `HttpOnly`, `SameSite=Strict` cookie | `doorVerdict` |
 | `load` | the shell renders: log, composer, Send | `shellVerdict` |
 | `marker` | the served page is `dist/server/page.html` byte for byte, its `meta[name=heddle-page]` that file's sha256 prefix | `markerVerdict`, `expectedPage` |
-| `turn` | a prompt streams (two or more chunks) and settles in the monitor's own session, per the server's session list; with `--deployment-conversation` a same-page follow-up must too | `turnVerdict`, `turnLanding`, `sameHealthSession`, `deploymentTurnWithConversation` |
+| `turn` | a prompt streams (two or more chunks) and settles in the monitor's own session, which the server lists in the monitor's own workspace; with `--deployment-conversation` a same-page follow-up must too | `turnVerdict`, `turnLanding`, `sameHealthSession`, `deploymentTurnWithConversation` |
 | `console` | no error-level message on load or after the turn; an unread console is unjudged | `consoleVerdict` |
 | `dsh` | the DSH reference on `8080` answers; counts recorded beside heddle's | evidence only |
 | `preview` | its own session store, token link `303`, `/api/endpoints` and `/api/tree` `200`, a fixture turn and a two-message conversation, or one real turn (D-052) | `previewVerdict`, `previewTurnVerdict` |
@@ -73,6 +73,18 @@ target then gets **one minimal real turn per pass**:
     session exists (`POST /api/sessions/<id>/flags {archived: true}`, recorded as
     `session.previous`). Archiving hides it from the tree and deletes nothing. Only an id the monitor
     created is ever archived.
+- **The preview's real turn has its own workspace and session too** (hd-coordinator, 2026-10-31).
+  The page's New session takes the open session's workspace, and the page opens the newest session
+  of any workspace. On 2026-10-30 and 2026-10-31 that put the preview's health session in two
+  testers' workspaces. So the preview now uses the 8082 path above on `3097`'s own API: the same
+  folder is registered there, and the session is created by that path and recorded under its own
+  key in the state file (`preview`, beside `deployment`). The page's New session is used only for a
+  fixture turn.
+- **Placement is checked before every real turn, on both targets** (`ownSessionPlaced`). The
+  server's own session list must show the id with `cwd` equal to the health folder. Otherwise no
+  turn is sent, and the turn is unjudged with the reason. A created id is recorded at once, so a
+  failing check never makes a new session each pass. The previous day's id is archived only after
+  the new one is confirmed in place.
 
 **Verdicts.** Staleness against a fresh `origin/main` (`dirty`, `behind`, `ahead`) is recorded,
 not failed. `passVerdict` fails on any failed check and is unjudged on any unjudged one: exit `0`

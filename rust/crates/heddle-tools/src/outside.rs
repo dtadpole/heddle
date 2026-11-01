@@ -418,6 +418,8 @@ fn request_id(id: &RequestId) -> String {
 pub struct OutsideComponent {
     row: String,
     tools: Vec<ToolSpec>,
+    /// Per declared tool, in order: whether it declared itself `concurrencySafe`.
+    safe: Vec<bool>,
     listeners: Vec<serde_json::Value>,
     child: Mutex<Option<Child>>,
     connection: Arc<Connection>,
@@ -521,6 +523,11 @@ impl OutsideComponent {
 
         Ok(Self {
             row,
+            safe: initialized
+                .tools
+                .iter()
+                .map(|tool| tool.concurrency_safe)
+                .collect(),
             tools: initialized.tools.into_iter().map(ToolSpec::from).collect(),
             listeners: initialized.listeners,
             child: Mutex::new(Some(child)),
@@ -544,15 +551,22 @@ impl OutsideComponent {
     }
 
     /// One [`ProcessTool`] per declared spec, each forwarding its calls over this connection.
+    /// A tool the component declared `concurrencySafe` may share a step's parallel group, as a built-in read does.
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         self.tools
             .iter()
-            .map(|spec| {
-                Arc::new(ProcessTool {
+            .enumerate()
+            .map(|(index, spec)| {
+                let tool = Arc::new(ProcessTool {
                     spec: spec.clone(),
                     row: self.row.clone(),
                     connection: Arc::clone(&self.connection),
-                }) as Arc<dyn Tool>
+                }) as Arc<dyn Tool>;
+                if self.safe.get(index).copied().unwrap_or(false) {
+                    crate::tool::parallel_safe(tool)
+                } else {
+                    tool
+                }
             })
             .collect()
     }
@@ -832,15 +846,9 @@ mod tests {
         })
     }
 
-    fn workspace(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path =
-            std::env::temp_dir().join(format!("heddle-outside-{label}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
+    /// A scratch workspace, removed when the guard drops.
+    fn workspace(label: &str) -> crate::test_support::ScratchDir {
+        crate::test_support::ScratchDir::new(&format!("outside-{label}"))
     }
 
     /// The component this test binary becomes when the parent starts it: a JSON-RPC peer on stdio.
@@ -880,6 +888,11 @@ mod tests {
                     }
                     let tools = match mode.as_str() {
                         "blank" => json!([{ "name": "", "description": "" }]),
+                        // `safe` declares two tools, one of them parallel-safe.
+                        "safe" => json!([
+                            { "name": "peek", "description": "Read something.", "concurrencySafe": true },
+                            { "name": "poke", "description": "Change something." }
+                        ]),
                         // `dead` declares a real tool and then exits: the row loads, then everything fails.
                         _ => json!([{
                             "name": "shout",
@@ -979,16 +992,18 @@ mod tests {
         ]
     }
 
-    fn spec(mode: &str) -> OutsideComponentSpec {
+    /// The fixture component's spec, and the guard of the folder it runs in.
+    fn spec(mode: &str) -> (OutsideComponentSpec, crate::test_support::ScratchDir) {
+        let folder = workspace("component");
         let mut spec = OutsideComponentSpec::new(
             "fixture",
             std::env::current_exe().expect("the test binary"),
-            workspace("component"),
+            folder.to_path_buf(),
         );
         spec.args = component_args();
         spec.env = vec![("HEDDLE_TEST_COMPONENT".to_owned(), mode.to_owned())];
         spec.init_timeout = Duration::from_secs(10);
-        spec
+        (spec, folder)
     }
 
     fn sandbox_at(root: PathBuf) -> Arc<dyn SandboxGate> {
@@ -996,16 +1011,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_tool_declared_concurrency_safe_shares_a_parallel_group_and_the_rest_do_not() {
+        let root = workspace("safe");
+        let (component_spec, _component_dir) = spec("safe");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
+            .await
+            .unwrap();
+        let registry = registry(sandbox_at(root.to_path_buf()));
+        assert_eq!(component.register_into(&registry).unwrap(), 2);
+        assert!(
+            registry.is_concurrency_safe("peek"),
+            "a declared concurrencySafe tool is parallel-safe"
+        );
+        assert!(
+            !registry.is_concurrency_safe("poke"),
+            "a tool that declares nothing runs alone"
+        );
+    }
+
+    #[tokio::test]
     async fn a_component_registers_its_tools_and_answers_a_call() {
         let root = workspace("call");
-        let component = OutsideComponent::start(spec("shout"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("shout");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
         assert_eq!(component.row(), "fixture");
         assert_eq!(component.specs().len(), 1);
         assert_eq!(component.specs()[0].name, "shout");
 
-        let registry = registry(sandbox_at(root.clone()));
+        let registry = registry(sandbox_at(root.to_path_buf()));
         assert_eq!(component.register_into(&registry).unwrap(), 1);
         assert_eq!(registry.names(), ["shout"]);
         let result = registry
@@ -1026,10 +1061,11 @@ mod tests {
     #[tokio::test]
     async fn a_blank_declared_spec_fails_the_whole_row() {
         let root = workspace("blank");
-        let component = OutsideComponent::start(spec("blank"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("blank");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
-        let registry = registry(sandbox_at(root));
+        let registry = registry(sandbox_at(root.to_path_buf()));
         let error = component.register_into(&registry).unwrap_err();
         match error {
             OutsideError::Registration { row, source } => {
@@ -1045,7 +1081,8 @@ mod tests {
     #[tokio::test]
     async fn a_dead_process_fails_its_calls_rather_than_hanging() {
         let root = workspace("dead");
-        let component = OutsideComponent::start(spec("dead"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("dead");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
         // The component exited after initialize; the close is noticed by the reader task.
@@ -1066,7 +1103,8 @@ mod tests {
     #[tokio::test]
     async fn a_back_channel_denial_becomes_the_sandbox_refusal() {
         let root = workspace("deny");
-        let component = OutsideComponent::start(spec("deny"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("deny");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
         let tools = component.tools();
@@ -1094,7 +1132,8 @@ mod tests {
     #[tokio::test]
     async fn a_cancelled_call_stops_waiting_and_reports_interrupted() {
         let root = workspace("cancel");
-        let component = OutsideComponent::start(spec("slow"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("slow");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
         let token = CancellationToken::new();
@@ -1119,9 +1158,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_component_that_never_answers_initialize_fails_the_row() {
-        let mut spec = spec("silent");
+        let (mut spec, _component_dir) = spec("silent");
+        let silent_root = workspace("silent");
         spec.init_timeout = Duration::from_millis(300);
-        let error = OutsideComponent::start(spec, sandbox_at(workspace("silent")))
+        let error = OutsideComponent::start(spec, sandbox_at(silent_root.to_path_buf()))
             .await
             .unwrap_err();
         match error {
@@ -1133,7 +1173,8 @@ mod tests {
     #[tokio::test]
     async fn a_notification_reaches_the_component_and_expects_no_answer() {
         let root = workspace("notify");
-        let component = OutsideComponent::start(spec("count"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("count");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
         component
@@ -1166,7 +1207,8 @@ mod tests {
     #[tokio::test]
     async fn a_notification_to_a_dead_process_fails_naming_the_row() {
         let root = workspace("notify-dead");
-        let component = OutsideComponent::start(spec("dead"), sandbox_at(root.clone()))
+        let (component_spec, _component_dir) = spec("dead");
+        let component = OutsideComponent::start(component_spec, sandbox_at(root.to_path_buf()))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;

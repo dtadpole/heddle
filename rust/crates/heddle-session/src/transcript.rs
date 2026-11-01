@@ -81,12 +81,40 @@ pub fn looks_compressed(buffer: &[u8]) -> bool {
 /// marked last, plus the 4-byte checksum when the descriptor declares one. Anything unexpected ends the
 /// walk with `None` rather than panicking: a torn tail is a normal thing to find in an appended file.
 pub fn frame_end(buffer: &[u8], start: usize) -> Option<usize> {
-    if start + 4 > buffer.len() || buffer[start..start + 4] != FRAME_MAGIC {
-        return None;
+    match frame_extent(buffer, start) {
+        FrameExtent::End(end) => Some(end),
+        FrameExtent::Short | FrameExtent::Malformed => None,
+    }
+}
+
+/// Where one frame ends, or why it does not ([`frame_extent`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameExtent {
+    /// The frame ends here.
+    End(usize),
+    /// The bytes stop inside a frame that is well formed so far: a torn tail, or a head not read far enough yet.
+    Short,
+    /// Not a frame: no magic where one must start, or a reserved block type.
+    Malformed,
+}
+
+/// [`frame_end`] with its two `None`s apart, as `frameExtent` in `src/session/transcript.ts`: the header check
+/// ([`judge_log_header`]) reads a torn first frame as a crash heddle repairs, and a malformed one as a file that is not
+/// a log.
+pub fn frame_extent(buffer: &[u8], start: usize) -> FrameExtent {
+    let magic = FRAME_MAGIC.len().min(buffer.len().saturating_sub(start));
+    if magic == 0 {
+        return FrameExtent::Short;
+    }
+    if buffer[start..start + magic] != FRAME_MAGIC[..magic] {
+        return FrameExtent::Malformed;
+    }
+    if magic < FRAME_MAGIC.len() {
+        return FrameExtent::Short;
     }
     let mut cursor = start + 4;
     if cursor + 1 > buffer.len() {
-        return None;
+        return FrameExtent::Short;
     }
     let descriptor = buffer[cursor];
     cursor += 1;
@@ -109,12 +137,12 @@ pub fn frame_end(buffer: &[u8], start: usize) -> Option<usize> {
     };
     cursor += content_size_bytes;
     if cursor > buffer.len() {
-        return None;
+        return FrameExtent::Short;
     }
 
     loop {
         if cursor + 3 > buffer.len() {
-            return None;
+            return FrameExtent::Short;
         }
         let header = u32::from(buffer[cursor])
             | (u32::from(buffer[cursor + 1]) << 8)
@@ -124,7 +152,7 @@ pub fn frame_end(buffer: &[u8], start: usize) -> Option<usize> {
         let block_type = (header >> 1) & 0x03;
         let block_size = header >> 3;
         if block_type == 3 {
-            return None; // reserved
+            return FrameExtent::Malformed; // reserved
         }
         // An RLE block carries one byte whatever its declared size says.
         let payload = if block_type == 1 {
@@ -134,7 +162,7 @@ pub fn frame_end(buffer: &[u8], start: usize) -> Option<usize> {
         };
         cursor += payload;
         if cursor > buffer.len() {
-            return None;
+            return FrameExtent::Short;
         }
         if last_block {
             break;
@@ -145,9 +173,9 @@ pub fn frame_end(buffer: &[u8], start: usize) -> Option<usize> {
         cursor += 4;
     }
     if cursor > buffer.len() {
-        None
+        FrameExtent::Short
     } else {
-        Some(cursor)
+        FrameExtent::End(cursor)
     }
 }
 
@@ -239,6 +267,80 @@ pub fn decode_transcript(buffer: &[u8]) -> DecodedTranscript {
         torn: consumed != buffer.len(),
         readable_bytes: consumed,
     }
+}
+
+/// What a log's first record says about whether the log can be read at all (`LogHeader` in
+/// `src/session/transcript.ts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogHeader {
+    /// A first record that is a session event, or nothing to judge yet: an empty file, or a first frame torn by a
+    /// crash, which the store has always read as an empty session and cut back on the next write.
+    Readable,
+    /// The first record does not decode, is not JSON, or is not a session event; the reason says which.
+    Unreadable(&'static str),
+    /// The bytes given end before the first record does; read further and ask again.
+    Incomplete,
+}
+
+/// Judge a log by its **first record**, the way DSH's JSONL backend judges a session by its header before it lists
+/// it (`judgeLogHeader` in `src/session/transcript.ts`, word for word in its reasons).
+///
+/// DSH (dsh-session-persistence-jsonl README: "Unreadable or unsupported headers, including corrupt Zstandard header
+/// frames, are omitted from discovery and `list()`") reads only the header frame (`readFirstZstdLine`,
+/// lib/index.js:3378-3409): a frame that fails validation is corruption (:3403), a first line that is not JSON or not a
+/// header is no header (`readGenerationHeader`, :3150-3156 and :3170), and `listArtifacts` leaves both out
+/// (:3114-3127). A heddle log has no separate header line; its first record is the first event, judged with the shape
+/// [`SessionEvent::from_line`](crate::SessionEvent::from_line) requires of every line. An empty file and a torn first
+/// frame read as an empty session, as [`decode_transcript`] reads them.
+pub fn judge_log_header(head: &[u8], at_end: bool) -> LogHeader {
+    if looks_compressed(head) {
+        let end = match frame_extent(head, 0) {
+            FrameExtent::End(end) => end,
+            FrameExtent::Short if at_end => return LogHeader::Readable,
+            FrameExtent::Short => return LogHeader::Incomplete,
+            FrameExtent::Malformed => {
+                return LogHeader::Unreadable("its first zstd frame is malformed");
+            }
+        };
+        let Some(text) = decode_frame(&head[..end]) else {
+            return LogHeader::Unreadable("its first zstd frame does not decode");
+        };
+        return judge_first_line(text.split('\n').find(|line| !line.is_empty()).unwrap_or(""));
+    }
+    let start = head.iter().take_while(|byte| **byte == b'\n').count();
+    if start == head.len() {
+        return if at_end {
+            LogHeader::Readable
+        } else {
+            LogHeader::Incomplete
+        };
+    }
+    let newline = head[start..].iter().position(|byte| *byte == b'\n');
+    if newline.is_none() && !at_end {
+        return LogHeader::Incomplete;
+    }
+    let line = &head[start..newline.map_or(head.len(), |at| start + at)];
+    judge_first_line(&String::from_utf8_lossy(line))
+}
+
+/// The first record's verdict: valid JSON, and a session event ([`is_event_record`]).
+fn judge_first_line(line: &str) -> LogHeader {
+    match serde_json::from_str::<serde_json::Value>(line) {
+        Err(_) => LogHeader::Unreadable("its first record is not valid JSON"),
+        Ok(record) if is_event_record(&record) => LogHeader::Readable,
+        Ok(_) => LogHeader::Unreadable("its first record is not a session event"),
+    }
+}
+
+/// Whether a parsed line has the shape every event the store writes has: a whole-number `seq`, a string `at` and a
+/// string `type` — what [`SessionEvent::from_line`](crate::SessionEvent::from_line) requires.
+pub fn is_event_record(record: &serde_json::Value) -> bool {
+    record
+        .get("seq")
+        .and_then(serde_json::Value::as_u64)
+        .is_some()
+        && record.get("at").is_some_and(serde_json::Value::is_string)
+        && record.get("type").is_some_and(serde_json::Value::is_string)
 }
 
 #[cfg(test)]

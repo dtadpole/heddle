@@ -1,8 +1,8 @@
 ---
 title: The heddle-config crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-29T12:56:06Z
-version: 0.8.1
+modified: 2026-10-29T14:41:37Z
+version: 0.8.2
 description: The Rust port crate for the configuration tree — profiles, patch layers, includes, environment references, validation and provenance — with its public API, the crates that read it, the config-boot contract callers follow, and its port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -40,6 +40,7 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `layer` | `Layer`, `NamedLayer` (`read`, `inline`), `read_layer`, `anchor_dir`, `INLINE_FILE` | `readLayer`, `NamedLayer` |
 | `references` | `references_in`, `resolve_env`, `parse_scalar` | `referencesIn`, `resolveEnv`, `parseScalar` |
 | `compose` | `EntryRow` (`label`, `component`), `ComponentName`, `Provenance`, `ComposedRow` (`to_report`), `compose`, `origin_of` | `compose`, `provenanceOf`, `originOf` |
+| `plugin_inventory` | `plugin_inventory`, `PluginInventorySnapshot`, `PluginInventoryEntry`, `PluginFiberPhase` — DSH's read-only `pluginInventory/list` over a loaded tree: every non-group row in row order with its declared `name`, whether it is enabled (a disabled row the loader gave no entry is listed disabled, phase `null`), and its entry's phase; no `managementAvailable`. The binary serves it as `GET /api/plugin-inventory` | `src/config/plugin-inventory.ts` (DSH's `dsh-host-plugin-inventory`) |
 | `profile` | `ProfileInfo`, `list_profiles`, `resolve_profile`, `profile_argument`, `LayerOptions` (`for_run`, `for_inspection`), `default_layers` | `listProfiles`, `resolveProfile`, `defaultLayers`, cli `baseLayer` |
 | `schema` | `Schema` (a JSON Schema subset), `SchemaType`, `TypeSet`, `Additional`, `SchemaProblem` | Schemastery, as the validator used it |
 | `validate` | `ComponentCatalog` (trait), `SchemaLookup`, `StaticCatalog`, `ComponentManifest`, `ManifestCatalog`, `read_component_manifest`, `ValidationResult`, `validate_rows` | `validate.ts`; the manifest catalog is the part-0 shape for outside components |
@@ -49,6 +50,7 @@ except `paths::resolve`, `paths::resolve_from_cwd` and the `command` module, whi
 | `endpoints` | `EndpointConfig` (catalogue methods), `EndpointPatch`, `EndpointKind`, `ModelEntry`, `ModelOption`, `ReasoningLevel(s)`, `ReasoningValue`, `default_endpoints`, `environment_override`, `merge_endpoint`, `read_key_file`, `materialize_key`, `resolve_endpoints`, `describe_endpoint(s)`, `EndpointsView`, `selection_problem`, `config_paths` | `src/endpoints.ts`, `src/llm/types.ts` |
 | `command` | `ConfigCommand`, `ConfigArgs`, `CommandContext`, `run` — `heddle profiles` and `heddle config [--json] [--origins] [--validate]`, output and exit codes | `runConfigCommand` |
 | `settings` | `settings_target`, `describe_settings`, `plan_settings_write`, `commit_settings_write`, `SettingsService` (`new`, `describe`, `write`), `handle_settings_request` and `SettingsResponse`, `SettingsView`, `SettingsNamespace`, `SecretSlot`, `SettingsWrite`, `SettingsPathOp`, `SettingsError` (`code`, `message`), `SettingsRevisions`, `PlannedWrite`, `is_secret_key`, `SETTINGS_BEGIN`, `SETTINGS_END` — the active profile's patch as a writable surface | `src/config/settings.ts` (DSH's `dsh-settings` over `dsh-config-editor`) |
+| `template` | `PROFILE_TEMPLATES`, `template_files`, `reset_profile_from_template` — DSH's `--from-default-profile`: profile `<name>` replaced by a fresh copy of a shipped template, written beside it and renamed into place; heddle ships `default`, the checkout's own tree with absolute row names (the Rust binary's checkout is the one it was built from, `CARGO_MANIFEST_DIR` fixed at compile time, so a binary copied elsewhere still reads its build checkout); a name that is not plain or an unknown template is refused before anything is written | `src/config/profile-template.ts` (DSH's launcher `--from-default-profile`) |
 
 **Settings.** The active profile's `heddle.patch.yml` is writable from `GET /api/settings`, `GET` and `POST
 /api/settings/{ns}`, as DSH's settings controller allows; `src/config/settings.ts` is the TypeScript twin and the
@@ -58,7 +60,9 @@ restates an entry's complete **raw** config, so an `${ENV}` value stays a refere
 beneath the block, and an entry back at its base leaves it. The complete candidate is composed and validated
 before the disk is touched; a stale revision is `settings-conflict` (409), and an invalid value, a row a later
 layer restates or removes, an overlay's own row, a secret, or a run with no profile patch is `settings-rejected`
-(422), each with the file unchanged. `applies` is `restart` until a change can apply to the running tree. The
+(422), each with the file unchanged. A live entry applies a write to the running tree as it lands (`SettingsService::with_live`, `applies: live`);
+the binary marks the model row, whose `ModelRowSource::set_row_config` takes the written configuration, and the
+TypeScript build applies every entry through the loader. The other Rust entries say `applies: restart`. The
 binary mounts the routes behind the door (`web.rs`, `settings_router`); `05-config-system/check-settings.mjs`
 judges them through `HEDDLE_BIN`.
 

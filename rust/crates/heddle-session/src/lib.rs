@@ -31,6 +31,7 @@
 //! read by `src/session/transcript.ts` through the `heddle` binary, which is what
 //! `_verifiers_/70-workspaces-sessions` judges once the command line composes this crate.
 
+pub mod activity;
 pub mod clock;
 pub mod command;
 pub mod definition;
@@ -42,15 +43,27 @@ pub mod layout;
 pub mod message;
 pub mod meta;
 pub mod mode;
+pub mod repair;
+pub mod search;
 pub mod service;
 pub mod store;
 pub mod surface;
+pub mod title;
 pub mod transcript;
+pub mod unicode61;
 
+/// DSH's title cleaning, reached by its path (`heddle_session::title_text`), not re-exported at the root.
+pub mod title_text;
+
+pub use activity::{
+    ActivityEntry, ActivityItem, LineageMeta, RowActivity, activity_sessions, refusal_sentence,
+    session_activity,
+};
 pub use definition::{
     CreatedDefinition, DEFINITION_FILE, DefinitionOptions, SESSIONS_FOLDER, SessionDefinition,
     SessionDefinitionFields, ensure_sessions_folder, existing_session_names,
-    read_session_definition, session_name, update_session_definition, write_session_definition,
+    read_session_definition, require_folder, session_name, update_session_definition,
+    write_session_definition,
 };
 pub use error::{SessionError, SessionFlagError};
 pub use event::{
@@ -63,22 +76,35 @@ pub use message::{
 };
 pub use meta::{
     CreateOptions, FlagPatch, ForkAttribution, ModelSelection, SessionMeta, SessionOrigin,
+    under_archived_session,
 };
 pub use mode::{MODE_EVENT, effective_mode, inherit_recorded_mode, recorded_mode};
+pub use repair::{CloserCause, INTERRUPTED_RESULT, interrupted_turn_closers, open_turn_closers};
+pub use search::{
+    SESSION_SEARCH_QUERY_MAX_CHARS, SESSION_SEARCH_RESULT_LIMIT,
+    SESSION_SEARCH_SNIPPET_MAX_CODE_POINTS, SessionSearchHit, SessionSearchIndex,
+    SessionSearchPage, SessionSearchQueryError, normalize_search_query,
+};
 pub use service::{
     CreateAtOptions, ForkOutcome, ModeChange, OpenAtOptions, SessionConfig, SessionService,
     StartOptions, fork_title, title_from,
 };
 pub use store::{
-    EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord, SessionStore,
-    TRANSCRIPT_NAME, can_compress, default_session_root, is_framed, lock_path, log_name, meta_name,
-    transcript_in,
+    EventListener, LEGACY_TRANSCRIPT_NAME, ModelRequestBreakdown, ModelRequestRecord,
+    RenameListener, SessionStore, TRANSCRIPT_NAME, Warn, can_compress, default_session_root,
+    is_framed, lock_path, log_name, meta_name, read_log_header, skipped_log_line, transcript_in,
 };
 pub use surface::{
     SURFACE_EVENT_TYPES, SurfaceReplacement, SurfaceState, completed_prefix, derive_message,
-    derive_node_message, fold_surface, index_by_seq, inherits_answer, is_surface_eligible,
+    derive_node_message, fold_surface, fork_seed, index_by_seq, inherited_by_fork, inherits_answer,
+    is_surface_eligible,
+};
+pub use title::{
+    LlmTitles, SESSION_TITLE_PURPOSE, SessionTitles, TitleAnswer, TitleDone, TitleModel,
+    TitleSpawn, TitleTask, normalize_session_title, title_from_answer,
 };
 pub use transcript::{
-    DecodedTranscript, FRAME_MAGIC, Frame, TranscriptFormat, decode_transcript, encode_frame,
-    frame_end, is_compressed, looks_compressed, split_frames,
+    DecodedTranscript, FRAME_MAGIC, Frame, FrameExtent, LogHeader, TranscriptFormat,
+    decode_transcript, encode_frame, frame_end, frame_extent, is_compressed, is_event_record,
+    judge_log_header, looks_compressed, split_frames,
 };

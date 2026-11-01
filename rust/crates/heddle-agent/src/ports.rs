@@ -73,6 +73,24 @@ pub trait ModelPort: Send + Sync {
         cancel: Option<CancellationToken>,
     ) -> BoxStream<'static, Result<Chunk, ModelError>>;
 
+    /// The request [`ModelPort::stream`] would send, after the service's `model/request` waterfall.
+    ///
+    /// The loop records this, not the request it built, so a step a selection policy moved to the session's
+    /// current model is logged under that model (issue #14). A port with no waterfall sends what it is given.
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        Ok(request)
+    }
+
+    /// Stream a request [`ModelPort::resolve`] already answered, without running the waterfall again, so a call runs
+    /// its request hooks exactly once and sends what was recorded. A port with no waterfall streams it as given.
+    fn stream_resolved(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        self.stream(request, cancel)
+    }
+
     /// The endpoint a session with none recorded runs on.
     fn default_endpoint(&self) -> Option<String>;
 
@@ -96,6 +114,9 @@ pub struct ModelRequestRecord {
     /// The reasoning level, when the turn named one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Whether that level is the model's declared default rather than a choice (#157).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_default: Option<bool>,
     /// How many messages the request carries.
     pub messages: usize,
     /// The names of the tools it carries.
@@ -173,6 +194,42 @@ pub trait SessionPort: Send + Sync {
     fn has_pending_input(&self, _session: &SessionHandle) -> bool {
         false
     }
+
+    /// DSH's archived-session gate: whether the session, or a session above it in its subagent lineage, is
+    /// archived, so its next step must be rejected (dsh-api-session-controller lib/index.js:2508-2541). Asked of
+    /// the records at every step. A session store with no archive runs every step, which is the default.
+    fn under_archived(&self, _session: &SessionHandle) -> bool {
+        false
+    }
+
+    /// Record the claim of a step the gate rejected, writing none of it (`heddle_session::inbox::claim_rejected`):
+    /// first queue `prompt` as the next turn's input when there is one (DSH's `followup`), then claim the next-step
+    /// list and, with `with_turn`, the first queued prompt. Answers how many messages were claimed and dropped.
+    fn claim_rejected(
+        &self,
+        _session: &SessionHandle,
+        _prompt: Option<(Vec<ContentPart>, Option<serde_json::Value>)>,
+        _with_turn: bool,
+    ) -> Result<usize, PortError> {
+        Ok(0)
+    }
+
+    /// The agent preset the session recorded (`SessionMeta.preset`, inventory A96), or `None` for a session that
+    /// recorded none. The default knows no record, for a session that does not keep one.
+    fn recorded_preset(&self, _session: &SessionHandle) -> Option<String> {
+        None
+    }
+
+    /// Record `preset` as the session's agent preset **only when it has none** (`SessionStore::record_preset`), and
+    /// answer the preset the session now records. A session keeps its preset, so this never replaces one. The default
+    /// records nothing and answers `None`, and the loop then runs the preset it asked to record.
+    fn record_preset(
+        &self,
+        _session: &SessionHandle,
+        _preset: &str,
+    ) -> Result<Option<String>, PortError> {
+        Ok(None)
+    }
 }
 
 /// The context service, narrowed to the three questions a turn asks.
@@ -222,7 +279,7 @@ pub enum HookFailure {
 }
 
 /// What one refused model call is offered on `agent/request-error`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct RequestErrorPayload {
     /// The failure's code and sentence.
     pub code: String,
@@ -238,6 +295,8 @@ pub struct RequestErrorPayload {
     pub cwd: PathBuf,
     /// The tools the request carried.
     pub tools: Vec<ToolSpec>,
+    /// The turn's stop token, so the forced reduction's summary call stops with the turn (#154).
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// A listener's answer on `agent/request-error`.
@@ -263,6 +322,14 @@ pub trait TurnHooks: Send + Sync {
     ) -> BoxFuture<'a, Option<RequestErrorAction>> {
         let _ = payload;
         Box::pin(async { None })
+    }
+
+    /// Right after a round's runtime-context snapshot is recorded, before its request is assembled: the harness's
+    /// own per-step notes (the time context, `recordTimeContext` in `src/agent/loop.ts`). `step` is the round's
+    /// number in its turn, from 1. A failure fails the turn, as a failed snapshot does.
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        let _ = (session, step);
+        Ok(())
     }
 }
 
@@ -309,6 +376,12 @@ impl TurnHooks for ChainedTurnHooks {
             }
             None
         })
+    }
+
+    fn record_step_context(&self, session: &SessionHandle, step: u32) -> Result<(), PortError> {
+        self.hooks
+            .iter()
+            .try_for_each(|hooks| hooks.record_step_context(session, step))
     }
 }
 
@@ -416,6 +489,7 @@ mod tests {
             model: None,
             cwd: PathBuf::from("/w"),
             tools: Vec::new(),
+            cancel: None,
         };
         assert_eq!(
             chain.request_error(&payload).await,

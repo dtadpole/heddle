@@ -112,15 +112,19 @@ impl TodoErrorCode {
     }
 }
 
+/// DSH's refusal of an empty (or non-string) content, word for word.
+pub const TODO_EMPTY_CONTENT_MESSAGE: &str = "invalid todo: `content` must be a non-empty string";
+
 /// A refused or failed todo operation.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TodoError {
-    /// A list or a logged write did not validate; the message is the TypeScript build's sentence.
+    /// A list or a logged write did not validate; the message is the TypeScript build's sentence (DSH's for
+    /// the content, duplicate and in-progress refusals).
     #[error("{message}")]
     Invalid {
         /// Which refusal.
         code: TodoErrorCode,
-        /// The sentence, e.g. `at most one todo may be in_progress (got 2)`.
+        /// The sentence, e.g. `invalid todos: at most one task may be in_progress (got 2)`.
         message: String,
     },
     /// The session log failed. A tool reports it under `TODO_TOOL_ERROR`, as the TypeScript build reports any
@@ -144,8 +148,12 @@ impl TodoError {
 /// Refused (with `code`): not an array; an item that is not an object, has a key other than `content` and
 /// `status`, has non-string or blank content, repeats a trimmed content, or has an unknown status; and, unless
 /// `allow_parallel`, more than one `in_progress`. Content is stored trimmed. `allow_parallel` is a **policy**:
-/// the write path applies the service's, the fold passes `true`, so changing a deployment's policy never makes
-/// an older log unreadable.
+/// the write path applies the caller's (else the service's), the fold passes `true`, so changing a deployment's
+/// policy never makes an older log unreadable.
+///
+/// The content, duplicate and in-progress refusals are DSH's sentences (`dsh-tool-todo`), content trimmed
+/// first. DSH refuses a non-array, a non-object item, an unknown key or an unknown status at its registry's
+/// schema boundary; this project's registry checks no schema, so those keep their own texts.
 pub fn validate_todos(
     raw: &Value,
     code: TodoErrorCode,
@@ -173,17 +181,17 @@ pub fn validate_todos(
             }
         }
         let Some(content) = item.get("content").and_then(Value::as_str) else {
-            return Err(refusal(code, "todo content must be a string"));
+            return Err(refusal(code, TODO_EMPTY_CONTENT_MESSAGE));
         };
         let content = content.trim();
         if content.is_empty() {
-            return Err(refusal(code, "todo content must be non-empty"));
+            return Err(refusal(code, TODO_EMPTY_CONTENT_MESSAGE));
         }
         if !seen.insert(content.to_owned()) {
             return Err(refusal(
                 code,
                 format!(
-                    "duplicate todo content {}",
+                    "invalid todos: duplicate content {}",
                     json_text(&Value::String(content.to_owned()))
                 ),
             ));
@@ -210,7 +218,7 @@ pub fn validate_todos(
     if !allow_parallel && active > 1 {
         return Err(refusal(
             code,
-            format!("at most one todo may be in_progress (got {active})"),
+            format!("invalid todos: at most one task may be in_progress (got {active})"),
         ));
     }
     Ok(todos)
@@ -324,10 +332,13 @@ pub fn todo_write_event(todos: &[TodoItem], updated_at: &str) -> Map<String, Val
 }
 
 /// The todo plugin's configuration row. Camel-case keys, as the TypeScript options.
+///
+/// This is the **service's** fallback policy, for a caller that names none. The todo tool names its own: its
+/// row's required `allowParallelInProgress` ([`TodoToolConfig`](crate::tool::TodoToolConfig)).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TodoConfig {
-    /// Accept more than one `in_progress` item in a write. Off by default, as in DSH.
+    /// Accept more than one `in_progress` item in a write that names no policy. Off by default.
     pub allow_parallel_in_progress: bool,
 }
 
@@ -368,10 +379,21 @@ impl TodoService {
     }
 
     /// Replace the whole list with `raw` (validated with `TODO_INVALID_LIST` and the service's parallel
-    /// policy); returns the view the write produced.
+    /// policy, one item in progress unless its row lifts it); returns the view the write produced.
     pub fn write(&self, session: &str, raw: &Value) -> Result<TodoView, TodoError> {
+        self.write_with_policy(session, raw, self.allow_parallel)
+    }
+
+    /// [`write`](Self::write) under the caller's parallel policy: the TypeScript
+    /// `write(handle, raw, { allowParallelInProgress })`. The todo tool passes its own required setting.
+    pub fn write_with_policy(
+        &self,
+        session: &str,
+        raw: &Value,
+        allow_parallel_in_progress: bool,
+    ) -> Result<TodoView, TodoError> {
         // The list is validated before the log is touched, as the TypeScript build does.
-        let todos = validate_todos(raw, TodoErrorCode::InvalidList, self.allow_parallel)?;
+        let todos = validate_todos(raw, TodoErrorCode::InvalidList, allow_parallel_in_progress)?;
         let session = self.session_of(session)?;
         self.commit(&session, todos)
     }
@@ -502,9 +524,10 @@ mod tests {
         let (_log, service) = fixture("s1");
         for (raw, message) in [
             (json!("nope"), "todos must be an array"),
+            (json!(["not an object"]), "a todo must be an object"),
             (
                 json!([{"content": "a", "status": "pending"}, {"content": " a", "status": "completed"}]),
-                "duplicate todo content \"a\"",
+                "invalid todos: duplicate content \"a\"",
             ),
             (
                 json!([{"content": "a", "status": "doing"}]),
@@ -516,13 +539,79 @@ mod tests {
             ),
             (
                 json!([{"content": "a", "status": "in_progress"}, {"content": "b", "status": "in_progress"}]),
-                "at most one todo may be in_progress (got 2)",
+                "invalid todos: at most one task may be in_progress (got 2)",
             ),
             (json!([{"content": "a"}]), "unknown todo status undefined"),
         ] {
             let error = service.write("s1", &raw).unwrap_err();
             assert_eq!(error.to_string(), message, "{raw}");
         }
+    }
+
+    #[test]
+    fn the_refusals_are_dsh_sentences_content_trimmed_first() {
+        let (_log, service) = fixture("s1");
+        let message = |raw: Value| service.write("s1", &raw).unwrap_err().to_string();
+        assert_eq!(
+            message(json!([{"content": "   ", "status": "pending"}])),
+            "invalid todo: `content` must be a non-empty string"
+        );
+        assert_eq!(
+            message(json!([{"content": 7, "status": "pending"}])),
+            "invalid todo: `content` must be a non-empty string",
+            "a non-string content is the same refusal"
+        );
+        assert_eq!(
+            message(json!([{"status": "pending"}])),
+            "invalid todo: `content` must be a non-empty string",
+            "an absent content is the same refusal"
+        );
+        assert_eq!(
+            message(json!([
+                {"content": "ship it", "status": "pending"},
+                {"content": "  ship it ", "status": "completed"}
+            ])),
+            "invalid todos: duplicate content \"ship it\"",
+            "the duplicate is found after trimming and named as JSON"
+        );
+        assert_eq!(
+            message(json!([
+                {"content": "a", "status": "in_progress"},
+                {"content": "b", "status": "in_progress"},
+                {"content": "c", "status": "in_progress"}
+            ])),
+            "invalid todos: at most one task may be in_progress (got 3)"
+        );
+        assert_eq!(
+            TODO_EMPTY_CONTENT_MESSAGE,
+            "invalid todo: `content` must be a non-empty string"
+        );
+    }
+
+    #[test]
+    fn the_service_applies_the_caller_policy_for_parallel_work_defaulting_to_one_in_progress() {
+        let (_log, service) = fixture("s1");
+        let two = json!([
+            {"content": "a", "status": "in_progress"},
+            {"content": "b", "status": "in_progress"}
+        ]);
+        assert_eq!(
+            invalid_code(service.write("s1", &two).unwrap_err()),
+            "TODO_INVALID_LIST",
+            "no policy named: one in progress"
+        );
+        assert_eq!(
+            service.write_with_policy("s1", &two, true).unwrap().counts,
+            TodoCounts {
+                pending: 0,
+                in_progress: 2,
+                completed: 0
+            }
+        );
+        assert_eq!(
+            invalid_code(service.write_with_policy("s1", &two, false).unwrap_err()),
+            "TODO_INVALID_LIST"
+        );
     }
 
     #[test]

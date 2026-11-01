@@ -261,6 +261,7 @@ mod tests {
             proxy: None,
             timeout_ms: None,
             retry_policy: None,
+            prompt_cache: None,
         }
     }
 

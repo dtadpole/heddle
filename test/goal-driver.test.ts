@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { decideGoalRound, GoalDriver, renderGoalRoundPrompt, ROUND_LIMIT_CODE, type GoalDriverDeps } from '../src/goal/driver.ts'
+import { decideGoalRound, GoalDriver, renderGoalRoundPrompt, ROUND_LIMIT_CODE, turnEndOf, type GoalDriverDeps } from '../src/goal/driver.ts'
 import { foldGoal, GoalService, type GoalView } from '../src/goal/service.ts'
 import { SessionStore, type SessionHandle } from '../src/session/store.ts'
 
@@ -164,18 +164,25 @@ test('a round yields to the event loop, so a pause scheduled during it takes eff
       calls += 1
       store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
       if (calls === 1) {
-        /** A macrotask, exactly like an HTTP request from the Web UI, must get a turn before the cap. */
-        setTimeout(() => {
+        /**
+         * A macrotask, exactly like an HTTP request from the Web UI, must get a turn before the cap. It is queued with
+         * `setImmediate`, not `setTimeout(…, 0)`: a timer is due only after at least 1 ms of libuv's cached loop time,
+         * and microtask-fast rounds can pass several loop iterations in that millisecond, so a timer made the count
+         * machine-dependent (about 1 in 3 runs under load ran more than 3 rounds). An immediate queued during round 1
+         * runs before the driver's own between-rounds `setImmediate` (FIFO), so the pause lands before round 2. A
+         * driver that never yielded would still starve it until the cap, which is what this test exists to catch.
+         */
+        setImmediate(() => {
           goals.pause(session, { id: created.id, revision: created.revision })
           void driver.request(session)
-        }, 0)
+        })
       }
       return {}
     },
   })
   const outcome = await driver.advance(handle)
   assert.equal(goals.get(handle)?.phase, 'paused', 'the pause landed while the goal was running')
-  assert.ok(calls <= 3, `the chain stopped soon after the pause, not at the cap (ran ${calls} rounds)`)
+  assert.ok(calls <= 2, `the chain stopped at the next round boundary after the pause, not at the cap (ran ${calls} rounds)`)
   assert.equal(outcome.stopped, 'phase-paused')
 })
 
@@ -358,4 +365,98 @@ test('requesting an idle session with a paused goal settles without running a ro
   const outcome = await driver.request(handle)
   assert.equal(calls, 0)
   assert.equal(outcome.stopped, 'phase-paused')
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// #93: how a turn ended decides what follows it (DSH's turn/end and agent/error listeners)
+// ---------------------------------------------------------------------------------------------------------------
+
+test('turnEndOf reads a stop, a failure and a cut at the output limit from the closing records', () => {
+  assert.equal(turnEndOf({ finishReason: 'stop' }, {}), 'completed')
+  assert.equal(turnEndOf(undefined, {}), 'completed')
+  assert.equal(turnEndOf({ finishReason: 'aborted', ended: ['stopped by the caller'] }, { stopped: true }), 'stopped', 'a turn that threw on a stop')
+  assert.equal(turnEndOf({ finishReason: 'tool_calls', ended: ['stopped by the caller'] }, {}), 'stopped', 'a turn stopped between steps returns normally')
+  assert.equal(turnEndOf({ finishReason: 'error', ended: ['failed: provider down'], error: 'provider down' }, { error: 'provider down' }), 'failed')
+  assert.equal(turnEndOf({ finishReason: 'max_output_tokens', ended: ['round 1: max_output_tokens'] }, {}), 'max-tokens')
+})
+
+test('a goal round stopped by the caller pauses its goal, and no further round starts (#93)', async () => {
+  const { store, goals, handle } = setup()
+  goals.create(handle, { objective: 'write numbers forever', maxGoalRounds: 4 })
+  let calls = 0
+  let driver: GoalDriver
+  driver = new GoalDriver(new Context(), goals, {
+    run: async (session, prompt, source) => {
+      calls += 1
+      store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
+      /** The loop writes the stopped turn's turn/completed before run returns; the plugin forwards it. */
+      driver.turnEnded(session, 'stopped')
+      return { ended: ['stopped by the caller'] }
+    },
+  })
+  const outcome = await driver.request(handle)
+  assert.equal(calls, 1, 'one round, not cap-many')
+  assert.equal(outcome.stopped, 'cancelled')
+  assert.equal(outcome.rounds, 1)
+  const after = goals.get(handle)
+  assert.equal(after?.phase, 'paused', 'the goal whose round was under way is paused')
+  assert.equal(after?.activation, 'disarmed')
+  assert.equal(after?.roundsStarted, 1)
+  assert.equal((await driver.request(handle)).stopped, 'phase-paused', 'a later trigger starts nothing')
+  assert.equal(calls, 1)
+})
+
+test('a goal round stopped mid-stream (the turn throws) pauses its goal too', async () => {
+  const { store, goals, handle } = setup()
+  goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+  let driver: GoalDriver
+  driver = new GoalDriver(new Context(), goals, {
+    run: async (session, prompt, source) => {
+      store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
+      driver.turnEnded(session, 'stopped')
+      throw new Error('This operation was aborted')
+    },
+  })
+  const outcome = await driver.request(handle)
+  assert.equal(outcome.stopped, 'cancelled')
+  assert.equal(goals.get(handle)?.phase, 'paused')
+})
+
+test('a failed goal round disarms continuation instead of retrying, and a person\'s resume re-arms it', async () => {
+  const { store, goals, handle } = setup()
+  const created = goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+  let calls = 0
+  let driver: GoalDriver
+  driver = new GoalDriver(new Context(), goals, {
+    run: async (session, prompt, source) => {
+      calls += 1
+      store.message(session, { role: 'user', content: [{ type: 'text', text: prompt }], source })
+      driver.turnEnded(session, 'failed')
+      throw new Error('provider down')
+    },
+  })
+  const outcome = await driver.request(handle)
+  assert.equal(outcome.stopped, 'turn-failed')
+  assert.equal(calls, 1)
+  assert.equal(goals.get(handle)?.phase, 'active', 'the goal keeps its phase')
+  assert.equal(goals.get(handle)?.activation, 'disarmed', 'no abnormal auto-retry')
+  assert.equal((await driver.request(handle)).stopped, 'disarmed', 'the next turn/completed edge starts nothing')
+  assert.equal(calls, 1)
+  goals.resume(handle, { id: created.id, revision: goals.get(handle)!.revision })
+  assert.equal(goals.get(handle)?.activation, 'armed', 'a person resumes it')
+})
+
+test('a stopped turn that is not a goal round, a failed one and a length cut only disarm', () => {
+  for (const end of ['stopped', 'failed', 'max-tokens'] as const) {
+    const { goals, handle } = setup()
+    goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+    const driver = new GoalDriver(new Context(), goals, { run: async () => ({}) })
+    driver.turnEnded(handle, end)
+    assert.equal(goals.get(handle)?.phase, 'active', `${end}: the phase stays`)
+    assert.equal(goals.get(handle)?.activation, 'disarmed', `${end}: continuation is disarmed`)
+  }
+  const { goals, handle } = setup()
+  goals.create(handle, { objective: 'one', maxGoalRounds: 4 })
+  new GoalDriver(new Context(), goals, { run: async () => ({}) }).turnEnded(handle, 'completed')
+  assert.equal(goals.get(handle)?.activation, 'armed', 'a turn that completed changes nothing')
 })

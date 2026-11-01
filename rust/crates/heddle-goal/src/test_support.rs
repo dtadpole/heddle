@@ -16,6 +16,7 @@ pub(crate) const FIXED_NOW: &str = "2026-10-22T00:00:00.000Z";
 #[derive(Default)]
 pub(crate) struct MemoryLog {
     sessions: Mutex<HashMap<String, Vec<Value>>>,
+    metas: Mutex<HashMap<String, Value>>,
     next_seq: Mutex<u64>,
 }
 
@@ -41,6 +42,11 @@ impl MemoryLog {
             .get_mut(session)
             .expect("the session exists")
             .push(body);
+    }
+
+    /// Give one session a metadata record, as a store writes it (`delegationDepth` for a delegated session).
+    pub(crate) fn set_meta(&self, session: &str, meta: Value) {
+        self.metas.lock().unwrap().insert(session.to_owned(), meta);
     }
 
     /// Every event of one session, as read.
@@ -91,6 +97,10 @@ impl SessionLog for MemoryLog {
             .ok_or_else(|| LogError(format!("no session {session}")))?;
         events.push(written.clone());
         Ok(written)
+    }
+
+    fn meta(&self, session: &str) -> Option<Value> {
+        self.metas.lock().unwrap().get(session).cloned()
     }
 }
 

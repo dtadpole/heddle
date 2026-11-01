@@ -421,6 +421,23 @@ export function healthSessionExpired(created, now = new Date()) {
   return at < day
 }
 
+/**
+ * Whether the monitor's own health session is where it must be before a turn goes into it: listed by
+ * the server it was made on, with that server's `cwd` equal to the monitor's own workspace folder
+ * (hd-coordinator, 2026-10-31). The page's New session takes the open session's workspace, and on
+ * 2026-10-30/31 it put the preview's health session in two testers' workspaces; a session made through
+ * the API by workspace path is checked here, and anything else sends no turn. The reason never names a
+ * path, because the record is published.
+ */
+export function ownSessionPlaced({ listed, id, workspace }) {
+  if (!Array.isArray(listed)) return { ok: false, reason: "the server's session list could not be read" }
+  const entry = listed.find((item) => item?.id === id) ?? null
+  if (entry === null) return { ok: false, reason: 'the server does not list the health session' }
+  if (typeof entry.cwd !== 'string' || entry.cwd === '') return { ok: false, reason: 'the server lists the health session without a workspace' }
+  if (entry.cwd !== workspace) return { ok: false, reason: "the health session sits in a workspace that is not the monitor's own" }
+  return { ok: true }
+}
+
 /** Reasoning levels from least to most effort, for catalogues whose ids follow the common names. */
 const EFFORT_ORDER = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 

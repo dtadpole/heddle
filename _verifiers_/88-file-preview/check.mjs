@@ -3,9 +3,10 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
+import { openPage } from '../../_tools_/browser-use/lib.mjs'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { endChild, fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — one preview surface.
@@ -102,7 +103,6 @@ function startCli(args, env) {
     void (async () => {
       const { spawn } = await import('node:child_process')
       const { repoRoot } = await import('../../_tools_/verify-runner/lib.mjs')
-      const { join: joinPath } = await import('node:path')
       const child = spawn(...heddleCommand(args), {
         cwd: repoRoot,
         env: { ...process.env, NO_COLOR: '1', ...env },
@@ -110,25 +110,42 @@ function startCli(args, env) {
       })
       let output = ''
       let settled = false
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        child.kill('SIGKILL')
+        reject(new Error(`the server did not print a URL within 20 seconds\n${output}`))
+      }, 20_000)
+      child.once('error', (error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        reject(error)
+      })
       const onData = (chunk) => {
         output += chunk.toString()
         const match = /heddle web: (http:\/\/\S+)/.exec(output)
         if (match && !settled) {
           settled = true
+          clearTimeout(timeout)
           resolvePromise({ child, url: match[1], output: () => output, kill: () => child.kill('SIGKILL') })
         }
       }
       child.stdout.on('data', onData)
       child.stderr.on('data', onData)
       child.on('exit', (code) => {
-        if (!settled) reject(new Error(`the server exited ${code} before printing a URL\n${output}`))
+        if (!settled) {
+          settled = true
+          clearTimeout(timeout)
+          reject(new Error(`the server exited ${code} before printing a URL\n${output}`))
+        }
       })
-    })()
+    })().catch(reject)
   })
 }
 
 async function handshakeCookie(url) {
-  const response = await fetch(url, { redirect: 'manual' })
+  const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10_000) })
   const set = response.headers.get('set-cookie')
   if (set === null) throw new Error(`no cookie from ${url} (HTTP ${response.status})`)
   return set.split(';')[0]
@@ -138,6 +155,72 @@ async function supportsWeb() {
   const help = await runCli(['--help'])
   return /web/.test(help.stdout)
 }
+
+// #126: offline HTTP + headless browser regression, run against either CLI via HEDDLE_BIN.
+// PNG only; deliberately no claim for other image formats or zoom controls.
+test('standalone PNG decodes in the File panel behind the existing authorization boundary', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const home = isolatedHome('png-preview')
+  const work = fixtureDir('png-preview')
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64')
+  const path = join(work, 'pixel & snow.PNG')
+  const broken = join(work, 'broken.png')
+  writeFileSync(path, png)
+  writeFileSync(broken, 'not a PNG')
+  const outside = join(home, 'outside.png')
+  writeFileSync(outside, png)
+  const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
+  let server
+  let browser
+  const pngFetch = (url, options = {}) => fetch(url, { ...options, signal: AbortSignal.timeout(10_000) })
+  try {
+    server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], { HEDDLE_HOME: home, HEDDLE_CONFIG: config })
+    const cookie = await handshakeCookie(server.url)
+    const origin = new URL(server.url).origin
+    await pngFetch(`${origin}/api/workspaces`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ path: work }) })
+    const fileUrl = `${origin}/api/file?path=${encodeURIComponent(path)}`
+    assert.equal((await pngFetch(fileUrl, { redirect: 'manual' })).status, 401)
+    const metadata = await pngFetch(fileUrl, { headers: { cookie } })
+    assert.equal(metadata.status, 200, '#126: PNG must not be refused by the text reader with 415')
+    const body = await metadata.json()
+    assert.equal(body.renderer, 'image')
+    assert.equal(body.image.mediaType, 'image/png')
+    assert.equal(body.image.src, `/api/raw?path=${encodeURIComponent(path)}`)
+    assert.equal(body.text, undefined)
+    const rawUrl = origin + body.image.src
+    assert.equal((await pngFetch(rawUrl, { redirect: 'manual' })).status, 401)
+    const raw = await pngFetch(rawUrl, { headers: { cookie } })
+    assert.equal(raw.headers.get('content-type'), 'image/png')
+    assert.equal(raw.headers.get('x-content-type-options'), 'nosniff')
+    assert.deepEqual(Buffer.from(await raw.arrayBuffer()), png)
+    assert.equal((await pngFetch(`${origin}/api/file?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 400)
+    assert.equal((await pngFetch(`${origin}/api/raw?path=${encodeURIComponent(outside)}`, { headers: { cookie } })).status, 404)
+    assert.equal((await pngFetch(`${origin}/api/file?path=${encodeURIComponent(join(work, 'missing.png'))}`, { headers: { cookie } })).status, 404)
+    browser = await openBrowser({ width: 1400, height: 900 })
+    await browser.goto(server.url)
+    await browser.waitFor('typeof showFile === "function" && document.querySelectorAll("#tree .row").length > 0', 20_000)
+    await browser.evaluate(`(() => {
+      const row = [...document.querySelectorAll('#tree .row')].find(x => x.querySelector('.label')?.textContent === ${JSON.stringify(work.split('/').pop())})
+      if (row?.closest('li').getAttribute('aria-expanded') === 'false') row.click()
+    })()`)
+    assert.ok(await browser.waitFor('[...document.querySelectorAll("#tree .row")].some(x => x.querySelector(".label")?.textContent === "pixel & snow.PNG")', 20_000), 'PNG appears in the workspace tree')
+    await browser.evaluate('[...document.querySelectorAll("#tree .row")].find(x => x.querySelector(".label")?.textContent === "pixel & snow.PNG").click()')
+    assert.ok(await browser.waitFor('(() => { const img = document.querySelector("#file-body img"); return img && !img.hidden && img.complete && img.naturalWidth === 1 })()', 20_000), 'PNG actually decodes, not just an img tag')
+    const preview = JSON.parse(await browser.evaluate('JSON.stringify({alt: document.querySelector("#file-body img").alt, referrer: document.querySelector("#file-body img").referrerPolicy, head: document.getElementById("file-head").textContent, frameHidden: document.getElementById("file-html").hidden})'))
+    assert.match(preview.alt, /Image preview: pixel/)
+    assert.equal(preview.referrer, 'no-referrer')
+    assert.ok(preview.frameHidden)
+    assert.doesNotMatch(preview.head, /undefined|lines/)
+    await browser.evaluate(`showFile({path: ${JSON.stringify(broken)}})`)
+    assert.ok(await browser.waitFor('document.querySelector("#file-body [role=alert]")?.textContent.includes("could not be displayed")', 20_000), 'decode failure is accessible and visible')
+  } finally {
+    if (browser) await browser.close()
+    server?.kill()
+    removeDir(home)
+    removeDir(work)
+  }
+})
 
 test('the server renders each file type, and the page offers no second surface', async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
@@ -262,6 +345,8 @@ test('an html document is previewed as a page, and nothing in it can act', async
     join(work, 'page.html'),
     [
       '<!doctype html><html><head><title>Fixture</title>',
+      '<base href="https://example.invalid/hostile/">',
+      '<link rel="stylesheet" href="theme.css">',
       '<style>h1 { color: rgb(1, 2, 3) }</style></head><body>',
       '<h1>Fixture page</h1>',
       '<img src="mark.svg" alt="beside it" width="40" height="40">',
@@ -273,12 +358,14 @@ test('an html document is previewed as a page, and nothing in it can act', async
     ].join('\n'),
   )
   writeFileSync(join(work, 'mark.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#E68000"/></svg>')
+  writeFileSync(join(work, 'theme.css'), 'h1 { background-color: rgb(4, 5, 6) }')
 
   const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
     HEDDLE_HOME: home,
     HEDDLE_CONFIG: config,
   })
-  const browser = await openBrowser({ width: 1400, height: 900 })
+  // This regression reads Chrome's actual Log.entryAdded console, not a synthetic DOM event.
+  const browser = await openPage({ width: 1400, height: 900, profile: join(home, 'browser-profile') })
   try {
     const cookie = await handshakeCookie(server.url)
     const origin = new URL(server.url).origin
@@ -328,6 +415,10 @@ test('an html document is previewed as a page, and nothing in it can act', async
       15_000,
     )
 
+    await browser.waitFor(`(() => {
+      const heading = document.getElementById('html-view').contentDocument?.querySelector('h1')
+      return heading !== null && heading !== undefined && getComputedStyle(heading).backgroundColor === 'rgb(4, 5, 6)'
+    })()`, 15_000)
     const framed = JSON.parse(
       await browser.evaluate(`(() => {
         const frame = document.getElementById('html-view')
@@ -341,6 +432,9 @@ test('an html document is previewed as a page, and nothing in it can act', async
           iframes: inner.querySelectorAll('iframe').length,
           forms: inner.querySelectorAll('form').length,
           inputs: inner.querySelectorAll('input').length,
+          bases: inner.querySelectorAll('base').length,
+          policyText: inner.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content,
+          headingBackground: inner.querySelector('h1') === null ? null : getComputedStyle(inner.querySelector('h1')).backgroundColor,
           handlers: [...inner.querySelectorAll('*')].filter((e) => [...e.attributes].some((a) => a.name.startsWith('on'))).length,
           policy: inner.querySelector('meta[http-equiv="Content-Security-Policy"]') === null ? 'missing' : 'present',
           heading: (inner.querySelector('h1') || {}).textContent,
@@ -363,9 +457,67 @@ test('an html document is previewed as a page, and nothing in it can act', async
     assert.equal(framed.policy, 'present', 'the document carries the policy the browser enforces')
     assert.equal(framed.heading, 'Fixture page', 'the page rendered as a page rather than as its source')
     assert.equal(framed.headingColour, 'rgb(1, 2, 3)', "with the document's own stylesheet applied")
+    assert.equal(framed.headingBackground, 'rgb(4, 5, 6)', 'relative linked CSS still loads through the raw route')
     assert.ok(framed.imagesLoaded > 0, `and its own image loaded (${framed.imagesLoaded} of ${framed.images})`)
+    assert.equal(framed.bases, 0, 'neither source nor application injects a base')
+    assert.match(framed.policyText, /base-uri 'none'/, 'the restrictive policy is unchanged')
+    // Flush a protocol round trip after the frame loads, then inspect recorded browser console diagnostics.
+    await browser.send('Runtime.evaluate', { expression: '0' })
+    const baseErrors = browser.page.console.filter((entry) => /base-uri|setting the document.s base URI/i.test(entry.text))
+    assert.deepEqual(baseErrors, [], 'HTML preview produces no base-uri browser console violation')
   } finally {
-    browser.close()
+    try {
+      await browser.close()
+    } finally {
+      const ended = await endChild(server.child, { graceMs: 1000 })
+      server.child.stdout?.destroy()
+      server.child.stderr?.destroy()
+      assert.notEqual(ended, 'stuck', 'preview server exits before its fixtures are removed')
+      removeDir(home)
+      removeDir(work)
+    }
+  }
+})
+
+test('only an .html or .htm file is previewed as a page; a Word document or a text file is refused', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  const home = isolatedHome('html-only')
+  const work = fixtureDir('html-only')
+  const { config } = scriptedConfig({ home, steps: [{ text: 'ready' }] })
+  /**
+   * DSH frames a file as a page only through its HTML renderer, registered for `html` and `htm`; a `.docx` goes to its
+   * Office renderer. So the HTML route answers the page, and refuses a Word document (here the zip header a real one
+   * starts with, plus bytes that are not text) and a plain text file alike, instead of decoding either as markup.
+   */
+  writeFileSync(join(work, 'page.html'), '<!doctype html><h1>Only page</h1>')
+  writeFileSync(join(work, 'report.docx'), Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00, 0xff, 0xfe, 0x9c, 0x00, 0x77, 0x6f, 0x72, 0x64]))
+  writeFileSync(join(work, 'notes.txt'), 'plain words, not markup')
+  const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
+    HEDDLE_HOME: home,
+    HEDDLE_CONFIG: config,
+  })
+  try {
+    const cookie = await handshakeCookie(server.url)
+    const origin = new URL(server.url).origin
+    await fetch(`${origin}/api/workspaces`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie, origin },
+      body: JSON.stringify({ path: work }),
+    })
+    const preview = (leaf) => fetch(`${origin}/api/html?path=${encodeURIComponent(join(work, leaf))}`, { headers: { cookie } })
+
+    const page = await preview('page.html')
+    assert.equal(page.status, 200, 'the html document is previewed')
+    assert.match(String((await page.json()).html), /Only page/, 'with its own markup')
+
+    for (const leaf of ['report.docx', 'notes.txt']) {
+      const refused = await preview(leaf)
+      const body = await refused.text()
+      assert.equal(refused.status, 415, `${leaf} is not a page to preview (HTTP ${refused.status}: ${body.slice(0, 160)})`)
+      assert.match(body, /not an HTML document/, `${leaf} is refused by name, not decoded as markup`)
+      assert.ok(!body.includes('"html"'), `${leaf} comes back with no html to frame`)
+    }
+  } finally {
     server.kill()
     removeDir(home)
     removeDir(work)

@@ -26,7 +26,9 @@ import { rowSchemaJson, validateRows, type ValidationResult } from './validate.t
  * `!env` value stays a reference. An unset restores the value beneath the block; an entry back at its base
  * leaves the block, and an empty block leaves the file. Secrets (environment values and credential-named
  * fields) are redacted and never writable. Revisions count changes to the target's sections per entry, per
- * process. `applies` is `restart`: the next boot composes the written value.
+ * process. With an `Applier` (the web server gives the loader's `update`) a committed write is applied to the
+ * running tree at once and `applies` is `live`, as DSH's settings are; without one it is `restart`, and the next boot
+ * composes the written value.
  */
 
 export const SETTINGS_BEGIN = '# >>> heddle settings'
@@ -70,17 +72,33 @@ export interface SettingsNamespace {
   readonly value: unknown
   readonly base?: unknown
   readonly user?: unknown
-  readonly applies: 'restart'
+  /** `live` when a write is applied to the running tree as it lands (DSH's settings), `restart` when the next boot applies it. */
+  readonly applies: 'restart' | 'live'
   readonly secrets: readonly SecretSlot[]
   readonly revision: number
   readonly editable: boolean
   readonly reason?: string
+  /** Set on a write's answer when the file was written but the running tree refused the value; the next boot applies it. */
+  readonly applyError?: string
 }
+
+/**
+ * Apply entry `ns`'s newly composed config to the running tree (the server gives `ctx.loader.update(ns, { config })`).
+ * DSH's config editor applies a committed settings write the same way: the loader re-applies the entry, committing a
+ * volatile value in place and remounting otherwise.
+ */
+export type Applier = (ns: string, config: unknown) => Promise<void>
 
 export interface SettingsView {
   readonly writable: boolean
   readonly hasDocument: boolean
   readonly namespaces: readonly SettingsNamespace[]
+  /**
+   * Why the profile patch could not be read (#165), when it could not: the forms then show the running configuration,
+   * as DSH's settings read projects `configEditor.configuration()` without parsing the file, and a write is refused
+   * with this same sentence. It names the file, line and reason and quotes none of the file.
+   */
+  readonly documentError?: string
 }
 
 /** A refused write; `code` is DSH's wire code. */
@@ -127,9 +145,29 @@ export class SettingsRevisions {
   }
 }
 
-/** A field name that holds a credential, whatever the case. */
+/**
+ * A field name that holds a credential, whatever the case and separators (issue #118): the settings view never returns
+ * what `/api/endpoints` hides. A name is matched with its case folded and its separators dropped (`api_key`, `API-Key`
+ * and `apiKey` are one name), by what it ends with — `…key`, `…token`, `…secret`, `…password`, a key, token or secret
+ * file such as `apiKeyFile` (its path names the account that holds the key) — or by holding `password`,
+ * `authorization` or `credential` anywhere. `maxOutputTokens` ends in `tokens` and stays readable; no built-in row's
+ * other field matches.
+ */
 export function isSecretKey(key: string): boolean {
-  return ['apikey', 'apitoken', 'token', 'secret', 'password'].includes(key.toLowerCase())
+  const name = key.toLowerCase().replace(/[^a-z0-9]/g, '')
+  return SECRET_ENDINGS.some((ending) => name.endsWith(ending)) || SECRET_PARTS.some((part) => name.includes(part))
+}
+
+const SECRET_ENDINGS = ['key', 'token', 'secret', 'password', 'passwd', 'keyfile', 'tokenfile', 'secretfile']
+const SECRET_PARTS = ['password', 'authorization', 'credential']
+
+/**
+ * A field whose every value is a credential though its names are not: an endpoint's `headers` (issue #118), whose
+ * values are where an `Authorization: Bearer …` goes. `/api/endpoints` returns their names only; so does the settings
+ * view, as one secret slot per header.
+ */
+export function isSecretContainer(key: string): boolean {
+  return key.toLowerCase() === 'headers'
 }
 
 /** The file a settings write lands in, or `undefined` when the run has no profile patch. */
@@ -172,7 +210,10 @@ export class SettingsService {
   readonly env: NodeJS.ProcessEnv
   private readonly validate: Validator
   private readonly schemaOf: SchemaReader
+  private readonly applier: Applier | undefined
   private serial: Promise<unknown> = Promise.resolve()
+  /** The last state read whole, which is the running configuration a broken patch falls back to (#165). */
+  private lastGood: State | undefined
 
   // Fields are assigned explicitly: Node runs this file by stripping types, which parameter properties defeat.
   constructor(
@@ -181,17 +222,30 @@ export class SettingsService {
     env: NodeJS.ProcessEnv = process.env,
     validate: Validator = validateRows,
     schemaOf: SchemaReader = rowSchemaJson,
+    apply?: Applier,
   ) {
     this.layers = layers
     this.target = target
     this.env = env
     this.validate = validate
     this.schemaOf = schemaOf
+    this.applier = apply
   }
 
   /** Every entry's form, the target re-read. */
   async describe(): Promise<SettingsView> {
-    const state = readState(this.layers, this.target, this.env)
+    let state: State
+    let documentError: string | undefined
+    try {
+      state = readState(this.layers, this.target, this.env)
+      this.lastGood = state
+    } catch (error) {
+      if (!(error instanceof ConfigError) || this.target === undefined) throw error
+      // A hand edit broke the patch: the running configuration is still intact, so its forms stay readable and only a
+      // write is refused (it re-reads the file and fails with this same sentence).
+      documentError = error.problems.join('; ')
+      state = this.lastGood ?? bootState(this.layers, this.target)
+    }
     const rows = compose(state.current, this.env)
     let baseRows: readonly ComposedRow[] | undefined
     try {
@@ -203,9 +257,14 @@ export class SettingsService {
     for (const row of rows) {
       const ns = row.row.id
       if (ns === undefined) continue
-      namespaces.push(await namespaceOf(state, ns, row, baseRows, this.env, this.revisions, this.schemaOf))
+      namespaces.push(await namespaceOf(state, ns, row, baseRows, this.env, this.revisions, this.schemaOf, this.applier !== undefined))
     }
-    return { writable: this.target !== undefined, hasDocument: this.target !== undefined && existsSync(this.target.path), namespaces }
+    return {
+      writable: this.target !== undefined,
+      hasDocument: this.target !== undefined && existsSync(this.target.path),
+      namespaces,
+      ...(documentError !== undefined ? { documentError } : {}),
+    }
   }
 
   /** Check, write and re-read entry `ns`; resolves to its new form. Writes run one at a time. */
@@ -213,10 +272,21 @@ export class SettingsService {
     const run = this.serial.then(async () => {
       const text = await planWrite(this, ns, write, expectedRevision)
       commitWrite(this.target as SettingsTarget, text)
+      // Applied to the running tree as it lands, when the server can: the entry's composed, resolved config is what
+      // the next boot would hand it. A refusal does not undo the write; the answer says so and the next boot applies it.
+      let applyError: string | undefined
+      if (this.applier !== undefined) {
+        try {
+          const composed = compose(readState(this.layers, this.target, this.env).current, this.env).find((row) => row.row.id === ns)
+          await this.applier(ns, composed?.row.config ?? {})
+        } catch (error) {
+          applyError = error instanceof ConfigError ? error.problems.join('; ') : (error as Error).message
+        }
+      }
       const view = await this.describe()
       const entry = view.namespaces.find((candidate) => candidate.ns === ns)
       if (entry === undefined) throw rejected(`entry '${ns}' vanished after the write`)
-      return entry
+      return applyError === undefined ? entry : { ...entry, applyError }
     })
     this.serial = run.catch(() => undefined)
     return run
@@ -240,12 +310,13 @@ export class SettingsService {
 export function settingsServiceFor(
   options: LayerOptions & { readonly overrides?: readonly Layer[]; readonly configDir?: string },
   env: NodeJS.ProcessEnv = process.env,
+  apply?: Applier,
 ): SettingsService {
   const layers: NamedLayer[] = [...defaultLayers({ ...options, env })]
   for (const [index, override] of (options.overrides ?? []).entries()) {
     layers.push({ layer: `override ${index + 1}`, file: '(inline)', entries: [override] })
   }
-  return new SettingsService(layers, settingsTarget(options, layers, env), env)
+  return new SettingsService(layers, settingsTarget(options, layers, env), env, validateRows, rowSchemaJson, apply)
 }
 
 /** Answer `GET /api/settings`, `GET /api/settings/{ns}` and `POST /api/settings/{ns}`; `undefined` for any other path. */
@@ -343,6 +414,11 @@ interface State {
   readonly managed: readonly (readonly [string, unknown])[]
   readonly current: readonly NamedLayer[]
   readonly base: readonly NamedLayer[]
+}
+
+/** The run's boot layers as a state: what a broken patch falls back to before any read succeeded. */
+function bootState(layers: readonly NamedLayer[], target: SettingsTarget | undefined): State {
+  return { target, boot: layers, before: '', after: '', managed: [], current: layers, base: layers.filter((layer) => target === undefined || layer.file !== target.path) }
 }
 
 function readState(layers: readonly NamedLayer[], target: SettingsTarget | undefined, env: NodeJS.ProcessEnv): State {
@@ -482,7 +558,9 @@ function secretSlots(raw: unknown, env: NodeJS.ProcessEnv): SecretSlot[] {
     else if (isMapping(value)) {
       for (const [key, child] of Object.entries(value)) {
         if (isSecretKey(key)) slots.push({ path: [...path, key], set: child !== null && child !== undefined })
-        else walk(child, [...path, key])
+        else if (isSecretContainer(key) && isMapping(child)) {
+          for (const [name, header] of Object.entries(child)) slots.push({ path: [...path, key, name], set: header !== null && header !== undefined })
+        } else walk(child, [...path, key])
       }
     }
   }
@@ -556,6 +634,7 @@ async function namespaceOf(
   env: NodeJS.ProcessEnv,
   revisions: SettingsRevisions,
   schemaOf: SchemaReader,
+  live: boolean,
 ): Promise<SettingsNamespace> {
   const raw = rawConfig(state.current, ns)
   const secrets = raw === undefined ? [] : secretSlots(raw, env)
@@ -589,7 +668,7 @@ async function namespaceOf(
     value,
     ...(baseRow !== undefined ? { base: redact(baseRow.row.config ?? {}, secrets) } : {}),
     ...(user !== undefined ? { user } : {}),
-    applies: 'restart',
+    applies: live ? 'live' : 'restart',
     secrets,
     revision: revisions.revision(ns, digest(state, ns)),
     editable: reason === undefined,
@@ -654,6 +733,15 @@ function commitWrite(target: SettingsTarget, text: string): void {
   }
 }
 
+/** Whether a written value carries a credential field or header value anywhere inside it (issue #118). */
+function holdsSecret(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(holdsSecret)
+  if (value === null || typeof value !== 'object') return false
+  return Object.entries(value as Record<string, unknown>).some(
+    ([key, child]) => isSecretKey(key) || (isSecretContainer(key) && child !== null && typeof child === 'object' && Object.keys(child).length > 0) || holdsSecret(child),
+  )
+}
+
 function holdsReference(value: unknown): boolean {
   if (typeof value === 'string') return referencesIn(value).length > 0
   if (Array.isArray(value)) return value.some(holdsReference)
@@ -713,8 +801,13 @@ function applyWrite(current: unknown, base: unknown, write: SettingsWrite): unkn
   const check = (path: readonly string[], value?: unknown) => {
     if (path.length === 0) throw rejected('a settings write names a field, not the whole config')
     const startsWith = (long: readonly string[], short: readonly string[]) => short.every((segment, index) => long[index] === segment)
-    if (path.some(isSecretKey) || secrets.some((secret) => startsWith(path, secret) || startsWith(secret, path))) {
+    const last = path[path.length - 1] ?? ''
+    const intoHeaders = path.slice(0, -1).some(isSecretContainer) || (isSecretContainer(last) && holdsSecret({ [last]: value }))
+    if (path.some(isSecretKey) || intoHeaders || secrets.some((secret) => startsWith(path, secret) || startsWith(secret, path))) {
       throw rejected(`'${path.join('.')}' is a secret: credentials come from the environment or the machine file, not the profile`)
+    }
+    if (value !== undefined && holdsSecret(value)) {
+      throw rejected(`the value for '${path.join('.')}' holds a credential field; credentials come from the environment or the machine file, not the profile`)
     }
     if (value !== undefined && holdsReference(value)) throw rejected(`the value for '${path.join('.')}' holds an environment reference; write the literal value`)
   }

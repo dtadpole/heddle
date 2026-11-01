@@ -34,6 +34,8 @@ struct Runs {
     since: HashMap<String, u64>,
     completed: HashMap<String, u64>,
     controllers: HashMap<String, Vec<(u64, CancellationToken)>>,
+    /// Set by [`RunRegistry::abort_all`]: the server is shutting down, so no turn should start.
+    closing: bool,
 }
 
 /// One session's run state as `/api/sessions` reports it.
@@ -77,6 +79,10 @@ impl RunRegistry {
         let was_idle = runs.running.get(session).copied().unwrap_or(0) == 0;
         if was_idle {
             runs.since.insert(session.to_owned(), now);
+        }
+        // A turn begun after the shutdown stopped the others starts stopped, so nothing it runs outlives the grace.
+        if runs.closing {
+            cancel.cancel();
         }
         *runs.running.entry(session.to_owned()).or_insert(0) += 1;
         runs.controllers
@@ -148,6 +154,33 @@ impl RunRegistry {
             cancel.cancel();
         }
         stopped
+    }
+
+    /// Shutdown: stop every session's turns, as [`Self::abort`] stops one session's. A restart must end the
+    /// commands its turns started and close their calls as interrupted, as DSH's teardown cancels its agents
+    /// (live-testing issue #6: the command ran on orphaned and the log recorded nothing).
+    pub fn abort_all(&self) -> usize {
+        let sessions: Vec<String> = {
+            let mut runs = self.inner.lock().expect("the run registry lock");
+            runs.closing = true;
+            runs.controllers.keys().cloned().collect()
+        };
+        sessions.iter().map(|session| self.abort(session)).sum()
+    }
+
+    /// Whether the shutdown has begun ([`Self::abort_all`] ran); the turn route refuses while it has.
+    pub fn is_closing(&self) -> bool {
+        self.inner.lock().expect("the run registry lock").closing
+    }
+
+    /// Whether any session still has a turn in flight; shutdown waits on it after [`Self::abort_all`].
+    pub fn any_running(&self) -> bool {
+        self.inner
+            .lock()
+            .expect("the run registry lock")
+            .running
+            .values()
+            .any(|count| *count > 0)
     }
 }
 
@@ -313,6 +346,48 @@ mod tests {
         drop(first);
         drop(second);
         assert_eq!(registry.running("s"), 0);
+    }
+
+    #[test]
+    fn abort_all_stops_every_sessions_turns_and_any_running_follows_the_guards() {
+        // Issue #6: a shutdown stops every running turn, then waits for them to settle.
+        let (clock, _) = stepped_clock(1);
+        let registry = RunRegistry::with_clock(clock);
+        assert!(!registry.any_running());
+        let one = registry.begin("a");
+        let two = registry.begin("b");
+        assert!(registry.any_running());
+        assert_eq!(registry.abort_all(), 2);
+        assert!(one.is_cancelled() && two.is_cancelled());
+        assert_eq!(
+            registry.abort_all(),
+            0,
+            "a second shutdown finds nothing to stop"
+        );
+        assert!(
+            registry.any_running(),
+            "stopped turns still run until they settle"
+        );
+        drop(one);
+        assert!(registry.any_running());
+        drop(two);
+        assert!(!registry.any_running());
+    }
+
+    #[test]
+    fn after_abort_all_the_registry_is_closing_and_a_new_turn_starts_stopped() {
+        // developer-nine's follow-up to #6: a turn begun during the shutdown grace must not run on.
+        let (clock, _) = stepped_clock(1);
+        let registry = RunRegistry::with_clock(clock);
+        let open = registry.begin("a");
+        assert!(!registry.is_closing() && !open.is_cancelled());
+        registry.abort_all();
+        assert!(registry.is_closing());
+        let late = registry.begin("b");
+        assert!(
+            late.is_cancelled(),
+            "a turn begun while closing starts stopped"
+        );
     }
 
     #[test]

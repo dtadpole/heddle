@@ -136,6 +136,7 @@ mod tests {
             endpoint: Some("scripted".to_owned()),
             model: Some("scripted".to_owned()),
             team_id: None,
+            preset: None,
         });
     }
 

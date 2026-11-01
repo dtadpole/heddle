@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -241,6 +241,77 @@ test('the reader hands back text, refuses what a viewer cannot show, and says wh
   }
 })
 
+/**
+ * Issue #78: the reader decoded its slice lossily and refused any text holding U+FFFD, so it refused a valid file whose
+ * last character the limit cut, and a valid file that holds a literal U+FFFD. Only bytes that are not UTF-8 are refused.
+ * Four controls, the same as the Rust port's `file.rs` tests; a small limit keeps the files tiny.
+ */
+function withFile(name: string, content: string | Buffer, body: (path: string) => void): void {
+  const root = scaffold([])
+  try {
+    writeFileSync(join(root, name), content)
+    body(join(root, name))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+const NOT_UTF8 = /is not UTF-8 text, so it has no text to show$/
+
+test('a limit at a character boundary keeps every byte it read', () => {
+  // "ab中cd": the three bytes of 中 are 2..4.
+  withFile('wide.txt', 'ab中cd', (path) => {
+    const aligned = readFileText(path, { limit: 5 })
+    assert.deepEqual([aligned.text, aligned.truncated, aligned.bytes], ['ab中', true, 7])
+  })
+})
+
+test('a limit that cuts a character keeps the whole characters before it, truncated rather than refused', () => {
+  withFile('wide.txt', 'ab中cd', (path) => {
+    for (const limit of [3, 4]) {
+      const cut = readFileText(path, { limit })
+      assert.equal(cut.text, 'ab', `a limit of ${limit} cuts 中, so the text is the whole characters before it`)
+      assert.equal(cut.truncated, true, 'and it says it is truncated rather than refusing the file')
+      assert.equal(cut.lines, 1)
+      assert.equal(cut.bytes, 7, 'the size is still the whole file')
+    }
+  })
+  withFile('accent.txt', 'abé!', (path) => {
+    const accent = readFileText(path, { limit: 3 })
+    assert.deepEqual([accent.text, accent.truncated], ['ab', true], 'a two-byte character cut after its first byte')
+  })
+  withFile('accent-only.txt', 'é', (path) => {
+    const nothing = readFileText(path, { limit: 1 })
+    assert.deepEqual([nothing.text, nothing.lines, nothing.truncated], ['', 0, true], 'nothing whole before the cut is an empty, truncated text')
+  })
+  // "😀" is four bytes, 1..4: cut after one, two or three of them.
+  withFile('emoji.txt', 'x😀y', (path) => {
+    for (const limit of [2, 3, 4]) {
+      const emoji = readFileText(path, { limit })
+      assert.deepEqual([emoji.text, emoji.truncated], ['x', true], `a four-byte character cut by a limit of ${limit}`)
+    }
+  })
+})
+
+test('a literal U+FFFD is text, not a sign of bytes that are not UTF-8', () => {
+  withFile('replacement.txt', 'a literal \uFFFD is a character\n', (path) => {
+    const literal = readFileText(path)
+    assert.deepEqual([literal.text, literal.truncated], ['a literal \uFFFD is a character\n', false])
+  })
+})
+
+test('bytes that are not UTF-8 are refused wherever they are', () => {
+  withFile('invalid.txt', Buffer.from([0x61, 0xff, 0x62, 0x0a]), (path) => {
+    assert.throws(() => readFileText(path), NOT_UTF8, 'a byte that is not UTF-8 is refused')
+    assert.throws(() => readFileText(path, { limit: 3 }), NOT_UTF8, 'inside a truncated slice as well')
+  })
+  withFile('ends-cut.txt', Buffer.from([0x61, 0x62, 0xe4, 0xb8]), (path) => {
+    assert.throws(() => readFileText(path), NOT_UTF8, 'a file that itself ends inside a character: no limit cut it')
+  })
+  withFile('bad-lead.txt', Buffer.from([0x61, 0x62, 0xe0, 0x80, 0x80]), (path) => {
+    assert.throws(() => readFileText(path, { limit: 4 }), NOT_UTF8, 'bytes at the cut that begin no character (E0 80) are refused, not dropped')
+  })
+})
+
 test('a _sessions_ folder is not a node, and its sessions come first in the branch they belong to', () => {
   const root = scaffold([
     '_tools_/some-tool',
@@ -449,5 +520,65 @@ test('sessions inside one folder order by the time they were last written to, ne
     assert.deepEqual(labelsFor(pinned), ['beta', 'alpha', 'gamma'], 'a pin holds the top of its folder')
   } finally {
     rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a symlink to a folder lists as a folder at its own path, and expanding it lists its target, as DSH lists one', () => {
+  /**
+   * DSH's workspace listing reports what a child resolves to (dsh-api-workspace-files, types.d.ts: "A symlink reports the
+   * type of its destination"; dsh-fs-local listDirectory probes each child's resolved target), a size only for a regular
+   * file, and the child's path as the listing's path joined with its name. Measured before this rule: the link was a
+   * 0-byte file at its target's path, so it could not be expanded and shared that path with the target's own row.
+   */
+  const root = scaffold(['nest/inner'])
+  const outside = scaffold(['far'])
+  try {
+    writeFileSync(join(root, 'nest', 'a.txt'), 'hello\n')
+    writeFileSync(join(root, 'plain.txt'), 'x\n')
+    symlinkSync('nest', join(root, 'nest-link'))
+    symlinkSync('plain.txt', join(root, 'file-link'))
+    symlinkSync('missing', join(root, 'dangling'))
+    symlinkSync(join(outside, 'far'), join(root, 'out-link'))
+    const canonical = realpathSync(root)
+    const input: TreeInput = { roots: [{ path: root, title: 'fixture' }], sessions: [] }
+    const children = tree(root, input).children ?? []
+    const byLabel = new Map(children.map((node) => [node.label, node]))
+
+    const link = byLabel.get('nest-link')
+    assert.equal(link?.kind, 'folder', 'a link to a folder is a folder row')
+    assert.equal(link?.children, null, 'which can be expanded, like any folder nobody opened yet')
+    assert.equal(link?.bytes, undefined, 'and carries no size, as a folder does not')
+    assert.equal(link?.path, join(canonical, 'nest-link'), 'at its own path, so it does not share the target row\'s path')
+    assert.equal(byLabel.get('nest')?.path, join(canonical, 'nest'), 'the target keeps its own row and path')
+    assert.equal(new Set(children.map((node) => node.path)).size, children.length, 'no two rows share one path')
+
+    const out = byLabel.get('out-link')
+    assert.equal(out?.kind, 'folder', 'a link to a folder outside the root is still listed as the folder it resolves to')
+    assert.equal(out?.path, join(canonical, 'out-link'), 'at its own path; expanding it is the caller\'s containment check')
+
+    const fileLink = byLabel.get('file-link')
+    assert.equal(fileLink?.kind, 'file', 'a link to a file is a file row')
+    assert.equal(fileLink?.bytes, 2, 'with its target\'s size')
+    assert.equal(fileLink?.path, join(canonical, 'file-link'), 'at its own path')
+
+    const dangling = byLabel.get('dangling')
+    assert.equal(dangling?.kind, 'file', 'a link that resolves to nothing is a leaf')
+    assert.equal(dangling?.bytes, 0, 'of no size')
+
+    assert.deepEqual(
+      children.map((node) => node.label),
+      ['nest', 'nest-link', 'out-link', 'dangling', 'file-link', 'plain.txt'],
+      'a linked folder sorts with the folders',
+    )
+
+    const expanded = tree(join(root, 'nest-link'), input)
+    assert.deepEqual(
+      (expanded.children ?? []).map((node) => `${node.kind}:${node.label}`),
+      ['folder:inner', 'file:a.txt'],
+      'expanding the link lists what its target holds',
+    )
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
   }
 })

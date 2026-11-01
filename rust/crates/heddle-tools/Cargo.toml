@@ -15,7 +15,9 @@ heddle-sandbox.workspace = true
 heddle-session.workspace = true
 futures.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# `preserve_order`: argument violations name present properties in the order the schema declares them, as
+# DSH's validator does, whatever else the build pulls in.
+serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

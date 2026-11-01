@@ -82,8 +82,13 @@ export const Config = Schema.object({
   endpoint: Schema.string(),
   /** The model a summary is asked of; defaults to the endpoint's. */
   model: Schema.string(),
-  /** Cap on generated tokens for the summarising call. */
-  summarizeMaxTokens: Schema.number().default(1024),
+  /**
+   * Cap on generated tokens for the summarising call. Unset by default, so the call takes the endpoint's own cap
+   * (its `maxOutputTokens`, else the provider's or the adapter's default): a fixed 1024 left a reasoning model no
+   * room to answer, the summary came back empty and compaction was refused on every turn (#15). DSH budgets 65536,
+   * which a route that caps its output lower would refuse.
+   */
+  summarizeMaxTokens: Schema.number(),
 })
 
 export interface Config {
@@ -147,6 +152,8 @@ export interface ContextDependencies {
     readonly maxOutputTokens?: number
     /** Tags the call for a consumer that treats a summary differently from a turn. */
     readonly purpose?: string
+    /** The turn's signal, so a Stop cancels the summary call (#154). */
+    readonly signal?: AbortSignal
   }) => Promise<string>
 }
 
@@ -436,6 +443,8 @@ export class ContextService extends Service {
       readonly system?: string
       readonly summarize?: (messages: readonly Message[]) => Promise<string>
       readonly force?: boolean
+      /** The turn's signal: a Stop or a shutdown cancels the summary call, and nothing lands (#154). */
+      readonly signal?: AbortSignal
     },
   ): Promise<ContextReport> {
     const baseline = this.ensureContext(handle, { cwd: options.cwd, ...(options.system !== undefined ? { system: options.system } : {}) })
@@ -446,6 +455,7 @@ export class ContextService extends Service {
       budget,
       measurement,
       ...(options.force !== undefined ? { force: options.force } : {}),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
       summarize: options.summarize ?? this.defaultSummarizer(options),
       measure: () => this.measure(handle, tools !== undefined ? { tools } : {}),
     })
@@ -459,7 +469,7 @@ export class ContextService extends Service {
   }
 
   /** The default summariser: one call, the replayed prefix, and the configured cap. */
-  private defaultSummarizer(options: { readonly endpoint: string; readonly model?: string }): (messages: readonly Message[]) => Promise<string> {
+  private defaultSummarizer(options: { readonly endpoint: string; readonly model?: string; readonly signal?: AbortSignal }): (messages: readonly Message[]) => Promise<string> {
     const complete = this.dependencies.complete
     const endpoint = this.config.endpoint ?? options.endpoint
     const model = this.config.model ?? options.model
@@ -469,9 +479,11 @@ export class ContextService extends Service {
         endpoint,
         ...(model !== undefined ? { model } : {}),
         messages,
-        maxOutputTokens: this.config.summarizeMaxTokens ?? 1024,
+        ...(this.config.summarizeMaxTokens !== undefined ? { maxOutputTokens: this.config.summarizeMaxTokens } : {}),
         purpose: 'compaction',
-      })    }
+        ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      })
+    }
   }
 
   /** Build the report every caller reads, measuring the surface once more after any rewrite. */
@@ -524,13 +536,16 @@ export default class ContextPlugin extends ContextService {
         return configured === undefined ? undefined : contextWindowFor(configured, model)
       },
       complete: async (request) => {
-        const result = await ctx.model.generate({
-          endpoint: request.endpoint,
-          ...(request.model !== undefined ? { model: request.model } : {}),
-          messages: request.messages,
-          maxOutputTokens: request.maxOutputTokens,
-          ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
-        })
+        const result = await ctx.model.generate(
+          {
+            endpoint: request.endpoint,
+            ...(request.model !== undefined ? { model: request.model } : {}),
+            messages: request.messages,
+            maxOutputTokens: request.maxOutputTokens,
+            ...(request.purpose !== undefined ? { purpose: request.purpose } : {}),
+          },
+          request.signal,
+        )
         return result.text
       },
     })
@@ -556,6 +571,7 @@ export default class ContextPlugin extends ContextService {
         ...(payload.model !== undefined ? { model: payload.model } : {}),
         tools: payload.tools,
         force: true,
+        ...(payload.signal !== undefined ? { signal: payload.signal } : {}),
       })
       const after = ctx.session.surface(payload.session).replaceGeneration
       /**

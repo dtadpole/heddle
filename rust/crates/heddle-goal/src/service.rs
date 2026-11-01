@@ -899,6 +899,23 @@ impl GoalService {
         Ok(self.view_of(&session, &folded))
     }
 
+    /// The session's log, as the goal tools read it to decide **who is asking**.
+    ///
+    /// Authority is judged on the same log the fold reads, and through the same port: a direct human turn is a
+    /// person's message in the open turn, and a goal round is the driver's sourced message for the goal's current
+    /// revision and round. Reading it here keeps the tools on the service they already hold.
+    pub fn session_events(&self, session: &str) -> Result<Vec<Value>, GoalError> {
+        let session = self.session_of(session)?;
+        Ok(self.log.read(&session)?)
+    }
+
+    /// The session's metadata record, which says whether it is a delegated (subagent or teammate) session; `None`
+    /// when there is no such session or the log keeps no record ([`SessionLog::meta`]).
+    pub fn session_meta(&self, session: &str) -> Option<Value> {
+        let session = self.log.open(session)?;
+        self.log.meta(&session)
+    }
+
     /// Remove this process's continuation authority without changing the phase or the revision.
     pub fn disarm(&self, session: &str) -> Result<Option<GoalView>, GoalError> {
         let session = self.session_of(session)?;
@@ -970,9 +987,10 @@ impl GoalService {
         let folded = self.fold_session(&session)?;
         let current = expect_current(&folded, goal)?.clone();
         if request.objective.is_none() && request.max_goal_rounds.is_none() {
+            // DSH's sentence (dsh-goal `edit`), which the model reads back through `update_goal`.
             return Err(refused(
                 GoalErrorCode::InvalidEdit,
-                "an edit needs an objective and/or maxGoalRounds",
+                "goal edit requires objective and/or maxGoalRounds",
             ));
         }
         let objective = match request.objective {

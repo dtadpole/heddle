@@ -2,9 +2,10 @@
 //!
 //! Ported from `src/agent/turns.ts` and `src/plugins/turns.ts`. Durable logs cannot say "running" — a
 //! running turn is a fact about this process — so the team layer (`list_agents`, `interrupt_agent`) and
-//! the server's Stop read it here. A session may have several turns in flight (the server allows it), so
-//! the registry keeps a set per session: one interruption stops every turn of the subject, and the session
-//! is running while at least one remains.
+//! the server's Stop read it here. A turn begun through [`TurnRegistry::begin_queued`] waits for every turn
+//! already in flight or queued on its session, so one session runs one turn at a time (#28; DSH's follow-up).
+//! [`TurnRegistry::begin`] registers without waiting, so the registry still keeps a set per session: one
+//! interruption stops every turn of the subject, and the session is running while at least one remains.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,6 +22,9 @@ struct Inner {
     next: AtomicU64,
     /// Woken whenever a session's last live turn is removed, for [`TurnRegistry::when_idle`].
     idle: tokio::sync::Notify,
+    /// Per session, the queue a [`TurnRegistry::begin_queued`] turn waits in. tokio's mutex grants its lock in
+    /// request order, so the turns run in the order they arrived.
+    queues: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Inner {
@@ -54,6 +58,8 @@ pub struct LiveTurn {
     key: u64,
     token: CancellationToken,
     settled: AtomicBool,
+    /// The queue place of a [`TurnRegistry::begin_queued`] turn, released when the turn settles.
+    place: Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>,
 }
 
 impl LiveTurn {
@@ -67,6 +73,13 @@ impl LiveTurn {
     pub fn settle(&self) {
         if !self.settled.swap(true, Ordering::SeqCst) {
             self.inner.remove(&self.session_id, self.key);
+            // After the removal, so the next queued turn finds the session idle.
+            drop(
+                self.place
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take(),
+            );
         }
     }
 }
@@ -108,7 +121,40 @@ impl TurnRegistry {
             key,
             token,
             settled: AtomicBool::new(false),
+            place: Mutex::new(None),
         }
+    }
+
+    /// Register a turn of `session_id` once every turn already in flight or queued on it has settled, in
+    /// arrival order (#28).
+    ///
+    /// Measured before: two `POST /api/turn` for one session 300 ms apart both ran, interleaved their writes in
+    /// one log, and the first turn's next request carried the second's exchange, which the provider refused.
+    /// DSH admits a prompt sent to a busy session as a follow-up (`agent.followup`) and claims it after the
+    /// running turn. The wait is first for the turns queued before this one, then for any turn registered
+    /// without queueing ([`TurnRegistry::begin`]). A caller cancelled while it waits still gets its turn, which
+    /// its cancelled token then stops at once, so the prompt it sent is recorded with the stop.
+    pub async fn begin_queued(
+        &self,
+        session_id: &str,
+        caller: Option<&CancellationToken>,
+    ) -> LiveTurn {
+        let queue = {
+            let mut queues = self
+                .inner
+                .queues
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(queues.entry(session_id.to_owned()).or_default())
+        };
+        let place = queue.lock_owned().await;
+        self.when_idle(session_id).await;
+        let live = self.begin(session_id, caller);
+        *live
+            .place
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(place);
+        live
     }
 
     /// Whether `session_id` has a turn in flight.
@@ -178,6 +224,72 @@ impl TurnRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_queued_turn_waits_for_the_running_one_and_the_queue_keeps_arrival_order() {
+        let registry = TurnRegistry::new();
+        let running = registry.begin_queued("s", None).await;
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let mut waiting = Vec::new();
+        for name in ["second", "third"] {
+            let (registry, order) = (registry.clone(), Arc::clone(&order));
+            waiting.push(tokio::spawn(async move {
+                let turn = registry.begin_queued("s", None).await;
+                order.lock().expect("the order lock").push(name);
+                // While this turn runs, no other turn of the session does.
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    registry.inner.sessions.lock().expect("sessions")[0].1.len(),
+                    1
+                );
+                turn.settle();
+            }));
+            // Let the task reach the queue before the next one is spawned, so arrival order is defined.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(
+            order.lock().expect("the order lock").is_empty(),
+            "nothing ran beside the running turn"
+        );
+        running.settle();
+        for task in waiting {
+            task.await.expect("the queued turn ran");
+        }
+        assert_eq!(
+            *order.lock().expect("the order lock"),
+            vec!["second", "third"]
+        );
+        assert!(!registry.is_running("s"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_on_an_idle_session_does_not_wait_and_other_sessions_never_wait() {
+        let registry = TurnRegistry::new();
+        let a = registry.begin_queued("a", None).await;
+        let b = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.begin_queued("b", None),
+        )
+        .await
+        .expect("another session's turn begins at once");
+        // A turn registered without queueing is waited for as well.
+        let unqueued = registry.begin("c", None);
+        let registry2 = registry.clone();
+        let c = tokio::spawn(async move { registry2.begin_queued("c", None).await });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !c.is_finished(),
+            "the queued turn waits for the unqueued one"
+        );
+        drop(unqueued);
+        let c = c.await.expect("then it begins");
+        drop((a, b, c));
+        assert!(registry.running().is_empty());
+    }
 
     #[test]
     fn a_session_runs_while_any_of_its_turns_is_live() {

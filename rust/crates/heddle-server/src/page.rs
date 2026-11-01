@@ -33,6 +33,107 @@ pub fn page_marker(html: &str) -> String {
     out
 }
 
+/// The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`
+/// (the TypeScript `inlineScripts`).
+pub fn inline_scripts(html: &str) -> Vec<&str> {
+    let lower = html.to_ascii_lowercase();
+    let mut scripts = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = lower[from..].find("<script") {
+        let start = from + offset;
+        let after = start + "<script".len();
+        // `<script` must end its name here: `<scripts>` or `<scripting>` is another element.
+        if !lower[after..].starts_with(|c: char| c == '>' || c.is_ascii_whitespace()) {
+            from = after;
+            continue;
+        }
+        let Some(tag_end) = lower[after..].find('>').map(|at| after + at + 1) else {
+            break;
+        };
+        let Some(close) = closing_script(&lower, tag_end) else {
+            break;
+        };
+        if !has_src_attribute(&lower[after..tag_end - 1]) {
+            scripts.push(&html[tag_end..close.0]);
+        }
+        from = close.1;
+    }
+    scripts
+}
+
+/// The next `</script\s*>` at or after `from`: where it starts and where it ends.
+fn closing_script(lower: &str, from: usize) -> Option<(usize, usize)> {
+    let mut at = from;
+    while let Some(offset) = lower[at..].find("</script") {
+        let start = at + offset;
+        let rest = &lower[start + "</script".len()..];
+        let spaces = rest.len() - rest.trim_start().len();
+        if rest[spaces..].starts_with('>') {
+            return Some((start, start + "</script".len() + spaces + 1));
+        }
+        at = start + "</script".len();
+    }
+    None
+}
+
+/// Whether an opening tag's attributes name a `src` (`\bsrc\s*=`).
+fn has_src_attribute(attributes: &str) -> bool {
+    let bytes = attributes.as_bytes();
+    let mut from = 0usize;
+    while let Some(offset) = attributes[from..].find("src") {
+        let at = from + offset;
+        let bounded = at == 0 || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+        let rest = attributes[at + 3..].trim_start();
+        if bounded && rest.starts_with('=') {
+            return true;
+        }
+        from = at + 3;
+    }
+    false
+}
+
+/// The page's Content-Security-Policy, sent with `page.html` only (the TypeScript `pagePolicy`, word for word).
+///
+/// Defence in depth behind the sanitizer (live issues developer-two-6 and -7), approved by the coordinator as option
+/// (1): `script-src` is strict ('self' and the sha256 of each inline script of the page as served); images,
+/// stylesheets, fonts and media may also come over `https:` only because the HTML preview is a `srcdoc` frame, which
+/// inherits this policy, and a previewed document may load remote assets under its own policy (issue #50 would
+/// serve the preview at its own URL and drop them).
+pub fn page_policy(html: &str) -> String {
+    page_policy_with_browser(html, false)
+}
+
+/// D-068: remote frames are allowed only for the explicitly enabled Browser surface.
+pub fn page_policy_with_browser(html: &str, browser_enabled: bool) -> String {
+    use base64::Engine as _;
+    let mut script_src = String::from("script-src 'self'");
+    for code in inline_scripts(html) {
+        let digest = Sha256::digest(code.as_bytes());
+        script_src.push_str(&format!(
+            " 'sha256-{}'",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        ));
+    }
+    [
+        "default-src 'self'",
+        &script_src,
+        "style-src 'self' 'unsafe-inline' https:",
+        "img-src 'self' data: blob: https:",
+        "font-src 'self' data: https:",
+        "media-src 'self' https:",
+        if browser_enabled {
+            "frame-src http: https:"
+        } else {
+            "frame-src 'self'"
+        },
+        "object-src 'none'",
+        "base-uri 'self'",
+        "frame-ancestors 'none'",
+        "form-action 'self'",
+    ]
+    .join("; ")
+}
+
 /// The document with its build marker filled in: the first `<meta name="heddle-page" ...>` element is
 /// replaced by one whose `content` is [`page_marker`] of the **unmarked** document. A document without
 /// the element is returned unchanged.
@@ -53,10 +154,21 @@ pub fn marked_page(html: &str) -> String {
     marked
 }
 
+/// The page with its `<html lang>` set to `lang` (issue #80); the marker stays the file's own.
+pub fn with_language(page: &str, lang: &str) -> String {
+    page.replacen("<html lang=\"en\">", &format!("<html lang=\"{lang}\">"), 1)
+}
+
 /// The page as served: [`marked_page`] of [`PAGE_SOURCE`], computed once per process.
 pub fn page() -> &'static str {
     static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PAGE.get_or_init(|| marked_page(PAGE_SOURCE))
+}
+
+/// The policy for [`page`], computed once from the page as served, like the page itself.
+pub fn served_policy() -> &'static str {
+    static POLICY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    POLICY.get_or_init(|| page_policy(page()))
 }
 
 /// What a request for the page is answered with.
@@ -155,6 +267,48 @@ mod tests {
         assert!(std::ptr::eq(page(), page()));
     }
 
+    /// DSH's session rename (`dsh-client-ui-workspace`, `RenameSession.js`): one *Rename session* dialog, opened by
+    /// the row menu, the `Mod+Alt+G` chord and a double-click on the row's title. The page is embedded, so this
+    /// asserts the binary serves that dialog and the double-click that opens it, not a native `window.prompt`.
+    #[test]
+    fn the_served_page_renames_a_session_in_dshs_dialog_and_on_a_title_double_click() {
+        let served = page();
+        assert!(served.contains(
+            "<dialog id=\"session-rename\" class=\"ws-dialog\" aria-labelledby=\"session-rename-title\">"
+        ));
+        assert!(served.contains("<h2 id=\"session-rename-title\">Rename session</h2>"));
+        assert!(served.contains("id=\"session-rename-input\" aria-label=\"Session name\""));
+        assert!(served.contains("label.addEventListener('dblclick', (event) => {"));
+        assert!(!served.contains("window.prompt('Rename this session'"));
+    }
+
+    #[test]
+    fn the_served_page_carries_dshs_session_search() {
+        // C14, in the document this binary embeds: DSH's title-or-workspace search with its 20-row bound
+        // (dsh-api-session-controller `SESSION_SEARCH_RESULT_LIMIT`), its two status lines, and the reveal of a
+        // chosen hit. The derivation itself is judged in `test/workspace-tree.test.ts`.
+        let served = page();
+        assert!(served.contains("const SEARCH_LIMIT = 20"));
+        assert!(served.contains("Narrow your search."));
+        assert!(served.contains("No matching sessions"));
+        assert!(served.contains("id=\"search-more\""));
+        assert!(served.contains("async function revealSession(id)"));
+    }
+
+    #[test]
+    fn the_served_page_carries_dshs_content_search() {
+        // C15 (R-developer-eight-19), in the document this binary embeds: the 250 ms debounced host query
+        // (dsh-client-ui-workspace `SEARCH_DEBOUNCE_MS`) against this crate's `GET /api/sessions/search`, the merge
+        // into the name matches, the snippet on a hit and DSH's pending status. The rules themselves are judged in
+        // `test/content-search-page.test.ts`.
+        let served = page();
+        assert!(served.contains("/* content-search:begin */"));
+        assert!(served.contains("const DEBOUNCE_MS = 250"));
+        assert!(served.contains("/api/sessions/search?q="));
+        assert!(served.contains("Searching session history…"));
+        assert!(served.contains("quote.className = 'hit-snippet'"));
+    }
+
     #[test]
     fn page_access_tells_missing_from_stale() {
         assert_eq!(
@@ -180,6 +334,22 @@ mod tests {
         );
     }
 
+    /// DSH parity C13 (R-developer-eight-17) with C17 (#63): `In one list` takes the workspace tree's rule in the
+    /// selected order, through `WorkspaceTree.flatRows` (the `arrange` and `rowsOf` a group uses), as DSH's `deriveFlat`
+    /// partitions the flat account's order (`dsh-client-ui-workspace` lib/client.js:1146-1154, 3583-3584). Under Last
+    /// updated pin time does not order it; under Manual a pin fronts it. The page is embedded, so this asserts the binary
+    /// serves that rule: no creation-time sort (which put the earlier of two pins first) and no pin-time-only `flatList`.
+    #[test]
+    fn the_served_flat_list_orders_sessions_by_the_trees_rule() {
+        let served = page();
+        assert!(served.contains("function flatRows(sessions, options = {}) {"));
+        assert!(served.contains(
+            "const flat = WorkspaceTree.flatRows(index.sessions, { archived: archiveMode, order: orderState })"
+        ));
+        assert!(!served.contains("function flatList("));
+        assert!(!served.contains("String(right.created).localeCompare(String(left.created))"));
+    }
+
     #[test]
     fn the_token_form_is_the_recoverable_refusal() {
         let missing = token_form_page(false);
@@ -198,9 +368,104 @@ mod tests {
         assert!(!stale.contains("id=\"log\""));
     }
 
+    /// DSH parity C23 and C31 (R-developer-eight-26, -1), with the reload of C28 and C33 (-28, -2): the page this
+    /// binary embeds keeps a subagent's child out of the flat list and the search as well as the tree
+    /// (dsh-client-ui-workspace `sessionVisible`), reopens the saved session on a reload instead of `sessions[0]`
+    /// (`restoreSelection`, the tree block's `restoreChoice`), and gives a one-shot child DSH's read-only record in
+    /// place of the composer (dsh-client-ui-subagent `SubagentReadOnlyComposer`). The rules themselves are judged in
+    /// `test/session-rules.test.ts` and `test/workspace-tree.test.ts`.
+    #[test]
+    fn the_served_page_hides_subagents_restores_the_selection_and_locks_one_shot() {
+        let served = page();
+        assert!(served.contains("sessions: SessionRules.sidebarSessions(sessions),"));
+        assert!(served.contains("WorkspaceTree.restoreChoice(saved, workspaces, sessions)"));
+        assert!(!served.contains("const select = sessions[0]?.id ?? null"));
+        assert!(served.contains("const SELECTION_KEY = 'heddle.sessions.current'"));
+        assert!(served.contains("<div id=\"subagent-readonly\" role=\"status\" hidden><strong>One-shot subagent record</strong><span>One-shot tasks do not accept follow-ups; review the full execution record here.</span></div>"));
+    }
+
     #[test]
     fn the_favicon_is_the_projects_own_asset() {
         assert!(FAVICON_SVG.starts_with(b"<svg") || FAVICON_SVG.starts_with(b"<?xml"));
         assert!(!FAVICON_SVG.is_empty());
+    }
+
+    /// DSH's workspace browser does not open an archived session (`dsh-client-ui-workspace` lib/client.js:3532-3538,
+    /// `guardedOpen`): the row says "Archived sessions cannot be opened. Unarchive it to view." and carries that
+    /// sentence as its accessible description (:2279, :4934). The page is embedded, so this asserts the binary serves
+    /// the guarded row (live-testing draft developer-six-7).
+    #[test]
+    fn the_served_page_does_not_open_an_archived_session_row() {
+        let served = page();
+        assert!(served.contains(
+            "const ARCHIVED_NOT_OPENABLE = 'Archived sessions cannot be opened. Unarchive it to view.'"
+        ));
+        assert!(served.contains("return !(node?.kind === 'session' && node.archived === true)"));
+        assert!(served.contains(
+            "if (!WorkspaceTree.opensOnClick(node)) li.setAttribute('aria-description', WorkspaceTree.ARCHIVED_NOT_OPENABLE)"
+        ));
+        assert!(served.contains(
+            "if (!WorkspaceTree.opensOnClick(node)) {\n        notifyArchivedNotOpenable()\n        return\n      }"
+        ));
+    }
+
+    #[test]
+    fn the_page_policy_carries_a_hash_for_every_inline_script_and_nothing_inline_beyond_them() {
+        use base64::Engine as _;
+        let html = page();
+        let scripts = inline_scripts(html);
+        assert_eq!(
+            scripts.len(),
+            2,
+            "the page has a module script and a plain one"
+        );
+        let policy = served_policy();
+        for code in &scripts {
+            let hash =
+                base64::engine::general_purpose::STANDARD.encode(Sha256::digest(code.as_bytes()));
+            assert!(
+                policy.contains(&format!("'sha256-{hash}'")),
+                "every inline script is allowed by its hash"
+            );
+        }
+        assert!(
+            policy.starts_with("default-src 'self'; script-src 'self' 'sha256-"),
+            "{policy}"
+        );
+        assert!(
+            !policy.contains("unsafe-eval")
+                && !policy.contains("script-src 'self' 'unsafe-inline'"),
+            "{policy}"
+        );
+        assert!(
+            policy.ends_with(
+                "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+            ),
+            "{policy}"
+        );
+    }
+
+    #[test]
+    fn a_script_with_a_src_is_not_an_inline_script() {
+        let html = "<script src=\"/vendor/x.js\"></script><script type=\"module\">a()</script><scripts>no</scripts><SCRIPT>b()</SCRIPT >";
+        assert_eq!(inline_scripts(html), vec!["a()", "b()"]);
+    }
+}
+
+#[cfg(test)]
+mod browser_policy_tests {
+    use super::*;
+    #[test]
+    fn only_browser_capability_changes_the_frame_directive() {
+        let strict = page_policy("<script>const x = 1</script>");
+        let enabled = page_policy_with_browser("<script>const x = 1</script>", true);
+        assert!(strict.contains("frame-src 'self'"));
+        assert_eq!(
+            enabled,
+            strict.replace("frame-src 'self'", "frame-src http: https:")
+        );
+        assert!(
+            enabled.contains("object-src 'none'") && enabled.contains("frame-ancestors 'none'")
+        );
     }
 }

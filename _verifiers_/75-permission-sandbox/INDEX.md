@@ -74,6 +74,20 @@ a display or a window.
   shell), read-only keeps the shell but denies its writes, danger-full-access is the only bypass, `/dev/null`
   stays writable, a command that merely prints the denial sentence is not misclassified, and a missing backend
   fails closed instead of running the command unconfined.
+- [`check-stop-kills-group.mjs`](check-stop-kills-group.mjs) — a **Stop** or the bash **wall time** ends the whole
+  command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
+  started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
+  API, no browser.
+- [`check-shutdown-kills-group.mjs`](check-shutdown-kills-group.mjs) — a **restart** during a bash call: SIGTERM
+  to the server ends the command's whole process group, the server goes within seconds instead of waiting for the
+  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6); and a turn asked
+  for during the shutdown grace (a command that ignores SIGTERM keeps it open for its 3 s) is refused with 503 instead
+  of starting a command nothing would stop. No browser.
+- [`check-terminal.mjs`](check-terminal.mjs) — the page's **interactive terminal** (live-testing issue #85), through
+  the API on either build. Its routes are fenced: a foreign Origin or Host, a missing credential and a non-JSON
+  write are refused. A terminal belongs to its session, so no other session can reach it or see its output. Its
+  shell is confined like bash: under workspace-write it writes in the session folder and is refused outside it.
+  It is bounded (`maxTerminals`, then `409`). Close, archive and server shutdown each end its whole process tree.
 
 ## Running it
 
@@ -104,6 +118,20 @@ whole reason for existing — see [`_tools_/verify-runner/`](../../_tools_/verif
   shell), read-only keeps the shell but denies its writes, danger-full-access is the only bypass, `/dev/null`
   stays writable, a command that merely prints the denial sentence is not misclassified, and a missing backend
   fails closed instead of running the command unconfined.
+- [`check-stop-kills-group.mjs`](check-stop-kills-group.mjs) — a **Stop** or the bash **wall time** ends the whole
+  command a shell started, as DSH stops a process group: the turn ends at once, the background process the command
+  started is gone, and the call says `INTERRUPTED` or `TIMEOUT` (live-testing draft developer-five-5). Through the
+  API, no browser.
+- [`check-shutdown-kills-group.mjs`](check-shutdown-kills-group.mjs) — a **restart** during a bash call: SIGTERM
+  to the server ends the command's whole process group, the server goes within seconds instead of waiting for the
+  command, and the session log on disk records the call as `INTERRUPTED` (live-testing issue #6); and a turn asked
+  for during the shutdown grace (a command that ignores SIGTERM keeps it open for its 3 s) is refused with 503 instead
+  of starting a command nothing would stop. No browser.
+- [`check-terminal.mjs`](check-terminal.mjs) — the page's **interactive terminal** (live-testing issue #85), through
+  the API on either build. Its routes are fenced: a foreign Origin or Host, a missing credential and a non-JSON
+  write are refused. A terminal belongs to its session, so no other session can reach it or see its output. Its
+  shell is confined like bash: under workspace-write it writes in the session folder and is refused outside it.
+  It is bounded (`maxTerminals`, then `409`). Close, archive and server shutdown each end its whole process tree.
 
 ## Running it
 

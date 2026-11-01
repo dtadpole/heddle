@@ -189,9 +189,77 @@ pub fn save_upload(
     }
 }
 
+/// The sentence `GET /api/uploads/{leaf}` answers, with `404`, when the requesting session's log does not reference
+/// the upload (or no session was named) — `uploads.ts`'s `UPLOAD_NOT_REFERENCED`.
+pub const UPLOAD_NOT_REFERENCED: &str = "this upload is not referenced by this session";
+
+/// Whether a session's log references an upload by its leaf: some logged message carries an `image` or `file` part
+/// whose stored path ends in that leaf (`uploads.ts`'s `uploadReferencedBy`).
+///
+/// DSH serves an attachment only through `session/attachment(sessionId, attachmentId)`, which reads that session's
+/// events and refuses with "Image is not referenced by this session." (`ATTACHMENT_NOT_REFERENCED`) unless a built-in
+/// event's declared content carries the image. Every logged `message` counts, whatever its role.
+pub fn upload_referenced(events: &[serde_json::Value], leaf: &str) -> bool {
+    if leaf.is_empty() {
+        return false;
+    }
+    events.iter().any(|event| {
+        event
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|content| {
+                content.iter().any(|part| {
+                    let kind = part.get("type").and_then(serde_json::Value::as_str);
+                    matches!(kind, Some("image") | Some("file"))
+                        && part
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|path| crate::node_path::basename(path) == leaf)
+                })
+            })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_upload_is_referenced_only_by_a_logged_message_that_carries_its_leaf() {
+        let leaf = "2026-10-29T11-00-00-000Z-pixel.png";
+        let events = vec![
+            serde_json::json!({"type": "session/created", "cwd": "/w"}),
+            serde_json::json!({"type": "message", "message": {"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "path": format!("/home/uploads/{leaf}"), "name": "pixel.png"}
+            ]}}),
+            serde_json::json!({"type": "message", "message": {"role": "user", "content": [
+                {"type": "file", "path": "/home/uploads/2026-10-29-notes.md"}
+            ]}}),
+            serde_json::json!({"type": "message", "message": {"role": "tool", "content": [
+                {"type": "image", "path": "/home/uploads/2026-10-29-shot.png"}
+            ]}}),
+        ];
+        assert!(upload_referenced(&events, leaf), "an image in a prompt");
+        assert!(
+            upload_referenced(&events, "2026-10-29-notes.md"),
+            "a file part"
+        );
+        assert!(
+            upload_referenced(&events, "2026-10-29-shot.png"),
+            "a tool result's image"
+        );
+        // DSH's ATTACHMENT_NOT_REFERENCED: another upload, a leaf named only in text, or nothing.
+        assert!(!upload_referenced(&events, "2026-10-29-other.png"));
+        let text_only = vec![
+            serde_json::json!({"type": "message", "message": {"role": "user",
+            "content": [{"type": "text", "text": leaf}]}}),
+        ];
+        assert!(!upload_referenced(&text_only, leaf), "a leaf named in text");
+        assert!(!upload_referenced(&[], leaf), "an empty log");
+        assert!(!upload_referenced(&events, ""), "an empty leaf");
+    }
 
     #[test]
     fn the_upload_directory_is_under_the_given_home() {

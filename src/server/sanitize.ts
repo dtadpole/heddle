@@ -77,6 +77,39 @@ export interface SanitizeOptions {
   readonly url?: (value: string, at: { readonly tag: string; readonly attribute: string }) => string | null
 }
 
+/**
+ * Every named character reference whose character is ASCII (HTML's table), plus the no-break space. A URL's scheme and
+ * the characters a browser strips from it are ASCII, so decoding these and the numeric forms is enough to see a URL as
+ * the browser will: a name left undecoded stands for a character beyond ASCII, which can neither spell a scheme nor end
+ * one with a colon.
+ */
+const ASCII_NAMED: Readonly<Record<string, string>> = {
+  Tab: '\t', NewLine: '\n', excl: '!', quot: '"', QUOT: '"', num: '#', dollar: '$', percnt: '%', amp: '&', AMP: '&',
+  apos: "'", lpar: '(', rpar: ')', ast: '*', midast: '*', plus: '+', comma: ',', period: '.', sol: '/', colon: ':',
+  semi: ';', lt: '<', LT: '<', equals: '=', gt: '>', GT: '>', quest: '?', commat: '@', lsqb: '[', lbrack: '[',
+  bsol: '\\', rsqb: ']', rbrack: ']', Hat: '^', lowbar: '_', UnderBar: '_', grave: '`', DiacriticalGrave: '`',
+  lcub: '{', lbrace: '{', verbar: '|', vert: '|', VerticalLine: '|', rcub: '}', rbrace: '}', nbsp: '\u00a0',
+  NonBreakingSpace: '\u00a0',
+}
+
+/**
+ * An attribute value as a browser reads it: numeric references (`&#106;`, `&#x6A`, with or without the `;`) and the
+ * named references above, decoded in one pass, as HTML decodes them.
+ *
+ * The URL check used to be handed the value **as written**, so `<a href="&#x6A;avascript:alert(1)">` looked like a
+ * relative path to it and reached the page unchanged, where the browser decoded it into `javascript:alert(1)`: one
+ * click ran script in heddle's own origin. `java&#x09;script:`, `javascript&colon;` and `&#x64;ata:` went the same way
+ * (live issue developer-two-6, 2026-10-29).
+ */
+export function decodeCharacterReferences(value: string): string {
+  return value.replace(/&(?:#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?|([A-Za-z][A-Za-z0-9]*);)/g, (whole, hex: string | undefined, decimal: string | undefined, name: string | undefined) => {
+    if (name !== undefined) return ASCII_NAMED[name] ?? whole
+    const code = hex !== undefined ? Number.parseInt(hex, 16) : Number.parseInt(decimal ?? '', 10)
+    if (!Number.isFinite(code) || code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return '\ufffd'
+    return String.fromCodePoint(code)
+  })
+}
+
 /** Read an attribute whose value is quoted. Handles `"`, `'` and unquoted values, and entities are left alone. */
 function readAttribute(html: string, from: number): { readonly name: string; readonly value: string; readonly end: number } | null {
   let index = from
@@ -169,10 +202,16 @@ export function sanitizeHtml(html: string, options: SanitizeOptions = {}): strin
         continue
       }
       if (URL_ATTRS.has(attribute.name)) {
-        const decided =
-          options.url === undefined ? attribute.value : options.url(attribute.value, { tag: name, attribute: attribute.name })
+        /**
+         * The URL is judged **decoded**, as the browser will read it. When the decision keeps it as it is, the value
+         * is written back as it was given, references and all: the browser decodes it into exactly what was judged.
+         * When the decision rewrote it (a file's served address, a trimmed URL), the new value is escaped whole.
+         */
+        const decoded = decodeCharacterReferences(attribute.value)
+        const decided = options.url === undefined ? decoded : options.url(decoded, { tag: name, attribute: attribute.name })
         if (decided === null) continue
-        attributes.push(`${attribute.name}="${decided.replace(/"/g, '&quot;')}"`)
+        const written = decided === decoded ? attribute.value.replace(/"/g, '&quot;') : decided.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        attributes.push(`${attribute.name}="${written}"`)
         continue
       }
       attributes.push(attribute.value.length === 0 ? attribute.name : `${attribute.name}="${attribute.value.replace(/"/g, '&quot;')}"`)

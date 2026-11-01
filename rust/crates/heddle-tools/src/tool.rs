@@ -37,6 +37,8 @@ pub mod codes {
     pub const HOOKED: &str = "HOOKED";
     /// The arguments were malformed.
     pub const BAD_ARGS: &str = "BAD_ARGS";
+    /// The arguments break the tool's declared parameter schema (DSH's `INVALID_ARGS`).
+    pub const INVALID_ARGS: &str = "INVALID_ARGS";
     /// A wider sandbox mode was asked for and not granted.
     pub const ESCALATION_REFUSED: &str = "ESCALATION_REFUSED";
     /// The sandbox refused the effect.
@@ -45,6 +47,10 @@ pub mod codes {
     pub const SANDBOX_UNAVAILABLE: &str = "SANDBOX_UNAVAILABLE";
     /// The tool itself failed.
     pub const TOOL_FAILED: &str = "TOOL_FAILED";
+    /// A file a tool was asked to read does not exist (DSH's `FS_NOT_FOUND`).
+    pub const FS_NOT_FOUND: &str = "FS_NOT_FOUND";
+    /// A path a tool was asked to read is not a regular file, such as a directory (DSH's `FS_NOT_REGULAR_FILE`).
+    pub const FS_NOT_REGULAR_FILE: &str = "FS_NOT_REGULAR_FILE";
     /// A command exceeded its wall time and was killed.
     pub const TIMEOUT: &str = "TIMEOUT";
     /// A command exited non-zero.
@@ -260,6 +266,34 @@ pub trait Tool: Send + Sync {
 
     /// Run one call under `context.mode()`.
     fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> ToolFuture<'a>;
+
+    /// Whether a call may run alongside the other parallel-safe calls of one model step (DSH's
+    /// `isConcurrencySafe`). The default is exclusive: the call runs alone, a barrier between groups, which is the
+    /// safe answer for a tool that writes. [`parallel_safe`] marks a tool.
+    fn concurrency_safe(&self) -> bool {
+        false
+    }
+}
+
+/// `tool`, marked parallel-safe ([`Tool::concurrency_safe`]); its spec and its run are unchanged.
+pub fn parallel_safe(tool: Arc<dyn Tool>) -> Arc<dyn Tool> {
+    Arc::new(ParallelSafe(tool))
+}
+
+struct ParallelSafe(Arc<dyn Tool>);
+
+impl Tool for ParallelSafe {
+    fn spec(&self) -> &ToolSpec {
+        self.0.spec()
+    }
+
+    fn run<'a>(&'a self, args: ToolArgs, context: ToolRunContext) -> ToolFuture<'a> {
+        self.0.run(args, context)
+    }
+
+    fn concurrency_safe(&self) -> bool {
+        true
+    }
 }
 
 /// The closure a [`tool_fn`] tool runs.

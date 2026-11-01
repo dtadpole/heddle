@@ -58,6 +58,9 @@ pub struct SessionMeta {
     /// How deep in a delegation chain it is; a root is 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_depth: Option<u32>,
+    /// The agent preset it runs under (inventory A96), which a delegated child inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// Every other field, kept as read.
     #[serde(flatten)]
     pub rest: serde_json::Map<String, serde_json::Value>,
@@ -94,6 +97,9 @@ pub struct CreateSession {
     /// The team it belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team_id: Option<String>,
+    /// The agent preset it runs under (inventory A96).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     /// An id chosen by the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -111,7 +117,7 @@ pub struct SurfaceView {
 }
 
 /// What a round's context is prepared for. Mirror of the options of `heddle_context`'s `prepare`/`assemble`.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PrepareOptions {
     /// The conversation's folder, where instruction files are found.
     pub cwd: PathBuf,
@@ -123,6 +129,9 @@ pub struct PrepareOptions {
     pub tools: Vec<ToolSpec>,
     /// A system prompt for a session that has none.
     pub system: Option<String>,
+    /// The turn's stop token (#154): a Stop or a shutdown cancels the automatic compaction's summary call, and nothing
+    /// lands. `None` outside a turn, and for `assemble`, which calls no model.
+    pub cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[cfg(test)]
@@ -188,11 +197,12 @@ mod tests {
     #[test]
     fn session_meta_reads_delegation_fields_and_keeps_the_rest() {
         let meta: SessionMeta = serde_json::from_str(
-            r#"{"id":"c","parentSession":"p","origin":"subagent","delegationDepth":1,"turns":2}"#,
+            r#"{"id":"c","parentSession":"p","origin":"subagent","delegationDepth":1,"preset":"reader","turns":2}"#,
         )
         .unwrap();
         assert_eq!(meta.parent_session.as_deref(), Some("p"));
         assert_eq!(meta.delegation_depth, Some(1));
+        assert_eq!(meta.preset.as_deref(), Some("reader"));
         assert_eq!(meta.rest["turns"], 2);
     }
 }

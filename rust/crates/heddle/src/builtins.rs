@@ -55,12 +55,28 @@ pub enum Builtin {
     Todo,
     /// `src/plugins/todo-tool.ts`.
     TodoTool,
+    /// `src/questions/service.ts`.
+    Questions,
+    /// `src/plugins/questions-tool.ts`.
+    QuestionsTool,
     /// `src/plugins/turns.ts`.
     Turns,
+    /// `src/plugins/locale.ts`: the interface language a person chose (issue #80).
+    Locale,
+    /// `src/plugins/presets.ts`: the agent presets (inventory A96).
+    Presets,
     /// `src/plugins/team.ts`.
     Team,
+    /// `src/plugins/schedule.ts`.
+    Schedule,
+    /// `src/plugins/jobs.ts`.
+    Jobs,
     /// `src/plugins/tools.ts`.
     Tools,
+    /// `src/commands/service.ts`: the slash-command layer (developer-three).
+    Commands,
+    /// `src/plan/service.ts`: plan mode (developer-three).
+    Plan,
 }
 
 /// One built-in: the module it stands for, the crate that implements it, and its service wiring.
@@ -220,6 +236,24 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         "heddle-todo",
     ),
     spec(
+        Builtin::Questions,
+        "questions/service",
+        "questions",
+        "questions",
+        Some("questions"),
+        &["session"],
+        "heddle-questions",
+    ),
+    spec(
+        Builtin::QuestionsTool,
+        "plugins/questions-tool",
+        "questions-tool",
+        "questions-tool",
+        None,
+        &["questions", "tools"],
+        "heddle-questions",
+    ),
+    spec(
         Builtin::Turns,
         "plugins/turns",
         "turns",
@@ -227,6 +261,24 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         Some("turns"),
         &[],
         "heddle-agent",
+    ),
+    spec(
+        Builtin::Locale,
+        "plugins/locale",
+        "locale",
+        "locale",
+        Some("locale"),
+        &[],
+        "heddle-config",
+    ),
+    spec(
+        Builtin::Presets,
+        "plugins/presets",
+        "presets",
+        "presets",
+        Some("presets"),
+        &[],
+        "heddle-config",
     ),
     spec(
         Builtin::Team,
@@ -238,6 +290,24 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         "heddle-team",
     ),
     spec(
+        Builtin::Schedule,
+        "plugins/schedule",
+        "schedule",
+        "schedule",
+        Some("schedule"),
+        &["session", "model", "tools", "sandbox", "context"],
+        "heddle-schedule",
+    ),
+    spec(
+        Builtin::Jobs,
+        "plugins/jobs",
+        "jobs",
+        "jobs",
+        Some("jobs"),
+        &["session", "model", "tools", "sandbox", "context"],
+        "heddle-jobs",
+    ),
+    spec(
         Builtin::Tools,
         "plugins/tools",
         "tools",
@@ -245,6 +315,24 @@ pub const BUILTINS: &[BuiltinSpec] = &[
         Some("tools"),
         &["approvals", "sandbox", "session"],
         "heddle-tools",
+    ),
+    spec(
+        Builtin::Commands,
+        "commands/service",
+        "commands",
+        "commands",
+        Some("commands"),
+        &["session"],
+        "heddle-commands",
+    ),
+    spec(
+        Builtin::Plan,
+        "plan/service",
+        "plan",
+        "plan",
+        Some("plan"),
+        &["session", "commands", "tools"],
+        "heddle-plan",
     ),
 ];
 
@@ -413,12 +501,24 @@ impl Catalog for BuiltinCatalog {
             ComponentRef::Builtin(Builtin::TodoTool) => {
                 Some(Box::new(crate::adapters::TodoToolComponent))
             }
+            ComponentRef::Builtin(Builtin::Questions) => {
+                Some(Box::new(crate::adapters::QuestionsComponent))
+            }
+            ComponentRef::Builtin(Builtin::QuestionsTool) => {
+                Some(Box::new(crate::adapters::QuestionsToolComponent))
+            }
             ComponentRef::Builtin(Builtin::Goal) => Some(Box::new(crate::adapters::GoalComponent)),
             ComponentRef::Builtin(Builtin::GoalTool) => {
                 Some(Box::new(crate::adapters::GoalToolComponent))
             }
             ComponentRef::Builtin(Builtin::Turns) => {
                 Some(Box::new(crate::adapters::TurnsComponent))
+            }
+            ComponentRef::Builtin(Builtin::Locale) => {
+                Some(Box::new(crate::adapters::LocaleComponent))
+            }
+            ComponentRef::Builtin(Builtin::Presets) => {
+                Some(Box::new(crate::adapters::PresetsComponent))
             }
             ComponentRef::Builtin(Builtin::SubagentTool) => {
                 Some(Box::new(crate::adapters::SubagentToolComponent))
@@ -427,6 +527,14 @@ impl Catalog for BuiltinCatalog {
                 Some(Box::new(crate::adapters::GoalDriverComponent))
             }
             ComponentRef::Builtin(Builtin::Team) => Some(Box::new(crate::adapters::TeamComponent)),
+            ComponentRef::Builtin(Builtin::Schedule) => Some(Box::new(
+                crate::adapters::ScheduleComponent::new(self.env.clone()),
+            )),
+            ComponentRef::Builtin(Builtin::Commands) => {
+                Some(Box::new(crate::adapters::CommandsComponent))
+            }
+            ComponentRef::Builtin(Builtin::Plan) => Some(Box::new(crate::adapters::PlanComponent)),
+            ComponentRef::Builtin(Builtin::Jobs) => Some(Box::new(crate::adapters::JobsComponent)),
             ComponentRef::Builtin(Builtin::Context) => Some(Box::new(
                 crate::adapters::ContextComponent::new(self.env.clone()),
             )),
@@ -469,6 +577,18 @@ impl ComponentCatalog for BuiltinCatalog {
             ComponentRef::Unresolved(name) => {
                 SchemaLookup::Unresolvable(format!("no built-in or outside path is named '{name}'"))
             }
+        }
+    }
+
+    /// A built-in's form projection: the one generated from its TypeScript `Config`, so the settings view answers
+    /// the same descriptor as the TypeScript build (#123). An outside component keeps its manifest's plain schema.
+    fn form(&self, row: &EntryRow, anchor: Option<&Path>) -> Option<serde_json::Value> {
+        let resolved_against = anchor.unwrap_or(Path::new("."));
+        match resolve_component(&row.component(resolved_against)) {
+            ComponentRef::Builtin(builtin) => {
+                heddle_config::builtin_form(builtin.spec().module, &self.env)
+            }
+            _ => None,
         }
     }
 }
@@ -540,6 +660,82 @@ mod tests {
             assert!(
                 BUILTINS.iter().any(|entry| entry.module == module),
                 "no built-in for src/{module}.ts"
+            );
+        }
+    }
+
+    /// The binary resolves every row of the default profile to a built-in, so a row it has no adapter for fails
+    /// every CLI turn ("nothing answers for …"). This boots `heddle.patch.yml` as it is, through this catalog, in a
+    /// scratch home, and asks that no row failed and none is left pending.
+    #[test]
+    fn the_default_profile_boots_with_every_row_active() {
+        let home = scratch("default-profile");
+        let profile = home.join("profiles").join("dev");
+        std::fs::create_dir_all(&profile).expect("the profile directory");
+        std::fs::write(profile.join("cordis.yml"), "[]\n").expect("the base layer");
+        std::fs::write(
+            profile.join("heddle.patch.yml"),
+            include_str!("../../../../heddle.patch.yml"),
+        )
+        .expect("the default profile's rows");
+        let env = Env::from_pairs([
+            ("HEDDLE_HOME", home.to_string_lossy().into_owned()),
+            ("HOME", home.to_string_lossy().into_owned()),
+        ]);
+        let options = crate::boot::BootOptions {
+            layers: heddle_config::LayerOptions {
+                profile: Some("dev".to_owned()),
+                ..heddle_config::LayerOptions::default()
+            },
+            overrides: Vec::new(),
+            target: "heddle".to_owned(),
+            env: env.clone(),
+        };
+        let boot = crate::boot::boot(&options, &BuiltinCatalog::new(env, home.clone()))
+            .expect("the default profile composes");
+        let ids: Vec<&str> = boot.entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert!(
+            ids.len() >= 16,
+            "the default profile names its rows: {ids:?}"
+        );
+        let unhealthy: Vec<String> = boot
+            .entries
+            .iter()
+            .filter(|entry| entry.state != crate::boot::FiberState::Active)
+            .map(|entry| {
+                format!(
+                    "{} is {}: {}",
+                    entry.id,
+                    entry.state.name(),
+                    entry.error.as_deref().unwrap_or("waiting")
+                )
+            })
+            .collect();
+        assert!(unhealthy.is_empty(), "{unhealthy:#?}");
+        // Every row that provides a service provided it: `plan` and `commands` among them when the profile has them.
+        for entry in BUILTINS {
+            if let (Some(provided), true) = (entry.provides, ids.contains(&entry.bare)) {
+                assert!(
+                    boot.services.provides(provided),
+                    "{} provides {provided}",
+                    entry.bare
+                );
+            }
+        }
+        boot.dispose();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn every_builtin_has_an_adapter_in_the_binarys_catalog() {
+        let catalog = BuiltinCatalog::default();
+        for entry in BUILTINS {
+            assert!(
+                catalog
+                    .component(&ComponentRef::Builtin(entry.builtin))
+                    .is_some(),
+                "{:?} has no adapter",
+                entry.builtin
             );
         }
     }

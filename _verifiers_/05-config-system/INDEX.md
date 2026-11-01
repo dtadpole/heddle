@@ -29,6 +29,23 @@ files so the check states exactly what a tree is. It covers composition and orde
 winning, includes, include cycles, both environment reference shapes, a missing reference, a bad value,
 a patch against a missing row, provenance, and an unknown profile.
 
+`check-cli-catalog.mjs` judges the **shipped** profile (the repository's own `cordis.yml` and `heddle.patch.yml`,
+booted from the repository root) through its command line: that `goal <session> --json`, `tools --json` and
+`--turn … --json` print their JSON document alone on stdout, parsed whole rather than by `parseJson`'s upward scan;
+that `tools --json` lists `create_goal`, `get_goal`, `update_goal` and `todo_write`, the verbs a web turn offers; and
+that a scripted `--turn` calling `get_goal` gets the tool's answer rather than `UNKNOWN_TOOL`. It belongs here
+because it judges what the shipped tree composes to and what the command line that boots it prints: the tools row's
+allow list, which the command line applies and `heddle web` does not, had not been given the goal and todo tools,
+and the plugins' boot lines reached `--json` stdout ahead of the document.
+
+`check-plugin-inventory.mjs` judges `GET /api/plugin-inventory`, DSH's read-only `pluginInventory/list`, on a
+server booted from the shipped tree with its row names left relative: one entry per row in the tree's order, with
+exactly DSH's four fields; the module name as the layer wrote it (`./src/plugins/session.ts`), never the scratch
+home, the checkout or a `file://` URL; a disabled row listed disabled with phase `null`; a row whose configuration
+its schema refuses listed `failed`; every other row enabled and `active`; no `managementAvailable`; and the route
+behind the door (`401` unsigned) and read-only (`POST` is the plain `404`). It belongs here because the inventory
+is a view of the composed tree.
+
 ## Running it
 
 ```bash

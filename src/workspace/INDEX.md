@@ -1,6 +1,6 @@
 ---
 title: Workspace
-version: 1.1.0
+version: 1.2.0
 description: Workspaces as target folders with records, the sessions grouped under them, and how a root came to exist.
 grounded_in:
   - source: human-authored
@@ -26,6 +26,9 @@ folder** plus the record that says it is one:
   folder **promotes** its record rather than writing a second one for the same path.
 - Order lives in `workspaceIds` rather than in a field on each record, and a version-1 file that
   still carries the abandoned `sessionIds` array is read without it and written back without it.
+  A new root is prepended; `insertBefore()` moves one root before another, or last, which is DSH's
+  `workspace/insertBefore` and what the page's drag asks for (`POST /api/workspaces/insertBefore`).
+  It rewrites that array and nothing else, so the file keeps the shape both builds read.
 
 `remove()` exists because unregistering is not the same as forgetting: `bootstrap` re-creates a root
 for any folder that has sessions and no owner, so a removed root that still holds sessions would come

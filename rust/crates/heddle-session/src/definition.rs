@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 use crate::clock::parse_iso;
 use crate::error::SessionError;
 use crate::event::SessionHandle;
+use crate::title_text::clean_session_title;
 
 /// The type folder a branch's sessions live in. The tree never draws it; it hoists what is inside.
 pub const SESSIONS_FOLDER: &str = "_sessions_";
@@ -200,6 +201,21 @@ folder is a filing decision rather than something to navigate — and the branch
 for, not the drawer the session is kept in.
 ";
 
+/// Refuse a folder that is not an existing directory, naming it by its name ([`SessionError::MissingFolder`],
+/// `session/folder-missing`); it never creates one (#56).
+///
+/// DSH validates a session's working directory before every step's prompt and, when the session's original
+/// directory is gone as well, fails with `working-directory: directory does not exist` rather than bringing it
+/// back (dsh-working-directory lib/index.js:87-102, :123-131). A heddle session's recorded folder is its original
+/// directory, so this is that check, with heddle's sentence (`requireFolder` in the TypeScript build).
+pub fn require_folder(folder: impl AsRef<Path>) -> Result<(), SessionError> {
+    let folder = folder.as_ref();
+    match std::fs::metadata(folder) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        _ => Err(SessionError::missing_folder(&folder.to_string_lossy())),
+    }
+}
+
 /// Create a branch's `_sessions_` folder and its `INDEX.md` when they are not there yet; answers with
 /// the folder.
 pub fn ensure_sessions_folder(branch: &str) -> Result<String, SessionError> {
@@ -238,8 +254,14 @@ pub fn write_session_definition(
         "createdAt".to_string(),
         Value::String(options.created_at.clone()),
     );
+    // The store's rule for a title (`title_text`), so the definition and the record name the session alike.
+    let title = options
+        .title
+        .as_deref()
+        .map(clean_session_title)
+        .filter(|title| !title.is_empty());
     for (key, value) in [
-        ("title", options.title.clone()),
+        ("title", title),
         ("endpoint", options.endpoint.clone()),
         ("model", options.model.clone()),
         ("reasoningEffort", options.reasoning_effort.clone()),
@@ -294,11 +316,12 @@ pub fn update_session_definition(dir: &str, title: Option<&str>) -> Result<bool,
         return Ok(false);
     };
     if let Some(title) = title {
-        let trimmed = title.trim();
-        if trimmed.is_empty() {
+        // Cleaned as the store cleans a rename (`title_text`); nothing visible left deletes the key.
+        let cleaned = clean_session_title(title);
+        if cleaned.is_empty() {
             current.remove("title");
         } else {
-            current.set("title", Value::String(trimmed.to_string()));
+            current.set("title", Value::String(cleaned));
         }
     }
     let file = Path::new(dir).join(DEFINITION_FILE);

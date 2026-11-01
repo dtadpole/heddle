@@ -42,6 +42,8 @@ pub struct SessionMetaView {
     pub model: Option<String>,
     /// The team this session belongs to (its Lead's id), when it is a teammate's.
     pub team_id: Option<SessionId>,
+    /// The agent preset this session runs under (inventory A96), which a teammate takes from its Lead.
+    pub preset: Option<String>,
 }
 
 /// The metadata a teammate's session is created with: the attribution DSH's `childSessionMeta` writes, plus
@@ -108,6 +110,10 @@ pub trait TeamStore: Send + Sync {
     /// Give `child` the permission mode `parent` recorded, if it recorded one (`inheritRecordedMode`), so a
     /// read-only team cannot spawn a teammate that writes.
     fn inherit_recorded_mode(&self, parent: &str, child: &str) -> Result<(), PortError>;
+
+    /// Record `preset` as the session's agent preset only when it has none (`SessionStore.recordPreset`, inventory
+    /// A96): how a teammate takes its Lead's preset, so a narrowed Lead cannot widen its team's tools.
+    fn record_preset(&self, session: &str, preset: &str) -> Result<(), PortError>;
 }
 
 /// The rest of a turn after [`TeamRunner::begin`] returned. An `Err` is recorded in the session as

@@ -182,11 +182,6 @@ pub fn resolve_endpoint(requested: Option<&str>, models: &ModelService) -> Resul
     heddle_llm::command::turn_endpoint(requested, &models.names(), models.nominated().as_deref())
 }
 
-/// The prompt's first sixty characters, the title a new session is given.
-fn title_of(prompt: &str) -> String {
-    prompt.chars().take(60).collect()
-}
-
 async fn turn(
     args: &Args,
     context: &Context<'_>,
@@ -220,8 +215,25 @@ async fn turn(
 
     let endpoint = resolve_endpoint(args.endpoint.as_deref(), context.models)?;
 
-    // A turn asks this folder's session; `--resume` addresses one by id from anywhere.
+    // A turn asks this folder's session; `--resume` addresses one by id from anywhere. A new session is born
+    // untitled, as the turn route's is (#68): its first message writes the fallback name and the session layer asks
+    // the model for the title (heddle_session::title).
     let folder = context.cwd.to_string_lossy().into_owned();
+    // A new session that names neither an endpoint nor a model starts with the configured default selection (the
+    // model row's defaultModel and defaultEffort, checked against the default endpoint; DSH parity A104). It is
+    // recorded when the session is created, so a later change of default leaves this session as it is, and a session
+    // that already exists keeps what it had. The TypeScript build's `src/cli.ts`.
+    let known: std::collections::HashSet<String> = context
+        .sessions
+        .list()
+        .iter()
+        .map(|meta| meta.id().to_owned())
+        .collect();
+    let defaults = if args.endpoint.is_none() && args.model.is_none() && args.resume.is_none() {
+        context.models.default_selection()
+    } else {
+        heddle_llm::DefaultSelection::default()
+    };
     let handle = match &args.resume {
         Some(resume) => context.sessions.start(StartOptions {
             resume: Some(resume.clone()),
@@ -232,8 +244,8 @@ async fn turn(
             OpenAtOptions {
                 fresh: args.fresh,
                 endpoint: Some(endpoint.clone()),
-                model: args.model.clone(),
-                title: Some(title_of(prompt)),
+                model: args.model.clone().or_else(|| defaults.model.clone()),
+                reasoning_effort: defaults.reasoning_effort.clone(),
                 ..OpenAtOptions::default()
             },
         ),
@@ -256,7 +268,14 @@ async fn turn(
 
     let mut options = RunTurnOptions::new(handle.clone(), endpoint.clone(), prompt);
     options.system = args.system.clone();
-    options.model = args.model.clone();
+    let created = !known.contains(&handle.id);
+    options.model = args
+        .model
+        .clone()
+        .or_else(|| created.then(|| defaults.model.clone()).flatten());
+    if created {
+        options.reasoning_effort = defaults.reasoning_effort.clone();
+    }
     if let Some(rounds) = args.max_rounds {
         options.max_rounds = RoundLimit::Rounds(rounds);
     }
@@ -371,7 +390,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::adapters::tests::{SessionMessages, scripted_service, sessions_at};
+    use crate::adapters::tests::{ScratchDir, SessionMessages, scripted_service, sessions_at};
     use crate::adapters::{LlmModel, Sessions};
     use crate::ports::NoTurnHooks;
     use crate::turns::TurnRegistry;
@@ -383,19 +402,14 @@ mod tests {
         models: Arc<ModelService>,
         sessions: Arc<SessionService>,
         runtime: AgentRuntime,
+        /// The scratch folders behind `work`, the step file and the sessions, removed when the harness drops.
+        _scratch: Vec<ScratchDir>,
     }
 
-    fn scratch(label: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "heddle-agent-command-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.canonicalize().unwrap()
+    /// A scratch workspace (its canonical path) and the guard that removes it.
+    fn scratch(label: &str) -> (PathBuf, ScratchDir) {
+        let dir = ScratchDir::new(&format!("command-{label}"));
+        (dir.path().canonicalize().unwrap(), dir)
     }
 
     fn sandbox_at(root: &Path) -> Arc<SandboxService> {
@@ -414,9 +428,9 @@ mod tests {
     }
 
     fn harness(label: &str, steps: serde_json::Value, allow: &[&str]) -> Harness {
-        let work = scratch(label);
-        let sessions = sessions_at(label);
-        let models = scripted_service(label, steps);
+        let (work, work_dir) = scratch(label);
+        let (sessions, sessions_dir) = sessions_at(label);
+        let (models, models_dir) = scripted_service(label, steps);
         let gates = gates_over(
             sandbox_at(&work),
             Arc::new(ApprovalService::new(ApprovalsConfig::default())),
@@ -438,12 +452,14 @@ mod tests {
             tools: Arc::new(tools),
             hooks: Arc::new(NoTurnHooks),
             turns: Some(TurnRegistry::new()),
+            presets: None,
         };
         Harness {
             work,
             models,
             sessions,
             runtime,
+            _scratch: vec![work_dir, sessions_dir, models_dir],
         }
     }
 
@@ -825,10 +841,73 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_new_sessions_title_is_the_prompts_first_sixty_characters() {
-        assert_eq!(title_of("short"), "short");
-        assert_eq!(title_of(&"é".repeat(70)).chars().count(), 60);
+    /// A title model that answers at once, as the scripted endpoint's `session-title` step would, or fails.
+    struct AnsweringTitles(Result<&'static str, &'static str>);
+
+    impl heddle_session::TitleModel for AnsweringTitles {
+        fn generate(&self, request: heddle_llm::GenerateRequest, done: heddle_session::TitleDone) {
+            assert_eq!(
+                request.purpose.as_deref(),
+                Some(heddle_session::SESSION_TITLE_PURPOSE)
+            );
+            done(match self.0 {
+                Ok(text) => Ok(heddle_session::TitleAnswer {
+                    text: text.to_owned(),
+                    finish_reason: "stop".to_owned(),
+                    tool_calls: 0,
+                }),
+                Err(message) => Err(message.to_owned()),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_session_is_titled_from_its_first_prompt_as_a_blank_one_is() {
+        // #68: DSH writes no title when a session is created; dsh-session-title writes the fallback from the first
+        // eligible human message (lib/index.js:396-403, 620-648) and asks the first-prompt provider only for a session
+        // with no title yet (:387). `--turn` opened its session titled with the prompt's first sixty characters, so the
+        // coordinator saw a named session and asked nothing.
+        const PROMPT: &str = "Please summarise the quarterly revenue figures for the northern region and compare them with last year, thanks.";
+        let titled = harness("title", json!([{ "text": "an answer" }]), &[]);
+        titled.sessions.attach_titles(Arc::new(AnsweringTitles(Ok(
+            "**Northern revenue year on year**",
+        ))));
+        let (code, out, err) = titled
+            .run(&Args {
+                fresh: true,
+                ..turn(PROMPT)
+            })
+            .await;
+        assert_eq!(code, 0, "{out}{err}");
+        let meta = &titled.sessions.list()[0];
+        assert_eq!(
+            meta.title(),
+            Some("Northern revenue year on year"),
+            "the generated title replaced the fallback"
+        );
+
+        let failed = harness("title-failed", json!([{ "text": "an answer" }]), &[]);
+        failed
+            .sessions
+            .attach_titles(Arc::new(AnsweringTitles(Err("the title model is down"))));
+        let (code, _, _) = failed
+            .run(&Args {
+                fresh: true,
+                ..turn(PROMPT)
+            })
+            .await;
+        assert_eq!(code, 0);
+        let title = failed.sessions.list()[0].title().map(str::to_owned);
+        assert_eq!(
+            title.as_deref(),
+            Some(heddle_session::title_from(PROMPT).as_str()),
+            "a failed call leaves the fallback the first message wrote, cut at a word"
+        );
+        assert_ne!(
+            title,
+            Some(PROMPT.chars().take(60).collect::<String>()),
+            "not the prompt cut mid-word at sixty characters"
+        );
     }
 
     /// A writer whose bytes the test can read after the view wrote them.
@@ -862,13 +941,9 @@ mod tests {
             json!([{ "reasoning": "thinking", "text": "streamed answer" }]),
             &[],
         );
-        let root = std::env::temp_dir().join(format!(
-            "heddle-agent-command-stream-store-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = ScratchDir::new("command-stream-store");
         let config = heddle_session::SessionConfig {
-            root: Some(root.to_str().unwrap().to_owned()),
+            root: Some(root.path().to_str().unwrap().to_owned()),
         };
         let sessions = Arc::new(SessionService::new(
             &config,

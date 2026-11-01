@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { basename, join } from 'node:path'
 
 import { canonicalPath } from '../paths.ts'
 import type { SessionHandle } from './store.ts'
+import { normalizeSessionTitle } from './title-text.ts'
 
 /**
  * The **definition** of one session, written into the folder it belongs to.
@@ -18,6 +19,74 @@ import type { SessionHandle } from './store.ts'
  * passes the linter like any other instance, and it sorts chronologically, so the newest session of a
  * branch is also the last one a listing shows.
  */
+
+/**
+ * A branch heddle may not write, so a session cannot be filed in it (issue #106).
+ *
+ * The definition is written into the branch, so a folder heddle cannot write fails there — and it failed with Node's raw
+ * `EACCES: permission denied, mkdir '<absolute path>'`, which the route answered as a `500 internal error`. This is the
+ * sentence instead, naming the folder by its name and never by its absolute path, with a code the route answers `400`
+ * beside it. DSH files no session in the folder, so it has no such refusal; the code is heddle's, in DSH's `session/`
+ * family, and the sentence follows DSH's file backend (`cannot write "<path>": …`, dsh-fs-local lib/index.js:495).
+ */
+export class SessionUnwritableError extends Error {
+  readonly code = 'session/unwritable'
+  /** The folder's name, as the sentence says it. */
+  readonly folder: string
+  constructor(folder: string) {
+    super(`cannot write to "${folder}": permission denied`)
+    this.name = 'SessionUnwritableError'
+    this.folder = folder
+  }
+}
+
+/** The refusal for a permission error met writing into `branch`; any other error is answered as it is. */
+export function unwritableIn(branch: string, error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code !== 'EACCES' && code !== 'EPERM') return error
+  const canonical = canonicalPath(branch)
+  return new SessionUnwritableError(basename(canonical) || canonical)
+}
+
+/**
+ * A session's folder that is no longer there: deleted or moved outside heddle, or replaced by a file (issue #56).
+ *
+ * Beside `SessionUnwritableError` and shaped like it: a code the routes answer `400` beside the sentence
+ * (`session/folder-missing`, heddle's, in DSH's `session/` family), and the folder named by its name, never by its absolute
+ * path (#106). The words are the ones #56 asked for. DSH has no such sentence: its turn fails with
+ * `working-directory: directory does not exist: "<path>"` (dsh-working-directory lib/index.js:123-131), and its create
+ * makes the folder instead. Recognised by **class, name or code**, as `SessionFlagError` is, because a route that misses it
+ * answers a refusal as a 500. The sentence and code are the Rust build's `SessionError::MissingFolder`, word for word.
+ */
+export class MissingFolderError extends Error {
+  readonly code = 'session/folder-missing'
+  /** The folder's name, as the sentence says it. */
+  readonly folder: string
+
+  constructor(folder: string) {
+    super(`This workspace's folder no longer exists: "${folder}"`)
+    this.name = 'MissingFolderError'
+    this.folder = folder
+  }
+}
+
+/**
+ * Refuse a folder that is not an existing directory, naming it; it never creates one.
+ *
+ * DSH validates a session's working directory before every step's prompt and, when the session's original directory is
+ * gone as well, fails with `working-directory: directory does not exist` rather than bringing it back
+ * (dsh-working-directory lib/index.js:87-102, :123-131). A heddle session's recorded folder is its original directory,
+ * so this is that check, with heddle's sentence.
+ */
+export function requireFolder(folder: string): void {
+  let directory = false
+  try {
+    directory = statSync(folder).isDirectory()
+  } catch {
+    directory = false
+  }
+  if (!directory) throw new MissingFolderError(basename(folder) || folder)
+}
 
 /** The type folder a branch's sessions live in. The tree never draws it — it hoists what is inside. */
 export const SESSIONS_FOLDER = '_sessions_'
@@ -142,12 +211,14 @@ export function writeSessionDefinition(
   const dir = join(ensureSessionsFolder(canonical), name)
   mkdirSync(dir, { recursive: true })
 
+  /** The store's rule for a title (`./title-text.ts`), so the definition and the record name the session alike. */
+  const title = options.title === undefined ? '' : normalizeSessionTitle(options.title)
   const fields: SessionDefinitionFields = {
     id: handle.id,
     log: handle.transcript,
     cwd: canonical,
     createdAt: options.createdAt,
-    ...(options.title !== undefined ? { title: options.title } : {}),
+    ...(title.length > 0 ? { title } : {}),
     ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
     ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
@@ -192,7 +263,8 @@ export function updateSessionDefinition(dir: string, patch: { readonly title?: s
   if (current === null) return false
   const next: SessionDefinitionFields = { ...current }
   if (patch.title !== undefined) {
-    const trimmed = patch.title.trim()
+    /** Cleaned as the store cleans a rename (`./title-text.ts`); nothing visible left deletes the key. */
+    const trimmed = normalizeSessionTitle(patch.title)
     if (trimmed.length === 0) delete (next as { title?: string }).title
     else (next as { title?: string }).title = trimmed
   }

@@ -6,6 +6,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   statSync,
   truncateSync,
@@ -19,7 +20,10 @@ import { zstdCompressSync } from 'node:zlib'
 
 import type { Chunk, ContentPart, Message } from '../llm/types.ts'
 import { workspaceKey } from './layout.ts'
-import { decodeTranscript, encodeFrame } from './transcript.ts'
+import { interruptedTurnClosers } from './repair.ts'
+import { SessionTitles } from './title.ts'
+import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
+import { normalizeSessionTitle } from './title-text.ts'
 
 /**
  * The session store.
@@ -108,11 +112,11 @@ export interface SessionMeta {
   readonly id: SessionId
   readonly created: string
   /**
-   * When the session was **last written to**, which is the age a row shows.
+   * When a **person last prompted or steered** the session, which is the age a row shows and what Last updated sorts by.
    *
-   * The reference's session rows are aged by their latest activity, not by their creation: a conversation that continues for
-   * an hour reads as live, while one created an hour ago and untouched reads as old. `created` is still kept for duration and
-   * ordering records; this field moves with the log.
+   * DSH's list dates a row `max(createdAt, lastPromptAt)` (dsh-api-session-controller/lib/index.js:2124-2125), where
+   * `lastPromptAt` is the time of the latest user-sourced `user/message`. So an answer, a tool result, a turn boundary or
+   * a harness-written message (one with a `source`) does not move it; absent until the first prompt, when `created` stands.
    */
   readonly updated?: string
   readonly cwd: string
@@ -157,6 +161,14 @@ export interface SessionMeta {
    * inside a teammate's turn finds it.
    */
   readonly teamId?: SessionId
+  /**
+   * The agent preset this session runs under (inventory A96), recorded when it is created and never changed.
+   *
+   * DSH's rule: a session keeps the preset it was created with, so editing a preset or the default affects sessions
+   * created afterwards. A session from before presets has none until its next turn records the current default
+   * (`recordPreset`), after which it keeps that one too.
+   */
+  readonly preset?: string
 }
 
 /** The default root, overridable so a check can use a scratch directory. */
@@ -280,12 +292,31 @@ export function isReplacementOp(
 }
 
 /**
+ * Whether an event ends a model step for the fold: the next request, or the turn's retry or end.
+ *
+ * A chunk run that never got its `done` (a stop, a failed stream) ends here, and a message held for the step
+ * boundary is placed.
+ */
+export function endsStep(type: string): boolean {
+  return type === 'model/request' || type.startsWith('turn/')
+}
+
+/**
  * Fold a log into its surface.
  *
  * The chunk rule is where this store's own choice meets the surface: heddle records **every**
  * streamed chunk as it arrives, so an interrupted answer is not lost, while DSH settles a stream
  * into one message. The fold resolves that by giving the surface one node per run — the seq of its
  * first chunk — and deriving the run's message from the chunks that follow.
+ *
+ * **A message that lands mid-step is placed at the step boundary** (#30). A steer, a subagent's settlement notice and
+ * a teammate's mail are written when they arrive, which can be while the model is still streaming. Placed where it
+ * landed, such a message closed the run: the rest of the step became a second assistant node after it, the next
+ * request ended with that assistant message, the provider read it as a prefix to continue (in thinking mode it
+ * refused it for want of its reasoning), and the model never saw its own reply before the message. DSH claims such
+ * input at the next step boundary. So a message that lands while a run is open is held. It is placed when the run
+ * closes, or, when the step called tools, once their results are placed, so a call and its result stay adjacent. A
+ * new request, the turn's end or a replacement places whatever is still held.
  */
 export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
   const nodes: number[] = []
@@ -293,10 +324,27 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
   let contentGeneration = 0
   let replaceGeneration = 0
   let openChunk: number | undefined
+  /** The tool calls of the open run. */
+  let runCalls = new Set<string>()
+  /** The calls of the run that closed last whose results are not all placed yet. */
+  let awaiting = new Set<string>()
+  /** Messages that landed mid-step, in arrival order. */
+  let held: number[] = []
+  const place = (seq: number): void => {
+    nodes.push(seq)
+    contentGeneration += 1
+  }
+  const release = (): void => {
+    for (const seq of held) place(seq)
+    held = []
+    awaiting = new Set()
+  }
 
   for (const event of events) {
     const op = event.surfaceOp as SurfaceOp | undefined
     if (isReplacementOp(op)) {
+      release()
+      runCalls = new Set()
       const startIdx = nodes.indexOf(op.startSeq)
       const endIdx = nodes.indexOf(op.endSeq)
       if (startIdx === -1 || endIdx < startIdx) {
@@ -312,29 +360,67 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
       openChunk = undefined
       continue
     }
-    if (isSurfaceEligible(event.type) && event.type !== 'assistant/chunk') {
-      // A `message` the person or the model produced, or a `context/note` the harness wrote: both
-      // take a position, and neither is a chunk run.
-      nodes.push(event.seq)
-      contentGeneration += 1
+    if (endsStep(event.type)) {
       openChunk = undefined
+      runCalls = new Set()
+      release()
+      continue
+    }
+    if (isSurfaceEligible(event.type) && event.type !== 'assistant/chunk') {
+      // A `message` the person or the model produced, or a `context/note` the harness wrote: both take a position,
+      // and neither is a chunk run. Mid-step, the position is the step boundary.
+      if (openChunk !== undefined) {
+        held.push(event.seq)
+        continue
+      }
+      if (awaiting.size > 0) {
+        const message = event.message as { readonly role?: string; readonly toolCallId?: string } | undefined
+        if (message?.role === 'tool' && typeof message.toolCallId === 'string' && awaiting.has(message.toolCallId)) {
+          place(event.seq)
+          awaiting.delete(message.toolCallId)
+          if (awaiting.size === 0) release()
+        } else {
+          held.push(event.seq)
+        }
+        continue
+      }
+      place(event.seq)
       continue
     }
     if (event.type === 'assistant/chunk') {
       if (openChunk === undefined) {
-        nodes.push(event.seq)
-        contentGeneration += 1
+        place(event.seq)
         openChunk = event.seq
+        runCalls = new Set()
       }
       const chunk = event.chunk as Chunk | undefined
-      if (chunk?.type === 'done') openChunk = undefined
+      if (chunk?.type === 'tool-call') runCalls.add(chunk.id)
+      if (chunk?.type === 'done') {
+        openChunk = undefined
+        if (runCalls.size > 0) awaiting = runCalls
+        else release()
+        runCalls = new Set()
+      }
     }
   }
+  // The log may end mid-step (a turn still streaming, or its tools still running): what is held is shown at the end,
+  // and the next fold, over a longer log, places it at the boundary.
+  release()
 
   return { nodes, contentGeneration, replaceGeneration, replacements }
 }
 
-/** The message one node derives to, or null when it produces none. */
+/**
+ * The message one node derives to, or null when it produces none.
+ *
+ * A chunk run derives **one part per block, not one per delta**: consecutive `text-delta`s join into one `text` part
+ * and consecutive `reasoning-delta`s into one `reasoning` part, while a `tool-call` (or a switch between text and
+ * reasoning) starts the next part. That is DSH's assembly — `BlockAssembler.push` appends every delta of a block to one
+ * partial (`partial.text += chunk.text`, dsh-llm `lib/types/assembler.js:46-52`) — and it matters on the wire: the chat
+ * adapter keeps separate text blocks apart with a newline, so a part per delta handed the model its own earlier answer
+ * broken at every point where the stream split it (live-testing draft developer-five-2). The log itself still holds
+ * one event per chunk; only the derivation coalesces. The Rust twin is `derive_message` in heddle-session `surface.rs`.
+ */
 export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: number): Message | null {
   const event = bySeq.get(seq)
   if (event === undefined) return null
@@ -345,13 +431,25 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
   }
   if (event.type !== 'assistant/chunk') return null
   const content: ContentPart[] = []
+  /** Append a delta to the part it continues — the last one, when it is the same kind — or start a new part. */
+  const delta = (type: 'text' | 'reasoning', text: string): void => {
+    const last = content.at(-1)
+    if (last !== undefined && last.type === type) content[content.length - 1] = { type, text: last.text + text }
+    else content.push({ type, text })
+  }
   for (let index = seq; ; index += 1) {
     const next = bySeq.get(index)
-    if (next === undefined || next.type !== 'assistant/chunk') break
+    if (next === undefined) break
+    if (next.type !== 'assistant/chunk') {
+      // A message held for the step boundary, an inbox splice or any other note written while the model streamed is
+      // not part of its step (#30): the step runs to its `done`, or to a new request or the turn's end.
+      if (endsStep(next.type)) break
+      continue
+    }
     const chunk = next.chunk as Chunk | undefined
     if (chunk === undefined) continue
-    if (chunk.type === 'text-delta') content.push({ type: 'text', text: chunk.text })
-    else if (chunk.type === 'reasoning-delta') content.push({ type: 'reasoning', text: chunk.text })
+    if (chunk.type === 'text-delta') delta('text', chunk.text)
+    else if (chunk.type === 'reasoning-delta') delta('reasoning', chunk.text)
     else if (chunk.type === 'tool-call') content.push({ type: 'tool-call', id: chunk.id, name: chunk.name, arguments: chunk.arguments })
     else if (chunk.type === 'done') break
   }
@@ -392,6 +490,68 @@ export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
    * completed event for the record), so an answer is present when either form is there.
    */
   return inherited.some((event) => event.type === 'assistant/completed')
+}
+
+/**
+ * Whether a fork inherits an event of this type.
+ *
+ * DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a child
+ * here inherits the same — with four exceptions, each an event that belongs to the **source** rather than to the
+ * conversation, and that this store has no inherited-prefix mark to neutralise (DSH passes `inheritedEventCount` to every
+ * projection, dsh-session/lib/index.js:1418-1426; heddle's folds read the whole log):
+ *
+ * - `session/created`: the child writes its own, with its own clock.
+ * - `transcript/repaired`: it reports bytes cut from the source's file, not the child's.
+ * - `goal/change`: heddle arms an active goal whenever a process folds one (src/goal/service.ts, `activationOf`), so an
+ *   inherited goal would start spending rounds in the branch; DSH disarms it after a fork.
+ * - `team/*`: the team journal names the source as its Lead (`teamId`), and `foldTeam` refuses a foreign one, so a
+ *   copied journal would break the child's team tools.
+ */
+export function inheritedByFork(type: string): boolean {
+  return type !== 'session/created' && type !== 'transcript/repaired' && type !== 'goal/change' && !type.startsWith('team/')
+}
+
+/** A recorded field that names one other event by its seq, in a log-only record (a compaction's own bookkeeping). */
+const SEQ_FIELDS = ['fromSeq', 'throughSeq', 'summarySeq', 'replacementSeq'] as const
+/** A recorded field that names several events by seq. */
+const SEQ_LIST_FIELDS = ['sourceEventSeqs', 'shadowedSeqs'] as const
+
+/**
+ * The events a fork's child is seeded with: the inherited ones, as they were recorded, numbered on from `firstSeq`.
+ *
+ * Each event keeps its own time and every field in its written order, so the child's view, its surface and its
+ * model context are the source's: a streamed answer stays chunks (its reasoning a reasoning block, a call a named call),
+ * and a compaction stays a summary standing in for turns the child still shows (#52, #55). The child's own
+ * `session/created` takes seq 0 and so does the source's, so the seqs normally carry over unchanged and the
+ * events are copied byte for byte. When an event is left out (see {@link inheritedByFork}) the ones after it move
+ * down, and every field that names a seq is renumbered with them — the surface's `surfaceOp` range above all, which
+ * the fold resolves by position, plus the compaction records' `fromSeq`, `throughSeq`, `summarySeq`,
+ * `replacementSeq`, `shadowedSeqs`, `shadowedRange` and a replacement's `sourceEventSeqs`. A seq that names no
+ * inherited event is left as written. The Rust twin is `fork_seed` in heddle-session `surface.rs`.
+ */
+export function forkSeed(inherited: readonly SessionEvent[], firstSeq: number): readonly SessionEvent[] {
+  const kept = inherited.filter((event) => inheritedByFork(event.type))
+  if (kept.every((event, index) => event.seq === firstSeq + index)) return kept
+  const renumbered = new Map<number, number>()
+  kept.forEach((event, index) => renumbered.set(event.seq, firstSeq + index))
+  const moved = (seq: unknown): unknown => (typeof seq === 'number' ? (renumbered.get(seq) ?? seq) : seq)
+  /** Renumber the named fields that are present, in place in a copy, so no field moves and none is added. */
+  const renumber = (record: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> => {
+    const copy = { ...record }
+    for (const key of keys) if (key in copy) copy[key] = moved(copy[key])
+    return copy
+  }
+  const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+  return kept.map((event, index) => {
+    const copy = renumber({ ...event, seq: firstSeq + index }, SEQ_FIELDS)
+    for (const key of SEQ_LIST_FIELDS) {
+      const list = copy[key]
+      if (Array.isArray(list)) copy[key] = list.map(moved)
+    }
+    if (isRecord(copy.surfaceOp) && copy.surfaceOp.op === 'replace') copy.surfaceOp = renumber(copy.surfaceOp, ['startSeq', 'endSeq'])
+    if (isRecord(copy.shadowedRange)) copy.shadowedRange = renumber(copy.shadowedRange, ['start', 'end'])
+    return copy as SessionEvent
+  })
 }
 
 /** Index a log by seq, which every derivation over it wants. */
@@ -437,6 +597,30 @@ export class SessionFlagError extends Error {
 }
 
 /**
+ * Whether a session, or a session above it in its **subagent** lineage, is archived — the question DSH's archived-session
+ * gate asks before every model step (`underArchivedSession`, dsh-api-session-controller lib/index.js:2528-2541).
+ *
+ * The walk follows `parentSession` only through `origin: 'subagent'` records, as DSH's follows its durable header: a
+ * delegated child of an archived session runs no step either, while a fork (a `parentSession` with no origin) is an
+ * independent conversation. A parent whose record cannot be read ends the walk unarchived, and a cycle ends it too.
+ * Pure over a lookup so a caller can judge it without a store.
+ */
+export function underArchivedSession(
+  lookup: (id: SessionId) => Pick<SessionMeta, 'id' | 'archived' | 'origin' | 'parentSession'> | null | undefined,
+  id: SessionId,
+): boolean {
+  let meta = lookup(id)
+  const visited = new Set<string>()
+  while (meta !== null && meta !== undefined && !visited.has(meta.id)) {
+    if (meta.archived === true) return true
+    visited.add(meta.id)
+    if (meta.origin !== 'subagent' || meta.parentSession === undefined) return false
+    meta = lookup(meta.parentSession)
+  }
+  return false
+}
+
+/**
  * A write refused because another process holds the session's writer lock.
  *
  * The sentence is DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and the
@@ -454,6 +638,61 @@ export class SessionOwnedError extends Error {
     this.name = 'SessionAlreadyOwnedError'
     this.id = id
     this.pid = pid
+  }
+}
+
+/**
+ * A session log the store cannot read: a line that is not JSON, or not a session event.
+ *
+ * The message keeps the store's old shape, `<log>:<line> is not valid JSON — <detail>`, with the log named by its
+ * **file name** alone: the message reaches HTTP answers (a turn's `error` frame, a route's `500`), and the absolute
+ * path put the store root, home directory included, into them (#130, measured on both builds). `path` keeps the
+ * absolute path, so the server's own line names the file whole (`heddle session: skipped unreadable log …`).
+ */
+export class SessionLogUnreadableError extends Error {
+  readonly path: string
+  readonly reason: string
+
+  constructor(path: string, line: number, problem: string) {
+    super(`${basename(path)}:${line} ${problem}`)
+    this.name = 'SessionLogUnreadableError'
+    this.path = path
+    this.reason = `line ${line} ${problem}`
+  }
+}
+
+/** The line the store prints when it leaves a session out because its log cannot be read; the Rust store prints the same. */
+export function skippedLogLine(path: string, reason: string): string {
+  return `heddle session: skipped unreadable log ${path}: ${reason}`
+}
+
+/**
+ * Judge a log file by its first record ({@link judgeLogHeader}), reading only as far as that record ends.
+ *
+ * A file that cannot be opened is judged as `readLog` reads it, an empty session: the store's rule for a log not
+ * written yet, and the reason a session whose log is missing entirely is still listed and still openable. The folder
+ * tree asks it too, of the log a session definition names (`./tree.ts`).
+ */
+export function readLogHeader(path: string): LogHeader {
+  let fd: number
+  try {
+    fd = openSync(path, 'r')
+  } catch {
+    return { kind: 'readable' }
+  }
+  try {
+    let head = Buffer.alloc(0)
+    const chunk = Buffer.alloc(16 * 1024)
+    for (;;) {
+      const read = readSync(fd, chunk, 0, chunk.length, null)
+      if (read > 0) head = Buffer.concat([head, chunk.subarray(0, read)])
+      const verdict = judgeLogHeader(head, read === 0)
+      if (verdict.kind !== 'incomplete') return verdict
+    }
+  } catch {
+    return { kind: 'readable' }
+  } finally {
+    closeSync(fd)
   }
 }
 
@@ -515,12 +754,15 @@ function removeOwnLock(path: string): void {
  * file naming a pid that no longer exists, and that lock is removed and taken rather than blocking the session
  * forever. A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled writer's
  * resumed appends tear the log.
+ *
+ * Answers whether this process **took** the lock now (true) or already held it through another store (false): only a
+ * fresh take is a write-open after whatever wrote the session before, which is when an unfinished turn is closed.
  */
-function acquireWriterLock(path: string, id: string): void {
+function acquireWriterLock(path: string, id: string): boolean {
   const count = heldByProcess.get(path)
   if (count !== undefined) {
     heldByProcess.set(path, count + 1)
-    return
+    return false
   }
   const take = (): void => {
     heldByProcess.set(path, 1)
@@ -540,7 +782,7 @@ function acquireWriterLock(path: string, id: string): void {
         closeSync(fd)
       }
       take()
-      return
+      return true
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
@@ -556,7 +798,7 @@ function acquireWriterLock(path: string, id: string): void {
     const holder = lockHolder(text)
     if (holder === process.pid) {
       take()
-      return
+      return true
     }
     if (holder !== undefined && processAlive(holder)) throw new SessionOwnedError(id, holder)
     if (holder === undefined && Date.now() - modified < UNWRITTEN_LOCK_GRACE_MS) throw new SessionOwnedError(id)
@@ -584,6 +826,14 @@ function releaseWriterLock(path: string): void {
 export class SessionStore {
   readonly root: string
   private readonly onEvent: ((handle: SessionHandle, event: SessionEvent) => void) | undefined
+
+  /**
+   * Where a written title is announced. DSH records every title change as the session's title, and every view of the
+   * session follows it (inventory-shell S16). Heddle keeps the title in the meta record rather than in the log, so no
+   * log event carries it. This hook is how the Web UI hears a title written by the first message or the title model,
+   * and not only a person's rename (#33).
+   */
+  private readonly onRenamed: ((id: SessionId, title: string) => void) | undefined
   /**
    * Parsed events per session, and whether that session's transcript is compressed.
    *
@@ -614,14 +864,45 @@ export class SessionStore {
    */
   private readonly surfaceCache = new Map<string, { readonly count: number; readonly state: SurfaceState }>()
 
+  /**
+   * The automatic titles of this store's sessions (`./title.ts`, DSH's first-prompt title). Idle until a model is
+   * attached, which the session plugin does; it lives on the store so every service over this store shares one record
+   * of which call may still land.
+   */
+  readonly titles: SessionTitles = new SessionTitles(this)
+
+  /**
+   * Each log's first-record verdict, keyed by path and valid while the file's size and modification time are the ones
+   * it was judged at. `list()` asks it of every session on every call, so a log is re-read only after it changed, and
+   * a skipped log is reported once per change rather than once per listing.
+   */
+  private readonly headers = new Map<string, { readonly size: number; readonly mtimeMs: number; readonly verdict: LogHeader }>()
+
+  /** Where a skipped log is reported; standard error unless the caller collects it. */
+  private readonly warn: (message: string) => void
+
+  /** The unreadable whole logs `loads` has already named, so a second sweep does not name one twice. */
+  private readonly reportedLoads = new Set<string>()
+
   constructor(
     root: string = defaultSessionRoot(),
-    options: { readonly onEvent?: (handle: SessionHandle, event: SessionEvent) => void } = {},
+    options: {
+      readonly onEvent?: (handle: SessionHandle, event: SessionEvent) => void
+      /**
+       * Told about every title this store writes, with the title now stored (`''` when cleared): a person's rename, the
+       * first message's fallback, a fork's name and the title model's answer alike (#33).
+       */
+      readonly onRenamed?: (id: SessionId, title: string) => void
+      /** Receives the line naming a log the store leaves out ({@link skippedLogLine}); defaults to standard error. */
+      readonly warn?: (message: string) => void
+    } = {},
   ) {
     // `~` is expanded because the profile writes `~/.heddle/sessions` and a
     // literal `~` directory beside the project is the wrong place to put it.
     this.root = resolve(root.startsWith('~') ? join(homedir(), root.slice(1)) : root)
     this.onEvent = options.onEvent
+    this.onRenamed = options.onRenamed
+    this.warn = options.warn ?? ((message) => void process.stderr.write(`${message}\n`))
   }
 
   /**
@@ -641,6 +922,8 @@ export class SessionStore {
       readonly origin?: 'subagent'
       readonly delegationDepth?: number
       readonly teamId?: SessionId
+      /** The agent preset the session runs under; absent until a turn records the default. */
+      readonly preset?: string
       /** An id chosen by the caller, so a journal entry can name a session before it is created. */
       readonly id?: SessionId
     } = {},
@@ -651,6 +934,8 @@ export class SessionStore {
     const dir = join(this.root, workspaceKey(cwd))
     mkdirSync(dir, { recursive: true })
     const handle: SessionHandle = { id, dir, transcript: join(dir, logName(id)), meta: join(dir, metaName(id)) }
+    /** A title is cleaned as DSH cleans an accepted one (`./title-text.ts`); one with nothing visible left is not written. */
+    const title = options.title === undefined ? '' : normalizeSessionTitle(options.title)
     writeFileSync(
       handle.meta,
       `${JSON.stringify(
@@ -661,11 +946,12 @@ export class SessionStore {
           ...(options.endpoint !== undefined ? { endpoint: options.endpoint } : {}),
           ...(options.model !== undefined ? { model: options.model } : {}),
           ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}),
-          ...(options.title !== undefined ? { title: options.title } : {}),
+          ...(title.length > 0 ? { title } : {}),
           ...(options.parentSession !== undefined ? { parentSession: options.parentSession } : {}),
           ...(options.origin !== undefined ? { origin: options.origin } : {}),
           ...(options.delegationDepth !== undefined ? { delegationDepth: options.delegationDepth } : {}),
           ...(options.teamId !== undefined ? { teamId: options.teamId } : {}),
+          ...(options.preset !== undefined ? { preset: options.preset } : {}),
           turns: 0,
         },
         null,
@@ -683,16 +969,49 @@ export class SessionStore {
    * The **meta file** is a record, not the log: `session.jsonl` stays append-only and untouched, so a
    * rename cannot rewrite anything a run recorded. Only the title a person reads is replaced, and the
    * empty string clears it rather than leaving a blank name behind.
+   *
+   * The title is **cleaned as DSH cleans an accepted one** first (`./title-text.ts`, `dsh-session-title`
+   * `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80 UTF-8 bytes.
+   * Measured before: every title was kept as sent, a right-to-left override and an ANSI sequence included. A title
+   * with nothing visible left clears, as a blank one does; refusing it is the route's answer, as in DSH.
    */
   rename(id: SessionId, title: string): SessionMeta | null {
     const current = this.list().find((meta) => meta.id === id)
     if (current === undefined) return null
-    const trimmed = title.trim()
+    const trimmed = normalizeSessionTitle(title)
     const next: SessionMeta = {
       ...current,
       ...(trimmed.length > 0 ? { title: trimmed } : {}),
     }
     if (trimmed.length === 0) delete (next as { title?: string }).title
+    const meta = this.metaFile(id)
+    if (meta === null) return null
+    writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
+    /**
+     * After the write, as with `onEvent`: a listener never announces a title the record does not hold. A listener that
+     * throws is logged and swallowed: the rename has landed, and the first-message fallback that renames inside
+     * userContent must not fail because an announcement did (developer-eight's review of #33).
+     */
+    try {
+      this.onRenamed?.(id, next.title ?? '')
+    } catch (error) {
+      this.warn(`heddle: a rename listener failed for ${id}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return next
+  }
+
+  /**
+   * Record the agent preset a session runs under, **only when it has none** (inventory A96).
+   *
+   * A session keeps its preset, so this never replaces one: it is how a session created before presets, or by a path
+   * that named none, takes the current default once and then keeps it. Answers the record as it now is, or null for an
+   * unknown session.
+   */
+  recordPreset(id: SessionId, preset: string): SessionMeta | null {
+    const current = this.list().find((meta) => meta.id === id)
+    if (current === undefined) return null
+    if (current.preset !== undefined || preset.trim().length === 0) return current
+    const next: SessionMeta = { ...current, preset: preset.trim() }
     const meta = this.metaFile(id)
     if (meta === null) return null
     writeFileSync(meta, `${JSON.stringify(next, null, 2)}\n`)
@@ -739,14 +1058,38 @@ export class SessionStore {
     return next
   }
 
+  /** One session's record, read from its own file; `null` for an unknown id or an unreadable record. */
+  meta(id: SessionId): SessionMeta | null {
+    const file = this.metaFile(id)
+    if (file === null) return null
+    try {
+      const meta = JSON.parse(readFileSync(file, 'utf8')) as SessionMeta
+      return typeof meta?.id === 'string' ? meta : null
+    } catch {
+      return null
+    }
+  }
+
   /**
-   * Copy a session's **projected** messages into a new one, and answer with the new session.
+   * Whether the session or a subagent ancestor is archived (`underArchivedSession`), read from the records **now**: the
+   * agent loop asks before every step, so an archive written by another process stops the next step too.
+   */
+  underArchived(id: SessionId): boolean {
+    return underArchivedSession((one) => this.meta(one), id)
+  }
+
+  /**
+   * Seed a new session with a session's **log** up to its last completed turn, and answer with the new session.
    *
-   * A fork is a new conversation that starts where another one stood, which is why it copies the
-   * projection (`deriveMessages` — what the model would have seen, with compaction already folded) rather
-   * than the raw events: replaying another log's shadowing ranges into a fresh log would mean remapping
-   * sequence numbers, and a fork that replayed them wrongly would be worse than no fork at all. The system
-   * message is **not** copied: the new session assembles its own, and two of them would be one too many.
+   * A fork is a new conversation that starts where another one stood, and it starts there by replaying the source's
+   * events, as DSH's does: `session/fork` cuts at `latestCompletedPrefixBoundary` and seeds the child with that exact
+   * prefix (dsh-api-session-controller/lib/index.js:724-733 and 870-872, `buildForkSeed` in
+   * dsh-session/lib/types/fork.js:18-27). This copied the **projection** instead — one `message` per surface node — and
+   * the child read differently from its source on both builds: a streamed answer became one assistant message whose
+   * reasoning the chat drew glued in front of the answer, a tool call lost its name and command (#52), and a compacted
+   * source handed over its summary and live turns only, so the branch started mid-conversation (#55). The seed is
+   * {@link forkSeed}; the system prompt, the instruction baseline and a runtime-context snapshot come along as the notes
+   * they were, at the positions they held, so the child's next round finds them and writes no second copy.
    */
   fork(
     source: SessionId,
@@ -757,6 +1100,11 @@ export class SessionStore {
       readonly teamId?: SessionId
       readonly title?: string
       readonly id?: SessionId
+      /**
+       * DSH's `atSeq`: the inclusive event seq to cut at. Left out, the cut is the last completed turn. The caller
+       * checks that the seq exists in the source.
+       */
+      readonly atSeq?: number
     } = {},
   ): SessionHandle | null {
     const from = this.open(source)
@@ -775,17 +1123,40 @@ export class SessionStore {
       ...(attribution.id !== undefined ? { id: attribution.id } : {}),
     })
     /**
-     * The fork inherits what the source had **finished**: the projection of the log cut at its last completed turn. A
-     * dangling user message — one whose answer never arrived — is not carried over.
+     * The fork inherits what the source had **finished**: its log cut at the last completed turn. A dangling user
+     * message — one whose answer never arrived — is not carried over. An explicit `atSeq` is DSH's inclusive cut instead
+     * (dsh-api-session-controller/lib/index.js:843-872): the chat's Branch action passes the seq that ended the turn it
+     * sits on. Either way the child is seeded with the source's own events up to the cut, as DSH's `buildForkSeed` does.
      */
-    const events = completedPrefix(this.read(from))
-    const bySeq = indexBySeq(events)
-    for (const seq of foldSurface(events).nodes) {
-      const message = deriveMessage(bySeq, seq)
-      if (message === null || message.role === 'system') continue
-      this.message(handle, message)
-    }
+    const cut = attribution.atSeq
+    const events = cut === undefined ? completedPrefix(this.read(from)) : this.read(from).filter((event) => event.seq <= cut)
+    this.seed(handle, events)
     return handle
+  }
+
+  /**
+   * Write a fork's inherited events into its new log ({@link forkSeed}), after the child's own `session/created`.
+   *
+   * Written as one append and **not published**: the seed is history the child starts from, not activity, so neither
+   * the live stream, nor the goal and reminder drivers, nor the title coordinator hear its `model/request` and
+   * `turn/completed` events as a turn happening now. DSH's seeded session does the same: its constructor pushes each
+   * seed event into the log after checking it against the surface, and its live events start after them
+   * (dsh-session/lib/index.js:1399-1411). The result is folded here before anything is written, because a seed whose
+   * replacements did not land on the child's surface would leave a log nothing can read. The meta counts the inherited
+   * user messages as turns, as `message()` counted them in the source.
+   */
+  private seed(handle: SessionHandle, inherited: readonly SessionEvent[]): void {
+    this.claim(handle)
+    const log = this.load(handle)
+    const records = forkSeed(inherited, log.events.length)
+    if (records.length === 0) return
+    foldSurface([...log.events, ...records])
+    const lines = records.map((record) => `${JSON.stringify(record)}\n`)
+    appendFileSync(handle.transcript, log.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    /** One push per event: a long source's seed is far more events than a spread may pass as arguments. */
+    for (const record of records) log.events.push(record)
+    const turns = records.filter((record) => record.type === 'message' && (record.message as RecordedMessage | undefined)?.role === 'user').length
+    this.touch(handle, { addTurns: turns })
   }
 
   /**
@@ -841,13 +1212,52 @@ export class SessionStore {
     return null
   }
 
-  /** Open an existing session by id, or by the newest one when `id` is omitted. */
+  /** The log of the session whose metadata is in `dir`: `<id>.v2.jsonl.zstd` beside it, else the directory's own transcript. */
+  private transcriptFor(dir: string, id: SessionId): string {
+    return existsSync(join(dir, logName(id))) ? join(dir, logName(id)) : transcriptIn(dir)
+  }
+
+  /**
+   * Whether a session's log can be read at all, judged by its first record ({@link readLogHeader}), and reported once
+   * when it cannot.
+   *
+   * This is DSH's discovery rule (dsh-session-persistence-jsonl README, "Reading the logs": "Unreadable or unsupported
+   * headers, including corrupt Zstandard header frames, are omitted from discovery and `list()`"; `listArtifacts`,
+   * lib/index.js:3102-3138). DSH omits such a session without a word; heddle prints one line naming the file
+   * ({@link skippedLogLine}), because the file is the one thing a person has to find. Measured before (#130): one log
+   * holding 64 random bytes, or the line `{"not":"zstd"}`, stopped the next `heddle web` start half-way.
+   */
+  private logReadable(path: string): boolean {
+    let size: number
+    let mtimeMs: number
+    try {
+      ;({ size, mtimeMs } = statSync(path))
+    } catch {
+      this.headers.delete(path)
+      return true
+    }
+    const known = this.headers.get(path)
+    if (known !== undefined && known.size === size && known.mtimeMs === mtimeMs) return known.verdict.kind === 'readable'
+    const verdict = readLogHeader(path)
+    this.headers.set(path, { size, mtimeMs, verdict })
+    if (verdict.kind === 'unreadable') this.warn(skippedLogLine(path, verdict.reason))
+    return verdict.kind === 'readable'
+  }
+
+  /**
+   * Open an existing session by id, or by the newest one when `id` is omitted.
+   *
+   * A session whose log cannot be read opens as no session, the answer `list()` gives by leaving it out: direct access
+   * to it is refused (DSH: "Direct access to a corrupt compressed header still rejects"), and the routes answer it as
+   * they answer an unknown id, `404 no session <id>`, which is what the Rust build already answered (#130).
+   */
   open(id?: SessionId): SessionHandle | null {
     if (id !== undefined) {
       const meta = this.metaFile(id)
       if (meta === null) return null
       const dir = dirname(meta)
-      const transcript = existsSync(join(dir, logName(id))) ? join(dir, logName(id)) : transcriptIn(dir)
+      const transcript = this.transcriptFor(dir, id)
+      if (!this.logReadable(transcript)) return null
       return { id, dir, transcript, meta }
     }
     const newest = this.list()[0]
@@ -855,10 +1265,34 @@ export class SessionStore {
   }
 
   /**
+   * Whether a session's whole log reads: false, after printing the line that names it, for a log with a line that is
+   * not JSON or not a session event ({@link SessionLogUnreadableError}).
+   *
+   * For the server's startup sweeps, which read every session: one unreadable log must leave that session out, not
+   * stop the start. Any other failure is not about the log and still throws.
+   */
+  loads(handle: SessionHandle): boolean {
+    try {
+      this.load(handle)
+      return true
+    } catch (error) {
+      if (!(error instanceof SessionLogUnreadableError)) throw error
+      /** Once per log and line: the goal sweep and the team sweep each ask, and one file wants one line. */
+      const key = `${error.path}\n${error.reason}`
+      if (!this.reportedLoads.has(key)) {
+        this.reportedLoads.add(key)
+        this.warn(skippedLogLine(error.path, error.reason))
+      }
+      return false
+    }
+  }
+
+  /**
    * Sessions newest first, from both layouts.
    *
    * The walk reads a session's own directory (the old shape) and every workspace folder's `<id>.json` (the
-   * current one), so a store that holds both answers with all of its sessions and none of them twice.
+   * current one), so a store that holds both answers with all of its sessions and none of them twice. A session whose
+   * log cannot be read is left out, and named once ({@link SessionStore.logReadable}).
    */
   list(): readonly SessionMeta[] {
     let names: string[]
@@ -868,10 +1302,12 @@ export class SessionStore {
       return []
     }
     const metas = new Map<string, SessionMeta>()
-    const remember = (text: string): void => {
+    const remember = (text: string, dir: string): void => {
       try {
         const meta = JSON.parse(text) as SessionMeta
-        if (typeof meta?.id === 'string' && !metas.has(meta.id)) metas.set(meta.id, meta)
+        if (typeof meta?.id !== 'string' || metas.has(meta.id)) return
+        if (!this.logReadable(this.transcriptFor(dir, meta.id))) return
+        metas.set(meta.id, meta)
       } catch {
         // A file that is not metadata is not a reason to lose the sessions that are.
       }
@@ -880,7 +1316,7 @@ export class SessionStore {
       const at = join(this.root, name)
       if (name.startsWith('session-')) {
         try {
-          remember(readFileSync(join(at, 'meta.json'), 'utf8'))
+          remember(readFileSync(join(at, 'meta.json'), 'utf8'), at)
         } catch {
           // A session directory without readable metadata is skipped, as it always was.
         }
@@ -895,7 +1331,7 @@ export class SessionStore {
       for (const entry of entries) {
         if (!entry.startsWith('session-') || !entry.endsWith('.json')) continue
         try {
-          remember(readFileSync(join(at, entry), 'utf8'))
+          remember(readFileSync(join(at, entry), 'utf8'), at)
         } catch {
           continue
         }
@@ -948,15 +1384,14 @@ export class SessionStore {
     appendFileSync(handle.transcript, this.load(handle).framed ? encodeFrame(line) : Buffer.from(line, 'utf8'))
     this.load(handle).events.push(record)
     /**
-     * A turn boundary is activity: the row's age moves while an answer is being produced, not only when a message is typed.
-     * Messages are touched by `message()` instead, which also counts the turn in the same write.
+     * No event here moves `updated`: DSH dates a row by the latest prompt or steer only (see `message()`), so an answer, a
+     * turn boundary or a harness note no longer re-dates it. This used to touch on those three types (R-developer-eight-20).
      */
-    if (record.type === 'turn/completed' || record.type === 'assistant/completed' || record.type === 'context/note') {
-      this.touch(handle)
-    }
     // After the write, never before: a listener that saw an event the file does not
     // have would be a second truth, which is the failure this ordering prevents.
     this.onEvent?.(handle, record)
+    /** A first prompt waits for a title, and the turn's `model/request` starts it (`./title.ts`); never throws. */
+    this.titles.observe(handle, record)
     return record
   }
 
@@ -968,19 +1403,57 @@ export class SessionStore {
    * the session: what was read before may be behind the file, because the previous holder could have appended
    * and let go since, and a write counted from a stale fold is exactly the duplicate seq this lock exists to
    * prevent. Holding it again is free.
+   *
+   * Taking it **fresh** is DSH's write-open, so a turn the previous writer left unfinished is closed here, before the
+   * write that asked for the lock (`./repair.ts`, issue #5). A turn running in this process holds the lock already and
+   * never reaches this line.
    */
   claim(handle: SessionHandle): void {
     if (this.held.has(handle.id)) return
     const path = lockPath(handle)
-    acquireWriterLock(path, handle.id)
+    const fresh = acquireWriterLock(path, handle.id)
     this.held.set(handle.id, path)
     this.loaded.delete(handle.id)
     this.surfaceCache.delete(handle.id)
+    if (fresh) this.record(handle, interruptedTurnClosers(this.read(handle)))
+  }
+
+  /**
+   * Append events whose seq and time are already assigned, in one write, and without the side effects of `append`:
+   * no listener hears them and the meta's age does not move. The turn closers are the one caller — a repair of what the
+   * log already holds, not activity — and DSH seeds them into a resumed session rather than publishing them.
+   */
+  private record(handle: SessionHandle, records: readonly SessionEvent[]): void {
+    if (records.length === 0) return
+    const entry = this.load(handle)
+    const lines = records.map((record) => `${JSON.stringify(record)}\n`)
+    appendFileSync(handle.transcript, entry.framed ? Buffer.concat(lines.map(encodeFrame)) : Buffer.from(lines.join(''), 'utf8'))
+    entry.events.push(...records)
   }
 
   /** Whether this store holds the session's writer lock. */
   holds(handle: SessionHandle): boolean {
     return this.held.has(handle.id)
+  }
+
+  /**
+   * Whether a live writer holds the session: this process (through any store), or the live process its lock names.
+   *
+   * A reader asks it before it shows a session's unfinished turn as closed (`SessionService.events`): a turn whose
+   * writer is alive may still be running, and one whose writer is gone never will. A lock naming this process that
+   * this process does not hold is a previous process's that had the same pid.
+   */
+  writerHeld(handle: SessionHandle): boolean {
+    const path = lockPath(handle)
+    if (heldByProcess.has(path)) return true
+    let text: string
+    try {
+      text = readFileSync(path, 'utf8')
+    } catch {
+      return false
+    }
+    const holder = lockHolder(text)
+    return holder !== undefined && holder !== process.pid && processAlive(holder)
   }
 
   /**
@@ -1061,13 +1534,22 @@ export class SessionStore {
       }
     }
 
+    /**
+     * Every line must be a session event, as the Rust build's reader requires of every line (`SessionEvent::from_line`):
+     * a line that is not JSON, or JSON without a whole-number `seq`, a string `at` and a string `type`, makes the log
+     * unreadable rather than handing an event with no `type` to every fold above (#130: `{"not":"zstd"}` reached the
+     * team sweep as an event and stopped the start on `event.type.startsWith`).
+     */
     const events: SessionEvent[] = []
     for (const [index, line] of decoded.lines.entries()) {
+      let record: unknown
       try {
-        events.push(JSON.parse(line) as SessionEvent)
+        record = JSON.parse(line)
       } catch (error) {
-        throw new Error(`${handle.transcript}:${index + 1} is not valid JSON — ${(error as Error).message}`)
+        throw new SessionLogUnreadableError(handle.transcript, index + 1, `is not valid JSON — ${(error as Error).message}`)
       }
+      if (!isEventRecord(record)) throw new SessionLogUnreadableError(handle.transcript, index + 1, 'is not a session event')
+      events.push(record as SessionEvent)
     }
     const framed = decoded.format === 'zstd-frames' || ((torn || decoded.lines.length === 0) && isFramed(handle.transcript))
     const entry = { events, framed }
@@ -1205,11 +1687,17 @@ export class SessionStore {
     return messages
   }
 
-  /** Record a message and keep the metadata's turn count honest. */
+  /** Record a message and keep the metadata's turn count and prompt time honest. */
   message(handle: SessionHandle, message: RecordedMessage): SessionEvent {
     const event = this.append(handle, { type: 'message', message })
-    /** One write for both facts: the age moved, and a user message is a turn. */
-    this.touch(handle, { bumpTurns: message.role === 'user' })
+    /**
+     * A user message is a turn; one a **person** wrote — a prompt or a steer, which is a user message with no `source` —
+     * also dates the row, with the event's own time, as DSH's `lastPromptAt` takes `event.time` from a `user/message`
+     * whose source is the user (dsh-api-session-controller/lib/index.js:1872-1879). One write for both facts.
+     */
+    if (message.role === 'user') {
+      this.touch(handle, { bumpTurns: true, ...(message.source === undefined ? { promptedAt: event.at } : {}) })
+    }
     return event
   }
 
@@ -1252,6 +1740,8 @@ export class SessionStore {
       readonly endpoint: string
       readonly model?: string
       readonly reasoningEffort?: string
+      /** The level is the model's declared default, not a choice (#157; DSH's adapterDefaults.reasoningEffort). */
+      readonly reasoningEffortDefault?: true
       readonly messages: number
       readonly tools: readonly string[]
       readonly estimatedTokens?: number
@@ -1298,19 +1788,26 @@ export class SessionStore {
   }
 
   /**
-   * Record that the session was written to, and optionally count a user turn in the same write.
+   * Record a person's prompt time (`updated`) and/or count a user turn, in one meta write.
    *
    * The meta is a convenience beside the log: failing to write it must never lose the event that was just appended, which is
-   * why the catch swallows. `updated` is what a row's age reads, and `turns` what its tooltip counts.
+   * why the catch swallows. `updated` is what a row's age reads and what **Last updated** sorts by, and `turns` what its
+   * tooltip counts. A call with neither writes nothing.
    */
-  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean } = {}): void {
+  touch(handle: SessionHandle, options: { readonly bumpTurns?: boolean; readonly addTurns?: number; readonly promptedAt?: string } = {}): void {
     const path = handle.meta
+    /**
+     * `addTurns` is a fork's seed, which counts every inherited user message in one write and dates nothing: a fork's row
+     * is dated by its creation until its own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
+     */
+    const added = (options.bumpTurns === true ? 1 : 0) + (options.addTurns ?? 0)
+    if (added === 0 && options.promptedAt === undefined) return
     try {
       const meta = JSON.parse(readFileSync(path, 'utf8')) as SessionMeta
       const updated: SessionMeta = {
         ...meta,
-        updated: new Date().toISOString(),
-        ...(options.bumpTurns === true ? { turns: (meta.turns ?? 0) + 1 } : {}),
+        ...(options.promptedAt !== undefined ? { updated: options.promptedAt } : {}),
+        ...(added > 0 ? { turns: (meta.turns ?? 0) + added } : {}),
       }
       writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`)
     } catch {

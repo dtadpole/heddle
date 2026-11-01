@@ -61,6 +61,27 @@ impl LlmModel {
     }
 }
 
+impl LlmModel {
+    /// A service stream as the port's stream: errors converted, and cut at the caller's Stop.
+    fn port_stream(
+        opened: Result<heddle_llm::ChunkStream, heddle_llm::ModelError>,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        match opened {
+            Err(error) => Box::pin(futures::stream::once(async move {
+                Err(ModelError::from(error))
+            })),
+            Ok(stream) => {
+                let stream = stream.map(|item| item.map_err(ModelError::from));
+                match cancel {
+                    Some(cancel) => Box::pin(stream.take_until(cancel.cancelled_owned())),
+                    None => Box::pin(stream),
+                }
+            }
+        }
+    }
+}
+
 impl ModelPort for LlmModel {
     /// The endpoint's `retryPolicy`, resolved with DSH's defaults when it writes none; an endpoint that is not
     /// configured has none, and a policy that cannot be read is reported and not used.
@@ -83,18 +104,19 @@ impl ModelPort for LlmModel {
         request: GenerateRequest,
         cancel: Option<CancellationToken>,
     ) -> BoxStream<'static, Result<Chunk, ModelError>> {
-        match self.service.stream(request) {
-            Err(error) => Box::pin(futures::stream::once(async move {
-                Err(ModelError::from(error))
-            })),
-            Ok(stream) => {
-                let stream = stream.map(|item| item.map_err(ModelError::from));
-                match cancel {
-                    Some(cancel) => Box::pin(stream.take_until(cancel.cancelled_owned())),
-                    None => Box::pin(stream),
-                }
-            }
-        }
+        Self::port_stream(self.service.stream(request), cancel)
+    }
+
+    fn resolve(&self, request: GenerateRequest) -> Result<GenerateRequest, ModelError> {
+        self.service.resolve(&request).map_err(ModelError::from)
+    }
+
+    fn stream_resolved(
+        &self,
+        request: GenerateRequest,
+        cancel: Option<CancellationToken>,
+    ) -> BoxStream<'static, Result<Chunk, ModelError>> {
+        Self::port_stream(self.service.stream_resolved(request), cancel)
     }
 
     fn default_endpoint(&self) -> Option<String> {
@@ -190,6 +212,7 @@ impl SessionPort for Sessions {
             endpoint: record.endpoint.clone(),
             model: record.model.clone(),
             reasoning_effort: record.reasoning_effort.clone(),
+            reasoning_effort_default: record.reasoning_effort_default,
             messages: record.messages as u64,
             tools: record.tools.clone(),
             estimated_tokens: Some(record.estimated_tokens),
@@ -263,6 +286,42 @@ impl SessionPort for Sessions {
             }
         }
     }
+
+    fn under_archived(&self, session: &SessionHandle) -> bool {
+        self.service.under_archived(&session.id)
+    }
+
+    fn claim_rejected(
+        &self,
+        session: &SessionHandle,
+        prompt: Option<(Vec<ContentPart>, Option<serde_json::Value>)>,
+        with_turn: bool,
+    ) -> Result<usize, PortError> {
+        if let Some((content, source)) = prompt {
+            heddle_session::inbox::queue_turn(self.service.store(), session, content, source)
+                .map_err(port_error)?;
+        }
+        heddle_session::inbox::claim_rejected(self.service.store(), session, with_turn)
+            .map(|claimed| claimed.len())
+            .map_err(port_error)
+    }
+
+    fn recorded_preset(&self, session: &SessionHandle) -> Option<String> {
+        self.service
+            .meta(&session.id)
+            .and_then(|meta| meta.preset().map(str::to_owned))
+    }
+
+    fn record_preset(
+        &self,
+        session: &SessionHandle,
+        preset: &str,
+    ) -> Result<Option<String>, PortError> {
+        self.service
+            .record_preset(&session.id, preset)
+            .map(|meta| meta.and_then(|meta| meta.preset().map(str::to_owned)))
+            .map_err(port_error)
+    }
 }
 
 /// The [`SubagentStore`] over a [`SessionService`]: a child is a session of its own, created with its parent,
@@ -305,6 +364,7 @@ impl SubagentStore for SessionSubagents {
             origin,
             delegation_depth: options.delegation_depth.map(u64::from),
             team_id: options.team_id,
+            preset: options.preset,
             id: options.id,
         };
         self.service.store().create(options).map_err(port_error)
@@ -352,6 +412,28 @@ impl SubagentStore for SessionSubagents {
             )
             .map_err(port_error)?;
         Ok(event.seq)
+    }
+
+    fn open(&self, id: &str) -> Option<SessionHandle> {
+        self.service.open(id)
+    }
+
+    fn close_interrupted(&self, session: &SessionHandle) -> Result<bool, PortError> {
+        // The store's own log, without the closers a read adds while no writer holds it: whether the turn is open
+        // is the question.
+        let store = self.service.store();
+        if store.writer_held(session) {
+            return Ok(false);
+        }
+        let events = store.read(session).map_err(port_error)?;
+        if heddle_session::interrupted_turn_closers(&events).is_empty() {
+            return Ok(false);
+        }
+        // A fresh write-open writes the closers (`SessionStore::claim`); letting go leaves the session as free
+        // as the process that died left it.
+        store.claim(session).map_err(port_error)?;
+        store.release(session);
+        Ok(true)
     }
 }
 
@@ -420,6 +502,8 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
                 summarizer: None,
                 // An ordinary round: the trigger and the retained tail apply.
                 force: false,
+                // The turn's stop token reaches the summary call (#154).
+                cancel: options.cancel.as_ref(),
             };
             self.service
                 .prepare(&handle, &prepared)
@@ -490,6 +574,7 @@ impl<S: ContextStore + 'static> TurnHooks for ContextRecovery<S> {
                 endpoint: &payload.endpoint,
                 model: payload.model.as_deref(),
                 tools: &payload.tools,
+                cancel: payload.cancel.as_ref(),
             };
             match self.service.recover_overflow(&handle, &request).await {
                 Ok(heddle_context::RecoveryDecision::Retry) => Some(RequestErrorAction::Retry),
@@ -518,18 +603,42 @@ pub(crate) mod tests {
     use crate::upstream::ContextBreakdown;
     use crate::upstream::{ContentPart, Message, Role, ToolCall};
 
-    /// A scratch folder holding one scripted endpoint's step file.
-    pub(crate) fn scripted_service(label: &str, steps: serde_json::Value) -> Arc<ModelService> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let dir: PathBuf = std::env::temp_dir().join(format!(
-            "heddle-agent-scripted-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("script.json");
+    /// A scratch folder under the system temp folder that is removed when it is dropped, so a test that fails or
+    /// panics still cleans up after itself (a helper that only cleared the folder before creating it left one
+    /// behind per run: tool-developer's TMPDIR count, 2026-10-29). The name is unique per process and call.
+    pub(crate) struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        pub(crate) fn new(label: &str) -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir()
+                .join(format!("heddle-agent-{label}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        pub(crate) fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A scripted endpoint over one step file, and the scratch folder holding it: keep the guard alive for as
+    /// long as the service is used.
+    pub(crate) fn scripted_service(
+        label: &str,
+        steps: serde_json::Value,
+    ) -> (Arc<ModelService>, ScratchDir) {
+        let dir = ScratchDir::new(&format!("scripted-{label}"));
+        let script = dir.path().join("script.json");
         std::fs::write(&script, json!({ "steps": steps }).to_string()).unwrap();
         let endpoint: EndpointConfig = serde_json::from_value(json!({
             "name": "scripted",
@@ -538,7 +647,9 @@ pub(crate) mod tests {
             "model": "scripted",
         }))
         .unwrap();
-        Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap())
+        let service =
+            Arc::new(ModelService::from_configuration(vec![endpoint], Some("scripted")).unwrap());
+        (service, dir)
     }
 
     #[test]
@@ -588,13 +699,14 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_scripted_round_streams_its_tool_call_and_finishes_for_tools() {
-        let port = LlmModel::new(scripted_service(
+        let (models, _scratch) = scripted_service(
             "call",
             json!([
                 { "toolCall": { "name": "read_file", "arguments": { "path": "a.txt" } } },
                 { "text": "done" }
             ]),
-        ));
+        );
+        let port = LlmModel::new(models);
         let chunks: Vec<Chunk> = collect(&port, request(0))
             .await
             .into_iter()
@@ -625,7 +737,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_unknown_endpoint_fails_as_one_coded_error_item() {
-        let port = LlmModel::new(scripted_service("unknown", json!([])));
+        let (models, _scratch) = scripted_service("unknown", json!([]));
+        let port = LlmModel::new(models);
         let mut asked = request(0);
         asked.endpoint = "nowhere".into();
         let items = collect(&port, asked).await;
@@ -636,10 +749,11 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_scripted_failure_keeps_its_code_for_the_retry_rule() {
-        let port = LlmModel::new(scripted_service(
+        let (models, _scratch) = scripted_service(
             "overflow",
             json!([{ "error": { "code": "CONTEXT_WINDOW_EXCEEDED", "message": "too long" } }]),
-        ));
+        );
+        let port = LlmModel::new(models);
         let error = collect(&port, request(0))
             .await
             .into_iter()
@@ -651,7 +765,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_stopped_call_yields_nothing() {
-        let port = LlmModel::new(scripted_service("stop", json!([{ "text": "never seen" }])));
+        let (models, _scratch) = scripted_service("stop", json!([{ "text": "never seen" }]));
+        let port = LlmModel::new(models);
         let token = CancellationToken::new();
         token.cancel();
         let items: Vec<_> = port.stream(request(0), Some(token)).collect().await;
@@ -660,35 +775,30 @@ pub(crate) mod tests {
 
     #[test]
     fn the_default_endpoint_is_the_nominated_one() {
-        let port = LlmModel::new(scripted_service("default", json!([])));
+        let (models, _scratch) = scripted_service("default", json!([]));
+        let port = LlmModel::new(models);
         assert_eq!(port.default_endpoint().as_deref(), Some("scripted"));
     }
 
     // ---- The session and context adapters, against the real services. ----
 
-    pub(crate) fn sessions_at(label: &str) -> Arc<SessionService> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
-            "heddle-agent-sessions-{label}-{}-{n}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+    /// A session store in its own scratch folder, and the guard that removes it.
+    pub(crate) fn sessions_at(label: &str) -> (Arc<SessionService>, ScratchDir) {
+        let root = ScratchDir::new(&format!("sessions-{label}"));
         let config = heddle_session::SessionConfig {
-            root: Some(root.to_str().unwrap().to_owned()),
+            root: Some(root.path().to_str().unwrap().to_owned()),
         };
-        Arc::new(SessionService::new(
+        let service = Arc::new(SessionService::new(
             &config,
             &heddle_config::Env::default(),
             None,
-        ))
+        ));
+        (service, root)
     }
 
     #[test]
     fn the_session_port_records_the_prompt_and_reads_it_back_as_input() {
-        let sessions = sessions_at("port");
+        let (sessions, _sessions_dir) = sessions_at("port");
         let handle = sessions.store().create(CreateOptions::default()).unwrap();
         let port = Sessions::new(Arc::clone(&sessions));
         assert_eq!(port.count(&handle), 1, "session/created is seq 0");
@@ -717,9 +827,38 @@ pub(crate) mod tests {
         );
     }
 
+    /// Inventory A96: the port reads the record's preset and records one only when the session has none.
+    #[test]
+    fn the_session_port_reads_a_recorded_preset_and_records_one_only_when_there_is_none() {
+        let (sessions, _sessions_dir) = sessions_at("preset");
+        let handle = sessions.store().create(CreateOptions::default()).unwrap();
+        let port = Sessions::new(Arc::clone(&sessions));
+        assert_eq!(port.recorded_preset(&handle), None);
+        assert_eq!(
+            port.record_preset(&handle, "standard").unwrap().as_deref(),
+            Some("standard")
+        );
+        assert_eq!(
+            port.record_preset(&handle, "reader").unwrap().as_deref(),
+            Some("standard"),
+            "a session keeps the preset it recorded"
+        );
+        assert_eq!(port.recorded_preset(&handle).as_deref(), Some("standard"));
+        assert_eq!(port.count(&handle), 1, "the record is not the log");
+
+        // A child created through the subagent store carries the preset it is given.
+        let child = SessionSubagents::new(Arc::clone(&sessions))
+            .create(CreateSession {
+                preset: Some("reader".into()),
+                ..CreateSession::default()
+            })
+            .unwrap();
+        assert_eq!(port.recorded_preset(&child).as_deref(), Some("reader"));
+    }
+
     #[test]
     fn the_session_port_writes_model_request_in_the_typescript_field_order() {
-        let sessions = sessions_at("request");
+        let (sessions, _sessions_dir) = sessions_at("request");
         let handle = sessions.store().create(CreateOptions::default()).unwrap();
         let port = Sessions::new(Arc::clone(&sessions));
         port.model_request(
@@ -728,6 +867,7 @@ pub(crate) mod tests {
                 endpoint: "scripted".into(),
                 model: None,
                 reasoning_effort: None,
+                reasoning_effort_default: None,
                 messages: 3,
                 tools: vec!["read_file".into()],
                 estimated_tokens: 42,
@@ -766,7 +906,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_child_session_carries_its_parent_origin_depth_and_the_parents_mode() {
-        let sessions = sessions_at("child");
+        let (sessions, _sessions_dir) = sessions_at("child");
         let parent = sessions
             .store()
             .create(CreateOptions {
@@ -814,7 +954,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_unknown_origin_is_refused_rather_than_written() {
-        let sessions = sessions_at("origin");
+        let (sessions, _sessions_dir) = sessions_at("origin");
         let store = SessionSubagents::new(sessions);
         let error = store
             .create(CreateSession {
@@ -859,6 +999,7 @@ pub(crate) mod tests {
             model: None,
             tools: Vec::new(),
             system: None,
+            cancel: None,
         }
     }
 
@@ -955,7 +1096,7 @@ pub(crate) mod tests {
     async fn the_context_port_over_the_real_session_store_prepares_what_the_session_recorded() {
         // The production binding: heddle-context's `impl ContextStore for SessionStore`, whose handle is the
         // session's own, so `over_session_handles` needs no map.
-        let sessions = sessions_at("context-real");
+        let (sessions, _sessions_dir) = sessions_at("context-real");
         let handle = sessions.store().create(CreateOptions::default()).unwrap();
         sessions
             .user_content(&handle, vec![ContentPart::text("remember a word")], None)
@@ -1033,6 +1174,7 @@ pub(crate) mod tests {
             model: None,
             cwd: std::env::temp_dir(),
             tools: Vec::new(),
+            cancel: None,
         }
     }
 

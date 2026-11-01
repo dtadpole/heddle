@@ -41,6 +41,12 @@ pub struct FileReading {
 /// Why a file has no text to show. The route maps each to a status and answers `{"error": <message>}`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FileReadError {
+    /// Permission refusal — `400 workspace-file/unreadable` like #106, basename only (#45).
+    #[error("cannot read \"{name}\": permission denied")]
+    Unreadable { name: String },
+    /// Unexpected filesystem I/O — `500 workspace-file/read-failed`, never raw host errors.
+    #[error("cannot read file: I/O error")]
+    ReadFailed,
     /// `<canonical> is not a file` — answered `404`.
     #[error("{0}")]
     NotAFile(String),
@@ -62,6 +68,13 @@ pub trait FilesHost: Send + Sync + 'static {
 
     /// Read a file's text for the panel — the session tree's `readFileText`.
     fn read_file_text(&self, path: &Path) -> Result<FileReading, FileReadError>;
+
+    /// A session's logged events, which `GET /api/uploads/{leaf}` reads to authorize a read: an upload is served only
+    /// to a session whose log references it (DSH's `session/attachment`). `None` when no session has this id. The
+    /// default knows no session, so a host that does not answer serves no upload.
+    fn session_events(&self, _id: &str) -> Option<Vec<serde_json::Value>> {
+        None
+    }
 }
 
 #[cfg(test)]

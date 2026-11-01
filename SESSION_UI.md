@@ -1,6 +1,6 @@
 ---
 title: Session UI, as DSH does it
-version: 1.1.0
+version: 1.1.1
 description: What DSH's session management looks like in use, what Heddle does today, and the plan to close the gap.
 level: L2
 status: unverified
@@ -118,7 +118,7 @@ measurement that matched, a fix, or a stated decision not to copy.
 | Live state (a row still arriving) | a masked **shimmer sweep** over the row: `mask-image: linear-gradient(105deg, transparent 0, black 40%, black 60%, transparent 100%)` driven by a `shimmer-sweep` keyframe, at a slow rate | only a static caret (`▍`) | **fixed in cycle 3**: the same 105° masked sweep at 1.6s on a running assistant turn, the caret kept, and `prefers-reduced-motion` drops the sweep; measured `animation-name`, duration, mask and a settled row's `none`, then asserted |
 | Scroll state | the session tree scrolls natively (`overflow-y: auto`, `padding-bottom: 16px`, no scroll shadow, not scrollable when short) | the same, plain native scrolling | match |
 | Tree ARIA | `role="tree"` named "Sessions"; branch rows `aria-expanded`; session rows `aria-selected` and **no** `aria-expanded`; rows carry `draggable="true"` | `role="tree"`; branch rows `aria-expanded`; session and file rows `aria-selected` and no `aria-expanded` — **fixed this round**; rows are `tabindex="0"` | match on the state attributes, **difference kept** on `draggable` (drag-to-move is a feature) and on the label, which says "workspace folders" because this tree holds folders too |
-| Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | rows are focusable and Enter/Space opens them | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
+| Tree keyboard | the tree and its items are **not focusable** (measured: no `tabindex`, `.focus()` does nothing, arrow keys do not move the selection); a session is chosen by a click or by the search field | each row is **one** Tab stop, its `.row` (the list item is not one, #92), and Enter/Space on it opens it; a key on a row's control is that control's (#98); no arrow keys in the tree, as in DSH | **difference kept on purpose**: this UI is reachable by keyboard where DSH is click-only, which is an addition rather than a mismatch |
 | Row states | quiet tint, hover tint, selected = the same tint that stays | measured the same | match |
 
 ### The squashed session menu (2026-10-17)
@@ -300,6 +300,12 @@ Three reports from the owner, one root each.
 | A session being written to kept its old age (`1min`, `6d`) | the row aged by **`created`**, and nothing re-read the list while a turn ran | the store records **`updated`** on every message and turn boundary; the row ages by it and a 30 s ticker repaints the text; activity from any window re-reads the tree (debounced) |
 | The pin "did not appear to work" | the mechanism worked, but the row's **age span intercepted the press**: the age shares the right-hand grid slot with the controls and painted above them | the age is **decoration** (`pointer-events: none`) and the controls carry `position: relative; z-index: 1`, so the icon that is seen is the icon that is pressed |
 | Sessions were not ordered by what was done last | the comparator fell back to the **definition folder's clock name** | non-pinned sessions order by **`updated` descending**; pinned sessions still lead, and among pins the newest pin leads |
+
+Revised by DSH parity row C17 (R-developer-eight-20): `updated` now moves only on a person's **prompt or steer**, at
+that message's own time (DSH's `lastPromptAt`), so the age still moves the moment someone writes to a session but no
+longer moves with the answer or a turn boundary. **Last updated** orders each part (pinned, then the rest) by it alone,
+with pin time not counting, and View options adds DSH's **Manual**: a drag puts a row above or below another and selects
+Manual, and the sequence and the mode are kept in the browser across reloads.
 
 The second root is the same one as a fourth report — *the archive and pin icons blink while hovered*. A press dispatched at the icon's
 centre was delivered to the age span while `elementFromPoint` named the icon; the two disagreeing is exactly a box that paints but

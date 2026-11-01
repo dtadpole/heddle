@@ -2,8 +2,9 @@
 //!
 //! Ported from `readFileText` in `src/session/tree.ts`. Three refusals, each a sentence a person can
 //! act on: a directory or a missing path is not a file; a binary (a NUL byte in what is read) is not
-//! text; bytes that are not UTF-8 are not text. A file longer than the limit is **truncated and says
-//! so** rather than refused. This is a view, not a way around the sandbox: the caller decides which paths
+//! text; bytes that are not UTF-8 are not text (a literal U+FFFD is text). A file longer than the limit is
+//! **truncated and says so** rather than refused, and when the limit cuts a character the text is the complete
+//! characters before it. This is a view, not a way around the sandbox: the caller decides which paths
 //! are readable (the command line and the server both ask [`crate::WorkspaceService::owner`] first, on
 //! the canonical path, so a symlink pointing outside every root is refused).
 
@@ -27,21 +28,27 @@ pub struct FileReading {
     /// Lines in `text`: `\n`-separated, a trailing newline not counting a line of its own; 0 when empty.
     pub lines: usize,
     pub text: String,
-    /// The file is longer than the limit, so `text` is its beginning.
+    /// The file is longer than the limit, so `text` is its beginning: the complete characters before the limit.
     pub truncated: bool,
 }
 
 /// Why a file was refused. The messages are the TypeScript build's, and a verifier matches `not a file`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FileReadError {
+    /// Permission refusal (#45): only the basename, never a host path; the API answers 400 like #106.
+    #[error("cannot read \"{name}\": permission denied")]
+    Unreadable { name: String },
+    /// Unexpected filesystem I/O is not a missing file or unsupported text.
+    #[error("cannot read file: I/O error")]
+    ReadFailed,
     /// `<path> is not a file`
     #[error("{0} is not a file")]
     NotAFile(String),
     /// `<path> looks like a binary file, so it has no text to show`
     #[error("{0} looks like a binary file, so it has no text to show")]
     Binary(String),
-    /// `<path> is not UTF-8 text, so it has no text to show` — including a file cut by the limit in the
-    /// middle of a character, as the TypeScript build refuses it.
+    /// `<path> is not UTF-8 text, so it has no text to show` — bytes in what is read that are not UTF-8. A
+    /// character the limit cut is not one of them: the reading keeps the complete characters before it.
     #[error("{0} is not UTF-8 text, so it has no text to show")]
     NotUtf8(String),
 }
@@ -51,27 +58,22 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
     let canonical = canonical_path(Path::new(path))
         .to_string_lossy()
         .into_owned();
-    let Ok(metadata) = std::fs::metadata(&canonical) else {
-        return Err(FileReadError::NotAFile(canonical));
-    };
+    let metadata =
+        std::fs::metadata(&canonical).map_err(|error| read_failure(error, &canonical))?;
     if !metadata.is_file() {
         return Err(FileReadError::NotAFile(canonical));
     }
-    let Ok(whole) = std::fs::read(&canonical) else {
-        return Err(FileReadError::NotAFile(canonical));
-    };
+    let whole = std::fs::read(&canonical).map_err(|error| read_failure(error, &canonical))?;
     let limit = limit.unwrap_or(FILE_LIMIT_BYTES);
     let slice = &whole[..limit.min(whole.len())];
     if slice.contains(&0) {
         return Err(FileReadError::Binary(canonical));
     }
-    // `buffer.toString('utf8')` replaces every byte sequence that is not UTF-8 with U+FFFD, and the
-    // TypeScript build then refuses a file whose text carries one — including one the limit cut in the
-    // middle of a character.
-    let text = String::from_utf8_lossy(slice).into_owned();
-    if text.contains('\u{FFFD}') {
+    let truncated = whole.len() > slice.len();
+    let Some(text) = decode_utf8(slice, truncated) else {
         return Err(FileReadError::NotUtf8(canonical));
-    }
+    };
+    let text = text.to_owned();
     let lines = if text.is_empty() {
         0
     } else {
@@ -88,8 +90,43 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
         bytes: whole.len() as u64,
         lines,
         text,
-        truncated: whole.len() > slice.len(),
+        truncated,
     })
+}
+
+fn read_failure(error: std::io::Error, path: &str) -> FileReadError {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::PermissionDenied => FileReadError::Unreadable {
+            name: Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
+        ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::IsADirectory => {
+            FileReadError::NotAFile(path.to_owned())
+        }
+        _ => FileReadError::ReadFailed,
+    }
+}
+
+/// The slice's text, or `None` when its bytes are not UTF-8 (issue #78).
+///
+/// Decoded **strictly**, so a literal U+FFFD in the file is a character like any other and only bytes that are not
+/// UTF-8 are refused — DSH's reader decodes with `TextDecoder('utf-8', { fatal: true })` (dsh-fs-local
+/// lib/index.js:454). When the limit cut the file, its last character may be cut too: an error with no
+/// [`error_len`](std::str::Utf8Error::error_len) is a sequence that is valid so far and ends with the slice, and the
+/// text is then the complete characters before it ([`valid_up_to`](std::str::Utf8Error::valid_up_to)). That is what
+/// the TypeScript build's stream-mode decode keeps, and how DSH decodes across chunks (:342). A file the limit did not
+/// cut has no such excuse, so a final incomplete character is refused.
+fn decode_utf8(slice: &[u8], truncated: bool) -> Option<&str> {
+    match std::str::from_utf8(slice) {
+        Ok(text) => Some(text),
+        Err(error) if truncated && error.error_len().is_none() => {
+            std::str::from_utf8(&slice[..error.valid_up_to()]).ok()
+        }
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
@@ -100,6 +137,59 @@ mod tests {
         let path = dir.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn io_failure_kinds_do_not_depend_on_the_os_error_message() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            read_failure(
+                Error::new(ErrorKind::PermissionDenied, "private host path"),
+                "/private/host/denied.txt"
+            ),
+            FileReadError::Unreadable {
+                name: "denied.txt".into()
+            }
+        );
+        assert_eq!(
+            read_failure(Error::other("private host path"), "/private"),
+            FileReadError::ReadFailed
+        );
+        assert!(matches!(
+            read_failure(Error::from(ErrorKind::NotFound), "/missing"),
+            FileReadError::NotAFile(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_denied_is_not_a_missing_file_and_has_no_host_path() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "denied.txt", b"private fixture text");
+        let restore = Restore(
+            Path::new(&path).to_owned(),
+            std::fs::metadata(&path).unwrap().permissions(),
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let denial = std::fs::read(&path)
+            .expect_err("unjudged on hosts that can read mode 000: run as an unprivileged user");
+        assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            read_file_text(&path, None).unwrap_err().to_string(),
+            "cannot read \"denied.txt\": permission denied"
+        );
+        drop(restore);
+        assert_eq!(
+            read_file_text(&path, None).unwrap().text,
+            "private fixture text"
+        );
     }
 
     #[test]
@@ -160,15 +250,87 @@ mod tests {
         );
     }
 
+    // Issue #78: the four controls, the same as `test/tree.test.ts`'s.
+
     #[test]
-    fn a_limit_that_cuts_a_character_makes_the_read_refused() {
+    fn a_limit_at_a_character_boundary_keeps_every_byte_it_read() {
         let dir = tempfile::tempdir().unwrap();
-        // "é" is two bytes; a limit of one byte cuts it and the reader refuses it, as Node does.
-        let path = write(&dir, "a.txt", "é".as_bytes());
-        assert!(matches!(
-            read_file_text(&path, Some(1)).unwrap_err(),
-            FileReadError::NotUtf8(_)
-        ));
+        // "ab中cd": the three bytes of 中 are 2..4.
+        let path = write(&dir, "wide.txt", "ab中cd".as_bytes());
+        let reading = read_file_text(&path, Some(5)).unwrap();
+        assert_eq!(reading.text, "ab中");
+        assert!(reading.truncated);
+        assert_eq!(reading.bytes, 7);
+    }
+
+    #[test]
+    fn a_limit_that_cuts_a_character_keeps_the_whole_characters_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "wide.txt", "ab中cd".as_bytes());
+        for limit in [3, 4] {
+            let reading = read_file_text(&path, Some(limit)).unwrap();
+            assert_eq!(reading.text, "ab", "a limit of {limit} cuts 中");
+            assert!(reading.truncated, "truncated, not refused");
+            assert_eq!(reading.lines, 1);
+            assert_eq!(reading.bytes, 7, "the size is still the whole file's");
+        }
+        // "😀" is four bytes, 1..4: cut after one, two or three of them.
+        let emoji = write(&dir, "emoji.txt", "x😀y".as_bytes());
+        for limit in [2, 3, 4] {
+            let reading = read_file_text(&emoji, Some(limit)).unwrap();
+            assert_eq!(reading.text, "x", "a limit of {limit} cuts 😀");
+            assert!(reading.truncated);
+        }
+        // "é" is two bytes: a two-byte character cut after its first byte.
+        let accent = write(&dir, "accent.txt", "abé!".as_bytes());
+        let reading = read_file_text(&accent, Some(3)).unwrap();
+        assert_eq!(reading.text, "ab");
+        assert!(reading.truncated);
+        // Nothing whole before the cut: the text is empty and still truncated.
+        let accent = write(&dir, "accent-only.txt", "é".as_bytes());
+        let reading = read_file_text(&accent, Some(1)).unwrap();
+        assert_eq!((reading.text.as_str(), reading.lines), ("", 0));
+        assert!(reading.truncated);
+    }
+
+    #[test]
+    fn a_literal_replacement_character_is_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            &dir,
+            "replacement.txt",
+            "a literal \u{FFFD} is a character\n".as_bytes(),
+        );
+        let reading = read_file_text(&path, None).unwrap();
+        assert_eq!(reading.text, "a literal \u{FFFD} is a character\n");
+        assert!(!reading.truncated);
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_refused_wherever_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let refused = |path: &str, limit: Option<usize>| {
+            let error = read_file_text(path, limit).unwrap_err();
+            assert!(matches!(error, FileReadError::NotUtf8(_)), "{error}");
+            assert!(
+                error
+                    .to_string()
+                    .ends_with("is not UTF-8 text, so it has no text to show")
+            );
+        };
+        let invalid = write(&dir, "invalid.txt", &[0x61, 0xff, 0x62, 0x0a]);
+        refused(&invalid, None);
+        refused(&invalid, Some(3));
+        // A file that itself ends inside a character: no limit cut it, so it is not UTF-8.
+        refused(
+            &write(&dir, "ends-cut.txt", &[0x61, 0x62, 0xe4, 0xb8]),
+            None,
+        );
+        // Bytes at the cut that begin no character (E0 80) are refused, not dropped as a cut character.
+        refused(
+            &write(&dir, "bad-lead.txt", &[0x61, 0x62, 0xe0, 0x80, 0x80]),
+            Some(4),
+        );
     }
 
     #[test]
