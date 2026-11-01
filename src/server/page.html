@@ -4696,6 +4696,16 @@ const MESSAGES = Object.freeze({
     'tree.note.newSessionFailed': 'New session failed: {message}',
     'tree.note.serverRefused': 'the server refused it ({status})',
     'shortcuts.note.selectSession': 'select a session first — the shortcut acts on the row the panel is showing',
+    'file.reading': 'reading…',
+    'file.serverAnswered': 'the server answered {status}',
+    'file.line': '{count} line',
+    'file.lines': '{count} lines',
+    'file.truncated': 'showing the first {size}',
+    'file.preview': 'preview',
+    'file.readFailed': 'could not read this file: {reason}',
+    'file.sanitiserMissing': 'the sanitiser did not load, so this document is shown as its source instead',
+    'composer.attachUp': '↑ up',
+    'composer.attachEmpty': 'nothing to insert here',
     'header.thisSession': 'this session',
     'header.more': 'More actions',
     'header.download': 'Download session log',
@@ -5372,6 +5382,16 @@ const MESSAGES = Object.freeze({
     'tree.note.newSessionFailed': '新建会话失败：{message}',
     'tree.note.serverRefused': '服务器拒绝了请求（{status}）',
     'shortcuts.note.selectSession': '请先选择一个会话——快捷键作用于面板正在显示的那一行',
+    'file.reading': '正在读取…',
+    'file.serverAnswered': '服务器返回了 {status}',
+    'file.line': '{count} 行',
+    'file.lines': '{count} 行',
+    'file.truncated': '仅显示前 {size}',
+    'file.preview': '预览',
+    'file.readFailed': '无法读取此文件：{reason}',
+    'file.sanitiserMissing': '净化器未能加载，因此此文档以源码显示',
+    'composer.attachUp': '↑ 上一级',
+    'composer.attachEmpty': '这里没有可插入的内容',
     'header.thisSession': '此会话',
     'header.more': '更多操作',
     'header.download': '下载会话日志',
@@ -12747,7 +12767,7 @@ function renderAttachMenu(node) {
   if (attachTrail.length > 0) {
     const up = document.createElement('button')
     up.type = 'button'
-    up.textContent = '↑ up'
+    up.textContent = t('composer.attachUp')
     up.addEventListener('click', () => {
       attachTrail.pop()
       void openAttachLevel(attachTrail[attachTrail.length - 1] ?? null)
@@ -12758,7 +12778,7 @@ function renderAttachMenu(node) {
   if (children.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'meta'
-    empty.textContent = 'nothing to insert here'
+    empty.textContent = t('composer.attachEmpty')
     attachMenu.append(empty)
     return
   }
@@ -15335,8 +15355,12 @@ function humanBytes(bytes) {
  * what is read is what was clicked.
  */
 let fileFetches = 0
+/** The file the panel shows, so a language change can draw it again in the new words (#80). */
+let shownFile = null
+
 async function showFile(node) {
   closeSchedulesPage()
+  shownFile = node
   /** A file is something to read; the invitation belongs to the panel with nothing in it. */
   document.getElementById('empty-state')?.setAttribute('hidden', '')
   const ticket = ++fileFetches
@@ -15351,19 +15375,19 @@ async function showFile(node) {
   fileHtml.hidden = true
   fileBody.hidden = false
   fileBody.dataset.renderer = 'text'
-  fileBody.textContent = 'reading…'
+  fileBody.textContent = t('file.reading')
   await showView('file')
   try {
     const response = await fetch('/api/file?path=' + encodeURIComponent(node.path))
     const body = await response.json()
     if (ticket !== fileFetches) return
     if (!response.ok) {
-      fileBody.textContent = body.error ?? `the server answered ${response.status}`
+      fileBody.textContent = body.error ?? t('file.serverAnswered', { status: response.status })
       return
     }
     const bits = [humanBytes(body.bytes)]
-    if (typeof body.lines === 'number') bits.push(body.lines + (body.lines === 1 ? ' line' : ' lines'))
-    if (body.truncated) bits.push(`showing the first ${humanBytes(body.text.length)}`)
+    if (typeof body.lines === 'number') bits.push(t(body.lines === 1 ? 'file.line' : 'file.lines', { count: body.lines }))
+    if (body.truncated) bits.push(t('file.truncated', { size: humanBytes(body.text.length) }))
     fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}`
     /**
      * The server decided how to show this file and, for a document or source, produced the markup.
@@ -15410,7 +15434,7 @@ async function showFile(node) {
       return
     }
     if (body.renderer === 'html') {
-      fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}  ·  preview`
+      fileHead.textContent = `${body.path}  ·  ${bits.join('  ·  ')}  ·  ${t('file.preview')}`
       const htmlBody = await (await fetch('/api/html?path=' + encodeURIComponent(body.path))).json()
       if (ticket !== fileFetches) return
       await showHtml(body.path, htmlBody, ticket)
@@ -15425,9 +15449,14 @@ async function showFile(node) {
     }
   } catch (error) {
     if (ticket !== fileFetches) return
-    fileBody.textContent = 'could not read this file: ' + (error && error.message)
+    fileBody.textContent = t('file.readFailed', { reason: error && error.message })
   }
 }
+
+/** A language change draws the file the panel shows again, so its head and any note read in the new words (#80). */
+window.addEventListener('heddle:locale', () => {
+  if (view === 'file' && shownFile !== null) void showFile(shownFile)
+})
 
 /**
  * The two panes a file can occupy: the text pane, and the frame an HTML document is shown in.
@@ -15498,7 +15527,7 @@ async function showHtml(path, body, ticket) {
     fileHtml.hidden = true
     fileBody.hidden = false
     fileBody.dataset.renderer = 'text'
-    fileBody.textContent = 'the sanitiser did not load, so this document is shown as its source instead'
+    fileBody.textContent = t('file.sanitiserMissing')
     return
   }
   const clean = purifier.sanitize(body.html ?? '', {
