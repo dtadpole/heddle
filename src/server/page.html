@@ -17774,9 +17774,14 @@ window.addEventListener('storage', (event) => {
   refreshShortcuts()
 })
 
-/** An open reference redraws its rows in the new language (#80); its fixed words follow data-i18n. */
+/**
+ * An open reference redraws its rows in the new language (#80); its fixed words follow data-i18n. The standing
+ * unreadable-storage notice is said again too; a passing status line (a cancelled recording) is left as it was said.
+ */
 window.addEventListener('heddle:locale', () => {
-  if (shortcutReference.open) renderShortcutReference()
+  if (!shortcutReference.open) return
+  renderShortcutReference()
+  if (!keybindings.readable) shortcutStatus(unreadableNotice())
 })
 
 function toggleShortcutReference() {

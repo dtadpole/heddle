@@ -192,6 +192,16 @@ test('the keyboard shortcuts reference reads in the page language, and follows a
     assert.equal(en.refused.status, onMac ? 'A shortcut starts with ⌘.' : 'A shortcut starts with Ctrl.')
     assert.equal(en.refused.recording, 'Try another')
     assert.equal(en.cancelled.status, 'Recording cancelled.')
+
+    // Storage this page cannot read: the standing notice, opened in English, is said again in Chinese on a switch.
+    await browser.evaluate(`(() => { localStorage.setItem('heddle.keybindings.v1', 'not json'); window.dispatchEvent(new StorageEvent('storage', { key: 'heddle.keybindings.v1' })); document.getElementById('shortcut-reference').close(); document.activeElement?.blur?.(); return true })()`)
+    await press(browser, onMac, { code: 'Slash', key: '/', keyCode: 191, modifiers: onMac ? META : CTRL })
+    assert.ok(await browser.waitFor(`document.getElementById('shortcut-reference').open === true`, 5_000), 'Mod+/ opens the reference again')
+    assert.equal((await read(browser)).status, "Keyboard shortcuts could not be read from this browser's storage (heddle.keybindings.v1); the defaults are active and editing is off until it is repaired.")
+    await chooseLanguage(browser, 'zh', 'zh-CN')
+    const unreadable = '无法从此浏览器的存储（heddle.keybindings.v1）读取快捷键；当前使用默认键位，修复前不能编辑。'
+    assert.ok(await browser.waitFor(`document.getElementById('shortcut-reference').open === true && document.querySelector('#shortcut-reference-list .group')?.textContent === '应用操作'`, 10_000), 'the open reference redraws in Chinese')
+    assert.equal((await read(browser)).status, unreadable, 'the unreadable-storage notice follows the switch')
   } finally {
     browser?.close()
     server.kill()
