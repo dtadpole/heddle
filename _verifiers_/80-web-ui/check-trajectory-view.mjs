@@ -614,8 +614,13 @@ test('an overview tick shows its clock and duration after a 500 ms hover, as DSH
     })
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     /** A page load opens no session of its own (#17, stack 2), so the check opens the one it ran. */
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
@@ -658,8 +663,13 @@ test('an older ledger read that fails after a newer one drew leaves no error und
       body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
     })
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     /** The next ledger read is held, and fails when the check says so. */
     await browser.evaluate(`(() => {
@@ -712,8 +722,13 @@ test('the overview draws one bar per record, and an answer bar splits at its TTF
       body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
     })
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew per-record bars')
@@ -798,8 +813,13 @@ test('a slash command between two turns is drawn where it ran, in its own Betwee
     assert.ok(section.every((row) => row.loose && row.record.afterTurn === 1), `it belongs to no turn and follows turn 1\nsaw: ${shape}`)
     assert.deepEqual(section.map((row) => row.turnStart), [true, false], `and its first row heads its own section\nsaw: ${shape}`)
 
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the table drew rows')
@@ -840,8 +860,13 @@ test('the overview zooms with the wheel, pans with a right-button drag, and a ri
       body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
     })
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew its bars')
@@ -956,8 +981,13 @@ test("a user record counts its images and files, and its inspector lists them wi
       `the ledger's user record carries both attachments in order (${JSON.stringify(prompt?.record)})`,
     )
 
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelector("#tr-table tbody .tr-attach-count") !== null', 20_000), 'the user row shows its attachment counts')
