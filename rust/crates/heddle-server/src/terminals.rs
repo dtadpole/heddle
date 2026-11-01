@@ -274,6 +274,10 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 const SMALL_CHUNK: usize = 4096;
 
 async fn process_table() -> Vec<ProcessRow> {
+    #[cfg(test)]
+    if tests::empty_read() {
+        return Vec::new();
+    }
     let output = Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,tty="])
         .env("PATH", HELPER_PATH)
@@ -318,6 +322,18 @@ fn descendants_in(root: u32, table: &[ProcessRow]) -> Vec<ProcessRow> {
 
 async fn descendants(root: u32) -> Vec<ProcessRow> {
     descendants_in(root, &process_table().await)
+}
+
+/// The process table for a close. A read that failed or outlasted HELPER_TIMEOUT comes back empty, and the table is
+/// never truly empty (it lists at least `ps` and this server), so an empty one is read once more: swept from an empty
+/// table, a job that left the tree would outlive its terminal (#150).
+async fn process_table_for_close() -> Vec<ProcessRow> {
+    let table = process_table().await;
+    if table.is_empty() {
+        process_table().await
+    } else {
+        table
+    }
 }
 
 /// util-linux `script`, found in the system directories rather than through PATH.
@@ -699,15 +715,17 @@ impl Terminal {
             let _ = tokio::time::timeout(grace * 2, self.wait_done()).await;
             return;
         }
-        let known = lock(&self.state).tty.clone();
-        let tty = match known {
-            Some(tty) => Some(tty),
-            None => self.tty_path().await,
-        };
-        let table = process_table().await;
+        let table = process_table_for_close().await;
         // The tree, plus every process on this terminal's tty: a job started as `(cmd &)` or `nohup cmd &` leaves the
-        // tree for init but keeps the tty while the PTY is still this terminal's.
+        // tree for init but keeps the tty while the PTY is still this terminal's. A tty not learned yet is learned
+        // from this same table.
         let mut tree = descendants_in(leader, &table);
+        let known = lock(&self.state).tty.clone();
+        let tty = known.or_else(|| {
+            tree.iter()
+                .find(|row| row.has_tty())
+                .map(|row| format!("/dev/{}", row.tty))
+        });
         if let Some(tty) = &tty {
             let own = std::process::id();
             for row in &table {
@@ -726,7 +744,7 @@ impl Terminal {
         }
         signals::group(leader, true);
         let graceful = tokio::time::timeout(grace, self.wait_done()).await.is_ok();
-        let remaining = descendants(leader).await;
+        let remaining = descendants_in(leader, &process_table_for_close().await);
         if !graceful || !remaining.is_empty() || tree.iter().any(|row| signals::alive(row.pid)) {
             for row in tree.iter().chain(remaining.iter()) {
                 signals::kill(row.pid);
@@ -1199,6 +1217,20 @@ impl TerminalRegistry {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// How many coming table reads on this thread come back empty, as a `ps` that outlasts HELPER_TIMEOUT does.
+        static EMPTY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Whether this table read stands in for a failed one, taking it from `EMPTY_READS`.
+    pub(super) fn empty_read() -> bool {
+        EMPTY_READS.with(|left| {
+            let failing = left.get();
+            left.set(failing.saturating_sub(1));
+            failing > 0
+        })
+    }
+
     #[test]
     fn a_character_split_across_reads_is_decoded_whole() {
         let bytes = "你好🙂".as_bytes();
@@ -1439,20 +1471,19 @@ mod tests {
             let _ = std::fs::remove_dir_all(cwd);
         }
 
-        #[tokio::test]
-        async fn a_job_that_left_the_tree_still_ends_with_its_terminal() {
-            let _turn = SERIAL.lock().await;
-            // developer-ten's review, E: `(sleep 300 &)` is reparented to init but keeps the PTY's tty.
-            let cwd = scratch("escaped");
-            let registry = TerminalRegistry::default();
-            let info = spawn(&registry, "a", &cwd);
-            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+        /// Start `(sleep 300 &)` in session "a"'s terminal `id` and answer its pid: the job is reparented to init
+        /// but keeps the PTY's tty.
+        async fn escaped_job(
+            registry: &TerminalRegistry,
+            id: &str,
+            events: &mut TerminalEvents,
+        ) -> u32 {
             let mut seen = String::new();
             tokio::time::sleep(Duration::from_millis(700)).await;
             registry
-                .input("a", &info.id, "(sleep 300 & echo ESC=$! )\n")
+                .input("a", id, "(sleep 300 & echo ESC=$! )\n")
                 .await;
-            until(&mut events, &mut seen, "ESC=").await;
+            until(events, &mut seen, "ESC=").await;
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut job = None;
             while job.is_none() && Instant::now() < deadline {
@@ -1468,10 +1499,53 @@ mod tests {
             }
             let job = job.expect("the escaped job's pid");
             assert!(signals::alive(job));
+            job
+        }
+
+        #[tokio::test]
+        async fn a_job_that_left_the_tree_still_ends_with_its_terminal() {
+            let _turn = SERIAL.lock().await;
+            // developer-ten's review, E: `(sleep 300 &)` is reparented to init but keeps the PTY's tty.
+            let cwd = scratch("escaped");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+            let job = escaped_job(&registry, &info.id, &mut events).await;
             assert!(registry.close("a", &info.id).await);
             assert!(
                 ends_soon(job).await,
                 "the escaped job ended with its terminal"
+            );
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        #[tokio::test]
+        async fn a_close_whose_first_table_read_fails_still_ends_the_job_that_left_the_tree() {
+            let _turn = SERIAL.lock().await;
+            // #150: a `ps -A` that outlasts its 5 s timeout reads as an empty table. Swept from that table, a
+            // `(sleep 300 &)` (out of the tree, on the tty) would outlive its terminal. The table is never truly
+            // empty, so the close reads it again.
+            let cwd = scratch("empty-read");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+            let job = escaped_job(&registry, &info.id, &mut events).await;
+            // A resize answers Ok only once the tty is learned, so the failing read below is the close's own.
+            assert_eq!(
+                registry.resize("a", &info.id, 100.0, 30.0).await,
+                ResizeResult::Ok
+            );
+            EMPTY_READS.with(|left| left.set(1));
+            assert!(registry.close("a", &info.id).await);
+            let unread = EMPTY_READS.with(|left| left.replace(0));
+            let ended = ends_soon(job).await;
+            if !ended {
+                signals::kill(job);
+            }
+            assert_eq!(unread, 0, "the close read the process table");
+            assert!(
+                ended,
+                "the escaped job ended although the close's first table read came back empty"
             );
             let _ = std::fs::remove_dir_all(cwd);
         }

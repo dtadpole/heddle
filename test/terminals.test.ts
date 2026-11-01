@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { seatbeltProfileArgs } from '../src/sandbox/seatbelt.ts'
-import { shellArgv, terminalArgv, TerminalRegistry, type TerminalEvent, type TerminalLimits } from '../src/server/terminals.ts'
+import { processTable, shellArgv, terminalArgv, TerminalRegistry, type TerminalEvent, type TerminalLimits } from '../src/server/terminals.ts'
 
 /**
  * The page's interactive terminals, the server half (live-testing issue #85): one shell per terminal in a PTY,
@@ -331,6 +331,42 @@ test('a job that left the tree for init still ends with its terminal (developer-
     await new Promise((resolve) => setTimeout(resolve, 200))
     assert.equal(alive(pid), false, 'the job reparented to init ended with its terminal')
   } finally {
+    await terminals.closeAll()
+    s.done()
+  }
+})
+
+test('a close whose first process-table read fails still ends the job that left the tree (#150)', { skip }, async () => {
+  // A `ps -A` that outlasts its 5 s timeout reads as an empty table. Swept from that table, a `(sleep 300 &)` (out of
+  // the tree, on the tty) would outlive its terminal. The table is never truly empty, so the close reads it again.
+  const s = scratch()
+  let failing = 0
+  const terminals = new TerminalRegistry({
+    pollMs: 60_000,
+    processTable: () => {
+      if (failing === 0) return processTable()
+      failing -= 1
+      return Promise.resolve([])
+    },
+  })
+  let pid = 0
+  try {
+    const info = terminals.create({ session: 's1', cwd: s.workspace, mode: 'danger-full-access', cols: 80, rows: 24, confine: unconfined, env: { ...process.env, SHELL: '/bin/sh' } })
+    if (typeof info === 'string') return assert.fail(info)
+    const out = watch(terminals, 's1', info.id)
+    terminals.input('s1', info.id, '(sleep 300 & echo ESC=$! )\n')
+    pid = Number((await out.until(/ESC=(\d+)\r?\n/))[1])
+    assert.ok(alive(pid), 'the escaped job is running')
+    // A resize answers ok only once the tty is learned, so the failing read below is the close's own.
+    assert.equal(await terminals.resize('s1', info.id, 90, 25), 'ok')
+    failing = 1
+    assert.equal(await terminals.close('s1', info.id), true)
+    assert.equal(failing, 0, 'the close read the process table')
+    const deadline = Date.now() + 5000
+    while (alive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(alive(pid), false, 'the job reparented to init ended although the first read came back empty')
+  } finally {
+    if (pid > 0 && alive(pid)) process.kill(pid, 'SIGKILL')
     await terminals.closeAll()
     s.done()
   }
