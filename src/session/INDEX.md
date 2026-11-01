@@ -1,6 +1,6 @@
 ---
 title: Session
-version: 1.5.0
+version: 1.5.1
 description: The session store and its service — an append-only event log per session, the surface a request is derived from, and the folder tree a session is found in.
 grounded_in:
   - source: human-authored
@@ -42,7 +42,8 @@ The log is also what **content search** reads ([`search.ts`](search.ts)): DSH's 
 current user or assistant messages hold a phrase, ranked and quoted as DSH's SQLite FTS5 index answers. heddle has no
 SQLite, so the tokenizer's tables are measured from SQLite by [`unicode61-generate.ts`](unicode61-generate.ts) into
 [`unicode61.ts`](unicode61.ts) and its Rust twin, and the search is a scan that re-reads a log only when it changed
-(R-developer-eight-19).
+(R-developer-eight-19). Given the page's archive filter (`/api/sessions/search?archived=`), it ranks only the sessions
+the page draws as rows — no subagent child, no blank, archived ones per the filter — before it cuts its twenty (#189).
 
 [`activity.ts`](activity.ts) names the **running work** a plain archive is refused for, in DSH's
 `workspace/session-activity` shape and DSH's listener order: the session's own turn, its live background jobs (the

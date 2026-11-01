@@ -1,8 +1,8 @@
 ---
 title: The heddle-server crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T15:30:32Z
-version: 0.4.6
+modified: 2026-11-01T19:04:24Z
+version: 0.4.7
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -109,7 +109,7 @@ to confirm or move a row.
 | `GET /api/events` | heddle-server | SSE, every session event and approval question |
 | `GET /api/status` | heddle-server | the deployment mode and cwd |
 | `GET`, `POST /api/sessions` | heddle-server | list with run state; create at a branch |
-| `GET /api/sessions/search?q=` | heddle-server | content search, DSH's `session.search`, over `SessionService::search` (`heddle_session::SessionSearchIndex`) |
+| `GET /api/sessions/search?q=` | heddle-server | content search, DSH's `session.search`, over `SessionService::search` (`heddle_session::SessionSearchIndex`); `&archived=hide\|show\|only` ranks only the rows the page draws under that filter (#189) |
 | `GET /api/sessions/{id}` | heddle-server | the chat view; `?view=<name>` goes to a registered `SessionView` |
 | `GET /api/sessions/{id}?view=ledger` | heddle-web-trajectory | as a `SessionView` |
 | `GET /api/sessions/{id}/log` | heddle-web-trajectory | the decoded log download |
