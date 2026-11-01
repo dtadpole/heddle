@@ -2479,7 +2479,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: error.message })}\n`)
       return
     }
-    if ((state.running.get(id) ?? 0) === 0) {
+    /**
+     * Any running turn takes a steer, not only one this route started (issue #176): a goal round, a teammate's or a
+     * child's turn runs on the agent runtime and reads the session's appended messages at its next step, as DSH's
+     * agent takes a steer into whatever turn is running (its inbox is the session's, not the request's).
+     */
+    const liveTurns = ctx.get('turns') as TurnRegistry | undefined
+    if ((state.running.get(id) ?? 0) === 0 && liveTurns?.isRunning(id) !== true) {
       respond(
         response,
         409,
