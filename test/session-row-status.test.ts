@@ -63,12 +63,13 @@ test('#187: the count comes from the listing’s subagent children that the page
 /** The page's composition helpers, run in a small scope with the hover card's `pendingKind`. */
 function composition() {
   const start = page.indexOf('const pendingInteractions = new Map()')
-  const stop = page.indexOf('/** Re-read one session\'s open questions')
+  const stop = page.indexOf('const questionReadsInFlight = new Set()')
   assert.ok(start > 0 && stop > start, 'the page keeps its pending sources beside pendingInteractions')
-  return new Function(`${page.slice(start, stop)}\nreturn { pendingInteractions, approvalSessions, questionKinds, composePending, clearPending }`)() as {
+  return new Function(`${page.slice(start, stop)}\nreturn { pendingInteractions, approvalSessions, questionKinds, questionReads, composePending, clearPending }`)() as {
     pendingInteractions: Map<string, string>
     approvalSessions: Set<string>
     questionKinds: Map<string, string>
+    questionReads: Map<string, number>
     composePending: (id: string) => boolean
     clearPending: (id: string) => void
   }
@@ -91,4 +92,7 @@ test('#147: a waiting question marks the row "Waiting for answer", a plan review
   c.clearPending('s')
   assert.equal(c.pendingInteractions.has('s'), false, 'a turn that ended waits on nobody')
   assert.equal(c.approvalSessions.has('s') || c.questionKinds.has('s'), false)
+  const before = c.questionReads.get('s') ?? 0
+  c.clearPending('s')
+  assert.ok((c.questionReads.get('s') ?? 0) > before, 'and a question read still in flight is void')
 })
