@@ -15,6 +15,10 @@ exchanged at the root for an HttpOnly cookie signed with a persistent mode-600 s
 `token.ts` is separate because the handshake, the cookie and the constant-time comparison
 are worth reading — and checking — without a socket.
 
+[`terminals.ts`](terminals.ts) holds the page's interactive terminals (live-testing issue #85): one shell per
+terminal in a PTY from `script(1)`, owned by one session, confined like bash, bounded, and closed with its whole
+process tree on close, archive, idle and shutdown. `web.ts` routes `/api/sessions/<id>/terminals` to it.
+
 ## Read next
 
 [`../INDEX.md`](../INDEX.md) for the source tree, and

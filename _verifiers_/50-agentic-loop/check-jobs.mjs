@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -29,6 +29,9 @@ import { chatDouble, fixtureDir, heddleCommand, httpConfig, isolatedHome, readTr
  * 9. **A50, promoted** a foreground `bash` that outlives its `timeoutMs` is not killed: it answers the output so far
  *    and `[still running after <ms>ms; moved to background job <id>]` with DSH's hand-off, and the job goes on, so a
  *    later `job_output` reads the rest (DSH's `promoteOnTimeout`, default true while a job registry is loaded).
+ * 10. **Lifetime** archiving a session with a live job is refused as active and names the job; archiving it with
+ *    `stop: true` kills the job with `session archived`, and no completion notice wakes a turn in the archived
+ *    session (DSH's job archive admission, `dsh-jobs/lib/index.js:19-43`).
  *
  * It is gated on the Web command alone, never on the jobs capability, so a build without background jobs fails
  * here rather than skipping. Every model step comes from the offline scripted endpoint. The script is re-read on
@@ -72,6 +75,8 @@ async function startServer(label) {
     script,
     cookie,
     sessions,
+    /** The server process, for a claim that stops it the way a restart does. */
+    process: child,
     output: () => output,
     close: async () => {
       // A detached job outlives a killed server, so every live job is stopped first, through the page's own route.
@@ -449,6 +454,36 @@ test('A50 promoted: a foreground bash that outlives its wall time moves to a bac
   }
 })
 
+test('archive: a live job blocks the archive and is listed; stop: true archives, kills it with "session archived", and wakes nothing', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  const server = await startServer('archive')
+  try {
+    const folder = join(server.work, 'archive')
+    const session = await openSession(server, folder)
+    const mark = events(server, session).length
+    await turn(server, session, folder, [backgroundBash('sleep 30'), { text: 'started' }])
+    const id = startedId(toolTexts(server, session, mark)[0])
+    const flags = `/api/sessions/${encodeURIComponent(session)}/flags`
+    const refused = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true }) })
+    assert.equal(refused.status, 409, `a session with a live job is not archived without stop\nsaw: ${JSON.stringify(refused)}`)
+    assert.equal(refused.body.code, 'active')
+    assert.equal(refused.body.error, `session ${session} has running background jobs; pass stop: true to stop them and archive`, 'the sentence says what blocks it')
+    assert.deepEqual(refused.body.jobs, [{ id, label: 'sleep 30' }], 'the refusal names the job that blocks it')
+    // Were a notice to start a turn in the archived session, this step would answer it.
+    steps(server, [{ purpose: 'jobs-notice', text: 'woken in an archived session' }])
+    const archived = await api(server, flags, { method: 'POST', body: JSON.stringify({ archived: true, stop: true }) })
+    assert.equal(archived.status, 200, `stop: true archives\nsaw: ${JSON.stringify(archived)}`)
+    assert.equal(archived.body.archived, true)
+    const settled = await waitFor(() => settledEvent(server, session, id), 10_000, 'the job to settle')
+    assert.equal(settled.status, 'killed')
+    assert.equal(settled.detail, 'signal: SIGTERM; session archived')
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500))
+    assert.equal(notices(server, session).length, 0, 'no completion notice is delivered to an archived session')
+  } finally {
+    await server.close()
+  }
+})
+
 test('A51 spill: output that outgrew the ring is named by its spill file in job_output, and the file holds every byte', async (context) => {
   if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
   /**
@@ -483,6 +518,34 @@ test('A51 spill: output that outgrew the ring is named by its spill file in job_
     assert.ok(full.startsWith('line 00000\nline 00001\n') && full.endsWith('line 39999\n'))
     assert.match(read, /line 39999\n/, 'the read still shows the tail itself')
     assert.match(read, /\[status: completed, exit code: 0\]$/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('#129: a background job ended by a server shutdown is settled in its session log', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  /**
+   * A restart (SIGTERM) ends every live job's process group, and the job's end is recorded like any other settle:
+   * `job/settled` with status `killed`, so the session's history does not keep a job that never ended. DSH's teardown
+   * awaits its jobs' settles (LOCAL:831-839). Measured before (developer-four, #129): TS wrote the settle, the binary
+   * wrote none, because its teardown only spawned the wait and the process exited first.
+   */
+  const server = await startServer('shutdown')
+  try {
+    const folder = join(server.work, 'shutdown')
+    const session = await openSession(server, folder)
+    const mark = events(server, session).length
+    await turn(server, session, folder, [backgroundBash('sleep 63 && touch marker'), { text: 'started' }])
+    const id = startedId(toolTexts(server, session, mark)[0])
+    const exited = new Promise((resolvePromise) => server.process.once('exit', resolvePromise))
+    server.process.kill('SIGTERM')
+    const stopped = await Promise.race([exited.then(() => true), new Promise((resolvePromise) => setTimeout(() => resolvePromise(false), 15_000))])
+    assert.ok(stopped, 'the server exits after SIGTERM')
+    const settled = settledEvent(server, session, id)
+    assert.ok(settled, `the job's end is in the session log\nsaw: ${JSON.stringify(events(server, session).slice(mark).map((event) => event.type))}`)
+    assert.equal(settled.status, 'killed')
+    assert.equal(existsSync(join(folder, 'marker')), false, 'the command never got to finish')
   } finally {
     await server.close()
   }

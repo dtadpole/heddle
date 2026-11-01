@@ -36,10 +36,13 @@ pub use collate::compare_names;
 pub use error::WorkspaceError;
 pub use file::{FILE_LIMIT_BYTES, FileReadError, FileReading, read_file_text};
 pub use record::{
-    BootstrapReport, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord, WorkspaceRemoval,
-    WorkspaceStoreShape, WorkspaceView, listing_row,
+    BootstrapReport, FolderStatus, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord,
+    WorkspaceRemoval, WorkspaceStoreShape, WorkspaceView, listing_row,
 };
-pub use service::{WorkspaceConfig, WorkspaceService, default_workspace_file, workspace_views};
+pub use service::{
+    DEFAULT_WORKSPACE_DIRECTORY, WorkspaceConfig, WorkspaceService, default_workspace_directory,
+    default_workspace_file, workspace_views,
+};
 pub use tree::{
     ArchivedFilter, NodeKind, TreeInput, TreeNode, TreeRoot, TreeSession, badge_for, classify,
     kind_of, tree,

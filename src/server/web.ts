@@ -9,18 +9,23 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { runTurn } from '../agent/loop.ts'
 import type { TurnRegistry } from '../agent/turns.ts'
+import { handleCommandRequest } from '../commands/http.ts'
+import type { CommandService } from '../commands/service.ts'
+import { handlePlanRequest } from '../plan/http.ts'
+import type { PlanService } from '../plan/service.ts'
 import { describeContent, reasoningLevelFor } from '../llm/types.ts'
+import { mergeTokenUsage, type TokenUsage } from '../llm/usage.ts'
 import { AttachmentInputError, readAttachments } from './attachments.ts'
 import { logFileName } from './log-download.ts'
 import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, uploadReferencedBy } from './uploads.ts'
-import { renderSource } from './code.ts'
+import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
-import { renderMarkdown } from './markdown.ts'
+import { renderMarkdownOffThread } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
 import { expandHome } from '../config/schema.ts'
@@ -28,14 +33,16 @@ import { type InventoryLoader, readPluginInventory } from '../config/plugin-inve
 import { handleSettingsRequest, type SettingsService } from '../config/settings.ts'
 import { describeEndpoints, selectionProblem } from '../endpoints.ts'
 import { canonicalPath, isUnder } from '../paths.ts'
-import { readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
+import { MissingFolderError, readSessionDefinition, updateSessionDefinition } from '../session/definition.ts'
 import { permissionTransition } from '../sandbox/service.ts'
 import { readFileText, tree } from '../session/tree.ts'
 import { SessionSearchQueryError, searchSessions } from '../session/search.ts'
 import type { SessionEvent, SessionHandle, SessionMeta } from '../session/store.ts'
 import { SessionFlagError } from '../session/store.ts'
 import { normalizeSessionTitle, TITLE_INVALID } from '../session/title-text.ts'
+import { activitySessions, refusalSentence, rowActivity, sessionActivity, stopRowActivity } from '../session/activity.ts'
 import { handleScheduleRoute } from '../schedule/http.ts'
+import type { ScheduleService } from '../schedule/service.ts'
 import { handleJobsRoute } from '../jobs/http.ts'
 import type { JobRegistry } from '../jobs/registry.ts'
 import {
@@ -50,7 +57,9 @@ import {
   TOKEN_QUERY,
   authorize,
 } from './token.ts'
-import { heartbeatFrame, heartbeatInterval, newClientId, readyFrame, StallWatch, STREAM_OPEN } from './stream.ts'
+import { EventLog, heartbeatFrame, heartbeatInterval, newClientId, readyFrame, resetFrame, StallWatch, STREAM_OPEN, withoutSettledApprovals } from './stream.ts'
+import { TerminalRegistry, type TerminalEvent } from './terminals.ts'
+import { SandboxUnavailableError } from '../sandbox/backend.ts'
 
 /**
  * The Web UI.
@@ -135,6 +144,14 @@ export interface WebServerOptions {
    * /api/settings/{ns}`), DSH's settings controller. Absent, the routes answer 503.
    */
   readonly settings?: SettingsService
+  /**
+   * Exact Browser opt-in captured at server startup (D-068): the page policy then allows HTTP(S) frames, and
+   * `/api/status` reports it so the page offers its Browser tab (#86), which frames those pages beside the conversation.
+   *
+   * Off unless the operator asks: DSH's Web profile ships its Browser disabled too and enables it by a profile patch.
+   * The server never fetches, proxies or probes a page.
+   */
+  readonly browser?: boolean
 }
 
 export interface WebServer {
@@ -185,25 +202,47 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
   const completedAt = new Map<string, number>()
   // Tracked so shutdown can reach a connection whose handler is still awaiting a turn.
   const sockets = new Set<import('node:net').Socket>()
+  /** The page's interactive terminals, per session (#85); closed on archive, when unattended and at shutdown. */
+  const terminals = new TerminalRegistry()
   /** Set when the shutdown begins; from then on a turn is refused rather than started (see `stopRunningTurns`). */
   const lifecycle = { closing: false }
 
+  /**
+   * The stream's log: every frame pushed to `/api/events` gets an id from it and is kept for a while, so a client
+   * that reconnects is given what it missed (the follow cursor, `stream.ts`). The heartbeat interval is fixed here
+   * too, because `ready` tells the page what silence means.
+   */
+  const log = new EventLog()
+  const heartbeatMs = heartbeatInterval()
+
   // Every append is pushed to whoever is listening, from the one write path.
   ctx.on('session/event', (payload) => {
-    const line = `event: session\ndata: ${JSON.stringify(payload)}\n\n`
+    const line = log.record('session', JSON.stringify(payload))
     for (const client of subscribers) {
       client.write(line)
     }
   })
 
+  /**
+   * A session's title was written, so every page retitles it (#33). DSH records each title change and every view of the
+   * session follows (inventory-shell S16). That covers a person's rename, the first message's fallback and the title
+   * model's answer, so the push comes from the store's one rename path, not from the rename route alone.
+   */
+  ctx.on('session/renamed', ({ session, title }) => push({ log, subscribers }, 'sessions', { type: 'session/renamed', session, title }))
+
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
-    for (const client of subscribers) client.write('event: schedule\ndata: {}\n\n')
+    // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
+    // publish already does for the same event (phase B item 3).
+    const line = log.record('schedule', '{}')
+    for (const client of subscribers) client.write(line)
   })
 
   // A background job's lifecycle changed, so the page's job views refresh (DSH's job-list frame on each change).
   ctx.on('jobs/changed', () => {
-    for (const client of subscribers) client.write('event: jobs\ndata: {}\n\n')
+    // Through the stream's log too, so the frame is numbered and replayed to a page that reconnects (phase B item 3).
+    const line = log.record('jobs', '{}')
+    for (const client of subscribers) client.write(line)
   })
 
   /**
@@ -260,7 +299,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     | undefined
   const detachApprovals = approvals?.attachAnswerer?.()
   ctx.on('approval/request', (request) => {
-    const line = `event: approval\ndata: ${JSON.stringify(request)}\n\n`
+    const line = log.record('approval', JSON.stringify(request))
     for (const client of subscribers) {
       client.write(line)
     }
@@ -281,10 +320,14 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       port,
       clients,
       subscribers,
+      log,
+      heartbeatMs,
+      browser: options.browser === true,
       running,
       controllers,
       runningSince,
       completedAt,
+      terminals,
       lifecycle,
       maxRounds: options.maxRounds ?? DEFAULT_WEB_MAX_ROUNDS,
       ...(options.quiet !== undefined ? { quiet: options.quiet } : {}),
@@ -313,7 +356,6 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
    * two intervals while it still had some to send is destroyed (DSH's dead-peer rule, see `stream.ts`). One timer
    * for the server, unref'd so it never keeps a process alive on its own.
    */
-  const heartbeatMs = heartbeatInterval()
   const stalls = new StallWatch(heartbeatMs)
   const heartbeat = setInterval(() => {
     const frame = heartbeatFrame()
@@ -351,10 +393,16 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
      * leave `node --test` reporting "the event loop has already resolved" with a pending
      * promise. Ending the subscribers first, then destroying whatever sockets remain, is the
      * difference between closing and stopping.
+     *
+     * After the turns' grace the terminals end, and their processes with them, so a restart leaves no orphan shell
+     * (#85); a terminal opened during the grace is ended too.
      */
     close: () =>
       new Promise<void>((resolvePromise) => {
-        void stopRunningTurns().finally(() => closeNow(resolvePromise))
+        void stopRunningTurns()
+          .catch(() => {})
+          .then(() => terminals.closeAll())
+          .finally(() => closeNow(resolvePromise))
       }),
   }
 
@@ -398,6 +446,8 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
 const SHUTDOWN_GRACE_MS = 5_000
 
 interface RequestState {
+  /** Whether the operator enabled Browser framing and the page's Browser tab (`HEDDLE_WEB_BROWSER=1`; D-068, #86). */
+  readonly browser: boolean
   /** The settings surface, when the server was started with one. */
   readonly settings?: SettingsService
   readonly token: string
@@ -406,6 +456,10 @@ interface RequestState {
   readonly port: number
   readonly clients: Set<ServerResponse>
   readonly subscribers: Set<ServerResponse>
+  /** The stream's log: ids for every pushed frame, and the frames a reconnecting client missed. */
+  readonly log: EventLog
+  /** The heartbeat interval, which `ready` tells the page. */
+  readonly heartbeatMs: number
   /**
    * How many turns are running per session.
    *
@@ -434,6 +488,8 @@ interface RequestState {
    * the composer grew a Stop.
    */
   readonly controllers: Map<string, Set<AbortController>>
+  /** Each session's interactive terminals (#85). */
+  readonly terminals: TerminalRegistry
   /** The server's shutdown state: `closing` once `close()` has begun stopping the turns. */
   readonly lifecycle: { readonly closing: boolean }
   /**
@@ -572,7 +628,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
   if (url.pathname === '/' && request.method === 'GET') {
     const access = pageAccess(decision, offered)
     if (access.status === 200) {
-      respond(response, 200, 'text/html; charset=utf-8', page(pageLanguage(ctx, request.headers['accept-language'])))
+      const html = page(pageLanguage(ctx, request.headers['accept-language']))
+      respond(response, 200, 'text/html; charset=utf-8', html, { 'content-security-policy': pagePolicy(html, state.browser) })
       return
     }
     respond(response, access.status, 'text/html; charset=utf-8', tokenFormPage({ stale: access.stale }))
@@ -586,6 +643,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       url.pathname.startsWith('/api') ? 'text/plain' : 'text/html; charset=utf-8',
       url.pathname.startsWith('/api') ? 'unauthorized\n' : tokenFormPage(),
     )
+    return
+  }
+
+  /** The slash commands (`src/commands/`, developer-three): their list and a run, handed over behind the door. */
+  const commands = ctx.get('commands') as CommandService | undefined
+  if (commands !== undefined && (await handleCommandRequest(commands.routes, request, response, url))) return
+  /** Plan mode (`src/plan/`, developer-three): whether a session is in it, for the composer's Plan chip. */
+  const plan = ctx.get('plan') as PlanService | undefined
+  if (plan !== undefined && (await handlePlanRequest(plan.routes, request, response, url))) return
+
+  /**
+   * A session's interactive terminals (#85): list, create, stream, input, resize and close.
+   *
+   * After the Host/Origin fence and the credential, like every route here, so a terminal is never reachable by a
+   * request this server would refuse elsewhere.
+   */
+  if (TERMINAL_ROUTE.test(url.pathname)) {
+    await handleTerminalRoute(ctx, request, response, url, state)
     return
   }
 
@@ -697,6 +772,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     } catch {
       respond(response, 404, 'text/plain', 'no such asset\n', FILE_ANSWER_HEADERS)
     }
+    return
+  }
+
+  /** highlight.js for the page's code blocks: see {@link highlightAsset}. */
+  if (url.pathname.startsWith('/vendor/highlight/') && request.method === 'GET') {
+    const answer = highlightAsset(url.pathname.slice('/vendor/highlight/'.length), (relative) =>
+      readFileSync(new URL(`../../node_modules/highlight.js/${relative}`, import.meta.url), 'utf8'),
+    )
+    if (answer === null) {
+      respond(response, 404, 'text/plain', 'that highlighter module is not served\n')
+      return
+    }
+    response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+    response.end(answer)
     return
   }
 
@@ -903,26 +992,49 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const wanted = url.searchParams.get('path')
+    /**
+     * A folder that is gone (#141) is judged before it is read: under a root it is `404` with DSH's
+     * `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the folder
+     * is gone instead of listing it empty; outside every root it is the `400` below. It is placed through the real path
+     * of what still exists, so the spelling a person typed (`/tmp/x/w` for `/private/tmp/x/w`) is the same folder.
+     */
+    const missing = wanted !== null && wanted.length > 0 ? workspaces.missingFolder(wanted) : undefined
+    if (missing !== undefined) {
+      if (missing.owner === undefined) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `${missing.path} is not under any workspace root` })}\n`)
+      } else {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no entry at "${missing.path}"`, code: 'workspace-file/not-found' })}\n`)
+      }
+      return
+    }
     if (wanted !== null && wanted.length > 0 && workspaces.owner(wanted) === undefined) {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
     }
-    const node = tree(wanted === null || wanted.length === 0 ? null : wanted, {
-      roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
-      sessions: ctx.session.list(),
-      generated: workspaces.generated,
-      /**
-       * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
-       * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
-       * person may have bookmarked.
-       */
-      archived:
-        url.searchParams.get('archived') === 'only'
-          ? 'only'
-          : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
-            ? 'show'
-            : 'hide',
-    })
+    /** A folder the tree may not read is `400` with its code (#106), as the folder picker answers an unreadable one. */
+    let node
+    try {
+      node = tree(wanted === null || wanted.length === 0 ? null : wanted, {
+        roots: workspaces.list().map((record) => ({ path: record.path, title: record.title, ...(record.origin !== undefined ? { origin: record.origin } : {}) })),
+        sessions: ctx.session.list(),
+        generated: workspaces.generated,
+        /**
+         * Three states, DSH's arrangement: `?archived=show` adds archived sessions, `?archived=only` answers with
+         * nothing but them, and anything else hides them. `1` still means `show`, because it is already on a URL a
+         * person may have bookmarked.
+         */
+        archived:
+          url.searchParams.get('archived') === 'only'
+            ? 'only'
+            : url.searchParams.get('archived') === '1' || url.searchParams.get('archived') === 'show'
+              ? 'show'
+              : 'hide',
+      })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'workspace-file/unreadable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace-file/unreadable' })}\n`)
+      return
+    }
     respond(response, 200, 'application/json', `${JSON.stringify(node, null, 2)}\n`)
     return
   }
@@ -952,7 +1064,20 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const reading = readFileText(wanted)
+      const path = canonicalPath(wanted)
+      if (rendererFor(path).renderer === 'image') {
+        let stats
+        try { stats = statSync(path) } catch { throw new Error(`${path} is not a file`) }
+        if (!stats.isFile()) throw new Error(`${path} is not a file`)
+        // Decide before the UTF-8 reader rejects PNG. No bytes or HTML in this metadata;
+        // /api/raw rechecks authentication and workspace ownership when the img loads.
+        respond(response, 200, 'application/json', `${JSON.stringify({
+          path, name: basename(path), bytes: stats.size, renderer: 'image',
+          image: { src: `/api/raw?path=${encodeURIComponent(path)}`, mediaType: 'image/png' },
+        })}\n`)
+        return
+      }
+      const reading = readFileText(path)
       /**
        * The reading and the **renderer's decision** travel together.
        *
@@ -965,7 +1090,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         response,
         200,
         'application/json',
-        `${JSON.stringify({ ...reading, ...renderSource(reading.path, reading.text) }, null, 2)}\n`,
+        `${JSON.stringify({ ...reading, ...(await renderSourceOffThread(reading.path, reading.text)) }, null, 2)}\n`,
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -1276,6 +1401,28 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     return
   }
 
+  /**
+   * First use — DSH's `workspace/initializeDefault` (dsh-api-workspace-controller lib/index.js:881-887): create or reuse
+   * the default workspace, `$HEDDLE_HOME/default-workspace`, while nothing is registered and no session exists, and
+   * answer `{workspace}` — the record, or `null` when this install is not a first use (that is not an error). The page
+   * asks once at startup when it has nothing to show. No session is started and nothing is sent. A folder that cannot
+   * be made is `500 {error, code: 'workspace/default-failed'}`.
+   */
+  if (url.pathname === '/api/workspaces/default' && request.method === 'POST') {
+    const workspaces = ctx.workspace
+    if (workspaces === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the workspace plugin' })}\n`)
+      return
+    }
+    try {
+      const record = workspaces.initializeDefault(ctx.session.list())
+      respond(response, 200, 'application/json', `${JSON.stringify({ workspace: record ?? null }, null, 2)}\n`)
+    } catch (error) {
+      respond(response, 500, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace/default-failed' })}\n`)
+    }
+    return
+  }
+
   if (url.pathname === '/api/workspaces/pick' && request.method === 'POST') {
     const outcome = await pickFolder()
     if (outcome.kind === 'unavailable') {
@@ -1377,6 +1524,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const { record, created } = workspaces.add(folder, name)
+    if (created) push(state, 'workspace', { type: 'workspace/added', workspace: record })
     respond(response, 200, 'application/json', `${JSON.stringify({ record, created }, null, 2)}\n`)
     return
   }
@@ -1393,6 +1541,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     try {
       const outcome = workspaces.remove(id, { all: ctx.session.list(), force: true })
+      push(state, 'workspace', { type: 'workspace/removed', id })
       respond(response, 200, 'application/json', `${JSON.stringify(outcome, null, 2)}\n`)
     } catch (error) {
       respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
@@ -1427,6 +1576,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         respond(response, 404, 'application/json', `${JSON.stringify({ error: `no workspace ${id}` })}\n`)
         return
       }
+      push(state, 'workspace', { type: 'workspace/renamed', workspace: record })
       respond(response, 200, 'application/json', `${JSON.stringify(record, null, 2)}\n`)
     } catch (error) {
       if ((error as { code?: unknown }).code === 'workspace/name-conflict') {
@@ -1465,7 +1615,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      const { workspaceIds, moved } = workspaces.reorder(body.workspaceId, typeof before === 'string' ? before : undefined)
+      /**
+       * Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an added, renamed or
+       * removed workspace is, and a page redraws its tree from it. A move that changes nothing is not announced, as
+       * DSH's registry writes nothing then (dsh-workspace lib/index.js:484, :492).
+       */
+      if (moved) push(state, 'workspace', { type: 'workspace/reordered', workspaceIds })
       respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
     } catch (error) {
       const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
@@ -1525,9 +1681,38 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
-    const forked = ctx.session.fork(id)
+    /**
+     * An optional `atSeq` body field is DSH's inclusive cut (dsh-api-session-controller/lib/index.js:849-872): the chat's
+     * Branch action sends the seq that ended its turn. DSH refuses a value that is not a non-negative safe integer as a
+     * bad request, and a seq the source does not have as fork-unavailable, with the same two sentences used here.
+     */
+    const body = await readJson(request, response)
+    if (body === null) return
+    const atSeq = body.atSeq
+    if (atSeq !== undefined && !(typeof atSeq === 'number' && Number.isSafeInteger(atSeq) && atSeq >= 0)) {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'atSeq must be a non-negative safe integer' })}\n`)
+      return
+    }
+    let forked
+    try {
+      forked = ctx.session.fork(id, atSeq === undefined ? {} : { atSeq })
+    } catch (error) {
+      if (!isMissingFolder(error)) throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/folder-missing' })}\n`)
+      return
+    }
     if (forked === null) {
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return
+    }
+    if ('error' in forked && forked.error === 'no-such-event') {
+      const last = forked.lastSeq === undefined ? 'none' : String(forked.lastSeq)
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: `event ${forked.atSeq} does not exist in session "${id}" (last seq: ${last})`, code: 'unavailable' })}\n`,
+      )
       return
     }
     if ('error' in forked) {
@@ -1573,25 +1758,51 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     /**
-     * Archiving a session with a turn in flight is refused unless the caller says to stop it, which is DSH's
+     * Archiving a session with work in flight is refused unless the caller says to stop it, which is DSH's
      * `stopActivity` option: the durable archive set is what its pre-step gate reads, so the order is archive first, then
-     * stop. Here the stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     * stop. Here the turn's stop is the same abort the Stop button uses, and `{ stop: true }` is the caller agreeing to it.
+     *
+     * The refusal names the work the way DSH's `workspace/session-active` does (`dsh-workspace` `archiveSession`,
+     * `details.activity`): the turn in progress, the session's live background jobs, its running subagent descendants and
+     * its active reminders, in DSH's listener order (`src/session/activity.ts`), which the page's stop-and-archive dialog
+     * lists. A turn is running when this server started it or the live-turn registry holds one (a subagent's turn, a
+     * teammate's, a notice's), because a session the page did not start can still be working. The jobs are also listed
+     * as `jobs`, the jobs row's own field (`sessionJobActivity`), which the page's older confirm reads.
+     *
+     * With `stop: true` every family is stopped only once the archive is written, which is DSH's order: the archive set
+     * first, then each `workspace/session-stop` listener, awaited (`dsh-workspace/lib/index.js:527-541`, `:621-628`).
+     * The turn and its running subagents are aborted with `session archived`, the jobs killed with the same reason and
+     * the reminders removed. A write that is refused (`409`), finds no session (`404`) or fails stops nothing, as a
+     * throwing `setState` in DSH never reaches `stopSessionActivity`.
      */
+    const rows = { jobs: ctx.get('jobs') as JobRegistry | undefined, schedule: ctx.get('schedule') as ScheduleService | undefined }
+    const turns = ctx.get('turns') as TurnRegistry | undefined
+    /** The sessions a successful write stops: the session and the subagents its activity named. Empty without stop: true. */
+    let stopSessions: string[] = []
     if (archived === true) {
-      const running = state.running.get(id) ?? 0
-      if (running > 0) {
+      const isRunning = (sessionId: string) => (state.running.get(sessionId) ?? 0) > 0 || turns?.isRunning(sessionId) === true
+      const work = await rowActivity(rows, id)
+      const activity = sessionActivity(id, ctx.session.list(), isRunning, work)
+      if (activity.length > 0) {
         if (body.stop !== true) {
           respond(
             response,
             409,
             'application/json',
-            `${JSON.stringify({ error: `session ${id} is running; pass stop: true to stop it and archive`, code: 'active', running })}\n`,
+            `${JSON.stringify({
+              error: refusalSentence(id, activity),
+              code: 'active',
+              running: state.running.get(id) ?? 0,
+              activity,
+              ...(work.jobs.length > 0 ? { jobs: work.jobs } : {}),
+            })}\n`,
           )
           return
         }
-        abortSession(state.controllers, id)
+        stopSessions = activitySessions(id, activity)
       }
     }
+    const stopRows = archived === true && body.stop === true
     let meta
     try {
       meta = ctx.session.flags(id, {
@@ -1615,6 +1826,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
       return
     }
+    for (const sessionId of stopSessions) {
+      abortSession(state.controllers, sessionId)
+      turns?.abort(sessionId, 'session archived')
+    }
+    if (stopRows) await stopRowActivity(rows, id, (message) => ctx.logger.warn(message))
+    /** Archiving ends the session's terminals and their processes, as DSH's session-owned terminals end with their owner (#85). */
+    if (archived === true) await state.terminals.closeSession(id)
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -1671,6 +1889,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
     if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
+    /** The store's rename announced it, and `session/renamed` pushed it to every page (#33). */
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -1714,6 +1933,11 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const written = ctx.session.setMode(handle, decision.mode, ctx.sandbox.mode)
+    /**
+     * A terminal is confined by the mode it was opened under, and a mode change (a narrowing above all) must not
+     * leave a wider shell running, so the session's terminals end with the change (#85, developer-ten's review).
+     */
+    if (written.changed) await state.terminals.closeSession(id)
     respond(
       response,
       200,
@@ -1811,10 +2035,19 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const preset = newSessionPreset(ctx, named.preset)
-    const { handle, definition } = ctx.session.createAt(wanted, {
-      ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
-      ...(preset !== undefined ? { preset } : {}),
-    })
+    /** A branch heddle cannot write is `400` with its code and the session layer's sentence (#106), not a raw `500`. */
+    let created
+    try {
+      created = ctx.session.createAt(wanted, {
+        ...(typeof body.title === 'string' && body.title.length > 0 ? { title: body.title } : {}),
+        ...(preset !== undefined ? { preset } : {}),
+      })
+    } catch (error) {
+      if ((error as { code?: unknown }).code !== 'session/unwritable') throw error
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'session/unwritable' })}\n`)
+      return
+    }
+    const { handle, definition } = created
     respond(
       response,
       200,
@@ -1935,6 +2168,34 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** The session's own record, which is where a switch from the panel was written. */
     const meta = ctx.session.list().find((entry) => entry.id === id)
+    /** The statistics read the same events as the turns, before any await lets the log move on. */
+    const stats = (() => {
+      const projected = projectSessionStats(events)
+      let measured: { systemTokens: number; toolsTokens: number; messageTokens: number } | undefined
+      if (projected.contextBreakdown === undefined) {
+        try {
+          measured = ctx.context.measure(handle, { tools: ctx.tools.describe() })
+        } catch {
+          measured = undefined
+        }
+      }
+      const { contextBreakdown, contextBreakdownSource } = contextBreakdownWithFallback(projected.contextBreakdown, measured)
+      return {
+        ...projected,
+        ...(contextBreakdown !== undefined ? { contextBreakdown } : {}),
+        ...(contextBreakdownSource !== undefined ? { contextBreakdownSource } : {}),
+      }
+    })()
+    /**
+     * Every answer is rendered **off the event loop**, one after another (issue #19): a page opens this route on every
+     * load and every turn's end, and rendering a session's answers here on the server's only thread stood every other
+     * request still — measured, 7 s for one 30,000-item list answer, long enough for `/healthz` to miss the probes that
+     * make the supervisor kill the process.
+     */
+    const turns: (ChatTurn & { readonly html?: string })[] = []
+    for (const turn of scopeAttachmentUrls(transcriptTurns(events), id)) {
+      turns.push(turn.kind === 'assistant' ? { ...turn, html: await renderMarkdownOffThread(turn.text) } : turn)
+    }
     respond(
       response,
       200,
@@ -1979,34 +2240,26 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
            * DSH renders an assistant row's markdown once the row is **settled**, and this is the same decision
            * made on the server: the transcript is read once, so rendering here costs one pass and the page
            * never has to ask per turn. The live path (a turn that just ended) asks `/api/markdown` for the one
-           * answer it has, and both go through `renderMarkdown`, so there is one renderer and one allow-list.
+           * answer it has, and both go through `renderMarkdown` (off the event loop), so there is one renderer and one
+           * allow-list.
            */
-          turns: scopeAttachmentUrls(transcriptTurns(events), id).map((turn) =>
-            turn.kind === 'assistant' ? { ...turn, html: renderMarkdown(turn.text) } : turn,
-          ),
+          turns,
+          /**
+           * How far this transcript reaches: the last recorded event's `seq`, or 0 for an empty session.
+           *
+           * A page opening a session clears its transcript and reads this answer, while the event stream keeps
+           * delivering. Events that arrive during the read are also in the answer when they were recorded before it
+           * was built, so drawn both ways they read twice (live-testing draft developer-eleven-1). The page keeps them
+           * aside and draws only those past this `seq`.
+           */
+          seq: events.length > 0 ? events[events.length - 1]?.seq ?? 0 : 0,
           /**
            * The composer's bottom statistics, from the same events as everything else in this answer.
            * The reference prints turns, steps, a token total with its cache-hit share, and a context share;
            * every one of those is a fact of this record, so they travel with it rather than being re-derived
            * by the page from whatever happened to be on screen.
            */
-          stats: (() => {
-            const projected = projectSessionStats(events)
-            let measured: { systemTokens: number; toolsTokens: number; messageTokens: number } | undefined
-            if (projected.contextBreakdown === undefined) {
-              try {
-                measured = ctx.context.measure(handle, { tools: ctx.tools.describe() })
-              } catch {
-                measured = undefined
-              }
-            }
-            const { contextBreakdown, contextBreakdownSource } = contextBreakdownWithFallback(projected.contextBreakdown, measured)
-            return {
-              ...projected,
-              ...(contextBreakdown !== undefined ? { contextBreakdown } : {}),
-              ...(contextBreakdownSource !== undefined ? { contextBreakdownSource } : {}),
-            }
-          })(),
+          stats,
         },
         null,
         2,
@@ -2023,7 +2276,24 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      */
     state.subscribers.add(response)
     request.on('close', () => state.subscribers.delete(response))
-    response.write(readyFrame(newClientId()))
+    /**
+     * The follow cursor: `Last-Event-ID` is what the browser sends on its own retries, `?cursor=` what the page sends
+     * when it reconnects itself. Honoured, the frames after it follow `ready`; not honoured (the server restarted,
+     * or the log no longer reaches back), a `reset` tells the client to re-read its baselines. All of it is written
+     * in this one turn of the event loop, after the subscriber was added, so no frame falls between.
+     */
+    const header = request.headers['last-event-id']
+    const presented = (Array.isArray(header) ? header[0] : header) ?? url.searchParams.get('cursor')
+    const cursor = presented !== undefined && presented !== null && presented.length > 0 ? presented : null
+    const replay = cursor === null ? [] : state.log.since(cursor)
+    response.write(readyFrame(newClientId(), undefined, { cursor: state.log.cursor, resumed: cursor !== null && replay !== null, heartbeatMs: state.heartbeatMs }))
+    if (replay === null) response.write(resetFrame())
+    /** A question answered while the client was away is not put back on its page: only waiting ones replay. */
+    const approvals = ctx.get('approvals') as { pendingRequests?: () => readonly unknown[] } | undefined
+    const waiting = new Set(
+      (approvals?.pendingRequests?.() ?? []).map((request) => (request as { id?: unknown }).id).filter((id): id is string => typeof id === 'string'),
+    )
+    for (const frame of withoutSettledApprovals(replay ?? [], waiting)) response.write(frame)
     return
   }
 
@@ -2066,7 +2336,81 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 409, 'application/json', `${JSON.stringify({ answered: false, error: 'that question is no longer waiting; it was answered elsewhere, timed out, or this server does not hold it' })}\n`)
       return
     }
+    push(state, 'approval-settled', { type: 'approval/settled', id, outcome })
     respond(response, 200, 'application/json', `${JSON.stringify({ answered: true })}\n`)
+    return
+  }
+
+  /**
+   * The model's questions to a person (`ask_user_question`), and their answers - DSH's user-questions seam.
+   *
+   * `GET /api/questions?session=<id>` lists the session's answerable requests (`all=1` adds settled ones);
+   * `POST /api/questions/<id>` answers one batch; `POST /api/questions/<id>/hold` is Take time. Requests live in the
+   * session log, so a reload or a restart reads them back. A late answer - no turn waiting, because a timed wait ran
+   * out or the process that asked is gone - comes back as `message`, the user message DSH sends, for the caller to
+   * deliver as a turn (or queue behind a running one).
+   */
+  if (url.pathname === '/api/questions' || url.pathname.startsWith('/api/questions/')) {
+    const service = ctx.get('questions') as import('../questions/service.ts').QuestionService | undefined
+    if (service === undefined) {
+      respond(response, 503, 'application/json', `${JSON.stringify({ error: 'this profile does not load the questions plugin' })}\n`)
+      return
+    }
+    const sessionOf = (id: unknown) => {
+      if (typeof id !== 'string' || !/^session-[0-9a-f-]{36}$/i.test(id)) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: 'a session id is required' })}\n`)
+        return null
+      }
+      const handle = ctx.session.store.open(id)
+      if (handle === null) respond(response, 404, 'application/json', `${JSON.stringify({ error: `no session ${id}` })}\n`)
+      return handle
+    }
+    const refuse = (error: unknown) => {
+      const code = (error as { code?: unknown }).code
+      const status = code === 'NOT_FOUND' ? 404 : code === 'SETTLED' ? 409 : code === 'INVALID_ANSWERS' ? 400 : 500
+      if (status === 500) throw error
+      respond(response, status, 'application/json', `${JSON.stringify({ error: (error as Error).message, code })}\n`)
+    }
+    if (url.pathname === '/api/questions' && request.method === 'GET') {
+      const handle = sessionOf(url.searchParams.get('session'))
+      if (handle === null) return
+      const all = url.searchParams.get('all') === '1'
+      respond(response, 200, 'application/json', `${JSON.stringify({ session: handle.id, requests: service.list(handle, all ? {} : { open: true }) }, null, 2)}\n`)
+      return
+    }
+    const match = /^\/api\/questions\/(question-[0-9a-f-]{36})(\/hold)?$/i.exec(url.pathname)
+    if (match === null || request.method !== 'POST') {
+      respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a question route' })}\n`)
+      return
+    }
+    const body = await readJson(request, response)
+    if (body === null) return
+    const handle = sessionOf(body.session)
+    if (handle === null) return
+    const id = match[1] as string
+    try {
+      if (match[2] !== undefined) {
+        respond(response, 200, 'application/json', `${JSON.stringify({ request: service.hold(handle, id) }, null, 2)}\n`)
+        return
+      }
+      const outcome = service.answer(handle, id, body.answers)
+      if (!outcome.late) {
+        respond(response, 200, 'application/json', `${JSON.stringify({ answered: true, late: false, request: outcome.view }, null, 2)}\n`)
+        return
+      }
+      /**
+       * The caller delivers a late answer, as a turn or queued behind the running one. The server does not steer it in:
+       * a turn on its last step ends without another model call, so a steered answer was measured to go unanswered.
+       */
+      respond(
+        response,
+        200,
+        'application/json',
+        `${JSON.stringify({ answered: true, late: true, delivered: 'none', message: outcome.message, request: outcome.view }, null, 2)}\n`,
+      )
+    } catch (error) {
+      refuse(error)
+    }
     return
   }
 
@@ -2085,7 +2429,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'text is required' })}\n`)
       return
     }
-    respond(response, 200, 'application/json', `${JSON.stringify({ html: renderMarkdown(body.text) })}\n`)
+    /** Off the event loop: one long answer must not stop every other request (issue #19). */
+    respond(response, 200, 'application/json', `${JSON.stringify({ html: await renderMarkdownOffThread(body.text) })}\n`)
     return
   }
 
@@ -2189,13 +2534,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * reports while no session is open. A session that switched does not appear here — its own mode travels
    * with `GET /api/sessions/<id>`, because a server-wide answer would misreport every session that chose
    * otherwise.
+   *
+   * `browser: true` appears only when the operator enabled the page's Browser tab, so a default server's answer is
+   * the same bytes it always was.
    */
   if (url.pathname === '/api/status' && request.method === 'GET') {
     respond(
       response,
       200,
       'application/json',
-      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot })}\n`,
+      `${JSON.stringify({ sandbox: { mode: ctx.sandbox.mode }, cwd: ctx.sandbox.workspaceRoot, ...(state.browser ? { browser: true } : {}) })}\n`,
     )
     return
   }
@@ -2799,6 +3147,18 @@ export function unknownTurnSession(
        * that are not active at all").
        */
       safeWrite(`event: error\ndata: ${JSON.stringify({ session: handle.id, message: (error as Error).message })}\n\n`)
+      /**
+       * And it is recorded, so it reaches every client and every later read (R-developer-six-2, DSH's
+       * `api-session/error`). The `event: error` above told only the client that started the turn: another page
+       * watching the session, or this one after a reload, could not tell the turn had failed — or even ended. A
+       * `turn/failed` record goes out on `/api/events` like any append, ends the turn for every page, and the
+       * transcript carries it as the answer's stop reason.
+       */
+      try {
+        ctx.session.store.append(handle, { type: 'turn/failed', message: (error as Error).message })
+      } catch (recordError) {
+        ctx.logger.warn('web: the failed turn could not be recorded — %s', (recordError as Error).message)
+      }
     }
   } finally {
     handles.delete(controller)
@@ -2828,6 +3188,244 @@ function subscribeSessionEvent(ctx: Context, forward: (payload: { session: strin
   return () => {
     if (typeof dispose === 'function') dispose()
   }
+}
+
+/** `/api/sessions/<session>/terminals[/<terminal>[/stream|/input|/resize]]`; the ids are judged in the handler. */
+const TERMINAL_ROUTE = /^\/api\/sessions\/([^/]+)\/terminals(?:\/([^/]+)(?:\/(stream|input|resize))?)?$/
+
+/**
+ * The terminal routes (#85, slice 1), with developer-ten's conditions for the server half:
+ * - A write must be `application/json`. A page sends JSON, and a form on another site cannot.
+ * - The session must be this server's (`404` otherwise), and its folder must sit under one of this server's
+ *   workspace roots (`403`).
+ * - An archived session gets no new terminal, input, resize or stream (`409`); listing and closing still work.
+ * - The shell runs under the session's sandbox mode, wrapped the way bash calls are wrapped, with the environment
+ *   bash sees. A session whose mode this host cannot confine gets no terminal (`503`), as bash refuses to run.
+ * - The caps: `maxTerminals` per session (`409`), the size range, input bytes per request (`413`) and the
+ *   replay bytes.
+ * - A terminal id is looked up only inside its own session, so another session's path answers `404`.
+ */
+async function handleTerminalRoute(ctx: Context, request: IncomingMessage, response: ServerResponse, url: URL, state: RequestState): Promise<void> {
+  const [, rawSession = '', rawTerminal, action] = TERMINAL_ROUTE.exec(url.pathname) ?? []
+  const session = decodeURIComponent(rawSession)
+  const terminal = rawTerminal === undefined ? undefined : decodeURIComponent(rawTerminal)
+  const method = request.method ?? 'GET'
+  const json = (status: number, body: unknown): void => respond(response, status, 'application/json', `${JSON.stringify(body)}\n`)
+  const route =
+    terminal === undefined
+      ? method === 'GET' ? 'list' : method === 'POST' ? 'create' : undefined
+      : action === undefined
+        ? method === 'DELETE' ? 'close' : undefined
+        : action === 'stream'
+          ? method === 'GET' ? 'stream' : undefined
+          : method === 'POST' ? action : undefined
+  if (route === undefined) {
+    // The answer every unrouted request gets here (and the Rust router's method fallback).
+    respond(response, 404, 'text/plain', 'not found\n')
+    return
+  }
+  if (method !== 'GET' && !/^application\/json\s*(;|$)/i.test(String(request.headers['content-type'] ?? ''))) {
+    json(415, { error: 'a terminal request must be sent as application/json' })
+    return
+  }
+  if (!/^session-[0-9a-f-]{36}$/i.test(session)) {
+    json(400, { error: 'not a session id' })
+    return
+  }
+  const meta = ctx.session.list().find((entry) => entry.id === session)
+  if (meta === undefined) {
+    json(404, { error: `no session ${session}` })
+    return
+  }
+  // Listing and closing stay open to a session whose workspace was removed, so its terminals can still be ended.
+  if (ctx.workspace !== undefined && ctx.workspace.owner(meta.cwd) === undefined && route !== 'list' && route !== 'close') {
+    json(403, { error: `session ${session} is not under any workspace root of this server`, code: 'not-owned' })
+    return
+  }
+  if (meta.archived === true && route !== 'list' && route !== 'close') {
+    json(409, { error: `session ${session} is archived`, code: 'archived' })
+    return
+  }
+  const registry = state.terminals
+  if (route === 'list') {
+    json(200, { terminals: registry.list(session), limits: registry.limits })
+    return
+  }
+  if (route === 'close') {
+    const closed = await registry.close(session, terminal ?? '')
+    if (!closed) json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
+    else json(200, { closed: true, terminal })
+    return
+  }
+  if (route === 'stream') {
+    streamTerminal(request, response, registry, session, terminal ?? '')
+    return
+  }
+  const parsed = await readJson(request, response)
+  if (parsed === null && response.headersSent) return
+  // JSON that is not an object (`null`, an array, a number) reads as `{}`, as the Rust body reader does.
+  const body: Record<string, unknown> = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  if (route === 'create') {
+    const cols = body.cols === undefined ? 80 : body.cols
+    const rows = body.rows === undefined ? 24 : body.rows
+    if (typeof cols !== 'number' || typeof rows !== 'number' || !registry.fits(cols, rows)) {
+      json(400, { error: `cols and rows must be whole numbers from 1 to ${registry.limits.maxCols} and ${registry.limits.maxRows}` })
+      return
+    }
+    const handle = ctx.session.store.open(session)
+    if (handle === null) {
+      json(404, { error: `no session ${session}` })
+      return
+    }
+    const mode = ctx.session.effectiveMode(handle, ctx.sandbox.mode)
+    const root = ctx.sandbox.rootFor(meta.cwd)
+    try {
+      if (!statSync(root).isDirectory()) throw new Error('not a directory')
+    } catch {
+      json(409, { error: `the session's folder ${root} is not an available directory`, code: 'cwd-missing' })
+      return
+    }
+    try {
+      const created = registry.create({
+        session,
+        cwd: root,
+        mode,
+        cols,
+        rows,
+        confine: (argv) => ctx.sandbox.confine(argv, mode, root).argv,
+        env: process.env,
+      })
+      if (created === 'limit') {
+        json(409, { error: `session ${session} already holds ${registry.limits.maxTerminals} terminals; close one first`, code: 'limit' })
+        return
+      }
+      if (created === 'closed') {
+        json(503, { error: 'the server is shutting down', code: 'shutting-down' })
+        return
+      }
+      /**
+       * An archive that landed while this request was being read found nothing to close, so the archive is read
+       * again now that the terminal exists, and a terminal on an archived session is ended at once.
+       */
+      if (ctx.session.list().find((entry) => entry.id === session)?.archived === true) {
+        await registry.close(session, created.id)
+        json(409, { error: `session ${session} is archived`, code: 'archived' })
+        return
+      }
+      json(201, { terminal: created })
+    } catch (error) {
+      if (error instanceof SandboxUnavailableError || (error instanceof Error && error.name === 'SandboxUnavailableError')) {
+        json(503, { error: (error as Error).message, code: 'sandbox-unavailable' })
+        return
+      }
+      throw error
+    }
+    return
+  }
+  if (route === 'input') {
+    if (typeof body.data !== 'string') {
+      json(400, { error: 'data must be a string' })
+      return
+    }
+    const result = registry.input(session, terminal ?? '', body.data)
+    if (result === 'ok') json(200, { ok: true })
+    else if (result === 'missing') json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
+    else if (result === 'exited') json(409, { error: 'the terminal has exited', code: 'exited' })
+    else if (result === 'busy') json(503, { error: 'the terminal has too much input waiting; try again', code: 'busy' })
+    else json(413, { error: `input is limited to ${registry.limits.maxInputBytes} bytes per request` })
+    return
+  }
+  const cols = body.cols
+  const rows = body.rows
+  if (typeof cols !== 'number' || typeof rows !== 'number') {
+    json(400, { error: 'cols and rows are required numbers' })
+    return
+  }
+  const result = await registry.resize(session, terminal ?? '', cols, rows)
+  if (result === 'ok') json(200, { ok: true, cols, rows })
+  else if (result === 'missing') json(404, { error: `no terminal ${terminal ?? ''} in session ${session}` })
+  else if (result === 'exited') json(409, { error: 'the terminal has exited', code: 'exited' })
+  else if (result === 'out-of-range') json(400, { error: `cols and rows must be whole numbers from 1 to ${registry.limits.maxCols} and ${registry.limits.maxRows}` })
+  else json(503, { error: 'the terminal could not be resized', code: 'unavailable' })
+}
+
+/**
+ * One terminal's output as an event stream: a `snapshot` of the retained tail first, then `output` frames and
+ * one `exit`.
+ *
+ * The listener is attached before the snapshot is written, so no output can fall between the two. A heartbeat
+ * comment keeps an idle stream open through proxies. The stream ends after `exit`.
+ */
+function streamTerminal(request: IncomingMessage, response: ServerResponse, registry: TerminalRegistry, session: string, terminal: string): void {
+  const frames: TerminalEvent[] = []
+  let ready = false
+  let beat: NodeJS.Timeout | undefined
+  const send = (event: TerminalEvent): void => {
+    if (response.writableEnded || response.destroyed) return
+    response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+    /**
+     * A reader that falls more than the replay size behind is let go rather than buffered without bound (a `yes`
+     * read slowly). Its stream ends; the page reconnects and gets the current tail as a snapshot.
+     */
+    if (event.type === 'exit' || response.writableLength > registry.limits.replayBytes) {
+      clearInterval(beat)
+      attached?.detach()
+      response.end()
+    }
+  }
+  // `send` reads `attached`; it runs only after `attach` has returned, because events arrive from I/O callbacks.
+  const attached = registry.attach(session, terminal, (event) => (ready ? send(event) : frames.push(event)))
+  if (attached === undefined) {
+    respond(response, 404, 'application/json', `${JSON.stringify({ error: `no terminal ${terminal} in session ${session}` })}\n`)
+    return
+  }
+  respondSse(response)
+  request.on('close', () => {
+    clearInterval(beat)
+    attached?.detach()
+  })
+  const snapshot = attached.snapshot
+  response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`)
+  ready = true
+  for (const event of frames) send(event)
+  if (snapshot.exited) {
+    send({ type: 'exit', code: snapshot.exitCode })
+    return
+  }
+  beat = setInterval(() => {
+    if (!response.writableEnded && !response.destroyed) response.write(': heartbeat\n\n')
+  }, heartbeatInterval())
+  beat.unref()
+}
+
+/**
+ * Push one frame to every `/api/events` subscriber, through the stream's log so it has an id and is replayed to a
+ * client that reconnects (phase B item 4).
+ *
+ * The log-backed `session` and `approval` frames come from the bus; these are the changes that never reach a
+ * session's log — a renamed session, an added, renamed or removed workspace, a settled approval — which DSH pushes
+ * as its api-session and workspace increments and as the end of an approval waterfall. Without them a second page
+ * only learned of a change when it next read the list itself.
+ */
+export function push(state: Pick<RequestState, 'log' | 'subscribers'>, event: string, data: unknown): void {
+  const line = state.log.record(event, JSON.stringify(data))
+  for (const client of state.subscribers) {
+    try {
+      client.write(line)
+    } catch {
+      // a client that is already gone leaves through its close listener
+    }
+  }
+}
+
+/**
+ * A session's folder that is gone (#56): a refusal with its sentence and its code, answered `400 { error, code }` as the
+ * unwritable branch of #106 is. Recognised by code, class or name, as `SessionFlagError` is, so a second copy of the
+ * module still matches.
+ */
+function isMissingFolder(error: unknown): boolean {
+  if (error instanceof MissingFolderError) return true
+  return error instanceof Error && (error.name === 'MissingFolderError' || (error as { code?: unknown }).code === 'session/folder-missing')
 }
 
 function respondSse(response: ServerResponse): void {
@@ -2964,6 +3562,51 @@ export function attachmentsOf(
 }
 
 /**
+ * The grammars the page's code-block highlighter registers: exactly the set and the order `highlight.ts` registers on
+ * the server, so a fence the TypeScript server classified is classified the same in the page, on either build.
+ */
+export const HIGHLIGHT_GRAMMARS = [
+  'bash', 'c', 'cpp', 'css', 'diff', 'go', 'ini', 'java', 'javascript', 'json', 'markdown', 'php', 'plaintext', 'python',
+  'ruby', 'rust', 'sql', 'typescript', 'xml', 'yaml',
+] as const
+
+/**
+ * One module of highlight.js for the browser, or `null` for anything else: `core.js`, and `languages/<name>.js` for a
+ * grammar in {@link HIGHLIGHT_GRAMMARS}.
+ *
+ * DSH highlights a chat code block in the browser; heddle's two servers each highlight on their own (highlight.js here,
+ * a grammar engine in the Rust port) and were measured classifying the same tokens differently (C60). The page now
+ * re-highlights an answer's code blocks itself with the one highlight.js both servers serve from `node_modules`, so a
+ * block is coloured the same whichever server drew it. The package's ES grammars are standalone modules; its core is
+ * CommonJS with no `require`, so it is served wrapped as an ES module. Only listed names are served, so the route cannot
+ * name another file.
+ */
+export function highlightAsset(name: string, read: (relative: string) => string): string | null {
+  try {
+    if (name === 'core.js') {
+      return `const module = { exports: {} };\nconst exports = module.exports;\n${read('lib/core.js')}\nexport default module.exports;\n`
+    }
+    const match = /^languages\/([a-z]+)\.js$/.exec(name)
+    if (match === null || !(HIGHLIGHT_GRAMMARS as readonly string[]).includes(match[1] as string)) return null
+    return read(`es/languages/${match[1]}.js`)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A user message's text blocks as the person reads them: a paragraph each.
+ *
+ * A harness notice is written as separate blocks — a settled subagent's summary, `Its closing message:`, and the
+ * child's text (DSH's `createSettlementMessage`) — and the chat adapters hand them to the model on separate lines.
+ * Joined with nothing, the page read them as one run-on line (live-testing draft developer-five-10). A person's
+ * message is one block, so it reads exactly as before; an attachment has no text and adds nothing.
+ */
+export function blocksText(content: readonly { readonly text?: string }[]): string {
+  return content.map((part) => part.text ?? '').filter((text) => text !== '').join('\n\n')
+}
+
+/**
  * Fold a session's recorded events into the display turns the page renders.
  *
  * Exported so the fold can be judged directly: it is pure, it is where the two subtle rules live (read the
@@ -3049,6 +3692,16 @@ export function transcriptTurns(
     openReasoning = -1
   }
   /**
+   * The exchange's token usage, DSH's per-Turn usage row: every model round (`model/request`) since the message that
+   * opened the exchange, and the rounds that reported usage. The sum is attached to the answer at `turn/completed`
+   * only when **every** round reported, because DSH hides the row rather than show a partial total.
+   */
+  let usageRounds = 0
+  let usageReports = 0
+  let usageReported = false
+  let usageSum: TokenUsage | undefined
+  let usageStart = -1
+  /**
    * A blank-line-only delta between two tokens is a **stream artifact**, not prose.
    *
    * Measured 2026-10-18 in the owner's transcript: a build of the server streamed content as `'检测'`, `'\n\n\n'`,
@@ -3083,7 +3736,35 @@ export function transcriptTurns(
     if (write !== undefined && state === 'ok') write.ok = true
   }
 
+  /** Where each slash command's row sits, by its run id (src/commands/, developer-three). */
+  const commandAt = new Map<string, number>()
+
   for (const event of events) {
+    /**
+     * A slash command is a row of its own, outside the conversation: `command/run` opens it and `command/done`
+     * settles it with the host's words. Neither is a message, so the model never saw either.
+     */
+    if (event.type === 'command/run' && typeof event.commandId === 'string') {
+      closeRuns()
+      commandAt.set(event.commandId, turns.length)
+      turns.push({
+        kind: 'command',
+        text: '',
+        commandId: event.commandId,
+        name: typeof event.name === 'string' ? event.name : '',
+        ...(typeof event.args === 'string' ? { args: event.args } : {}),
+        state: 'running',
+      })
+      continue
+    }
+    if (event.type === 'command/done' && typeof event.commandId === 'string') {
+      const index = commandAt.get(event.commandId)
+      const turn = index === undefined ? undefined : turns[index]
+      if (index !== undefined && turn !== undefined) {
+        turns[index] = { ...turn, state: event.kind === 'error' ? 'error' : 'done', text: typeof event.text === 'string' ? event.text : '' }
+      }
+      continue
+    }
     if (event.type === 'message') {
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
@@ -3092,18 +3773,28 @@ export function transcriptTurns(
             role?: string
             content?: readonly { type?: string; text?: string; name?: string; path?: string; mimeType?: string; bytes?: number }[]
             toolCallId?: string
+            source?: unknown
           }
         | undefined
       if (message === undefined) continue
       const text = (message.content ?? []).map((part) => part.text ?? '').join('')
       if (message.role === 'user') {
         sectionStart = turns.length
+        usageRounds = 0
+        usageReports = 0
+        usageReported = false
+        usageSum = undefined
+        usageStart = turns.length
         const attachments = attachmentsOf(message.content ?? [])
+        /** A message the harness wrote names its trigger in `source`; a person's message has none. */
+        const source = message.source as { kind?: unknown } | undefined
+        const trigger = typeof source === 'object' && source !== null && typeof source.kind === 'string' && source.kind !== '' ? (source as ChatTurn['trigger']) : undefined
         turns.push({
           kind: 'user',
-          text,
+          text: blocksText(message.content ?? []),
           ...(attachments.length > 0 ? { attachments } : {}),
           ...(typeof event.at === 'string' ? { time: event.at } : {}),
+          ...(trigger !== undefined ? { trigger } : {}),
         })
       }
       else if (message.role === 'assistant') turns.push({ kind: 'assistant', text })
@@ -3129,6 +3820,25 @@ export function transcriptTurns(
       }
       continue
     }
+    if (event.type === 'model/request') {
+      usageRounds += 1
+      usageReported = false
+    }
+    if (event.type === 'turn/completed') {
+      /** The exchange's usage belongs to its last answer, and only a complete account is shown. */
+      if (usageRounds > 0 && usageReports === usageRounds && usageSum !== undefined) {
+        let lastAnswer = -1
+        for (let index = turns.length - 1; index > usageStart; index -= 1) {
+          if (turns[index]?.kind === 'user') break
+          if (turns[index]?.kind === 'assistant') { lastAnswer = index; break }
+        }
+        const answer = turns[lastAnswer]
+        if (lastAnswer >= 0 && answer !== undefined) turns[lastAnswer] = { ...answer, usage: usageSum }
+      }
+      usageRounds = 0
+      usageReports = 0
+      usageSum = undefined
+    }
     if (event.type !== 'assistant/chunk') {
       /**
        * A stopped turn records its reason on the completion. It is attached to the answer it stopped — or, when
@@ -3142,12 +3852,44 @@ export function transcriptTurns(
           else turns.push({ kind: 'assistant', text: typeof event.text === 'string' ? event.text : '', ended })
         }
       }
+      /**
+       * A completed turn can be branched from its closing answer — DSH's turn footer offers "Branch into a new
+       * conversation" there and forks with `atSeq` set to the turn's end (dsh-client-ui-chat/lib/client.js:6963-7001,
+       * 11094-11115, 13266-13285). DSH refuses the branch when the turn's last row is not an answer with text (a call
+       * after the answer, or no text at all), so only that case carries the seq.
+       */
+      if (event.type === 'turn/completed' && typeof event.seq === 'number') {
+        const last = turns[turns.length - 1]
+        if (last !== undefined && last.kind === 'assistant' && last.text.trim().length > 0) {
+          turns[turns.length - 1] = { ...last, forkSeq: event.seq }
+        }
+      }
+      /**
+       * A failed turn (`turn/failed`, written by the turn route) is the answer's stop reason, on the same notice row
+       * a stopped turn uses, so a reload says what the live page said. A turn the archived-session gate blocked
+       * (`reason: { kind: 'blocked' }`) is no failure and adds nothing, not even to the previous answer: DSH's chat shows
+       * no failure for a `blocked` end (`endFailure`, dsh-client-ui-chat lib/client.js:10475-10487), and its input was
+       * discarded (#139).
+       */
+      const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
+      if (event.type === 'turn/failed' && !blocked) {
+        const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
+        const last = turns[turns.length - 1]
+        if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
+        else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+      }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()
       continue
     }
-    const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string } | undefined
+    const chunk = event.chunk as { type?: string; text?: string; id?: string; name?: string; arguments?: string; usage?: TokenUsage } | undefined
     if (chunk === undefined) continue
+    if (chunk.usage !== undefined) {
+      /** One report per round, however many frames of that round carried usage. */
+      if (!usageReported) usageReports += 1
+      usageReported = true
+      usageSum = mergeTokenUsage(usageSum, chunk.usage)
+    }
     if (chunk.type === 'text-delta' && chunk.text !== undefined) {
       openAssistant = append('assistant', chunk.text, openAssistant)
       openReasoning = -1
@@ -3210,7 +3952,7 @@ export interface TurnAttachment {
 }
 
 export interface ChatTurn {
-  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool'
+  readonly kind: 'user' | 'assistant' | 'reasoning' | 'tool' | 'command'
   /**
    * When the logged event happened, as its own `at` — the **user message's clock**, which the page shows beside
    * the bubble and the copy button (DSH's `MessageIconActions` reads the same event time). It is the recorded
@@ -3232,11 +3974,22 @@ export interface ChatTurn {
    */
   readonly ended?: readonly string[]
   /**
+   * The exchange's token usage, summed over its model rounds - DSH's per-Turn usage row, carried by the exchange's
+   * last answer. Present only when every round reported usage; a bucket no round reported is absent.
+   */
+  readonly usage?: TokenUsage
+  /**
    * Files attached to this message, in the order they were chosen — the gallery and file chips DSH draws on
    * a person's row. The metadata is what the server measured when it recorded the message, so the page never
    * re-derives a size or a media type from a path.
    */
   readonly attachments?: readonly TurnAttachment[]
+  /**
+   * A user message the harness wrote rather than a person: a goal round's `source` (`{ kind: 'goal', goalId,
+   * revision, round }`) or another trigger's. DSH draws a non-human turn trigger as an independent, bordered notice
+   * on a neutral background, so the page needs to tell it apart from a person's bubble.
+   */
+  readonly trigger?: { readonly kind: string; readonly [key: string]: unknown }
   /** What the model said, or a tool call's arguments, or the reasoning text. */
   readonly text: string
   /** A closed tool's one-liner, kept as a field so the client never parses it back out. */
@@ -3247,8 +4000,17 @@ export interface ChatTurn {
   readonly toolCallId?: string
   /** What the tool answered — on the same turn, which is what makes one element of it. */
   readonly result?: string
-  /** DSH's phases, simplified: a call is running until its result says otherwise. */
-  readonly state?: 'running' | 'ok' | 'error'
+  /** DSH's phases, simplified: a call is running until its result says otherwise; a command is done or failed. */
+  readonly state?: 'running' | 'ok' | 'error' | 'done'
+  /**
+   * On the answer that closes a completed turn: the seq of that turn's `turn/completed`, which the page's Branch action
+   * sends as the fork's `atSeq` — DSH's turn footer forks at the turn's end seq.
+   */
+  readonly forkSeq?: number
+  /** A slash command's run id, which pairs its `command/run` and `command/done` (src/commands/). */
+  readonly commandId?: string
+  /** What followed the command's name, when the log kept it. */
+  readonly args?: string
 }
 
 /**
@@ -3323,6 +4085,40 @@ export function tokenFormPage(options: { readonly stale?: boolean } = {}): strin
 export function markedPage(html: string): string {
   const marker = createHash('sha256').update(html).digest('hex').slice(0, 12)
   return html.replace(/<meta name="heddle-page"[^>]*>/, `<meta name="heddle-page" content="${marker}">`)
+}
+
+/**
+ * The inline scripts of a page, as a browser ends them: each `<script>` without a `src`, up to the first `</script>`.
+ */
+export function inlineScripts(html: string): string[] {
+  return [...html.matchAll(/<script\b(?![^>]*\bsrc\s*=)[^>]*>([\s\S]*?)<\/script\s*>/gi)].map((match) => match[1] ?? '')
+}
+
+/**
+ * The page's Content-Security-Policy, sent with `page.html` only.
+ *
+ * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
+ * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
+ * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
+ * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
+ * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
+ * writes the same.
+ */
+export function pagePolicy(html: string, browserEnabled = false): string {
+  const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
+  return [
+    "default-src 'self'",
+    ["script-src 'self'", ...hashes].join(' '),
+    "style-src 'self' 'unsafe-inline' https:",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data: https:",
+    "media-src 'self' https:",
+    browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+  ].join('; ')
 }
 
 /**

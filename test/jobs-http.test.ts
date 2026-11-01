@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { test } from 'node:test'
 
-import { handleJobsRoute } from '../src/jobs/http.ts'
+import { handleJobsRoute, sessionJobActivity, stopSessionJobs } from '../src/jobs/http.ts'
 import { JobRegistry, type JobEvent, type JobHandle, type JobOutcome } from '../src/jobs/registry.ts'
 
 /** A server that answers only the job routes, as the web server's one dispatch line does. */
@@ -183,4 +183,20 @@ test('a refusal from a registry loaded in another module graph is still recognis
   } finally {
     server.close()
   }
+})
+
+test('archive admission: a session\'s live owned jobs block its archive, and the stop kills them with "session archived"', async () => {
+  const { jobs, events, start } = setup()
+  assert.deepEqual(sessionJobActivity(undefined, 'session-a'), [], 'no jobs row, no activity')
+  assert.deepEqual(stopSessionJobs(undefined, 'session-a'), [])
+  const mine = start('session-a')
+  const other = start('session-b')
+  start()
+  assert.deepEqual(sessionJobActivity(jobs, 'session-a'), [{ id: mine.id, label: 'tail -f log' }], 'unowned and foreign jobs never block')
+  assert.deepEqual(stopSessionJobs(jobs, 'session-a'), [mine.id])
+  assert.deepEqual(mine.cancels, ['session archived'])
+  const settled = await settledOf(events, mine.id)
+  assert.equal(settled.job.detail, 'signal: SIGTERM; session archived')
+  assert.deepEqual(sessionJobActivity(jobs, 'session-a'), [], 'a settled job no longer blocks')
+  assert.deepEqual(other.cancels, [], 'another session\'s job is left alone')
 })

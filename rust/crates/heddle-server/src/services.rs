@@ -39,6 +39,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::selection::SessionSelection;
 
+/// Told about a title the session store wrote: `(session id, title now stored)` ([`SessionService::on_renamed`]). The
+/// same shape as `heddle_session::RenameListener`, so a store's listener is this one.
+pub type TitleListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// A failure a service reports, with an optional stable code a route maps to a status.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -152,6 +156,15 @@ pub enum ForkOutcome {
     Unavailable {
         code: String,
     },
+    /// Refused — an explicit `atSeq` names no event of the source. Answered `409` with DSH's sentence, which
+    /// cites the source's last seq (`none` for an empty log).
+    NoSuchEvent {
+        at_seq: u64,
+        last_seq: Option<u64>,
+    },
+    /// Refused with the store's own sentence — the source's folder is gone (#56). Answered `400 { error, code }`
+    /// (`session/folder-missing`), as #106's unwritable branch is.
+    Refused(ServiceError),
     Forked(CreatedSession),
 }
 
@@ -175,6 +188,12 @@ pub struct ModeWrite {
 pub trait SessionService: Send + Sync {
     /// Every session's meta, in the store's order.
     fn list(&self) -> Vec<SessionMeta>;
+
+    /// Append one record to a session's log — the turn route's `turn/failed`, which web.ts writes through
+    /// `ctx.session.store.append`. An implementation that keeps no log writes nothing and answers `Ok`.
+    fn record(&self, _id: &str, _kind: &str, _fields: Value) -> Result<(), ServiceError> {
+        Ok(())
+    }
 
     /// One session's meta.
     fn meta(&self, id: &str) -> Option<SessionMeta> {
@@ -201,8 +220,8 @@ pub trait SessionService: Send + Sync {
         preset: Option<&str>,
     ) -> Result<CreatedSession, ServiceError>;
 
-    /// Fork a session at its last completed turn.
-    fn fork(&self, id: &str) -> ForkOutcome;
+    /// Fork a session at its last completed turn, or at `at_seq` (DSH's inclusive `atSeq`) when given.
+    fn fork(&self, id: &str, at_seq: Option<u64>) -> ForkOutcome;
 
     /// Pin, unpin, archive or unarchive. `Ok(None)` is an unknown session; `Err` is a refusal answered
     /// `409` with its code (`archived` when the store gave none).
@@ -210,6 +229,14 @@ pub trait SessionService: Send + Sync {
 
     /// Retitle; the empty string clears the title. `None` is an unknown session.
     fn rename(&self, id: &str, title: &str) -> Option<SessionMeta>;
+
+    /// Announce every title the store writes from now on to `listener`, with the session id and the title now stored
+    /// (`""` when cleared): a person's rename, the first message's fallback, a fork's name and the title model's answer
+    /// alike (#33). Answers whether this service announces titles at all. One that does not (the default) leaves the
+    /// rename route to push its own rename, which is then the only title the pages hear.
+    fn on_renamed(&self, _listener: TitleListener) -> bool {
+        false
+    }
 
     /// The id of the session whose definition lives in `folder`, if any.
     fn definition_id(&self, folder: &Path) -> Option<String>;
@@ -329,6 +356,22 @@ pub trait WorkspaceService: Send + Sync {
         let _ = before;
         Err(workspace_not_found(id))
     }
+
+    /// [`WorkspaceService::insert_before`], saying whether anything moved (`reorder` in `src/workspace/service.ts`),
+    /// so the route pushes a move to every open page and nothing for a move that changes nothing (#136; DSH's
+    /// registry writes nothing then, dsh-workspace lib/index.js:484, :492). The default counts every answered move
+    /// as one, for doubles that do not model the order.
+    fn reorder(&self, id: &str, before: Option<&str>) -> Result<(Vec<String>, bool), ServiceError> {
+        self.insert_before(id, before).map(|order| (order, true))
+    }
+
+    /// First use — DSH's `workspace/initializeDefault`, `POST /api/workspaces/default`: the default workspace's
+    /// record when this install is a first use (created or reused), `Ok(None)` when it is not, `Err` when its
+    /// folder cannot be made (`500`). The default answers `None`, for doubles that do not model first use.
+    fn initialize_default(&self, sessions: &[SessionMeta]) -> Result<Option<Value>, ServiceError> {
+        let _ = sessions;
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -394,6 +437,20 @@ pub trait TurnRunner: Send + Sync {
         &self,
         request: TurnRequest,
     ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>>;
+
+    /// Whether the agent runtime has a turn in flight for `session` that this server did not start — a
+    /// subagent's, a teammate's, a settlement notice's (the TypeScript build's `ctx.get('turns').isRunning`).
+    /// The archive route asks it so a session doing work the page never started is still refused. A runner
+    /// without a live-turn registry knows of none.
+    fn is_live(&self, _session: &str) -> bool {
+        false
+    }
+
+    /// Stop every such turn of `session`; whether there was one (`turns.abort`). The stop-and-archive path
+    /// calls it for the session and each running subagent descendant.
+    fn interrupt(&self, _session: &str) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -419,6 +476,34 @@ pub trait SandboxService: Send + Sync {
         requested: Option<&Value>,
         confirm: Option<&Value>,
     ) -> Result<String, String>;
+
+    /// The folder a session's calls run in (`rootFor`): the session's folder, or the configured root when the
+    /// operator named one or the session has none. A page terminal starts here (#85).
+    fn root_for(&self, folder: Option<&Path>) -> PathBuf {
+        match folder {
+            Some(folder) if !folder.as_os_str().is_empty() => folder.to_path_buf(),
+            _ => PathBuf::from(self.workspace_root()),
+        }
+    }
+
+    /// Wrap `argv` under `mode`, rooted at `root`, the way a bash call is wrapped (#85: a page terminal is
+    /// confined like bash). `Err` carries the sandbox's sentence when this host cannot confine the mode. The
+    /// default confines nothing, so it refuses every mode but `danger-full-access`: it fails closed.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let _ = root;
+        if mode == "danger-full-access" {
+            Ok(argv.to_vec())
+        } else {
+            Err(format!(
+                "sandbox mode \"{mode}\" is requested but this server's sandbox cannot confine a terminal; refusing to run it unconfined"
+            ))
+        }
+    }
 }
 
 /// How a person answered an approval question.
@@ -515,6 +600,63 @@ pub trait TurnInterrupter: Send + Sync {
     fn interrupt(&self, session: &str) -> bool;
 }
 
+/// Work a session holds besides the turns and subagents the server counts itself, which an archive is refused by
+/// unless the caller agrees to stop it: DSH's other `workspace/session-activity` providers and their
+/// `workspace/session-stop` listeners (`dsh-workspace` `archiveSession`, `lib/index.js:527-541`). The binary
+/// supplies it from the jobs row (`dsh-jobs/lib/index.js:19-43`) and the schedule row
+/// (`dsh-schedule/lib/index.js:2043-2064`).
+pub trait SessionActivity: Send + Sync {
+    /// The live work that blocks archiving `session`, each item under its kind. The server lists the items of
+    /// the `job` and `schedule` kinds in DSH's listener order (`heddle_session::session_activity`); it counts
+    /// turns and subagents itself.
+    fn active(&self, session: &str) -> Vec<ActivityItem>;
+    /// Stop it, once the archive is written: a background job is killed with `session archived`, a reminder is
+    /// removed. The server awaits it before answering, as DSH's registry awaits every stop listener
+    /// (`dsh-workspace/lib/index.js:540`, `:621-628`) — a reminder's removal waits its turn in the schedule
+    /// service's queue (`stopSessionTasks`, `dsh-schedule/lib/index.js:2273-2292`).
+    fn stop(&self, session: &str) -> BoxFuture<'static, ()>;
+}
+
+/// What kind of work an [`ActivityItem`] is: DSH's activity `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Turn,
+    Job,
+    Subagent,
+    Schedule,
+}
+
+impl ActivityKind {
+    /// The kind as DSH spells it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Turn => "turn",
+            Self::Job => "job",
+            Self::Subagent => "subagent",
+            Self::Schedule => "schedule",
+        }
+    }
+}
+
+/// One piece of live work an archive is refused by (DSH's activity item: `{ id, label }` under a `kind`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityItem {
+    pub kind: ActivityKind,
+    pub id: String,
+    pub label: String,
+}
+
+/// The questions a model asks a person (`ask_user_question`), as the three routes see them.
+///
+/// The binary adapts `heddle-questions`, whose answers are already the TypeScript route's exact status and body;
+/// the server only matches the path. A late answer comes back in the body for the page to deliver.
+pub trait QuestionService: Send + Sync {
+    /// `GET /api/questions?session=<id>[&all=1]`: the status and the body.
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String);
+    /// `POST /api/questions/<id>` (or its `/hold`): the status and the body.
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String);
+}
+
 /// One Lead session's team as the view shows it — the same state the tools see.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TeamView {
@@ -568,10 +710,13 @@ pub struct Harness {
     pub approvals: Option<Arc<dyn ApprovalService>>,
     pub goals: Option<Arc<dyn GoalService>>,
     pub todos: Option<Arc<dyn TodoService>>,
+    pub questions: Option<Arc<dyn QuestionService>>,
     pub team: Option<Arc<dyn TeamService>>,
     pub attachments: Option<Arc<dyn AttachmentReader>>,
     pub markdown: Option<Arc<dyn MarkdownRenderer>>,
     pub stats: Option<Arc<dyn SessionStatsProjector>>,
+    /// Work besides turns and subagents that an archive stops or is refused by; `None`: no such row is loaded.
+    pub activity: Option<Arc<dyn SessionActivity>>,
     /// The interface language the optional `locale` row stores (issue #80): the page is served with its
     /// `<html lang>`; `None` follows each browser's `Accept-Language`.
     pub locale: Option<heddle_config::LocalePreference>,
@@ -604,10 +749,12 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
             locale: None,
             presets: None,
             interrupter: None,
@@ -651,10 +798,12 @@ impl Harness {
             approvals: None,
             goals: None,
             todos: None,
+            questions: None,
             team: None,
             attachments: None,
             markdown: None,
             stats: None,
+            activity: None,
             locale: None,
             presets: None,
             interrupter: None,
@@ -692,7 +841,7 @@ impl SessionService for UnavailableSessions {
     ) -> Result<CreatedSession, ServiceError> {
         Err(ServiceError::new(NOT_LOADED))
     }
-    fn fork(&self, _id: &str) -> ForkOutcome {
+    fn fork(&self, _id: &str, _at_seq: Option<u64>) -> ForkOutcome {
         ForkOutcome::NotFound
     }
     fn set_flags(&self, _id: &str, _patch: FlagPatch) -> Result<Option<SessionMeta>, ServiceError> {
@@ -834,6 +983,11 @@ impl HarnessBuilder {
         self
     }
 
+    pub fn questions(mut self, service: Arc<dyn QuestionService>) -> Self {
+        self.harness.questions = Some(service);
+        self
+    }
+
     pub fn team(mut self, service: Arc<dyn TeamService>) -> Self {
         self.harness.team = Some(service);
         self
@@ -851,6 +1005,11 @@ impl HarnessBuilder {
 
     pub fn stats(mut self, service: Arc<dyn SessionStatsProjector>) -> Self {
         self.harness.stats = Some(service);
+        self
+    }
+
+    pub fn activity(mut self, service: Arc<dyn SessionActivity>) -> Self {
+        self.harness.activity = Some(service);
         self
     }
 

@@ -49,7 +49,9 @@ use crate::surface::{
     index_by_seq, is_surface_eligible,
 };
 use crate::title::SessionTitles;
-use crate::transcript::{TranscriptFormat, decode_transcript, encode_frame};
+use crate::transcript::{
+    LogHeader, TranscriptFormat, decode_transcript, encode_frame, judge_log_header,
+};
 
 /// The transcript file name inside an **old-layout** session directory, current format.
 pub const TRANSCRIPT_NAME: &str = "session.v2.jsonl.zstd";
@@ -61,6 +63,14 @@ pub const LEGACY_TRANSCRIPT_NAME: &str = "session.jsonl";
 /// This is the seam the command line's printer and the Web UI's stream listen on; the boot wires it to
 /// the `session/event` hook (`{ session: handle.id, event }`).
 pub type EventListener = Arc<dyn Fn(&SessionHandle, &SessionEvent) + Send + Sync>;
+
+/// Told about every title the store writes, after the write, with the session id and the title now stored (`""` when
+/// cleared): a person's rename, the first message's fallback, a fork's name and the title model's answer alike (#33).
+///
+/// DSH records each title change, and every view of the session follows it (inventory-shell S16). Heddle keeps the title
+/// in the meta record rather than in the log, so no [`EventListener`] event carries it; the boot wires this one to the
+/// Web UI's `session/renamed` push (`onRenamed` in `src/session/store.ts`).
+pub type RenameListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// The default store root: `heddle_home(env)/sessions` — `$HEDDLE_HOME/sessions`, else
 /// `~/.heddle/sessions`.
@@ -341,6 +351,55 @@ pub struct SessionStore {
     meta_lock: Mutex<()>,
     /// The automatic titles of this store's sessions ([`crate::title`]); idle until a model is attached.
     titles: Arc<SessionTitles>,
+    /// Each log's first-record verdict ([`SessionStore::log_readable`]), keyed by path and valid while the file's size
+    /// and modification time are the ones it was judged at: `list()` asks it of every session on every call, so a log is
+    /// re-read only after it changed, and a skipped log is reported once per change rather than once per listing.
+    headers: Mutex<HashMap<String, HeaderVerdict>>,
+    /// Where a skipped log is reported ([`skipped_log_line`]); standard error unless [`SessionStore::set_warn`] names a
+    /// collector.
+    warn: Mutex<Option<Warn>>,
+    /// Where a written title is announced ([`SessionStore::on_renamed`]); nobody until the boot names a listener.
+    renamed: Mutex<Option<RenameListener>>,
+}
+
+/// Receives the line naming a log the store leaves out.
+pub type Warn = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// One log's first-record verdict, and the file state it was judged at.
+struct HeaderVerdict {
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    verdict: LogHeader,
+}
+
+/// The line the store prints when it leaves a session out because its log cannot be read, the same line the
+/// TypeScript store prints (`skippedLogLine`). DSH omits such a session silently; heddle names the file, because the
+/// file is the one thing a person has to find (#130).
+pub fn skipped_log_line(path: &str, reason: &str) -> String {
+    format!("heddle session: skipped unreadable log {path}: {reason}")
+}
+
+/// Judge a log file by its first record ([`judge_log_header`]), reading only as far as that record ends. A file that
+/// cannot be opened or read is judged as the load reads it, an empty session: the store's rule for a log not written
+/// yet, and the reason a session whose log is missing entirely is still listed and still openable. The workspace tree
+/// asks it too, of the log a session definition names.
+pub fn read_log_header(path: &str) -> LogHeader {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return LogHeader::Readable;
+    };
+    let mut head = Vec::new();
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let Ok(read) = file.read(&mut chunk) else {
+            return LogHeader::Readable;
+        };
+        head.extend_from_slice(&chunk[..read]);
+        match judge_log_header(&head, read == 0) {
+            LogHeader::Incomplete => continue,
+            verdict => return verdict,
+        }
+    }
 }
 
 /// One session's fold: its events, and whether its transcript is stored as frames.
@@ -400,11 +459,12 @@ fn entries_sorted(dir: &Path) -> Vec<String> {
 }
 
 /// Add one parsed metadata file to a listing, first occurrence winning. A file that is not metadata is
-/// skipped rather than failing the list.
+/// skipped rather than failing the list, and so is a session whose log `readable` refuses.
 fn remember_meta(
     text: Result<String, std::io::Error>,
     metas: &mut Vec<SessionMeta>,
     seen: &mut Vec<String>,
+    readable: impl Fn(&str) -> bool,
 ) {
     let Ok(text) = text else {
         return;
@@ -416,7 +476,7 @@ fn remember_meta(
         return;
     };
     let id = meta.id().to_string();
-    if seen.contains(&id) {
+    if seen.contains(&id) || !readable(&id) {
         return;
     }
     seen.push(id);
@@ -433,6 +493,9 @@ impl SessionStore {
             state: Mutex::new(StoreState::default()),
             meta_lock: Mutex::new(()),
             titles: Arc::new(SessionTitles::default()),
+            headers: Mutex::new(HashMap::new()),
+            warn: Mutex::new(None),
+            renamed: Mutex::new(None),
         }
     }
 
@@ -444,12 +507,102 @@ impl SessionStore {
             state: Mutex::new(StoreState::default()),
             meta_lock: Mutex::new(()),
             titles: Arc::new(SessionTitles::default()),
+            headers: Mutex::new(HashMap::new()),
+            warn: Mutex::new(None),
+            renamed: Mutex::new(None),
         }
     }
 
     /// The absolute root every session is filed under.
     pub fn root(&self) -> &str {
         &self.root
+    }
+
+    /// Send the line naming a skipped log ([`skipped_log_line`]) to `warn` instead of standard error.
+    pub fn set_warn(&self, warn: Warn) {
+        *self.warn.lock().unwrap_or_else(PoisonError::into_inner) = Some(warn);
+    }
+
+    /// Announce every title this store writes from now on to `listener` ([`RenameListener`]). A second call replaces
+    /// the first, so a store announces to one server: a second router over the same store takes the announcements
+    /// from the first (no in-tree path builds two).
+    pub fn on_renamed(&self, listener: RenameListener) {
+        *self.renamed.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
+    }
+
+    /// Tell the rename listener, if any, about a title just written. Called with the meta lock released, as the event
+    /// listener is, so a listener may read the store; the title service calls it once its own lock is released too.
+    pub(crate) fn announce_title(&self, meta: &SessionMeta) {
+        let listener = self
+            .renamed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(listener) = listener {
+            listener(meta.id(), meta.title().unwrap_or(""));
+        }
+    }
+
+    /// Whether a session's log can be read at all, judged by its first record ([`read_log_header`]), and reported once
+    /// when it cannot (`logReadable` in `src/session/store.ts`).
+    ///
+    /// DSH's discovery rule (dsh-session-persistence-jsonl README, "Reading the logs": "Unreadable or unsupported
+    /// headers, including corrupt Zstandard header frames, are omitted from discovery and `list()`"; `listArtifacts`,
+    /// lib/index.js:3102-3138). Measured before (#130): a log holding 64 random bytes, or the line `{"not":"zstd"}`, was
+    /// listed while `GET /api/sessions/<id>` answered 404, and nothing named the file.
+    fn log_readable(&self, path: &str) -> bool {
+        let Ok(stat) = std::fs::metadata(path) else {
+            self.headers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(path);
+            return true;
+        };
+        let (size, modified) = (stat.len(), stat.modified().ok());
+        let verdict = {
+            let mut headers = self.headers.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(known) = headers.get(path)
+                && known.size == size
+                && known.modified == modified
+            {
+                return known.verdict == LogHeader::Readable;
+            }
+            let verdict = read_log_header(path);
+            headers.insert(
+                path.to_string(),
+                HeaderVerdict {
+                    size,
+                    modified,
+                    verdict: verdict.clone(),
+                },
+            );
+            verdict
+        };
+        if let LogHeader::Unreadable(reason) = verdict {
+            let line = skipped_log_line(path, reason);
+            let warn = self
+                .warn
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            match warn {
+                Some(warn) => warn(&line),
+                None => eprintln!("{line}"),
+            }
+            return false;
+        }
+        true
+    }
+
+    /// The log of the session whose metadata is in `dir`: `<id>.v2.jsonl.zstd` beside it, else the directory's own
+    /// transcript — the path [`SessionStore::open`] hands out, so the listing and an open judge the same file.
+    fn transcript_for(dir: &str, id: &str) -> String {
+        let candidate = Path::new(dir).join(log_name(id));
+        if candidate.exists() {
+            candidate.to_string_lossy().into_owned()
+        } else {
+            transcript_in(dir)
+        }
     }
 
     /// The automatic-title coordinator every service over this store shares ([`crate::title`]).
@@ -562,26 +715,34 @@ impl SessionStore {
     /// `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80
     /// UTF-8 bytes; one with nothing visible left clears, as a blank one does (the route refuses it).
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
-        let _meta = self.meta_guard();
-        self.rename_locked(id, title)
+        let renamed = {
+            let _meta = self.meta_guard();
+            self.rename_locked(id, title)?
+        };
+        if let Some(meta) = &renamed {
+            self.announce_title(meta);
+        }
+        Ok(renamed)
     }
 
     /// Write a generated title only while the session still carries `expected` — the name the call started from.
-    /// Answers whether it wrote.
+    /// Answers the record it wrote, if it wrote. It does **not** announce: the caller holds its own lock across this
+    /// write and calls [`Self::announce_title`] once that lock is released, so a listener that calls back into the
+    /// session service cannot deadlock (developer-eight's review of #33).
     pub(crate) fn rename_if_title(
         &self,
         id: &str,
         expected: &str,
         title: &str,
-    ) -> Result<bool, SessionError> {
+    ) -> Result<Option<SessionMeta>, SessionError> {
         let _meta = self.meta_guard();
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
-            return Ok(false);
+            return Ok(None);
         };
         if current.title().unwrap_or("") != expected {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(self.rename_locked(id, title)?.is_some())
+        self.rename_locked(id, title)
     }
 
     /// `rename` with the meta lock already held.
@@ -686,6 +847,18 @@ impl SessionStore {
         source: &str,
         attribution: ForkAttribution,
     ) -> Result<Option<SessionHandle>, SessionError> {
+        self.fork_at(source, attribution, None)
+    }
+
+    /// [`SessionStore::fork`] with DSH's `atSeq`: `Some(seq)` is the inclusive event seq to cut at
+    /// instead of the last completed turn (dsh-api-session-controller/lib/index.js:843-872). The caller
+    /// checks that the seq exists in the source.
+    pub fn fork_at(
+        &self,
+        source: &str,
+        attribution: ForkAttribution,
+        at_seq: Option<u64>,
+    ) -> Result<Option<SessionHandle>, SessionError> {
         let Some(from) = self.open(source) else {
             return Ok(None);
         };
@@ -713,8 +886,16 @@ impl SessionStore {
         })?;
 
         // The fork inherits what the source had **finished**: a dangling user message is not carried.
+        // An explicit cut is DSH's inclusive `atSeq` instead.
         let events = self.read(&from)?;
-        let inherited = completed_prefix(events.as_slice());
+        let inherited = match at_seq {
+            None => completed_prefix(events.as_slice()),
+            Some(cut) => events
+                .iter()
+                .filter(|event| event.seq <= cut)
+                .cloned()
+                .collect(),
+        };
         self.seed(&handle, &inherited)?;
         Ok(Some(handle))
     }
@@ -839,17 +1020,19 @@ impl SessionStore {
     }
 
     /// Open an existing session by id, in whichever layout it was written in.
+    ///
+    /// A session whose log cannot be read opens as no session, the answer `list()` gives by leaving it out: direct
+    /// access is refused (DSH: "Direct access to a corrupt compressed header still rejects"), and the routes answer it
+    /// as an unknown id, `404 no session <id>` — the answer this build already gave, now from the store (#130).
     pub fn open(&self, id: &str) -> Option<SessionHandle> {
         let meta = self.meta_file(id)?;
         let dir = Path::new(&meta)
             .parent()
             .map(|parent| parent.to_string_lossy().into_owned())?;
-        let candidate = Path::new(&dir).join(log_name(id));
-        let transcript = if candidate.exists() {
-            candidate.to_string_lossy().into_owned()
-        } else {
-            transcript_in(&dir)
-        };
+        let transcript = Self::transcript_for(&dir, id);
+        if !self.log_readable(&transcript) {
+            return None;
+        }
         Some(SessionHandle {
             id: id.to_string(),
             dir,
@@ -881,7 +1064,8 @@ impl SessionStore {
     }
 
     /// Every session, newest `created` first, from both layouts, none twice. A file that is not
-    /// metadata is skipped rather than failing the list. Directory entries are visited in byte order,
+    /// metadata is skipped rather than failing the list, and so is a session whose log cannot be read
+    /// ([`SessionStore::log_readable`], which names it once). Directory entries are visited in byte order,
     /// as Node's `readdirSync` returns them.
     pub fn list(&self) -> Vec<SessionMeta> {
         let mut metas: Vec<SessionMeta> = Vec::new();
@@ -889,11 +1073,14 @@ impl SessionStore {
 
         for name in entries_sorted(Path::new(&self.root)) {
             let at = Path::new(&self.root).join(&name);
+            let dir = at.to_string_lossy().into_owned();
+            let readable = |id: &str| self.log_readable(&Self::transcript_for(&dir, id));
             if name.starts_with("session-") {
                 remember_meta(
                     std::fs::read_to_string(at.join("meta.json")),
                     &mut metas,
                     &mut seen,
+                    readable,
                 );
                 continue;
             }
@@ -905,6 +1092,7 @@ impl SessionStore {
                     std::fs::read_to_string(at.join(&entry)),
                     &mut metas,
                     &mut seen,
+                    readable,
                 );
             }
         }
@@ -1401,6 +1589,34 @@ impl SessionStore {
         handle: &SessionHandle,
         message: RecordedMessage,
     ) -> Result<Arc<SessionEvent>, SessionError> {
+        self.record_message(handle, message, None)
+    }
+
+    /// [`SessionStore::message`] for a user message that also **names a session nothing has named yet**: when the
+    /// record has no title, or a blank one, `fallback_title` is written as [`SessionStore::rename`] writes a title
+    /// (cleaned; nothing visible left clears the key), in the **same** meta write that counts the turn. An empty
+    /// `fallback_title` names nothing.
+    ///
+    /// One write, because the record is read without the store's lock: the web server lists sessions on its own
+    /// threads while a turn records its first message on another, and with the count and the name written one after
+    /// the other a list in between showed the session with a turn and no title. A delegated child, which no route
+    /// marks running, was listed that way (80's check-subagents, Rust only: Node runs no request between the
+    /// TypeScript build's two synchronous writes, `src/session/service.ts` `userContent`).
+    pub fn user_message_named(
+        &self,
+        handle: &SessionHandle,
+        message: RecordedMessage,
+        fallback_title: &str,
+    ) -> Result<Arc<SessionEvent>, SessionError> {
+        self.record_message(handle, message, Some(fallback_title))
+    }
+
+    fn record_message(
+        &self,
+        handle: &SessionHandle,
+        message: RecordedMessage,
+        fallback_title: Option<&str>,
+    ) -> Result<Arc<SessionEvent>, SessionError> {
         let event = self.append(
             handle,
             NewEvent::new("message").field(
@@ -1411,7 +1627,11 @@ impl SessionStore {
         )?;
         if message.role == Role::User {
             let prompted_at = message.source.is_none().then_some(event.at.as_str());
-            self.touch(handle, true, prompted_at);
+            // Every title the store writes is announced (#33), this one too: once the write that named the session is
+            // done and the meta lock released, as `rename` announces.
+            if let Some(named) = self.write_meta_touch(handle, 1, prompted_at, fallback_title) {
+                self.announce_title(&named);
+            }
         }
         Ok(event)
     }
@@ -1503,26 +1723,51 @@ impl SessionStore {
     /// inherited user message at once and dates nothing, so a fork's row is dated by its creation until its
     /// own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
     fn touch_counting(&self, handle: &SessionHandle, turns: u64, prompted_at: Option<&str>) {
-        if turns == 0 && prompted_at.is_none() {
-            return;
+        let _ = self.write_meta_touch(handle, turns, prompted_at, None);
+    }
+
+    /// [`SessionStore::touch_counting`], also naming an untitled session with `fallback_title` in the same write
+    /// ([`SessionStore::user_message_named`]). The keys change in the order the separate writes changed them —
+    /// `updated`, `turns`, then `title` — so the record's bytes are the ones a touch then a rename left.
+    ///
+    /// Answers the record when this write **named** the session, so the caller can announce the title once the meta
+    /// lock (held only inside this call) is released; `None` when it named nothing.
+    fn write_meta_touch(
+        &self,
+        handle: &SessionHandle,
+        turns: u64,
+        prompted_at: Option<&str>,
+        fallback_title: Option<&str>,
+    ) -> Option<SessionMeta> {
+        let fallback_title = fallback_title.filter(|title| !title.is_empty());
+        if turns == 0 && prompted_at.is_none() && fallback_title.is_none() {
+            return None;
         }
         let _meta = self.meta_guard();
-        let Ok(text) = std::fs::read_to_string(&handle.meta) else {
-            return;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            return;
-        };
-        let Some(mut meta) = SessionMeta::from_value(value) else {
-            return;
-        };
+        let text = std::fs::read_to_string(&handle.meta).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        let mut meta = SessionMeta::from_value(value)?;
+        let mut named = false;
         if let Some(at) = prompted_at {
             meta.set("updated", Value::String(at.to_string()));
         }
         if turns > 0 {
             meta.set("turns", Value::from(meta.turns() + turns));
         }
-        let _ = crate::fsio::write_atomic(&handle.meta, meta.to_file_text());
+        if let Some(title) = fallback_title
+            && meta.title().is_none_or(|title| title.trim().is_empty())
+        {
+            // `rename`'s cleaning and its clearing of a title with nothing visible left.
+            let cleaned = crate::title_text::clean_session_title(title);
+            if cleaned.is_empty() {
+                meta.remove("title");
+            } else {
+                meta.set("title", Value::String(cleaned));
+                named = true;
+            }
+        }
+        let written = crate::fsio::write_atomic(&handle.meta, meta.to_file_text()).is_ok();
+        (named && written).then_some(meta)
     }
 }
 
@@ -1941,6 +2186,61 @@ mod tests {
         assert_eq!(meta.preset(), Some("reader"));
         let keys: Vec<&str> = meta.as_map().keys().map(String::as_str).collect();
         assert_eq!(keys, ["id", "created", "cwd", "teamId", "preset", "turns"]);
+    }
+
+    /// `user_message_named` writes the record a touch then a rename wrote — `updated`, `turns`, then `title`, cleaned as
+    /// `rename` cleans one — in one write; a blank title is replaced, a set one is kept, and an empty name names nothing.
+    #[test]
+    fn a_named_user_message_leaves_the_record_a_touch_then_a_rename_left() {
+        let (_dir, store) = store();
+        let keys = |id: &str| -> Vec<String> {
+            store.meta(id).unwrap().as_map().keys().cloned().collect()
+        };
+        let named = store.create(CreateOptions::default()).unwrap();
+        let plain = store.create(CreateOptions::default()).unwrap();
+        store
+            .user_message_named(&named, user("child task"), "child\u{202E} task")
+            .unwrap();
+        store.message(&plain, user("child task")).unwrap();
+        store.rename(&plain.id, "child\u{202E} task").unwrap();
+        assert_eq!(keys(&named.id), keys(&plain.id));
+        assert_eq!(
+            keys(&named.id),
+            ["id", "created", "cwd", "turns", "updated", "title"]
+        );
+        let meta = store.meta(&named.id).unwrap();
+        assert_eq!(
+            meta.title(),
+            Some("child task"),
+            "cleaned as rename cleans a title"
+        );
+        assert_eq!(meta.turns(), 1);
+
+        store
+            .user_message_named(&named, user("a later turn"), "a later turn")
+            .unwrap();
+        let meta = store.meta(&named.id).unwrap();
+        assert_eq!(meta.title(), Some("child task"), "a title is kept");
+        assert_eq!(meta.turns(), 2);
+
+        let blank = store.create(CreateOptions::default()).unwrap();
+        let mut meta = store.meta(&blank.id).unwrap();
+        meta.set("title", json!("   "));
+        std::fs::write(&blank.meta, meta.to_file_text()).unwrap();
+        store
+            .user_message_named(&blank, user("hello there"), "hello there")
+            .unwrap();
+        assert_eq!(
+            store.meta(&blank.id).unwrap().title(),
+            Some("hello there"),
+            "a blank title is replaced"
+        );
+
+        let silent = store.create(CreateOptions::default()).unwrap();
+        store.user_message_named(&silent, user(""), "").unwrap();
+        let meta = store.meta(&silent.id).unwrap();
+        assert_eq!(meta.title(), None, "an empty name names nothing");
+        assert_eq!(meta.turns(), 1);
     }
 
     /// Inventory A96: `record_preset` writes a preset only when the session has none — trimmed, never replacing one,

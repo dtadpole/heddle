@@ -1,6 +1,6 @@
 ---
 title: Jobs
-version: 1.1.0
+version: 1.1.1
 description: Background jobs a session starts and collects later - the in-memory registry and its output ring, the three job tools, background bash, the completion notice that wakes an idle session, and the page's job routes.
 grounded_in:
   - source: dsh-0.2.1-rc.2
@@ -26,7 +26,7 @@ own, the session is told with a completion notice, which starts a turn if the se
 | [`spill.ts`](spill.ts) | `StreamSpill`: a stream's complete output in a private spill file once it outgrows a 64 000-byte tail (64 MiB cap, removed past it), in a 0700 per-process directory under the OS tmpdir; `spillSources` reports each file to the job as a pull source with no text, so `job_output`'s dropped-output notice names it (DSH's `OutputCollector` spill) |
 | [`bash.ts`](bash.ts) | background `bash`: the producer (confined by the same sandbox path as a foreground call, detached in its own process group, SIGTERM then SIGKILL after 3000 ms through the sandbox's `killProcessGroup`, DSH's outcome mapping and sandbox notes), the runner the jobs row attaches to the `bash` tool, and `runForeground`: a foreground call run as a job, promoted to the background when it outlives its wall time (`renderPromoted`) |
 | [`notice.ts`](notice.ts) | the completion notice's text and source, and `NoticeDelivery`: who is told, wake or inject, per-session serialization, `quiet` delivery and the wake budget |
-| [`http.ts`](http.ts) | the person's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`) |
+| [`http.ts`](http.ts) | the person's routes under `/api/jobs`: list, follow (non-consuming), kill (`cancelled by the user`); and the archive admission the flags route asks (`sessionJobActivity`, `stopSessionJobs`) |
 
 The plugin that wires them is [`../plugins/jobs.ts`](../plugins/jobs.ts): it provides `ctx.jobs`, registers the
 three tools, attaches background `bash`, delivers notices with `runTurn` as its turn starter and the session inbox as
@@ -70,8 +70,11 @@ run uses.
 - **Owner liveness is session existence.** DSH requires a live agent for the owner and cancels its jobs when that
   agent is disposed (`owner disposed`). Heddle has no per-session agent object, so the owner must exist in the session
   store, and a job lives until it ends, is killed, or the row is disposed (`jobs service disposed`).
-- **The archive kill is a method, not a hook.** `killOwnedBy(session, 'session archived')` exists; heddle has no
-  archive event yet (the schedule row notes the same gap), so nothing calls it.
+- **Archiving stops a session's jobs**, as DSH's job archive admission does (`dsh-jobs/lib/index.js:19-43`): the
+  server's flags route counts the session's live owned jobs as activity (`sessionJobActivity`), refuses the archive
+  with `code: 'active'` and the jobs listed unless `stop: true`, and after the archive is written kills them with
+  `session archived` (`stopSessionJobs`). An archived session receives no completion notice: the row's notice host
+  treats it as gone, so no turn starts there.
 - **The tool call is read from the log.** DSH's producer receives the call id; heddle's tool context carries none. As
   `bash` is an exclusive tool, the running call is the first unanswered `bash` call of the current model answer with
   the same arguments; `toolCall` is omitted when the log cannot say.

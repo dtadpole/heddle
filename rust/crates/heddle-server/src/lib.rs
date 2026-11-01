@@ -41,6 +41,7 @@ pub mod server;
 pub mod services;
 pub mod stall;
 pub mod stream;
+pub mod terminals;
 pub mod token;
 pub mod transcript;
 

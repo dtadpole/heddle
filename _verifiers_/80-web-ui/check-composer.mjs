@@ -700,6 +700,7 @@ test('the session-statistics dock prints DSH\u2019s figures, and blanks what was
       await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000),
       'the dock fills once the turn ended and its usage was reported',
     )
+    assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="steps"]\') || {}).textContent === "1 steps" && (document.querySelector(\'[data-stat="context"]\') || {}).textContent === "50%"', 20_000))
     const first = JSON.parse(await dock())
     assert.equal(first.turns, '1 turns', 'the reference\u2019s label is always plural')
     assert.equal(first.steps, '1 steps', 'one model round is one agent step')
@@ -1263,6 +1264,7 @@ test('the dock elements open the reference\u2019s detail surfaces, and close aga
     assert.ok(await browser.waitFor('(document.querySelector(\'[data-stat="tokens"]\') || {}).textContent !== ""', 20_000))
 
     await click('time')
+    assert.ok(await browser.waitFor('document.getElementById("stat-popover").textContent.includes("LLM time")', 20_000))
     const time = JSON.parse(await panel())
     assert.equal(time.hidden, false, 'the time pill opens a surface')
     assert.equal(time.label, 'Session statistics')
@@ -1370,7 +1372,9 @@ test('a pending image is delivered to a vision route as image content', async (c
     assert.match(String(image.image_url.url), /^data:image\/png;base64,/, 'as a data URL of the declared media type')
     assert.equal(Buffer.from(String(image.image_url.url).split(',')[1] ?? '', 'base64').length, bytes.length, 'with the whole stored file')
     assert.ok(user.content.some((part) => part.type === 'text' && part.text === 'describe this image'), 'beside the prompt text')
-    assert.ok(!JSON.stringify(sent).includes(server.home), 'and the stored path is not what the provider was told')
+    // The stored file sits under <home>/uploads. The whole home is not the test: an empty install now works in
+    // <home>/default-workspace, so the request's cwd and runtime context name the home on purpose.
+    assert.ok(!JSON.stringify(sent).includes(join(server.home, 'uploads')), 'and the stored path is not what the provider was told')
 
     const rows = await browser.evaluate(`(async () => (await (await fetch('/api/sessions')).json()).map((row) => row.id).slice(0, 1))()`)
     assert.equal(rows.length, 1, 'the turn created a session')
@@ -1805,8 +1809,14 @@ test('switching to idle Y keeps X queued messages moving and Y offers Send', asy
     const headers = { cookie, origin: new URL(server.url).origin, 'content-type': 'application/json' }
     const post = (path, body) => fetch(new URL(path, server.url), { method: 'POST', headers, body: JSON.stringify(body) }).then((response) => response.json())
     await post('/api/workspaces', { path: server.work })
-    const x = (await post('/api/sessions', { branch: server.work })).session
-    const y = (await post('/api/sessions', { branch: server.work })).session
+    /**
+     * Both sessions are titled when they are made. A session with no turn and no title is a New session placeholder, and
+     * among those only the open one is a tree row (DSH `sessionVisible`, dsh-client-ui-workspace lib/client.js:959-966;
+     * heddle's `WorkspaceTree.placeholder` / `hiddenBlank`), so two untitled blanks would leave Y without a row to click
+     * once X is open. A titled session is one a person named, and is a row however many turns it has.
+     */
+    const x = (await post('/api/sessions', { branch: server.work, title: 'session X' })).session
+    const y = (await post('/api/sessions', { branch: server.work, title: 'session Y' })).session
     assert.ok(typeof x === 'string' && typeof y === 'string')
     await browser.goto(server.url)
     const row = (id) => `document.querySelector('#tree li[data-kind=session][data-session-id=${JSON.stringify(id)}] > .row')`
@@ -1920,6 +1930,58 @@ test('a message the server took is not put back or resent when the connection dr
     assert.ok(!state.notes.some((note) => /could not be sent/.test(note)), `nor reported as unsent (${JSON.stringify(state.notes)})`)
     assert.ok(state.notes.some((note) => /delivered/.test(note)), 'the note says the message was delivered')
     assert.equal(server.double.requests.length, 1, 'and nothing was sent twice')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * DSH's per-Turn token usage (C71): a completed turn shows its own usage row, closed to its total and opening to the
+ * buckets the provider reported, beside the session dock. The row is the durable fold's, so it is the same live and
+ * after a reload; a turn whose provider reported nothing has no row at all rather than a zero.
+ */
+test('a completed turn shows its own token-usage row, which opens to the reported buckets', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  const server = await startServer('turn-usage', {
+    usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 800 } },
+    holdOpenMs: 50,
+  })
+  const browser = await openBrowser()
+  try {
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    await type(browser, 'report the cost')
+    await press(browser, { key: 'Enter' })
+    const row = () =>
+      browser.evaluate(`(() => {
+        const answers = [...document.querySelectorAll('#log .turn.assistant')]
+        const row = answers.length === 0 ? null : answers[answers.length - 1].querySelector('.turn-usage')
+        if (row === null) return JSON.stringify(null)
+        return JSON.stringify({
+          summary: row.querySelector('summary').textContent,
+          open: row.open,
+          buckets: [...row.querySelectorAll('[data-bucket]')].map((node) => [node.dataset.bucket, node.textContent]),
+          visible: row.querySelector('.turn-usage-figures').getBoundingClientRect().height > 0,
+          rows: document.querySelectorAll('#log .turn-usage').length,
+        })
+      })()`).then(JSON.parse)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant .turn-usage") !== null', 20_000), 'the completed turn has its own usage row')
+    const live = await row()
+    assert.equal(live.summary, 'Tokens · 1,050', 'closed, it reads the turn\u2019s total')
+    assert.equal(live.open, false)
+    assert.equal(live.rows, 1, 'one row for one turn')
+    assert.deepEqual(live.buckets, [['inputTokens', 'Input 200'], ['cacheReadTokens', 'Cache read 800'], ['outputTokens', 'Output 50']], 'the reported buckets, and no invented cache write')
+    await browser.evaluate('document.querySelector("#log .turn-usage summary").click()')
+    assert.equal((await row()).visible, true, 'it opens to its figures')
+
+    // A reload reopens the session the page remembers, and draws the turn from the transcript.
+    await browser.goto(server.url)
+    await browser.waitFor('document.body.dataset.ready === "true"', 20_000)
+    assert.ok(await browser.waitFor('document.querySelector("#log .turn.assistant .turn-usage") !== null', 15_000), 'a reload draws the same row')
+    const reloaded = await row()
+    assert.deepEqual([reloaded.summary, reloaded.buckets], [live.summary, live.buckets])
   } finally {
     browser.close()
     await server.close()

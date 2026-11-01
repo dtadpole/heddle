@@ -111,7 +111,11 @@ export function apply(ctx: Context, config: Config = {}): void {
   let disposed = false
 
   const host: NoticeHost = {
-    exists: (sessionId) => store.open(sessionId) !== null,
+    /**
+     * An archived session is no longer a place to deliver to: DSH stops its work when it is archived and its agent
+     * refuses a step there, so a notice must not start a turn in it.
+     */
+    exists: (sessionId) => store.open(sessionId) !== null && metaOf(sessionId)?.archived !== true,
     isRunning: (sessionId) => {
       const live = turns()
       return live !== undefined ? live.isRunning(sessionId) : inTurn.has(sessionId)

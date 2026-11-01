@@ -133,6 +133,33 @@ pub fn harness(boot: &Boot, cwd: PathBuf) -> Harness {
     if let Some(turns) = boot.services.get::<heddle_agent::TurnRegistry>("turns") {
         harness.interrupter = Some(Arc::new(LiveTurns { turns }));
     }
+    // The rows behind the archive admission: the jobs row (a session's live background jobs) and the schedule row
+    // (its active reminders). Each blocks a plain archive and is stopped by `stop: true` once the archive is written;
+    // the server places their families in DSH's listener order itself (`heddle_session::session_activity`).
+    let mut rows: Vec<Arc<dyn heddle_server::services::SessionActivity>> = Vec::new();
+    if let Some(jobs) = boot.services.get::<Arc<heddle_jobs::JobsPlugin>>("jobs") {
+        rows.push(Arc::new(JobActivity {
+            jobs: jobs.registry.clone(),
+        }));
+    }
+    if let Some(schedule) = boot
+        .services
+        .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
+    {
+        rows.push(Arc::new(ScheduleActivity {
+            service: Arc::clone(&schedule.service),
+        }));
+    }
+    if !rows.is_empty() {
+        harness.activity = Some(Arc::new(RowActivities(rows)));
+    }
+    // The questions row: the page's question card reads and answers through /api/questions.
+    if let Some(service) = boot
+        .services
+        .get::<Arc<heddle_questions::QuestionService>>("questions")
+    {
+        harness.questions = Some(Arc::new(Questions { service }));
+    }
     // The approvals row: the page becomes the answerer while the server runs, and every question the
     // service publishes reaches /api/events as an `approval` frame (the server relays `subscribe`).
     if let Some(service) = boot
@@ -193,6 +220,8 @@ pub fn web(args: &Args, invocation: &Invocation, boot: Boot, out: &mut Output<'_
             .collect(),
         views: page_views(&boot, &invocation.env),
         asset_roots: asset_roots(&boot.anchor, &invocation.cwd),
+        // The Browser tab and its frames are opt-in, as `runWeb` reads it: exactly `1` enables them (D-068, #86).
+        browser: invocation.env.get("HEDDLE_WEB_BROWSER") == Some("1"),
         secret_path: Some(heddle_config::heddle_home(&invocation.env).join("web-secret")),
         notes,
         shutdown: shutdown.clone(),
@@ -295,6 +324,21 @@ impl TurnRunner for Turns {
             })
         })
     }
+
+    /// The runtime's live-turn registry: a subagent's, a teammate's or a notice's turn the page never started.
+    fn is_live(&self, session: &str) -> bool {
+        self.runtime
+            .turns
+            .as_ref()
+            .is_some_and(|turns| turns.is_running(session))
+    }
+
+    fn interrupt(&self, session: &str) -> bool {
+        self.runtime
+            .turns
+            .as_ref()
+            .is_some_and(|turns| turns.abort(session, Some("session archived")))
+    }
 }
 
 /// What the page's feature routers read: the booted session store, the workspace roots and the tools.
@@ -347,6 +391,22 @@ fn page_routers(
             .get::<Arc<heddle_schedule::SchedulePlugin>>("schedule")
             .map(|schedule| Arc::clone(&schedule.service)),
     ));
+    // Only when the profile loads the `commands` row, as `web.ts` hands over only when `ctx.get('commands')` exists.
+    if boot
+        .services
+        .get::<Arc<heddle_commands::CommandsRow>>("commands")
+        .is_some()
+    {
+        routers.push(heddle_commands::router(commands_host(boot, &host)));
+    }
+    // `GET /api/sessions/{id}/plan`, only when the profile loads the `plan` row, as `web.ts` hands over only when
+    // `ctx.get('plan')` exists.
+    if let Some(plan) = boot
+        .services
+        .get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME)
+    {
+        routers.push(plan.router());
+    }
     // The background-job routes: DSH's job controller (list, follow, kill); 503 when the profile has no jobs row.
     routers.push(heddle_jobs::http::router(
         boot.services
@@ -449,6 +509,42 @@ async fn settings_answer(
             .into_response(),
         None => axum::http::StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+/// The slash commands (`/commands/menu.js`, `GET /api/commands`, `POST /api/sessions/{id}/commands`): the
+/// built-ins wired to the booted session, goal, context and model services, with the sandbox's mode as a
+/// session's default, and `/plan` when the profile loads the `plan` row.
+fn commands_host(boot: &Boot, host: &PageHost) -> Arc<heddle_commands::Commands> {
+    let services = &boot.services;
+    // Commands another row contributes, as that row's plugin registers them in the TypeScript build.
+    let contributed = services
+        .get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME)
+        .map(|plan| plan.command());
+    let commands = heddle_commands::Commands::new(heddle_commands::CommandServices {
+        sessions: Arc::clone(&host.sessions),
+        goals: services.get::<Arc<heddle_goal::GoalService>>("goal"),
+        context: services
+            .get::<Arc<heddle_context::ContextService<heddle_session::SessionStore>>>("context"),
+        models: services.get::<Arc<heddle_llm::ModelService>>("model"),
+        sandbox_default: services
+            .get::<Arc<heddle_sandbox::SandboxService>>("sandbox")
+            .map(|sandbox| sandbox.mode())
+            .unwrap_or(heddle_sandbox::SandboxMode::WorkspaceWrite),
+        heddle_home: host.home.clone(),
+        // The directory `compose_uploads` gives the turn route: a command line's attachments are read as a turn's.
+        upload_dir: heddle_web_files::uploads::upload_directory(&host.home),
+        // `/compact` is refused while a turn of the session runs, as DSH's is (#133).
+        turn_running: services
+            .get::<heddle_agent::TurnRegistry>("turns")
+            .map(|turns| {
+                Arc::new(move |id: &str| turns.is_running(id)) as heddle_commands::TurnRunning
+            }),
+    })
+    .with_contributed(contributed);
+    for refusal in commands.refused() {
+        eprintln!("heddle web: a contributed command was not registered: {refusal}");
+    }
+    Arc::new(commands)
 }
 
 /// What the composer's routes read: the booted session store, the model service and the sandbox.
@@ -845,6 +941,27 @@ impl ServerSandbox for Sandbox {
             .map(|change| change.mode.to_string())
             .map_err(|refusal| refusal.reason().to_owned())
     }
+
+    /// `rootFor`, the folder a session's calls (and its page terminals, #85) run in.
+    fn root_for(&self, folder: Option<&std::path::Path>) -> std::path::PathBuf {
+        self.service.root_for(folder)
+    }
+
+    /// A page terminal is wrapped as a bash call is: the same backend and policy, rooted at the session's folder.
+    fn confine(
+        &self,
+        argv: &[std::ffi::OsString],
+        mode: &str,
+        root: &std::path::Path,
+    ) -> Result<Vec<std::ffi::OsString>, String> {
+        let mode = heddle_sandbox::SandboxMode::parse(mode)
+            .ok_or_else(|| format!("'{mode}' is not a sandbox mode"))?;
+        self.service
+            .rooted_at(root)
+            .confine(argv, mode)
+            .map(|confined| confined.argv)
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// The workspace row's service as the server's port. The sessions a row counts and a removal checks
@@ -860,6 +977,15 @@ fn path_text(path: &std::path::Path) -> String {
 
 fn refusal(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new(error.to_string())
+}
+
+/// A workspace refusal with its code when it has one, so the route answers it: a folder the tree may not
+/// read is `workspace-file/unreadable`, a `400` (#106).
+fn coded_refusal(error: heddle_workspace::WorkspaceError) -> ServiceError {
+    match error.code() {
+        Some(code) => ServiceError::with_code(error.to_string(), code),
+        None => refusal(error),
+    }
 }
 
 impl heddle_server::services::WorkspaceService for Workspaces {
@@ -891,7 +1017,8 @@ impl heddle_server::services::WorkspaceService for Workspaces {
             },
         };
         let path = path.map(path_text);
-        serde_json::to_value(heddle_workspace::tree(path.as_deref(), &input)).map_err(refusal)
+        let node = heddle_workspace::tree(path.as_deref(), &input).map_err(coded_refusal)?;
+        serde_json::to_value(node).map_err(refusal)
     }
 
     fn add(
@@ -951,14 +1078,35 @@ impl heddle_server::services::WorkspaceService for Workspaces {
     }
 
     fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
+        self.reorder(id, before).map(|(order, _)| order)
+    }
+
+    fn reorder(&self, id: &str, before: Option<&str>) -> Result<(Vec<String>, bool), ServiceError> {
+        // Whether the move moved anything comes from the registry, which writes only then (#136).
         self.service
-            .insert_before(id, before)
+            .reorder(id, before)
             .map_err(|error| match error {
                 heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
                     heddle_server::services::workspace_not_found(&missing)
                 }
                 other => refusal(other),
             })
+    }
+
+    fn initialize_default(
+        &self,
+        _sessions: &[heddle_server::services::SessionMeta],
+    ) -> Result<Option<Value>, ServiceError> {
+        // First use (DSH's `workspace/initializeDefault`): every session the store holds, archived ones included,
+        // decides whether this install is empty; the folder is `$HEDDLE_HOME/default-workspace`.
+        match self
+            .service
+            .initialize_default(&self.sessions.list())
+            .map_err(refusal)?
+        {
+            Some(record) => serde_json::to_value(&record).map(Some).map_err(refusal),
+            None => Ok(None),
+        }
     }
 }
 
@@ -1166,6 +1314,23 @@ impl heddle_server::services::GoalService for Goals {
     }
 }
 
+/// `heddle-questions` behind the server's port: its answers are already the TypeScript route's bytes.
+struct Questions {
+    service: Arc<heddle_questions::QuestionService>,
+}
+
+impl heddle_server::services::QuestionService for Questions {
+    fn get(&self, session: Option<&str>, all: bool) -> (u16, String) {
+        let answer = heddle_questions::get_questions(Some(&self.service), session, all);
+        (answer.status, answer.body)
+    }
+
+    fn post(&self, id: &str, hold: bool, body: &Value) -> (u16, String) {
+        let answer = heddle_questions::post_question(Some(&self.service), id, hold, body);
+        (answer.status, answer.body)
+    }
+}
+
 /// The todo row's service as the server's port.
 struct Todos {
     service: Arc<heddle_todo::TodoService>,
@@ -1179,6 +1344,88 @@ struct LiveTurns {
 impl heddle_server::services::TurnInterrupter for LiveTurns {
     fn interrupt(&self, session: &str) -> bool {
         self.turns.abort(session, Some("stopped by the user"))
+    }
+}
+
+/// The jobs row as the server's archive admission (`sessionJobActivity` / `stopSessionJobs` in the TypeScript
+/// build's `src/jobs/http.ts`).
+struct JobActivity {
+    jobs: heddle_jobs::JobRegistry,
+}
+
+impl heddle_server::services::SessionActivity for JobActivity {
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        heddle_jobs::http::session_job_activity(&self.jobs, session)
+            .into_iter()
+            .map(|(id, label)| heddle_server::services::ActivityItem {
+                kind: heddle_server::services::ActivityKind::Job,
+                id,
+                label,
+            })
+            .collect()
+    }
+
+    /// Each live job is killed with `session archived` when this is called; the kill is a request, answered at
+    /// once (the job settles when its process ends), so there is nothing left to await.
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
+        heddle_jobs::http::stop_session_jobs(&self.jobs, session);
+        Box::pin(async {})
+    }
+}
+
+/// The schedule row as the server's archive admission — DSH's `workspace/session-activity` and
+/// `workspace/session-stop` listeners of `dsh-schedule` (`lib/index.js:2043-2064`), through the service's
+/// public `list` and `stop_session_tasks` (`scheduleActivity` / `stopSessionSchedules` in the TypeScript
+/// build's `src/session/activity.ts`).
+struct ScheduleActivity {
+    service: Arc<heddle_schedule::ScheduleService>,
+}
+
+impl heddle_server::services::SessionActivity for ScheduleActivity {
+    /// The session's active reminders, each labelled by its title (DSH's `{ id: record.id, label:
+    /// record.title }`).
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        self.service
+            .list(session)
+            .into_iter()
+            .map(|record| heddle_server::services::ActivityItem {
+                kind: heddle_server::services::ActivityKind::Schedule,
+                id: record.id,
+                label: record.title,
+            })
+            .collect()
+    }
+
+    /// Remove every active reminder of the session inside the service's queue (DSH's `stopSessionTasks`); a
+    /// failure is reported, never a reason to keep the session visible (`dsh-workspace/lib/index.js:621-628`).
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
+        let service = Arc::clone(&self.service);
+        let session = session.to_owned();
+        Box::pin(async move {
+            if let Err(error) = service.stop_session_tasks(&session).await {
+                service.warn(&format!(
+                    "workspace: stopping session '{session}' for archive failed: {error}"
+                ));
+            }
+        })
+    }
+}
+
+/// Every row's archive admission as the server's one port: their items together, and their stops asked at once
+/// and awaited together, as DSH's registry asks every `workspace/session-stop` listener in parallel
+/// (`dsh-workspace/lib/index.js:621-628`).
+struct RowActivities(Vec<Arc<dyn heddle_server::services::SessionActivity>>);
+
+impl heddle_server::services::SessionActivity for RowActivities {
+    fn active(&self, session: &str) -> Vec<heddle_server::services::ActivityItem> {
+        self.0.iter().flat_map(|row| row.active(session)).collect()
+    }
+
+    fn stop(&self, session: &str) -> futures::future::BoxFuture<'static, ()> {
+        let stops: Vec<_> = self.0.iter().map(|row| row.stop(session)).collect();
+        Box::pin(async move {
+            futures::future::join_all(stops).await;
+        })
     }
 }
 
@@ -1589,6 +1836,66 @@ mod tests {
             "a session with no record keeps the request"
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_plan_row_adds_plan_and_its_route_and_without_it_the_commands_are_as_before() {
+        let root = std::env::temp_dir().join(format!(
+            "heddle-web-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut boot = composer_boot(&root);
+        boot.services
+            .provide("commands", Arc::new(heddle_commands::CommandsRow));
+        let env = heddle_config::Env::from_pairs([(
+            "HEDDLE_HOME",
+            root.join("home").to_string_lossy().into_owned(),
+        )]);
+        let host = page_host(&boot, &env).expect("a session store");
+        let names = |boot: &Boot| -> Vec<String> {
+            commands_host(boot, &host)
+                .registry()
+                .list()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect()
+        };
+        assert_eq!(
+            names(&boot),
+            ["compact", "export", "feedback", "goal", "permission"],
+            "no plan row: the five built-ins, as before"
+        );
+        let without = page_routers(&boot, &env, None).len();
+
+        let sessions = boot
+            .services
+            .get::<Arc<heddle_session::SessionService>>("session")
+            .expect("the session service");
+        boot.services.provide(
+            heddle_plan::NAME,
+            heddle_plan::PlanService::new(Arc::clone(sessions.store())),
+        );
+        assert_eq!(
+            names(&boot),
+            [
+                "compact",
+                "export",
+                "feedback",
+                "goal",
+                "permission",
+                "plan"
+            ]
+        );
+        assert_eq!(
+            page_routers(&boot, &env, None).len(),
+            without + 1,
+            "the plan route is mounted with the row"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

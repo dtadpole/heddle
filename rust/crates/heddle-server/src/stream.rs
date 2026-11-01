@@ -36,6 +36,8 @@ pub mod names {
     pub const READY: &str = "ready";
     /// The heartbeat every `/api/events` subscriber gets once per interval.
     pub const HEARTBEAT: &str = "heartbeat";
+    /// Sent after `ready` when the presented cursor cannot be honoured: re-read the baselines.
+    pub const RESET: &str = "reset";
     /// A turn's normal end, on its own response.
     pub const DONE: &str = "done";
     /// A turn that was stopped, on its own response.
@@ -44,11 +46,13 @@ pub mod names {
     pub const ERROR: &str = "error";
 }
 
-/// One SSE frame: a name and its data, already serialized to one line of JSON.
+/// One SSE frame: a name and its data, already serialized to one line of JSON, and the id the hub gave it
+/// (`None` until it is published, and for the frames about the connection: `ready`, `reset`, heartbeats).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SseFrame {
     pub event: String,
     pub data: String,
+    pub id: Option<String>,
 }
 
 impl SseFrame {
@@ -57,6 +61,7 @@ impl SseFrame {
         SseFrame {
             event: event.into(),
             data: serde_json::to_string(data).expect("a serializable frame payload"),
+            id: None,
         }
     }
 
@@ -71,6 +76,7 @@ impl SseFrame {
                 serde_json::to_string(session).expect("a string serializes"),
                 serde_json::to_string(event).expect("an event serializes")
             ),
+            id: None,
         }
     }
 
@@ -84,6 +90,9 @@ impl SseFrame {
                 kind: "ready",
                 client_id,
                 host: ReadyHost { home },
+                cursor: None,
+                resumed: None,
+                heartbeat_ms: None,
             },
         )
     }
@@ -93,6 +102,7 @@ impl SseFrame {
         SseFrame {
             event: names::HEARTBEAT.to_owned(),
             data: "{\"type\":\"heartbeat\"}".to_owned(),
+            id: None,
         }
     }
 
@@ -101,12 +111,41 @@ impl SseFrame {
         SseFrame {
             event: names::APPROVAL.to_owned(),
             data: serde_json::to_string(request).expect("an approval request serializes"),
+            id: None,
         }
     }
 
-    /// `event: <name>\ndata: <data>\n\n`.
+    /// `event: <name>\ndata: <data>\n\n`, with `id: <id>\n` first when the hub gave it one.
     pub fn encode(&self) -> String {
-        format!("event: {}\ndata: {}\n\n", self.event, self.data)
+        match &self.id {
+            Some(id) => format!("id: {id}\nevent: {}\ndata: {}\n\n", self.event, self.data),
+            None => format!("event: {}\ndata: {}\n\n", self.event, self.data),
+        }
+    }
+
+    /// The `reset` frame: the client's cursor could not be honoured, so it re-reads its baselines.
+    pub fn reset() -> Self {
+        SseFrame {
+            event: names::RESET.to_owned(),
+            data: "{\"type\":\"reset\"}".to_owned(),
+            id: None,
+        }
+    }
+
+    /// The opening `ready` frame with heddle's follow fields after DSH's keys — the bytes
+    /// `readyFrame(clientId, home, follow)` writes in `src/server/stream.ts`.
+    pub fn ready_with(client_id: &str, home: &str, follow: &ReadyFollow) -> Self {
+        SseFrame::new(
+            names::READY,
+            &ReadyData {
+                kind: "ready",
+                client_id,
+                host: ReadyHost { home },
+                cursor: Some(&follow.cursor),
+                resumed: Some(follow.resumed),
+                heartbeat_ms: Some(follow.heartbeat_ms),
+            },
+        )
     }
 
     /// The session a `session` frame belongs to, read from its data; `None` for any other frame.
@@ -119,7 +158,7 @@ impl SseFrame {
     }
 }
 
-/// The data of the opening `ready` frame.
+/// The data of the opening `ready` frame: DSH's keys, then heddle's follow fields when a stream sends them.
 #[derive(Serialize)]
 struct ReadyData<'a> {
     #[serde(rename = "type")]
@@ -127,6 +166,21 @@ struct ReadyData<'a> {
     #[serde(rename = "clientId")]
     client_id: &'a str,
     host: ReadyHost<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resumed: Option<bool>,
+    #[serde(rename = "heartbeatMs", skip_serializing_if = "Option::is_none")]
+    heartbeat_ms: Option<u64>,
+}
+
+/// The follow fields of `ready`: the newest id this stream has been given, whether the presented cursor was
+/// honoured, and the heartbeat interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyFollow {
+    pub cursor: String,
+    pub resumed: bool,
+    pub heartbeat_ms: u64,
 }
 
 /// The Host facts the opening frame carries.
@@ -182,6 +236,58 @@ pub fn events_frames(
     futures::stream::once(std::future::ready(SseFrame::ready(client_id, home))).chain(subscription)
 }
 
+/// The replay without questions that no longer wait: an `approval` frame is kept only while its question is in
+/// `waiting` (the approval service's pending ids), as DSH replays pending questions and not settled ones. Every
+/// other frame, `approval-settled` included, is kept. `withoutSettledApprovals` in `src/server/stream.ts` is the same.
+pub fn without_settled_approvals(
+    frames: Vec<SseFrame>,
+    waiting: &std::collections::HashSet<String>,
+) -> Vec<SseFrame> {
+    frames
+        .into_iter()
+        .filter(|frame| {
+            if frame.event != names::APPROVAL {
+                return true;
+            }
+            serde_json::from_str::<Value>(&frame.data)
+                .ok()
+                .and_then(|data| data.get("id").and_then(Value::as_str).map(str::to_owned))
+                .is_some_and(|id| waiting.contains(&id))
+        })
+        .collect()
+}
+
+/// The frames of `/api/events` for a client that may be reconnecting: `ready` with the follow fields, then
+/// `reset` when its cursor could not be honoured, else the frames it missed, then everything published after.
+pub fn follow_frames(
+    follow: Follow,
+    presented: bool,
+    client_id: &str,
+    home: &str,
+    heartbeat_ms: u64,
+) -> impl Stream<Item = SseFrame> + Send + 'static {
+    let Follow {
+        subscription,
+        replay,
+        cursor,
+    } = follow;
+    let resumed = presented && replay.is_some();
+    let mut opening = vec![SseFrame::ready_with(
+        client_id,
+        home,
+        &ReadyFollow {
+            cursor,
+            resumed,
+            heartbeat_ms,
+        },
+    )];
+    match replay {
+        Some(frames) => opening.extend(frames),
+        None => opening.push(SseFrame::reset()),
+    }
+    futures::stream::iter(opening).chain(subscription)
+}
+
 /// The listener a binary registers on its event bus's `session/event` channel: it captures the hub the
 /// server streams from and publishes every payload into it. The bus's own signature is the binary's, so
 /// this is a plain function of `(session, event)` rather than a trait this crate would have to guess.
@@ -196,37 +302,136 @@ pub fn approval_request_forwarder(hub: EventHub) -> impl Fn(&Value) + Send + Syn
 }
 
 /// The hub. Cloning shares it.
-#[derive(Clone, Default)]
+///
+/// Besides delivering frames it keeps the stream's log — the follow cursor of `src/server/stream.ts`'s `EventLog`:
+/// every published frame except a heartbeat gets the id `<epoch>-<seq>` (`epoch` random per hub, `seq` from 1),
+/// the newest are kept within a count and a byte bound, and [`EventHub::subscribe_from`] gives a reconnecting
+/// client the kept frames after its cursor, or tells it the cursor cannot be honoured.
+#[derive(Clone)]
 pub struct EventHub {
     inner: Arc<Mutex<HubInner>>,
 }
 
-#[derive(Default)]
+impl Default for EventHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct HubInner {
     next: u64,
     subscribers: Vec<(u64, mpsc::UnboundedSender<SseFrame>)>,
     closed: bool,
+    epoch: String,
+    seq: u64,
+    kept: std::collections::VecDeque<(u64, SseFrame, usize)>,
+    kept_bytes: usize,
+    max_frames: usize,
+    max_bytes: usize,
+}
+
+/// A subscription opened at a cursor: the frames the client missed (`None` when its cursor cannot be honoured),
+/// the newest id at the moment it was opened, and the subscription that carries everything published after.
+pub struct Follow {
+    pub subscription: Subscription,
+    pub replay: Option<Vec<SseFrame>>,
+    pub cursor: String,
 }
 
 impl EventHub {
     pub fn new() -> Self {
-        Self::default()
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).expect("the operating system entropy source");
+        Self::with_log(
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            4096,
+            16 * 1024 * 1024,
+        )
     }
 
-    /// Deliver one frame to every live subscriber, dropping those whose reader has gone.
-    pub fn publish(&self, frame: SseFrame) {
+    /// A hub with a given epoch and log bounds — what the tests pin; [`EventHub::new`] picks a random epoch.
+    pub fn with_log(epoch: String, max_frames: usize, max_bytes: usize) -> Self {
+        EventHub {
+            inner: Arc::new(Mutex::new(HubInner {
+                next: 0,
+                subscribers: Vec::new(),
+                closed: false,
+                epoch,
+                seq: 0,
+                kept: std::collections::VecDeque::new(),
+                kept_bytes: 0,
+                max_frames,
+                max_bytes,
+            })),
+        }
+    }
+
+    /// The id of the newest published frame, or `<epoch>-0` before the first.
+    pub fn cursor(&self) -> String {
+        let inner = self.inner.lock().expect("the event hub lock");
+        format!("{}-{}", inner.epoch, inner.seq)
+    }
+
+    /// Deliver one frame to every live subscriber, dropping those whose reader has gone. Every frame but a
+    /// heartbeat is given the next id and kept in the log first.
+    pub fn publish(&self, mut frame: SseFrame) {
         let mut inner = self.inner.lock().expect("the event hub lock");
         if inner.closed {
             return;
+        }
+        if frame.event != names::HEARTBEAT {
+            inner.seq += 1;
+            let seq = inner.seq;
+            frame.id = Some(format!("{}-{seq}", inner.epoch));
+            let size = frame.encode().len();
+            inner.kept.push_back((seq, frame.clone(), size));
+            inner.kept_bytes += size;
+            while inner.kept.len() > inner.max_frames
+                || (inner.kept_bytes > inner.max_bytes && inner.kept.len() > 1)
+            {
+                if let Some((_, _, size)) = inner.kept.pop_front() {
+                    inner.kept_bytes -= size;
+                }
+            }
         }
         inner
             .subscribers
             .retain(|(_, sender)| sender.send(frame.clone()).is_ok());
     }
 
+    /// A subscription opened at `cursor`, all under one lock so no frame falls between the replay and the
+    /// subscription. `cursor: None` (a first connection) replays nothing.
+    pub fn subscribe_from(&self, cursor: Option<&str>) -> Follow {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut inner = self.inner.lock().expect("the event hub lock");
+        if inner.closed {
+            drop(sender);
+        } else {
+            inner.next += 1;
+            let id = inner.next;
+            inner.subscribers.push((id, sender));
+        }
+        let replay = match cursor {
+            None => Some(Vec::new()),
+            Some(cursor) => since(&inner, cursor),
+        };
+        Follow {
+            subscription: Subscription { receiver },
+            replay,
+            cursor: format!("{}-{}", inner.epoch, inner.seq),
+        }
+    }
+
     /// Publish the bus's `session/event` payload.
     pub fn publish_session_event(&self, session: &str, event: &Value) {
         self.publish(SseFrame::session(session, event));
+    }
+
+    /// Push a change that never reaches a session's log — a renamed session (`sessions`), a workspace edit
+    /// (`workspace`), a settled approval (`approval-settled`) — as `web.ts`'s `push` does. It is published like any
+    /// other frame, so it carries an id and is replayed to a client that reconnects.
+    pub fn push(&self, event: &str, data: &Value) {
+        self.publish(SseFrame::new(event, data));
     }
 
     /// Publish the bus's `approval/request` payload.
@@ -265,6 +470,39 @@ impl EventHub {
         inner.closed = true;
         inner.subscribers.clear();
     }
+}
+
+/// The kept frames after `cursor`, or `None` when it cannot be honoured: another epoch, older than the log,
+/// ahead of it, or malformed — the rule of `EventLog.since` in `src/server/stream.ts`.
+fn since(inner: &HubInner, cursor: &str) -> Option<Vec<SseFrame>> {
+    let (epoch, seq) = cursor.rsplit_once('-')?;
+    if epoch.is_empty()
+        || epoch != inner.epoch
+        || seq.is_empty()
+        || !seq.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let seq: u64 = seq.parse().ok()?;
+    if seq > inner.seq {
+        return None;
+    }
+    let oldest = inner
+        .kept
+        .front()
+        .map(|(seq, _, _)| *seq)
+        .unwrap_or(inner.seq + 1);
+    if seq + 1 < oldest {
+        return None;
+    }
+    Some(
+        inner
+            .kept
+            .iter()
+            .filter(|(kept, _, _)| *kept > seq)
+            .map(|(_, frame, _)| frame.clone())
+            .collect(),
+    )
 }
 
 /// One subscriber's frames, in publish order. Ends when the hub closes.
@@ -307,8 +545,10 @@ impl Stream for SessionFrames {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match self.inner.receiver.poll_recv(cx) {
-                Poll::Ready(Some(frame)) => {
+                Poll::Ready(Some(mut frame)) => {
                     if frame.session_id().as_deref() == Some(self.session.as_str()) {
+                        // A turn's own response is not the followed stream: its frames carry no id, as in TS.
+                        frame.id = None;
                         return Poll::Ready(Some(frame));
                     }
                 }
@@ -379,6 +619,191 @@ mod tests {
     }
 
     #[test]
+    fn a_published_frame_carries_its_id_first_and_the_follow_frames_write_the_typescript_bytes() {
+        let mut frame = SseFrame::session("s", &serde_json::json!({"type": "message"}));
+        frame.id = Some("e1-3".into());
+        assert_eq!(
+            frame.encode(),
+            "id: e1-3\nevent: session\ndata: {\"session\":\"s\",\"event\":{\"type\":\"message\"}}\n\n"
+        );
+        assert_eq!(
+            SseFrame::reset().encode(),
+            "event: reset\ndata: {\"type\":\"reset\"}\n\n"
+        );
+        let follow = ReadyFollow {
+            cursor: "e1-7".into(),
+            resumed: true,
+            heartbeat_ms: 2000,
+        };
+        assert_eq!(
+            SseFrame::ready_with("abc123", "/home/owner", &follow).encode(),
+            "event: ready\ndata: {\"type\":\"ready\",\"clientId\":\"abc123\",\"host\":{\"home\":\"/home/owner\"},\"cursor\":\"e1-7\",\"resumed\":true,\"heartbeatMs\":2000}\n\n"
+        );
+    }
+
+    fn ids(frames: &[SseFrame]) -> Vec<String> {
+        frames
+            .iter()
+            .map(|frame| frame.id.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn the_hub_numbers_what_it_publishes_but_not_the_heartbeat() {
+        let hub = EventHub::with_log("e1".into(), 16, 1 << 20);
+        assert_eq!(hub.cursor(), "e1-0");
+        let mut subscription = hub.subscribe();
+        hub.publish_session_event("s", &serde_json::json!({"n": 1}));
+        hub.publish(SseFrame::heartbeat());
+        hub.publish_approval_request(&serde_json::json!({"id": "approval-1"}));
+        assert_eq!(hub.cursor(), "e1-2");
+        let mut seen = Vec::new();
+        while let Ok(frame) = subscription.receiver.try_recv() {
+            seen.push(frame);
+        }
+        assert_eq!(
+            ids(&seen),
+            vec!["e1-1".to_owned(), String::new(), "e1-2".to_owned()]
+        );
+        assert!(
+            EventHub::new().cursor().len() > "-0".len(),
+            "a fresh hub picks a random epoch"
+        );
+    }
+
+    #[test]
+    fn a_cursor_in_the_log_is_given_exactly_what_follows_it() {
+        let hub = EventHub::with_log("e1".into(), 16, 1 << 20);
+        for n in 1..=5 {
+            hub.publish_session_event("s", &serde_json::json!({ "n": n }));
+        }
+        assert_eq!(
+            ids(&hub.subscribe_from(Some("e1-3")).replay.unwrap()),
+            vec!["e1-4", "e1-5"]
+        );
+        assert!(hub.subscribe_from(Some("e1-5")).replay.unwrap().is_empty());
+        assert_eq!(hub.subscribe_from(Some("e1-0")).replay.unwrap().len(), 5);
+        assert!(
+            hub.subscribe_from(None).replay.unwrap().is_empty(),
+            "a first connection replays nothing"
+        );
+        assert_eq!(hub.subscribe_from(None).cursor, "e1-5");
+    }
+
+    #[test]
+    fn a_cursor_the_log_cannot_honour_gets_none() {
+        let hub = EventHub::with_log("e1".into(), 3, 1 << 20);
+        for n in 1..=6 {
+            hub.publish_session_event("s", &serde_json::json!({ "n": n }));
+        }
+        assert!(
+            hub.subscribe_from(Some("e0-3")).replay.is_none(),
+            "another epoch"
+        );
+        assert!(
+            hub.subscribe_from(Some("e1-1")).replay.is_none(),
+            "older than the log"
+        );
+        assert_eq!(hub.subscribe_from(Some("e1-3")).replay.unwrap().len(), 3);
+        assert!(
+            hub.subscribe_from(Some("e1-9")).replay.is_none(),
+            "ahead of the log"
+        );
+        for bad in ["e1", "e1-", "-3", "e1-x", "e1-3.5"] {
+            assert!(hub.subscribe_from(Some(bad)).replay.is_none(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_log_is_bounded_by_bytes_and_keeps_the_newest_frame() {
+        let hub = EventHub::with_log("e1".into(), 16, 150);
+        hub.publish(SseFrame::new("session", &"x".repeat(60)));
+        hub.publish(SseFrame::new("session", &"y".repeat(60)));
+        assert!(
+            hub.subscribe_from(Some("e1-0")).replay.is_none(),
+            "the first frame was evicted"
+        );
+        assert_eq!(hub.subscribe_from(Some("e1-1")).replay.unwrap().len(), 1);
+        hub.publish(SseFrame::new("session", &"z".repeat(500)));
+        assert_eq!(hub.subscribe_from(Some("e1-2")).replay.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn follow_frames_open_with_ready_then_replay_or_reset_then_live() {
+        let hub = EventHub::with_log("e1".into(), 16, 1 << 20);
+        hub.publish_session_event("s", &serde_json::json!({"n": 1}));
+        hub.publish_session_event("s", &serde_json::json!({"n": 2}));
+        let mut frames = Box::pin(follow_frames(
+            hub.subscribe_from(Some("e1-1")),
+            true,
+            "c",
+            "/h",
+            2000,
+        ));
+        hub.publish_session_event("s", &serde_json::json!({"n": 3}));
+        let ready = frames.next().await.unwrap();
+        assert_eq!(ready.event, names::READY);
+        assert!(
+            ready
+                .data
+                .contains("\"cursor\":\"e1-2\",\"resumed\":true,\"heartbeatMs\":2000"),
+            "{}",
+            ready.data
+        );
+        assert_eq!(
+            frames.next().await.unwrap().id.as_deref(),
+            Some("e1-2"),
+            "the missed frame, replayed"
+        );
+        assert_eq!(
+            frames.next().await.unwrap().id.as_deref(),
+            Some("e1-3"),
+            "then live, no duplicate"
+        );
+
+        let mut restarted = Box::pin(follow_frames(
+            hub.subscribe_from(Some("e0-9")),
+            true,
+            "c",
+            "/h",
+            2000,
+        ));
+        let ready = restarted.next().await.unwrap();
+        assert!(ready.data.contains("\"resumed\":false"), "{}", ready.data);
+        assert_eq!(restarted.next().await.unwrap().event, names::RESET);
+    }
+
+    #[test]
+    fn a_replay_keeps_an_approval_question_only_while_it_waits() {
+        let hub = EventHub::with_log("e1".into(), 16, 1 << 20);
+        hub.publish_approval_request(&serde_json::json!({"id": "approval-1", "tool": "bash"}));
+        hub.publish(SseFrame::new(
+            "approval-settled",
+            &serde_json::json!({"type": "approval/settled", "id": "approval-1", "outcome": "rejected"}),
+        ));
+        hub.publish_approval_request(&serde_json::json!({"id": "approval-2", "tool": "bash"}));
+        let replay = hub.subscribe_from(Some("e1-0")).replay.unwrap();
+        let waiting: std::collections::HashSet<String> =
+            ["approval-2".to_owned()].into_iter().collect();
+        let kept = without_settled_approvals(replay, &waiting);
+        let events: Vec<&str> = kept.iter().map(|frame| frame.event.as_str()).collect();
+        assert_eq!(
+            events,
+            vec!["approval-settled", "approval"],
+            "the answered question is dropped, its settlement kept"
+        );
+        assert!(kept[1].data.contains("approval-2"));
+    }
+
+    #[tokio::test]
+    async fn a_turns_own_response_carries_no_ids() {
+        let hub = EventHub::new();
+        let mut frames = Box::pin(hub.subscribe().for_session("s"));
+        hub.publish_session_event("s", &serde_json::json!({"type": "message"}));
+        assert_eq!(frames.next().await.unwrap().id, None);
+    }
+
+    #[test]
     fn every_stream_gets_its_own_client_id_in_hex() {
         let ids: std::collections::HashSet<String> = (0..64).map(|_| new_client_id()).collect();
         assert_eq!(ids.len(), 64, "no two streams share an id");
@@ -437,7 +862,8 @@ mod tests {
         assert_eq!(
             SseFrame {
                 event: "session".into(),
-                data: "not json".into()
+                data: "not json".into(),
+                id: None,
             }
             .session_id(),
             None

@@ -38,4 +38,22 @@ pub enum WorkspaceError {
         path: String,
         sessions: usize,
     },
+    /// `cannot list "<name>": permission denied` — a folder the tree was asked for and may not read (#106),
+    /// named relative to its workspace (a root by its title). DSH's file backend says the same of such a
+    /// folder (dsh-fs-local lib/index.js:269); DSH has no code for it, so the route answers heddle's
+    /// `workspace-file/unreadable` ([`WorkspaceError::code`]), `400` as the folder picker answers
+    /// `directory-picker/unreadable`.
+    #[error("cannot list \"{name}\": permission denied")]
+    Unreadable { name: String },
+}
+
+impl WorkspaceError {
+    /// The code a route answers beside the sentence: `workspace-file/unreadable` for
+    /// [`WorkspaceError::Unreadable`]; `None` for every other error.
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            WorkspaceError::Unreadable { .. } => Some("workspace-file/unreadable"),
+            _ => None,
+        }
+    }
 }

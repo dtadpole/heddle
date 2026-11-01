@@ -88,7 +88,8 @@ test('a wrongly typed or out-of-range settings write is refused before it is wri
     const profile = scratchProfile(home)
     const patch = join(profile, 'heddle.patch.yml')
     const env = { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: join(home, 'heddle.json') }
-    const args = ['--profile', profile, '--session-root', join(home, 'sessions'), '--sandbox-root', home]
+    // No --sandbox-root: that overlay would make the sandbox entry not editable, and the check writes to it.
+    const args = ['--profile', profile, '--session-root', join(home, 'sessions')]
     server = await startServer(args, env)
     const before = readFileSync(patch, 'utf8')
 
@@ -96,6 +97,10 @@ test('a wrongly typed or out-of-range settings write is refused before it is wri
       ['context', { contextWindow: 'huge' }, 'contextWindow'],
       ['jobs', { maxConcurrentJobsPerOwner: 0 }, 'maxConcurrentJobsPerOwner'],
       ['team', { maxMembers: 'eight' }, 'maxMembers'],
+      // A value outside an enum the component's own schema does not spell, judged as the TS Config judges it (#125).
+      ['sandbox', { mode: 'yolo' }, 'mode'],
+      ['approvals', { unanswered: 'maybe' }, 'unanswered'],
+      ['tools', { bashOutputLimit: 0 }, 'bashOutputLimit'],
     ]) {
       const refused = await write(server, ns, update)
       assert.equal(refused.status, 422, `${ns} ${JSON.stringify(update)} is refused\n${refused.text}`)

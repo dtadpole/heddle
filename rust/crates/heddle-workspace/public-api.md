@@ -1,7 +1,7 @@
 ---
 title: The heddle-workspace public API
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-23T08:24:41Z
+modified: 2026-10-29T20:55:00Z
 level: L1
 version: 1.0.0
 description: Every item the crate re-exports at its root, and the decisions a dependent crate should know.
@@ -19,9 +19,10 @@ Everything is re-exported at the crate root.
 
 | Item | What it is |
 |---|---|
-| `WorkspaceService` | `read`, `list`, `ensure`, `add` → `WorkspaceAddition`, `remove` → `WorkspaceRemoval`, `find`, `rename`, `owner`, `owner_among`, `sessions`, `ensure_owner`, `bootstrap` → `BootstrapReport`. Reads the file on every call; one lock serializes this process's writes |
+| `WorkspaceService` | `read`, `list`, `ensure`, `add` → `WorkspaceAddition`, `remove` → `WorkspaceRemoval`, `find`, `rename`, `owner`, `owner_among`, `sessions`, `ensure_owner`, `bootstrap` → `BootstrapReport`, `initialize_default` (first use, DSH's `workspace/initializeDefault`) and `default_directory`. Reads the file on every call; one lock serializes this process's writes |
 | `WorkspaceConfig`, `default_workspace_file(&Env)` | the config row `{ file, generated }`; `$HEDDLE_HOME/workspaces.json`. `WorkspaceService::new(&config, &Env)` |
-| `WorkspaceRecord`, `WorkspaceOrigin`, `WorkspaceStoreShape` | `{ id, path, title, origin, createdAt, updatedAt }`; `added` / `auto`; the version-3 file |
+| `DEFAULT_WORKSPACE_DIRECTORY`, `default_workspace_directory(&Env)` | `default-workspace`; first use's folder, `$HEDDLE_HOME/default-workspace` (DSH's is under Documents; heddle stays in its own home) |
+| `WorkspaceRecord`, `WorkspaceOrigin`, `WorkspaceStoreShape` | `{ id, path, title, origin, createdAt, updatedAt }`; `added` / `auto`; the version-3 file, which carries `defaultWorkspaceId` last once a first use has happened |
 | `listing_row` | one row of `heddle workspaces --json`: `{ ...record, sessions: [ids] }` |
 | `tree`, `kind_of`, `classify`, `badge_for` + `TreeInput`, `TreeRoot`, `TreeNode`, `TreeSession`, `NodeKind`, `ArchivedFilter` | the tree, one level at a time, serialized in the TypeScript key order |
 | `read_file_text`, `FileReading`, `FileReadError`, `FILE_LIMIT_BYTES` | the right panel's file reader and its three refusals |

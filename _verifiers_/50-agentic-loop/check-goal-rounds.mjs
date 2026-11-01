@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { heddleCommand, isolatedHome, removeDir, repoRoot, scriptedConfig } from '../../_tools_/verify-runner/lib.mjs'
+import { endChild, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedConfig } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * A goal's round cap holds when the goal is edited during a round (R-developer-two-31, DSH parity S131).
@@ -49,8 +49,8 @@ function startServer(home, work, config) {
     logs: () => output,
     close: async () => {
       if (child.exitCode !== null || child.signalCode !== null) return
-      child.kill()
-      await new Promise((resolve) => child.once('exit', resolve))
+      // Bounded: SIGTERM, then SIGKILL after 5 s, so a harness slow to exit fails the check by name, not by the lane's limit.
+      await endChild(child)
     },
   }
 }

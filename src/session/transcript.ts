@@ -63,9 +63,24 @@ export function looksCompressed(buffer: Buffer): boolean {
  * walk rather than throwing — a torn tail is a normal thing to find in an appended file.
  */
 export function frameEnd(buffer: Buffer, start: number): number | undefined {
-  if (start + 4 > buffer.length || !buffer.subarray(start, start + 4).equals(FRAME_MAGIC)) return undefined
+  const end = frameExtent(buffer, start)
+  return typeof end === 'number' ? end : undefined
+}
+
+/**
+ * Where one frame ends, or why it does not: `'short'` when the bytes stop inside a frame that is well formed so far
+ * (a torn tail, or a head not read far enough yet), `'malformed'` when they are not a frame at all — no magic where
+ * one must start, or a reserved block type. {@link frameEnd} folds both into `undefined`; the header check
+ * ({@link judgeLogHeader}) needs them apart, because a torn first frame is a crash heddle repairs and a malformed
+ * one is a file that is not a log.
+ */
+export function frameExtent(buffer: Buffer, start: number): number | 'short' | 'malformed' {
+  const magic = Math.min(4, buffer.length - start)
+  if (magic <= 0) return 'short'
+  if (!buffer.subarray(start, start + magic).equals(FRAME_MAGIC.subarray(0, magic))) return 'malformed'
+  if (magic < 4) return 'short'
   let cursor = start + 4
-  if (cursor + 1 > buffer.length) return undefined
+  if (cursor + 1 > buffer.length) return 'short'
   const descriptor = buffer[cursor] ?? 0
   cursor += 1
 
@@ -78,24 +93,24 @@ export function frameEnd(buffer: Buffer, start: number): number | undefined {
   cursor += [0, 1, 2, 4][dictionaryFlag] ?? 0 // Dictionary_ID
   const contentSizeBytes = contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][contentSizeFlag] ?? 0
   cursor += contentSizeBytes
-  if (cursor > buffer.length) return undefined
+  if (cursor > buffer.length) return 'short'
 
   for (;;) {
-    if (cursor + 3 > buffer.length) return undefined
+    if (cursor + 3 > buffer.length) return 'short'
     const header = (buffer[cursor] ?? 0) | ((buffer[cursor + 1] ?? 0) << 8) | ((buffer[cursor + 2] ?? 0) << 16)
     cursor += 3
     const lastBlock = (header & 0x01) !== 0
     const blockType = (header >> 1) & 0x03
     const blockSize = header >> 3
-    if (blockType === 3) return undefined // reserved
+    if (blockType === 3) return 'malformed' // reserved
     const payload = blockType === 1 ? 1 : blockSize // an RLE block carries one byte
     cursor += payload
-    if (cursor > buffer.length) return undefined
+    if (cursor > buffer.length) return 'short'
     if (lastBlock) break
   }
 
   if (checksum) cursor += 4
-  return cursor > buffer.length ? undefined : cursor
+  return cursor > buffer.length ? 'short' : cursor
 }
 
 /**
@@ -182,4 +197,70 @@ export function decodeTranscript(buffer: Buffer): DecodedTranscript {
     consumed = frame.end
   }
   return { lines, format: 'zstd-frames', frames: frames.length, torn: consumed !== buffer.length, readableBytes: consumed }
+}
+
+/**
+ * What a log's first record says about whether the log can be read at all.
+ *
+ * - `readable`: a first record that is a session event, or nothing to judge yet — an empty file, or a first frame torn
+ *   by a crash, which the store has always read as an empty session and cut back on the next write.
+ * - `unreadable`: the first record does not decode, is not JSON, or is not a session event; `reason` says which.
+ * - `incomplete`: the bytes given end before the first record does; read further and ask again.
+ */
+export type LogHeader =
+  | { readonly kind: 'readable' }
+  | { readonly kind: 'unreadable'; readonly reason: string }
+  | { readonly kind: 'incomplete' }
+
+/**
+ * Judge a log by its **first record**, the way DSH's JSONL backend judges a session by its header before it lists it.
+ *
+ * DSH (dsh-session-persistence-jsonl, README "Reading the logs": "Unreadable or unsupported headers, including corrupt
+ * Zstandard header frames, are omitted from discovery and `list()`") reads only the header frame
+ * (`readFirstZstdLine`, lib/index.js:3378-3409): a frame that fails validation is corruption (:3403), a first line that
+ * is not JSON or not a header is no header (`readGenerationHeader`, :3150-3156 and :3170), and `listArtifacts` leaves
+ * both out (:3114-3127). A heddle log has no separate header line; its first record is the first event, so that is the
+ * record judged here, with the event shape the Rust build's reader already requires of every line (a whole-number
+ * `seq`, a string `at` and a string `type`). The rules for the tolerated shapes are unchanged: an empty file and a torn
+ * first frame read as an empty session, as {@link decodeTranscript} reads them.
+ *
+ * @param head - the file's first bytes; `atEnd` says whether they are the whole file.
+ */
+export function judgeLogHeader(head: Buffer, atEnd: boolean): LogHeader {
+  if (looksCompressed(head)) {
+    const end = frameExtent(head, 0)
+    if (end === 'short') return atEnd ? { kind: 'readable' } : { kind: 'incomplete' }
+    if (end === 'malformed') return { kind: 'unreadable', reason: 'its first zstd frame is malformed' }
+    let text: string
+    try {
+      text = zstdDecompressSync(head.subarray(0, end)).toString('utf8')
+    } catch {
+      return { kind: 'unreadable', reason: 'its first zstd frame does not decode' }
+    }
+    return judgeFirstLine(text.split('\n').find((line) => line.length > 0) ?? '')
+  }
+  let start = 0
+  while (start < head.length && head[start] === 0x0a) start += 1
+  if (start === head.length) return atEnd ? { kind: 'readable' } : { kind: 'incomplete' }
+  const newline = head.indexOf(0x0a, start)
+  if (newline === -1 && !atEnd) return { kind: 'incomplete' }
+  return judgeFirstLine(head.subarray(start, newline === -1 ? head.length : newline).toString('utf8'))
+}
+
+/** The first record's verdict: valid JSON, and a session event (`seq` a whole number, `at` and `type` strings). */
+function judgeFirstLine(line: string): LogHeader {
+  let record: unknown
+  try {
+    record = JSON.parse(line)
+  } catch {
+    return { kind: 'unreadable', reason: 'its first record is not valid JSON' }
+  }
+  return isEventRecord(record) ? { kind: 'readable' } : { kind: 'unreadable', reason: 'its first record is not a session event' }
+}
+
+/** Whether a parsed line has the shape every event the store writes has: a whole-number `seq`, a string `at`, a string `type`. */
+export function isEventRecord(record: unknown): boolean {
+  if (typeof record !== 'object' || record === null || Array.isArray(record)) return false
+  const { seq, at, type } = record as { seq?: unknown; at?: unknown; type?: unknown }
+  return typeof seq === 'number' && Number.isSafeInteger(seq) && seq >= 0 && typeof at === 'string' && typeof type === 'string'
 }

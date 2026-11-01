@@ -312,7 +312,10 @@ fn tree_command(
         generated,
         archived: ArchivedFilter::Hide,
     };
-    let node = tree(wanted.as_deref(), &input);
+    let node = match tree(wanted.as_deref(), &input) {
+        Ok(node) => node,
+        Err(error) => return refuse(err, error),
+    };
     if args.json {
         write_pretty(out, &serde_json::to_value(&node).unwrap_or(Value::Null));
     } else {

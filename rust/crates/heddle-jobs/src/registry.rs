@@ -1502,6 +1502,30 @@ impl JobRegistry {
         }
     }
 
+    /// [`dispose`](Self::dispose) from synchronous code that may be the process's last step: the binary's boot
+    /// disposal after the server stopped (issue #129). Outside any runtime it blocks on the registry's runtime until
+    /// every live job settled, or `limit` passed, so each settle reaches the session log as `job/settled` before the
+    /// process exits. The TypeScript teardown awaits the same settles. Inside a runtime it cannot block, so it
+    /// behaves as [`dispose_in_background`](Self::dispose_in_background).
+    pub fn dispose_blocking(&self, limit: std::time::Duration) {
+        let Some(rest) = self.begin_dispose() else {
+            return;
+        };
+        if let Ok(current) = tokio::runtime::Handle::try_current() {
+            current.spawn(rest);
+            return;
+        }
+        match self.shared.runtime.clone() {
+            Some(runtime) => {
+                // The timer is made inside `block_on`: built out here it would find no runtime to register with.
+                runtime.block_on(async move {
+                    let _ = tokio::time::timeout(limit, rest).await;
+                });
+            }
+            None => drop(rest),
+        }
+    }
+
     fn begin_dispose(&self) -> Option<BoxFuture<'static, ()>> {
         let shared = Arc::clone(&self.shared);
         let gate = shared.gate();
@@ -2288,6 +2312,57 @@ pub(crate) mod tests {
             codes::JOB_DISPOSED,
             "jobs service disposed",
         );
+    }
+
+    /// Issue #129: the binary's boot disposal runs after the server stopped, outside any runtime, and the process exits
+    /// right after it. A teardown that only spawned its wait left the settle unrecorded; blocking until the settle
+    /// lands puts `job/settled` in the session's log first, as the TypeScript teardown does.
+    #[test]
+    fn dispose_blocking_outside_a_runtime_records_the_settle_before_it_returns() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (jobs, records, _) = {
+            let _inside = runtime.enter();
+            registry_with(JobRegistryOptions {
+                runtime: Some(runtime.handle().clone()),
+                ..JobRegistryOptions::default()
+            })
+        };
+        let (spec, producer) = manual(Some("session-a"));
+        let id = {
+            let _inside = runtime.enter();
+            jobs.start(spec).unwrap()
+        };
+        let finisher = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                if !producer.cancels().is_empty() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            // The process group takes a moment to go after its SIGTERM.
+            std::thread::sleep(Duration::from_millis(50));
+            producer.finish(outcome(OutcomeStatus::Killed, Some("signal: SIGTERM")));
+        });
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "the test runs outside any runtime"
+        );
+        jobs.dispose_blocking(Duration::from_secs(5));
+        let recorded = records.lock().unwrap().iter().any(|(session, kind, data)| {
+            session == "session-a"
+                && kind == "job/settled"
+                && data.get("jobId") == Some(&Value::String(id.clone()))
+        });
+        assert!(
+            recorded,
+            "the settle was in the log when dispose_blocking returned: {:?}",
+            records.lock().unwrap()
+        );
+        finisher.join().unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

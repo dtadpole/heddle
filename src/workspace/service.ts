@@ -1,11 +1,11 @@
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
-import { canonicalPath, depthOf, isUnder } from '../paths.ts'
+import { canonicalPath, canonicalPathThroughAncestors, depthOf, isUnder } from '../paths.ts'
 import type { SessionMeta } from '../session/store.ts'
 
 /**
@@ -64,6 +64,12 @@ export interface WorkspaceStoreShape {
   /** Workspace ids in the collection's own order. */
   readonly workspaceIds: readonly string[]
   readonly workspaces: Record<string, WorkspaceRecord>
+  /**
+   * The workspace first use created (see {@link WorkspaceService.initializeDefault}), kept after its registration is
+   * deleted — DSH's `defaultWorkspaceId`, which is what stops an emptied registry from being given it back. Absent
+   * until a first use happens, so a record that never had one is written exactly as before.
+   */
+  readonly defaultWorkspaceId?: string
 }
 
 /**
@@ -102,6 +108,25 @@ export interface WorkspaceAddition {
 export function defaultWorkspaceFile(env: NodeJS.ProcessEnv = process.env): string {
   const home = env.HEDDLE_HOME ?? join(homedir(), '.heddle')
   return join(home, 'workspaces.json')
+}
+
+/**
+ * The first-use folder's own name: DSH's `DEFAULT_WORKSPACE_DIRECTORY` (dsh-api-workspace-controller
+ * lib/types/default-workspace.js). Fixed and language-neutral, so one install keeps one path; the workspace's first
+ * title is this same name, which the page labels *Default workspace*.
+ */
+export const DEFAULT_WORKSPACE_DIRECTORY = 'default-workspace'
+
+/**
+ * Where first use puts its workspace: `$HEDDLE_HOME/default-workspace`, else `~/.heddle/default-workspace`.
+ *
+ * DSH uses `<Documents>/deepseek-harness/default-workspace` (lib/index.js:609-640). Heddle's counterpart of that
+ * product folder is its own home, so first use never reaches into the user's Documents — a protected folder whose
+ * every access the OS asks about.
+ */
+export function defaultWorkspaceDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HEDDLE_HOME ?? join(homedir(), '.heddle')
+  return join(home, DEFAULT_WORKSPACE_DIRECTORY)
 }
 
 export const Config = Schema.object({
@@ -151,6 +176,7 @@ export class WorkspaceService extends Service {
         version?: number
         workspaceIds?: string[]
         workspaces?: Record<string, Partial<WorkspaceRecord> & { sessionIds?: unknown }>
+        defaultWorkspaceId?: unknown
       }
       const workspaces: Record<string, WorkspaceRecord> = {}
       for (const [id, record] of Object.entries(parsed.workspaces ?? {})) {
@@ -168,7 +194,12 @@ export class WorkspaceService extends Service {
           updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
         }
       }
-      return { version: 3, workspaceIds: parsed.workspaceIds ?? [], workspaces }
+      return {
+        version: 3,
+        workspaceIds: parsed.workspaceIds ?? [],
+        workspaces,
+        ...(typeof parsed.defaultWorkspaceId === 'string' ? { defaultWorkspaceId: parsed.defaultWorkspaceId } : {}),
+      }
     } catch {
       return { version: 3, workspaceIds: [], workspaces: {} }
     }
@@ -230,6 +261,39 @@ export class WorkspaceService extends Service {
   }
 
   /**
+   * First use: create or reuse the default workspace — DSH's `workspace/initializeDefault`.
+   *
+   * DSH's rules (dsh-workspace lib/index.js:425-440), kept as they are:
+   *
+   * - once a first use has happened, the answer is **that** workspace, or nothing when its registration was deleted:
+   *   deleting it turns first use off for good, so an emptied list is not handed the folder back;
+   * - otherwise it applies only to an **empty install** — no workspace record of any kind and no session at all — and
+   *   anything else answers nothing, which is not an error;
+   * - the folder is made when missing and reused when present, and the workspace is titled after the folder's own name;
+   * - no session is started and nothing is sent. The page shows the workspace and aims the composer at it, as *Add
+   *   workspace* does (D-056: a heddle session writes a definition into its folder, so none is started unasked).
+   *
+   * `all` is every session the store holds, archived and subagent ones included.
+   */
+  initializeDefault(all: readonly SessionMeta[], directory: string = defaultWorkspaceDirectory()): WorkspaceRecord | undefined {
+    const shape = this.read()
+    if (shape.defaultWorkspaceId !== undefined) return shape.workspaces[shape.defaultWorkspaceId]
+    if (shape.workspaceIds.length > 0 || Object.keys(shape.workspaces).length > 0 || all.length > 0) return undefined
+    mkdirSync(directory, { recursive: true })
+    const now = new Date().toISOString()
+    const record: WorkspaceRecord = {
+      id: randomUUID(),
+      path: canonicalPath(directory),
+      title: DEFAULT_WORKSPACE_DIRECTORY,
+      origin: 'added',
+      createdAt: now,
+      updatedAt: now,
+    }
+    this.write({ version: 3, workspaceIds: [record.id], workspaces: { [record.id]: record }, defaultWorkspaceId: record.id })
+    return record
+  }
+
+  /**
    * Unregister a root, and say what happened to the sessions that were under it.
    *
    * Removing a root is not the same as forgetting one: `bootstrap` attaches every session to the
@@ -265,12 +329,40 @@ export class WorkspaceService extends Service {
     return { removed: record, ownedSessions: owned.length, ...(parent !== undefined ? { adoptedBy: parent.title } : {}) }
   }
 
-  /** One workspace by id or by path. */
+  /**
+   * One workspace by id or by path.
+   *
+   * A path whose folder is gone is matched through the real path of its deepest existing ancestor as well (#141): the
+   * record was stored canonical while the folder existed, and a spelling through a link (`/tmp/x/w` for
+   * `/private/tmp/x/w`) no longer resolves once it is deleted or moved, which made the routes answer "no workspace".
+   */
   find(idOrPath: string): WorkspaceRecord | undefined {
     const shape = this.read()
     if (shape.workspaces[idOrPath] !== undefined) return shape.workspaces[idOrPath]
     const canonical = canonicalPath(idOrPath)
-    return Object.values(shape.workspaces).find((record) => record.path === canonical)
+    const found = Object.values(shape.workspaces).find((record) => record.path === canonical)
+    if (found !== undefined) return found
+    const located = canonicalPathThroughAncestors(idOrPath)
+    return located === canonical ? undefined : Object.values(shape.workspaces).find((record) => record.path === located)
+  }
+
+  /**
+   * Whether a folder is gone, for the tree route (#141): `undefined` when it exists; otherwise where it was — its
+   * canonical spelling through its deepest existing ancestor — and the root that owns that place, if any.
+   *
+   * DSH's file tree answers a directory that is not there with `workspace-file/not-found` (dsh-api-workspace-files
+   * lib/index.js:568), and its tree says "That directory is gone" rather than listing it empty
+   * (dsh-client-ui-sidebar-files lib/client.js:485). The place is judged where its existing part lands, so a missing
+   * folder behind a link out of every root is outside, as an existing one is.
+   */
+  missingFolder(path: string): { readonly path: string; readonly owner: WorkspaceRecord | undefined } | undefined {
+    const located = canonicalPathThroughAncestors(path)
+    try {
+      statSync(located)
+      return undefined
+    } catch {
+      return { path: located, owner: this.owner(located) }
+    }
   }
 
   /**
@@ -313,6 +405,16 @@ export class WorkspaceService extends Service {
    * workspace's siblings, as DSH's does. Answers the complete order, as DSH's does.
    */
   insertBefore(idOrPath: string, beforeIdOrPath?: string): readonly string[] {
+    return this.reorder(idOrPath, beforeIdOrPath).workspaceIds
+  }
+
+  /**
+   * {@link insertBefore}, saying whether anything moved — what the route needs to announce a move to every open page
+   * and to stay quiet about one that changes nothing (#136). DSH's `insertBefore` returns before it writes when the
+   * workspace is its own anchor or the order would not change (dsh-workspace lib/index.js:484, :492), so no change
+   * reaches its clients then; a committed order is registry state every client follows.
+   */
+  reorder(idOrPath: string, beforeIdOrPath?: string): { readonly workspaceIds: readonly string[]; readonly moved: boolean } {
     const shape = this.read()
     const listed = (key: string): string => {
       const record = this.find(key)
@@ -321,15 +423,15 @@ export class WorkspaceService extends Service {
     }
     const id = listed(idOrPath)
     const before = beforeIdOrPath === undefined ? undefined : listed(beforeIdOrPath)
-    if (before === id) return shape.workspaceIds
+    if (before === id) return { workspaceIds: shape.workspaceIds, moved: false }
     const without = shape.workspaceIds.filter((each) => each !== id)
     const at = before === undefined ? without.length : without.indexOf(before)
     const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
     if (workspaceIds.length === shape.workspaceIds.length && workspaceIds.every((each, index) => each === shape.workspaceIds[index])) {
-      return shape.workspaceIds
+      return { workspaceIds: shape.workspaceIds, moved: false }
     }
     this.write({ ...shape, workspaceIds })
-    return workspaceIds
+    return { workspaceIds, moved: true }
   }
 
   /**
@@ -361,9 +463,16 @@ export class WorkspaceService extends Service {
     })
   }
 
-  /** Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See {@link workspaceViews}. */
+  /**
+   * Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See {@link workspaceViews}.
+   *
+   * Each carries its folder's `status`, read now: DSH's `Workspace.status()`, `'ok'` when the path is a directory and
+   * `'missing-dir'` otherwise, uncached and never changing the record, because the folder may only be away for a while
+   * (dsh-workspace lib/index.js:154-160, lib/types/types.d.ts:131-136). A workspace whose folder was deleted or moved
+   * stays listed, as DSH keeps it, and the page tells it apart (#141).
+   */
   views(all: readonly SessionMeta[]): WorkspaceView[] {
-    return workspaceViews(this.list(), all)
+    return workspaceViews(this.list(), all).map((view) => ({ ...view, status: folderStatus(view.path) }))
   }
 
   /**
@@ -415,6 +524,23 @@ export interface WorkspaceView {
   readonly createdAt: string
   readonly updatedAt: string
   readonly sessionIds: readonly string[]
+  /**
+   * Whether the folder is there — DSH's `Workspace.status()`. Set by {@link WorkspaceService.views}, which reads the disk;
+   * the pure {@link workspaceViews} leaves it out.
+   */
+  readonly status?: FolderStatus
+}
+
+/** DSH's `Workspace.status()` vocabulary (dsh-workspace lib/types/types.d.ts:136). */
+export type FolderStatus = 'ok' | 'missing-dir'
+
+/** Whether `path` is a directory now, as DSH's `status()` stats it: anything else, or nothing, is `missing-dir`. */
+export function folderStatus(path: string): FolderStatus {
+  try {
+    return statSync(path).isDirectory() ? 'ok' : 'missing-dir'
+  } catch {
+    return 'missing-dir'
+  }
 }
 
 /**

@@ -128,6 +128,10 @@ impl Component for ModelComponent {
         if let Some(hooks) = bus_hooks(services) {
             service.add_hooks(Arc::new(hooks));
         }
+        // A plan row that started first left its `model/request` hook for this row to register (`PlanComponent`).
+        if let Some(plan) = services.get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME) {
+            service.add_hooks(plan.model_hooks());
+        }
         services.provide("model", Arc::clone(&service));
         services.provide(
             "model",
@@ -483,7 +487,8 @@ impl SessionPort for SessionView {
             archived: heddle_workspace::ArchivedFilter::default(),
         };
         let wanted = wanted.map(|path| path.to_string_lossy().into_owned());
-        serde_json::to_value(heddle_workspace::tree(wanted.as_deref(), &input)).map_err(port_error)
+        let node = heddle_workspace::tree(wanted.as_deref(), &input).map_err(port_error)?;
+        serde_json::to_value(node).map_err(port_error)
     }
 
     fn read_file_text(&self, path: &std::path::Path) -> PortResult<Record> {
@@ -795,6 +800,134 @@ impl heddle_goal::SessionLog for StoreLog {
     }
 }
 
+impl heddle_questions::QuestionLog for StoreLog {
+    fn open(&self, id: &str) -> Option<String> {
+        StoreLog::open(self, id)
+    }
+
+    fn read(&self, session: &str) -> Result<Vec<Value>, heddle_questions::LogError> {
+        StoreLog::read(self, session).map_err(heddle_questions::LogError)
+    }
+
+    fn append(
+        &self,
+        session: &str,
+        event: serde_json::Map<String, Value>,
+    ) -> Result<Value, heddle_questions::LogError> {
+        StoreLog::append(self, session, event).map_err(heddle_questions::LogError)
+    }
+}
+
+/// `src/questions/service.ts`: the questions a model asks a person, folded from the session log.
+pub struct QuestionsComponent;
+
+impl Component for QuestionsComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, config: &Value, services: &mut Services) -> Result<(), String> {
+        let log = StoreLog {
+            sessions: session_service(services, "questions")?,
+        };
+        let config = heddle_questions::QuestionConfig::from_value(Some(config));
+        services.provide(
+            "questions",
+            Arc::new(heddle_questions::QuestionService::new(
+                Arc::new(log),
+                config,
+            )),
+        );
+        // A plan row that started first is handed its review channel here (`hand_plan_review_channel`).
+        hand_plan_review_channel(services);
+        Ok(())
+    }
+}
+
+/// `src/plan/service.ts` `reviewChannel`: `exit_plan_mode` puts its plan to the person through the question
+/// service when that row is loaded, as DSH's plan mode asks through `userQuestions`, and refuses with DSH's sentence
+/// when it is not. The TypeScript plan service looks the service up per call; here whichever of the `plan` and
+/// `questions` rows starts second hands the channel over, so the rows' order does not matter.
+fn hand_plan_review_channel(services: &Services) {
+    let (Some(plan), Some(questions)) = (
+        services.get::<Arc<heddle_plan::PlanService>>(heddle_plan::NAME),
+        services.get::<Arc<heddle_questions::QuestionService>>("questions"),
+    ) else {
+        return;
+    };
+    plan.provide_review_channel(heddle_plan::questions_review_channel(Arc::new(
+        PlanReviewAsker(questions),
+    )));
+}
+
+/// The question service as the plan review's asker: its `ask`, with the answers in the plan crate's words.
+struct PlanReviewAsker(Arc<heddle_questions::QuestionService>);
+
+impl heddle_plan::QuestionAsker for PlanReviewAsker {
+    fn ask(
+        &self,
+        session: &heddle_session::SessionHandle,
+        questions: Value,
+        options: heddle_plan::AskOptions,
+    ) -> futures::future::BoxFuture<'static, Result<heddle_plan::QuestionOutcome, String>> {
+        let service = Arc::clone(&self.0);
+        let session = session.id.clone();
+        Box::pin(async move {
+            let timeout = options.timeout.map(Value::from);
+            match service
+                .ask(&session, &questions, timeout.as_ref(), options.cancel)
+                .await
+            {
+                Ok(heddle_questions::AskOutcome::Answered(answers)) => {
+                    Ok(heddle_plan::QuestionOutcome::Answered {
+                        answers: answers
+                            .into_iter()
+                            .map(|answer| heddle_plan::QuestionAnswer {
+                                id: answer.id,
+                                selected: answer.selected,
+                                custom: answer.custom,
+                            })
+                            .collect(),
+                    })
+                }
+                Ok(heddle_questions::AskOutcome::Pending { call_id }) => {
+                    Ok(heddle_plan::QuestionOutcome::Pending { call_id })
+                }
+                Err(error) => Err(error.message),
+            }
+        })
+    }
+}
+
+/// `src/plugins/questions-tool.ts`: `ask_user_question` in the registry.
+pub struct QuestionsToolComponent;
+
+impl Component for QuestionsToolComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["questions".to_owned(), "tools".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let questions = services
+            .get::<Arc<heddle_questions::QuestionService>>("questions")
+            .ok_or_else(|| "questions-tool: the question service is not provided".to_owned())?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "questions-tool: the tool registry is not provided".to_owned())?;
+        registry
+            .register(Arc::new(heddle_questions::AskUserTool::new(questions)))
+            .map_err(|error| error.to_string())
+    }
+}
+
 /// The session service a row injects, or the sentence naming it.
 fn session_service(
     services: &Services,
@@ -954,6 +1087,68 @@ impl Component for TodoComponent {
             "todo",
             Arc::new(heddle_todo::TodoService::new(Arc::new(log), config)),
         );
+        Ok(())
+    }
+}
+
+/// `src/commands/service.ts`: the slash-command layer. The row is what turns it on, as `ctx.get('commands')` does in
+/// `web.ts`; the routes themselves are built by `web.rs` once every service a command drives has started.
+pub struct CommandsComponent;
+
+impl Component for CommandsComponent {
+    fn requires(&self) -> Vec<String> {
+        vec!["session".to_owned()]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        services.provide("commands", Arc::new(heddle_commands::CommandsRow));
+        Ok(())
+    }
+}
+
+/// `src/plan/service.ts`: plan mode (developer-three). The row registers `exit_plan_mode` in the tool registry and
+/// the `model/request` hook that adds the plan-mode policy to every request of a session in plan mode, and provides
+/// the service as `plan`; `web.rs` adds `/plan` to the command registry and mounts `GET /api/sessions/{id}/plan`
+/// only when it is provided, as `web.ts` hands over only when `ctx.get('plan')` exists.
+///
+/// The TypeScript plugin listens on the bus (`ctx.on('model/request')`), which exists before any row; here the hook
+/// goes on the model service's own waterfall, which exists once the model row has started. Whichever of the two
+/// rows starts second registers it — this row when the model service is already provided, else the model row when
+/// it finds the plan service — so neither row waits for the other and the row's `inject` stays the TypeScript one.
+pub struct PlanComponent;
+
+impl Component for PlanComponent {
+    fn requires(&self) -> Vec<String> {
+        vec![
+            "session".to_owned(),
+            "commands".to_owned(),
+            "tools".to_owned(),
+        ]
+    }
+
+    fn schema(&self) -> Option<heddle_config::Schema> {
+        None
+    }
+
+    fn start(&self, _config: &Value, services: &mut Services) -> Result<(), String> {
+        let sessions = session_service(services, "plan")?;
+        let registry = services
+            .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+            .ok_or_else(|| "plan: the tool registry is not provided".to_owned())?;
+        let plan = heddle_plan::PlanService::new(Arc::clone(sessions.store()));
+        registry
+            .register(plan.exit_tool())
+            .map_err(|error| format!("plan: {error}"))?;
+        if let Some(models) = services.get::<Arc<heddle_llm::ModelService>>("model") {
+            models.add_hooks(plan.model_hooks());
+        }
+        services.provide(heddle_plan::NAME, plan);
+        // A questions row that started first hands its review channel over here (`hand_plan_review_channel`).
+        hand_plan_review_channel(services);
         Ok(())
     }
 }
@@ -2140,6 +2335,170 @@ mod tests {
             .expect("the greeting service");
         assert_eq!(greeting.greet("heddle"), "hello, heddle?");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A `model/stream` hook that records what an adapter would be sent, and sends nothing.
+    struct SentRecorder(Arc<std::sync::Mutex<Vec<heddle_llm::GenerateRequest>>>);
+
+    impl heddle_llm::ModelHooks for SentRecorder {
+        fn stream(
+            &self,
+            request: &heddle_llm::GenerateRequest,
+            _next: Box<dyn FnOnce() -> heddle_llm::ChunkStream + Send>,
+        ) -> heddle_llm::ChunkStream {
+            self.0.lock().unwrap().push(request.clone());
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    /// The plan row's three effects, with the model row started before it and after it.
+    #[test]
+    fn the_plan_row_registers_its_tool_and_its_hook_whichever_of_it_and_the_model_row_starts_first()
+    {
+        use crate::builtins::{BuiltinCatalog, Catalog, resolve_component};
+        use futures::StreamExt;
+        for model_first in [true, false] {
+            let home = scratch(if model_first {
+                "plan-after-model"
+            } else {
+                "plan-before-model"
+            });
+            let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+            let mut services = Services::new();
+            let mut rows = vec![
+                ("session", json!({ "root": home.join("sessions") })),
+                ("sandbox", json!({})),
+                ("approvals", json!({})),
+                ("tools", json!({})),
+                ("commands", json!({})),
+                ("plan", json!({})),
+            ];
+            let model = ("model", json!({ "readLocalConfig": false }));
+            if model_first {
+                rows.insert(0, model);
+            } else {
+                rows.push(model);
+            }
+            for (bare, config) in rows {
+                let reference =
+                    resolve_component(&heddle_config::ComponentName::Bare(bare.to_owned()));
+                let component = catalog
+                    .component(&reference)
+                    .unwrap_or_else(|| panic!("{bare} has an adapter"));
+                for name in component.requires() {
+                    assert!(services.provides(&name), "{bare} waits for {name}");
+                }
+                component
+                    .start(&config, &mut services)
+                    .unwrap_or_else(|error| panic!("{bare} starts: {error}"));
+            }
+            let plan = services
+                .get::<Arc<heddle_plan::PlanService>>("plan")
+                .expect("the plan service is provided");
+            let tools = services
+                .get::<Arc<heddle_tools::ToolRegistry>>("tools")
+                .expect("the registry");
+            assert!(
+                tools
+                    .describe()
+                    .iter()
+                    .any(|spec| spec.name == "exit_plan_mode"),
+                "exit_plan_mode is in the catalog in every mode"
+            );
+
+            let sessions = services
+                .get::<Arc<heddle_session::SessionService>>("session")
+                .expect("the session service");
+            let handle = sessions
+                .start(heddle_session::StartOptions {
+                    cwd: Some(home.to_string_lossy().into_owned()),
+                    ..heddle_session::StartOptions::default()
+                })
+                .expect("a session starts");
+            let models = services
+                .get::<Arc<heddle_llm::ModelService>>("model")
+                .expect("the model service");
+            let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+            models.add_hooks(Arc::new(SentRecorder(Arc::clone(&sent))));
+            let send = || {
+                let request = heddle_llm::GenerateRequest {
+                    endpoint: "scripted".to_owned(),
+                    messages: vec![heddle_llm::types::user_message("plan the change")],
+                    session_id: Some(handle.id.clone()),
+                    ..heddle_llm::GenerateRequest::default()
+                };
+                futures::executor::block_on(async {
+                    let mut stream = models.stream(request).expect("the endpoint exists");
+                    while stream.next().await.is_some() {}
+                });
+            };
+            send();
+            plan.set_mode(&handle, true).expect("plan mode on");
+            send();
+            let sent = sent.lock().unwrap();
+            let policies: Vec<bool> = sent
+                .iter()
+                .map(|request| {
+                    request.messages.first().is_some_and(|message| {
+                        message.role == heddle_llm::Role::System
+                            && message.content
+                                == vec![heddle_llm::ContentPart::text(
+                                    heddle_plan::PLAN_POLICY_SECTION,
+                                )]
+                    })
+                })
+                .collect();
+            assert_eq!(
+                policies,
+                [false, true],
+                "model first: {model_first} — the hook is registered exactly once either way"
+            );
+            assert_eq!(sent[1].messages.len(), 2, "one section, not two");
+            let _ = std::fs::remove_dir_all(&home);
+        }
+    }
+
+    /// `exit_plan_mode` reviews through the question service when the `questions` row is loaded, whichever of it
+    /// and the `plan` row starts first, and has no review channel without it (`src/plan/service.ts` `reviewChannel`).
+    #[test]
+    fn the_plan_row_reviews_through_the_question_service_whichever_of_the_two_starts_first() {
+        use crate::builtins::{BuiltinCatalog, Catalog, resolve_component};
+        for (label, tail) in [
+            ("plan-then-questions", vec!["plan", "questions"]),
+            ("questions-then-plan", vec!["questions", "plan"]),
+            ("plan-alone", vec!["plan"]),
+        ] {
+            let home = scratch(label);
+            let catalog = BuiltinCatalog::new(env_at(&home), home.clone());
+            let mut services = Services::new();
+            let mut rows = vec![
+                ("session", json!({ "root": home.join("sessions") })),
+                ("sandbox", json!({})),
+                ("approvals", json!({})),
+                ("tools", json!({})),
+                ("commands", json!({})),
+            ];
+            rows.extend(tail.iter().map(|bare| (*bare, json!({}))));
+            for (bare, config) in rows {
+                let reference =
+                    resolve_component(&heddle_config::ComponentName::Bare(bare.to_owned()));
+                let component = catalog
+                    .component(&reference)
+                    .unwrap_or_else(|| panic!("{bare} has an adapter"));
+                component
+                    .start(&config, &mut services)
+                    .unwrap_or_else(|error| panic!("{bare} starts: {error}"));
+            }
+            let plan = services
+                .get::<Arc<heddle_plan::PlanService>>("plan")
+                .expect("the plan service is provided");
+            let expected = tail.contains(&"questions");
+            assert!(
+                format!("{plan:?}").contains(&format!("review_channel: {expected}")),
+                "{label}: a review channel exactly when the questions row is loaded ({plan:?})"
+            );
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 
     /// `(first, second)` pairs: a failed entry's id and name, or a tool's name and description.

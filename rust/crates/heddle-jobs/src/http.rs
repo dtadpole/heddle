@@ -25,6 +25,23 @@ use crate::registry::{JobError, JobRegistry, codes};
 /// The route every job path starts with.
 pub const JOBS_ROUTE: &str = "/api/jobs";
 
+/// The jobs that keep a session from being archived, as `(id, label)`: the running or stopping ones it owns (DSH's
+/// `runningJobs`, which answers `workspace/session-activity`, `dsh-jobs/lib/index.js:19-43`). Unowned jobs belong to
+/// nobody and never block (`sessionJobActivity` in `src/jobs/http.ts`).
+pub fn session_job_activity(jobs: &JobRegistry, session: &str) -> Vec<(String, String)> {
+    jobs.list(Some(session))
+        .into_iter()
+        .filter(|job| job.owner.as_deref() == Some(session) && !job.status.is_terminal())
+        .map(|job| (job.id, job.label))
+        .collect()
+}
+
+/// Stop a session's live jobs because it is being archived with its work (DSH's `workspace/session-stop`
+/// listener): each is killed with `session archived`. Answers the ids asked to stop.
+pub fn stop_session_jobs(jobs: &JobRegistry, session: &str) -> Vec<String> {
+    jobs.kill_owned_by(session, "session archived")
+}
+
 /// The largest request body a route reads; a kill carries two ids.
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
@@ -376,6 +393,31 @@ mod tests {
             json!({ "outcome": "already-finished" })
         );
         assert_eq!(post(json!({ "session": "session-a" })).await.0, 400);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sessions_live_owned_jobs_block_its_archive_and_the_stop_kills_them() {
+        let (jobs, events) = setup();
+        let (mine, manual) = start(&jobs, Some("session-a"));
+        let (_, other) = start(&jobs, Some("session-b"));
+        let _ = start(&jobs, None);
+        assert_eq!(
+            session_job_activity(&jobs, "session-a"),
+            vec![(mine.clone(), "tail -f log".to_owned())],
+            "unowned and foreign jobs never block"
+        );
+        assert_eq!(stop_session_jobs(&jobs, "session-a"), vec![mine.clone()]);
+        assert_eq!(manual.cancels(), [Some("session archived".to_owned())]);
+        let (job, _, _) = settled_of(&events, &mine).await;
+        assert_eq!(
+            job.detail.as_deref(),
+            Some("signal: SIGTERM; session archived")
+        );
+        assert!(session_job_activity(&jobs, "session-a").is_empty());
+        assert!(
+            other.cancels().is_empty(),
+            "another session's job is left alone"
+        );
     }
 
     #[tokio::test]

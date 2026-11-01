@@ -1,4 +1,5 @@
 #!/bin/sh
-# Remove stale heddle-*, hd-*-browser-*, scoped_dir* and com.google.Chrome* entries from the user TMPDIR
-# (older than 2 hours, never one a running process names). See tmp-sweep.md; --dry-run lists only.
+# Remove stale scratch folders, browser profiles and Chrome leftovers from the user TMPDIR (older than
+# 2 hours, never one a running process names), then print its five largest entries. See tmp-sweep.md;
+# --dry-run lists only.
 exec node "$(dirname "$0")/tmp-sweep.mjs" "$@"

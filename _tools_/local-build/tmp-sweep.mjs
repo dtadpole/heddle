@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // Remove stale scratch entries that tests and browser runs leave in the user TMPDIR.
 //
-//   _tools_/local-build/tmp-sweep              remove heddle-*, hd-*-browser-*, scoped_dir*, com.google.Chrome*
-//                                              entries older than 2 hours
+//   _tools_/local-build/tmp-sweep              remove the KINDS below once older than 2 hours: scratch folders,
+//                                              browser profiles and Chrome's own leftovers
 //   _tools_/local-build/tmp-sweep --dry-run    list what would go
 //   _tools_/local-build/tmp-sweep --age-minutes 240 --dir <folder>
 //   _tools_/local-build/tmp-sweep --no-caches  skip the cache sizes
 //
-// It also reports the size of the npm and uv caches, which hold gigabytes on this Mac's one disk. It only
-// reports them: clearing a cache is the coordinator's call, and every seat would refill it.
+// After the sweep it prints what the folder still holds: its total, its entry count and its five largest
+// entries, so the next leak shows in the sweep's own output. It also reports the size of the npm and uv
+// caches, which hold gigabytes on this Mac's one disk. It only reports them: clearing a cache is the
+// coordinator's call, and every seat would refill it.
 //
 // An entry's age is the newest mtime of the entry and its direct children, so a folder still being written
 // into is young. An entry named on any running process's command line (a live browser's profile) is kept.
@@ -19,11 +21,17 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+// The first kind whose pattern matches names the entry. The two profile kinds are testers' Chrome profiles
+// (hd5-live-profile-*, x-chrome-profile-*); the hidden .com.google.Chrome.XXXXXX files are Chrome's temporary
+// files, a few hundred KiB each, of which 30,000 (5.3 GiB) had piled up by 31 October.
 export const KINDS = [
   ['heddle-*', /^heddle-/],
   ['hd-*-browser-*', /^hd-.*-browser-/],
+  ['hd*-live-profile*', /^hd.*-live-profile/],
+  ['*-chrome-profile*', /-chrome-profile/],
   ['scoped_dir*', /^scoped_dir/],
   ['com.google.Chrome*', /^com\.google\.Chrome/],
+  ['.com.google.Chrome*', /^\.com\.google\.Chrome/],
 ]
 
 const kindOf = (name) => (KINDS.find(([, re]) => re.test(name)) || [])[0]
@@ -119,6 +127,50 @@ export function formatKiB(kib) {
   return `${kib} KiB`
 }
 
+/**
+ * What `dir` holds: its total in KiB and every top-level entry's size, null when du failed. One `du -k -d 1`
+ * sizes the folders and the total (macOS du cannot combine -a with -d); lstat sizes the rest, files and links,
+ * by their allocated blocks as du counts them. du exits 1 on an unreadable subfolder but still prints the
+ * rest, so only a missing total is a failure. Removes nothing.
+ */
+export function entrySizes(dir) {
+  const top = path.resolve(dir)
+  const du = spawnSync('du', ['-k', '-d', '1', top], { encoding: 'utf8', timeout: 120_000, maxBuffer: 64 * 1024 * 1024 })
+  if (du.error || du.signal) return null
+  let total = null
+  const folders = new Map()
+  for (const line of (du.stdout || '').split('\n')) {
+    const m = /^(\d+)\t(.+)$/.exec(line)
+    if (!m) continue
+    const p = path.resolve(m[2])
+    if (p === top) total = Number(m[1])
+    else if (path.dirname(p) === top) folders.set(path.basename(p), Number(m[1]))
+  }
+  if (total === null) return null
+  const entries = []
+  let names = []
+  try {
+    names = fs.readdirSync(top)
+  } catch {
+    return null
+  }
+  for (const name of names) {
+    try {
+      const st = fs.lstatSync(path.join(top, name))
+      entries.push({ name, kib: st.isDirectory() ? folders.get(name) ?? 0 : Math.ceil(st.blocks / 2) })
+    } catch {} // gone meanwhile
+  }
+  return { total, entries }
+}
+
+/** One line: the folder's total, its entry count and its `count` largest entries, largest first. */
+export function renderLargest(dir, sizes, count = 5) {
+  if (!sizes) return `tmp-sweep: ${dir}: sizes unknown (du failed)`
+  const largest = [...sizes.entries].sort((a, b) => b.kib - a.kib || (a.name < b.name ? -1 : 1)).slice(0, count)
+  const list = largest.map((e) => `${formatKiB(e.kib)} ${e.name}`).join(', ') || 'none'
+  return `tmp-sweep: ${dir} holds ${formatKiB(sizes.total)} in ${sizes.entries.length} entries; largest: ${list}`
+}
+
 export function renderCaches(sizes) {
   const parts = sizes.map((c) => `${c.name} ${c.absent ? 'absent' : c.kib === null ? '? (du failed)' : formatKiB(c.kib)} (${c.dir})`)
   return `tmp-sweep: caches, sizes only, never removed: ${parts.join(', ')}`
@@ -154,6 +206,7 @@ export function main(argv) {
   }
   const result = sweep(opt)
   console.log(render(result, opt.dryRun))
+  console.log(renderLargest(opt.dir, entrySizes(opt.dir)))
   if (opt.caches) console.log(renderCaches(cacheSizes()))
   return result.errors.length ? 1 : 0
 }
