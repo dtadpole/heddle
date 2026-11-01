@@ -178,9 +178,13 @@ pub async fn wire(request: WireRequest) -> Result<WireResponse, ModelError> {
             ));
         }
         Ok(Err(error)) => {
+            let error = redacted(error);
             let timed_out = error.is_timeout();
             return Err(ModelError::new(
-                format!("the request to '{endpoint}' could not be sent — {error}"),
+                format!(
+                    "the request to '{endpoint}' could not be sent — {}",
+                    cause_chain(&error)
+                ),
                 endpoint,
                 if timed_out {
                     crate::error::code::TIMEOUT
@@ -329,10 +333,14 @@ fn body_stream(response: reqwest::Response, endpoint: String, idle: Duration) ->
                 Ok(None) => None,
                 Ok(Some(Ok(bytes))) => Some((Ok(bytes), (upstream, endpoint, idle, false))),
                 Ok(Some(Err(error))) => {
+                    let error = redacted(error);
                     let timed_out = error.is_timeout();
                     Some((
                         Err(ModelError::new(
-                            format!("the request to '{endpoint}' could not be read — {error}"),
+                            format!(
+                                "the request to '{endpoint}' could not be read — {}",
+                                cause_chain(&error)
+                            ),
                             endpoint.clone(),
                             if timed_out {
                                 crate::error::code::TIMEOUT
@@ -598,9 +606,114 @@ pub const AUTH_FAILURE: &str = "API key is invalid; check the key this endpoint 
 /// What a quota refusal adds to the provider's sentence: DSH's `message.failure.quota` (`QUOTA_FAILURE`).
 pub const QUOTA_FAILURE: &str = "Request quota exhausted.";
 
+/// A transport error without what its URL must not carry into a sentence (#217): the query, the fragment
+/// and any user name or password. A provider may take its key as a query parameter, and this sentence
+/// lands in the session log, the page and a compaction's failure reason. The scheme, host, port and path
+/// stay, which is what shows a wrong `baseUrl` at a glance.
+fn redacted(mut error: reqwest::Error) -> reqwest::Error {
+    if let Some(url) = error.url_mut() {
+        url.set_query(None);
+        url.set_fragment(None);
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+    }
+    error
+}
+
+/// An error and every cause beneath it, joined with `": "` (#217). reqwest's own words are only "error
+/// sending request for url (...)"; the reason (a refused connection, DNS, TLS, a proxy) is in its source
+/// chain, where TypeScript's Node error carries it in its message. A link whose words the link before it
+/// already says is dropped.
+pub(crate) fn cause_chain(error: &dyn std::error::Error) -> String {
+    let mut said = vec![error.to_string()];
+    let mut next = error.source();
+    while let Some(cause) = next {
+        let text = cause.to_string();
+        if !text.is_empty() && !said.last().is_some_and(|last| last.contains(&text)) {
+            said.push(text);
+        }
+        next = cause.source();
+    }
+    said.join(": ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link of an error chain, for the joiner.
+    #[derive(Debug)]
+    struct Link(&'static str, Option<Box<Link>>);
+
+    impl std::fmt::Display for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Link {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1
+                .as_deref()
+                .map(|link| link as &(dyn std::error::Error + 'static))
+        }
+    }
+
+    #[test]
+    fn a_transport_error_says_its_whole_cause_chain_without_repeating_a_link() {
+        // #217: reqwest says only "error sending request for url (...)"; the reason is in its sources.
+        let chain = Link(
+            "error sending request for url (http://127.0.0.1:9/v1/chat/completions)",
+            Some(Box::new(Link(
+                "client error (Connect)",
+                Some(Box::new(Link(
+                    "tcp connect error",
+                    Some(Box::new(Link(
+                        "tcp connect error: Connection refused (os error 61)",
+                        Some(Box::new(Link("Connection refused (os error 61)", None))),
+                    ))),
+                ))),
+            ))),
+        );
+        assert_eq!(
+            cause_chain(&chain),
+            "error sending request for url (http://127.0.0.1:9/v1/chat/completions): client error (Connect): tcp connect error: tcp connect error: Connection refused (os error 61)"
+        );
+        assert_eq!(cause_chain(&Link("alone", None)), "alone");
+        assert_eq!(
+            cause_chain(&Link(
+                "refused: Connection refused",
+                Some(Box::new(Link("Connection refused", None)))
+            )),
+            "refused: Connection refused",
+            "a cause the link before already says is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_names_the_refusal_and_never_the_query_or_user_info() {
+        // A port that was free a moment ago, so the connection is refused on purpose.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .map(|address| address.port())
+            .expect("a free port");
+        let error = reqwest::Client::new()
+            .get(format!(
+                "http://user:hunter2@127.0.0.1:{port}/v1/chat?key=SECRET#frag"
+            ))
+            .send()
+            .await
+            .expect_err("nothing listens there");
+        let said = cause_chain(&redacted(error));
+        assert!(
+            said.contains(&format!("http://127.0.0.1:{port}/v1/chat")),
+            "{said}"
+        );
+        assert!(said.to_lowercase().contains("connection refused"), "{said}");
+        for secret in ["SECRET", "key=", "hunter2", "user", "frag"] {
+            assert!(!said.contains(secret), "{secret} leaked: {said}");
+        }
+    }
 
     #[test]
     fn a_refused_credential_says_the_key_is_invalid_without_the_providers_words() {
