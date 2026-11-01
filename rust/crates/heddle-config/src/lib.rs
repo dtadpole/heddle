@@ -47,6 +47,7 @@
 //! ([`command::run`]). The port plan and what remains (step 9, the verifier) are in the crate's
 //! `INDEX.md`.
 
+mod boot_fallback;
 mod builtin_forms;
 pub mod command;
 mod component_schemas;
@@ -72,6 +73,7 @@ mod template;
 mod validate;
 mod value;
 
+pub use boot_fallback::{BootFallback, boot_fallback};
 pub use builtin_forms::{
     HEDDLE_HOME_PLACEHOLDER, builtin_form, builtin_form_modules, form_problem,
 };
@@ -122,12 +124,12 @@ pub use settings::{
     PlannedWrite, SETTINGS_BEGIN, SETTINGS_END, SecretSlot, SettingsApplier, SettingsError,
     SettingsNamespace, SettingsPathOp, SettingsResponse, SettingsRevisions, SettingsService,
     SettingsTarget, SettingsView, SettingsWrite, commit_settings_write, describe_settings,
-    handle_settings_request, is_secret_container, is_secret_key, plan_settings_write,
-    settings_target,
+    handle_settings_request, is_secret_container, is_secret_key, layers_beneath_settings,
+    plan_settings_write, settings_target,
 };
 pub use template::{PROFILE_TEMPLATES, reset_profile_from_template, template_files};
 pub use validate::{
-    ComponentCatalog, ComponentManifest, ManifestCatalog, SchemaLookup, StaticCatalog,
-    ValidationResult, read_component_manifest, validate_rows,
+    ComponentCatalog, ComponentManifest, ManifestCatalog, RowJudgement, SchemaLookup,
+    StaticCatalog, ValidationResult, judge_row, read_component_manifest, validate_rows,
 };
 pub use value::{LayerValue, plain_json};

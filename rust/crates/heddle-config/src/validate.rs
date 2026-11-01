@@ -241,53 +241,79 @@ pub fn validate_rows(
     let anchor = anchor_dir(layers);
     let mut problems = Vec::new();
     let mut checked = 0;
-
     for composed in &rows {
-        let row = &composed.row;
-        if row.disabled == Some(true) {
-            continue;
+        let judged = judge_row(&composed.row, anchor.as_deref(), catalog);
+        if judged.checked {
+            checked += 1;
         }
-        let config = row
-            .config
-            .clone()
-            .unwrap_or_else(|| Value::Object(Map::new()));
-        // A built-in is first judged as the TypeScript build judges it, by its Config's form projection, in
-        // Schemastery's words (#125): its enums, limits and required fields, which the component's own schema may
-        // not spell. The component's schema then adds whatever it is stricter about.
-        let form_problem = catalog
-            .form(row, anchor.as_deref())
-            .and_then(|form| crate::builtin_forms::form_problem(&form, &config));
-        match catalog.lookup(row, anchor.as_deref()) {
-            // A component that declares no configuration is not a problem, and is not "checked":
-            // counting it would claim a check that never happened.
-            SchemaLookup::NoSchema => {
-                if let Some(problem) = form_problem {
-                    problems.push(format!("{}: {problem}", row.label()));
-                }
-            }
-            SchemaLookup::Unresolvable(why) => problems.push(format!(
-                "{}: cannot resolve the component '{}' — {why}",
-                row.label(),
-                row.name
-            )),
-            SchemaLookup::Schema(schema) => {
-                checked += 1;
-                if let Some(problem) = form_problem {
-                    problems.push(format!("{}: {problem}", row.label()));
-                } else {
-                    for problem in schema.check(&config) {
-                        problems.push(format!("{}: {problem}", row.label()));
-                    }
-                }
-            }
-        }
+        problems.extend(judged.problems);
     }
-
     Ok(ValidationResult {
         rows: rows.len(),
         checked,
         problems,
     })
+}
+
+/// One row's judgement: whether a schema checked it, and every problem, each starting with the row's label.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RowJudgement {
+    /// Whether a schema (or a built-in's form) judged the row.
+    pub checked: bool,
+    /// Every problem, `{label}: {problem}`.
+    pub problems: Vec<String>,
+}
+
+/// Judge one composed row as [`validate_rows`] judges every row: a built-in by its form projection first,
+/// then the component's schema (and the rule it names). A disabled row is not judged. Boot uses this to
+/// find a row a patch has broken before the row fails and takes its dependants down with it (#213).
+pub fn judge_row(
+    row: &EntryRow,
+    anchor: Option<&Path>,
+    catalog: &dyn ComponentCatalog,
+) -> RowJudgement {
+    if row.disabled == Some(true) {
+        return RowJudgement::default();
+    }
+    let config = row
+        .config
+        .clone()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    // A built-in is first judged as the TypeScript build judges it, by its Config's form projection, in
+    // Schemastery's words (#125): its enums, limits and required fields, which the component's own schema may
+    // not spell. The component's schema then adds whatever it is stricter about.
+    let form_problem = catalog
+        .form(row, anchor)
+        .and_then(|form| crate::builtin_forms::form_problem(&form, &config));
+    let label = row.label();
+    match catalog.lookup(row, anchor) {
+        // A component that declares no configuration is not a problem, and is not "checked":
+        // counting it would claim a check that never happened.
+        SchemaLookup::NoSchema => RowJudgement {
+            checked: false,
+            problems: form_problem
+                .map(|problem| vec![format!("{label}: {problem}")])
+                .unwrap_or_default(),
+        },
+        SchemaLookup::Unresolvable(why) => RowJudgement {
+            checked: false,
+            problems: vec![format!(
+                "{label}: cannot resolve the component '{}' — {why}",
+                row.name
+            )],
+        },
+        SchemaLookup::Schema(schema) => RowJudgement {
+            checked: true,
+            problems: match form_problem {
+                Some(problem) => vec![format!("{label}: {problem}")],
+                None => schema
+                    .check(&config)
+                    .iter()
+                    .map(|problem| format!("{label}: {problem}"))
+                    .collect(),
+            },
+        },
+    }
 }
 
 #[cfg(test)]

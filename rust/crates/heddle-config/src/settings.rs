@@ -722,6 +722,19 @@ fn rejected(error: ConfigError) -> SettingsError {
     SettingsError::Rejected(error.problems().join("; "))
 }
 
+/// The layers beneath what Settings wrote: `layers` with the target's settings block taken out, which is
+/// what Reset restores a field to. Boot runs a row the block broke on these (#213); `None` when the target
+/// cannot be read. `src/config/settings.ts` `layersBeneathSettings` is the twin.
+pub fn layers_beneath_settings(
+    layers: &[NamedLayer],
+    target: &SettingsTarget,
+    env: &Env,
+) -> Option<Vec<NamedLayer>> {
+    State::read(layers, Some(target), env)
+        .ok()
+        .map(|state| state.base)
+}
+
 /// The layers with the target as it is on disk now, and without its settings block.
 #[derive(Clone)]
 struct State {
