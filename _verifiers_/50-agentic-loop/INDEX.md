@@ -22,6 +22,9 @@ a display or a window.
 `check.mjs` drives a scripted multi-round turn and reads the transcript, `check-end-to-end.mjs` runs the whole thing
 from configuration, `check-subagents.mjs` judges the delegation boundary: a child agent runs in its own
 session, attributed to its parent, and its final answer returns as the parent's tool result, and
+`check-subagent-restart.mjs` judges a background child cut by a crash: the server is killed while the child waits on
+its model, and at the next start the child's log is closed and its parent gets one `interrupted` settlement notice and
+answers it, and a further start reports nothing (issue #170; before the fix the parent heard nothing, on both builds),
 `check-teams.mjs` judges Agent Teams end to end — a Lead's real turn spawns a teammate, creates and completes a
 shared task, mails the teammate and answers, the team survives a server restart, and boot recovery settles a
 previous process's provisioning members and delivers its queued mail. `check-goal-rounds.mjs` judges that a goal's

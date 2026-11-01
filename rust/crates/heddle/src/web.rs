@@ -821,6 +821,10 @@ impl heddle_web_files::host::FilesHost for PageHost {
             Ok(reading) => serde_json::to_value(reading)
                 .and_then(serde_json::from_value)
                 .map_err(|error| FileReadError::NotText(error.to_string())),
+            Err(heddle_workspace::FileReadError::Unreadable { name }) => {
+                Err(FileReadError::Unreadable { name })
+            }
+            Err(heddle_workspace::FileReadError::ReadFailed) => Err(FileReadError::ReadFailed),
             Err(error @ heddle_workspace::FileReadError::NotAFile(_)) => {
                 Err(FileReadError::NotAFile(error.to_string()))
             }
@@ -1151,6 +1155,27 @@ async fn boot_notes(boot: &Boot) -> Vec<String> {
         && let Some(note) = heddle_team::command::web_start_note(&team).await
     {
         notes.push(note);
+    }
+    // And for background children: a child the previous process left mid-turn is closed and reported to its
+    // parent as interrupted, which the process that ran it can no longer do (#170). The parents' turns run on
+    // this runtime without being awaited here.
+    if let (Some(subagents), Some(sessions)) = (
+        boot.services
+            .get::<Arc<heddle_agent::SubagentService>>("subagents"),
+        boot.services
+            .get::<Arc<heddle_session::SessionService>>("session"),
+    ) {
+        let ids: Vec<String> = sessions
+            .list()
+            .iter()
+            .map(|meta| meta.id().to_owned())
+            .collect();
+        let reported = subagents.report_interrupted(&ids);
+        if reported > 0 {
+            notes.push(format!(
+                "reported {reported} interrupted subagent(s) to their parent(s)"
+            ));
+        }
     }
     // Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule); a
     // committed reminder write reaches the page's subscribers as `event: schedule`.
