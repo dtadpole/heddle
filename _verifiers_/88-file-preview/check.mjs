@@ -6,7 +6,7 @@ import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/brows
 import { openPage } from '../../_tools_/browser-use/lib.mjs'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { endChild, fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — one preview surface.
@@ -466,10 +466,16 @@ test('an html document is previewed as a page, and nothing in it can act', async
     const baseErrors = browser.page.console.filter((entry) => /base-uri|setting the document.s base URI/i.test(entry.text))
     assert.deepEqual(baseErrors, [], 'HTML preview produces no base-uri browser console violation')
   } finally {
-    await browser.close()
-    server.kill()
-    removeDir(home)
-    removeDir(work)
+    try {
+      await browser.close()
+    } finally {
+      const ended = await endChild(server.child, { graceMs: 1000 })
+      server.child.stdout?.destroy()
+      server.child.stderr?.destroy()
+      assert.notEqual(ended, 'stuck', 'preview server exits before its fixtures are removed')
+      removeDir(home)
+      removeDir(work)
+    }
   }
 })
 
