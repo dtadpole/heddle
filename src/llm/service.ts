@@ -1,10 +1,11 @@
 import { Service } from '@deepseek-ai/cordis'
 import type { Context } from '@deepseek-ai/cordis'
 
+import { selectionProblem } from '../endpoints.ts'
 import { adapterFor } from './adapters.ts'
 import { projectAttachments } from './attachments.ts'
 import { inputModalitiesFromModelList, type InputModality } from './model-info.ts'
-import { ModelError, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
+import { ModelError, reasoningLevelsFor, requestMessages, textOf, type Adapter, type Chunk, type EndpointConfig, type GenerateRequest, type Message } from './types.ts'
 
 export * from './types.ts'
 
@@ -172,6 +173,54 @@ export class ModelService extends Service {
     return this.endpoints.keys().next().value
   }
 
+  /** The model and effort the configuration names for a new session (the model row's `defaultModel`, `defaultEffort`). */
+  private defaults: { readonly model?: string; readonly effort?: string } = {}
+  /** The stale defaults already warned about, so one stale value is said once rather than on every session. */
+  private warnedDefaults = new Set<string>()
+
+  /** Record the model and effort a new session starts with when it names none. */
+  setDefaults(defaults: { readonly model?: string; readonly effort?: string }): void {
+    this.defaults = { ...defaults }
+  }
+
+  /**
+   * What a new session starts with when it names nothing: the default endpoint, the configured default model when
+   * that endpoint still offers it, and the configured default effort when the chosen model still declares it (DSH's
+   * `dsh-agent-default-model` `currentSelection`). A stale default never fails a session: it falls back to the
+   * endpoint's own model and default level and is warned about once, with the reason `selectionProblem` gives.
+   */
+  defaultSelection(): { readonly endpoint?: string; readonly model?: string; readonly reasoningEffort?: string } {
+    const endpoint = this.defaultEndpoint()
+    const configured = endpoint === undefined ? undefined : this.endpoint(endpoint)
+    if (endpoint === undefined || configured === undefined) return {}
+    const warn = (value: string, problem: string) => {
+      if (this.warnedDefaults.has(value)) return
+      this.warnedDefaults.add(value)
+      this.ctx.logger.warn('model: the configured default %s', `${problem}; the endpoint's own is used instead`)
+    }
+    let model = this.defaults.model
+    if (model !== undefined) {
+      const problem = selectionProblem(configured, model)
+      if (problem !== null) {
+        warn(`model:${endpoint}:${model}`, problem)
+        model = undefined
+      }
+    }
+    let effort = this.defaults.effort
+    if (effort !== undefined) {
+      const problem = selectionProblem(configured, model, effort)
+      if (problem !== null) {
+        warn(`effort:${endpoint}:${model ?? ''}:${effort}`, problem)
+        effort = undefined
+      }
+    }
+    return {
+      endpoint,
+      ...(model !== undefined ? { model } : {}),
+      ...(effort !== undefined ? { reasoningEffort: effort } : {}),
+    }
+  }
+
   /** Record which endpoint the configuration nominates as the default. */
   nominateDefault(name: string): void {
     if (this.endpoints.has(name)) this.nominated = name
@@ -215,7 +264,8 @@ export class ModelService extends Service {
      * policy attaches to. `model/stream` below is the chunk-level seam for logging,
      * retrying or replaying a call.
      */
-    return this.ctx.waterfall('model/request', request, () => request)
+    const effective = this.ctx.waterfall('model/request', request, () => request)
+    return withDefaultEffort(this.endpoints.get(effective.endpoint)?.endpoint, effective)
   }
 
   /** Stream a request `resolve` already answered; the `model/request` waterfall is not run again. */
@@ -352,4 +402,20 @@ declare module '@deepseek-ai/cordis' {
      */
     'model/request'(this: ModelService, request: GenerateRequest, next: () => GenerateRequest): GenerateRequest
   }
+}
+
+/**
+ * A request that names no reasoning effort runs at its model's declared default (#157), as DSH's `resolveCallWithInfo`
+ * resolves `requested ?? reasoning.defaultEffort`, and says so with `reasoningEffortDefault`. Applied after the
+ * `model/request` waterfall, so a selection policy that names a level wins, and on the endpoint that will answer (a
+ * policy may have moved the call). A model that declares levels but no default keeps sending nothing: that is the
+ * provider's own default, the page's `Default` row.
+ */
+export function withDefaultEffort(endpoint: EndpointConfig | undefined, request: GenerateRequest): GenerateRequest {
+  if (endpoint === undefined || (request.reasoningEffort !== undefined && request.reasoningEffort.length > 0)) return request
+  // An empty model is no model, as the Rust twin filters it: the endpoint's own model answers.
+  const model = request.model !== undefined && request.model.length > 0 ? request.model : endpoint.model
+  const fallback = reasoningLevelsFor(endpoint, model)?.default
+  if (fallback === undefined || fallback.length === 0) return request
+  return { ...request, reasoningEffort: fallback, reasoningEffortDefault: true }
 }

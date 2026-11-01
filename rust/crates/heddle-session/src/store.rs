@@ -64,6 +64,14 @@ pub const LEGACY_TRANSCRIPT_NAME: &str = "session.jsonl";
 /// the `session/event` hook (`{ session: handle.id, event }`).
 pub type EventListener = Arc<dyn Fn(&SessionHandle, &SessionEvent) + Send + Sync>;
 
+/// Told about every title the store writes, after the write, with the session id and the title now stored (`""` when
+/// cleared): a person's rename, the first message's fallback, a fork's name and the title model's answer alike (#33).
+///
+/// DSH records each title change, and every view of the session follows it (inventory-shell S16). Heddle keeps the title
+/// in the meta record rather than in the log, so no [`EventListener`] event carries it; the boot wires this one to the
+/// Web UI's `session/renamed` push (`onRenamed` in `src/session/store.ts`).
+pub type RenameListener = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// The default store root: `heddle_home(env)/sessions` — `$HEDDLE_HOME/sessions`, else
 /// `~/.heddle/sessions`.
 pub fn default_session_root(env: &Env) -> String {
@@ -314,6 +322,9 @@ pub struct ModelRequestRecord {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Whether that level is the model's declared default rather than a choice (#157).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_default: Option<bool>,
     /// How many messages the request carries.
     pub messages: u64,
     /// The tool names offered.
@@ -350,6 +361,8 @@ pub struct SessionStore {
     /// Where a skipped log is reported ([`skipped_log_line`]); standard error unless [`SessionStore::set_warn`] names a
     /// collector.
     warn: Mutex<Option<Warn>>,
+    /// Where a written title is announced ([`SessionStore::on_renamed`]); nobody until the boot names a listener.
+    renamed: Mutex<Option<RenameListener>>,
 }
 
 /// Receives the line naming a log the store leaves out.
@@ -485,6 +498,7 @@ impl SessionStore {
             titles: Arc::new(SessionTitles::default()),
             headers: Mutex::new(HashMap::new()),
             warn: Mutex::new(None),
+            renamed: Mutex::new(None),
         }
     }
 
@@ -498,6 +512,7 @@ impl SessionStore {
             titles: Arc::new(SessionTitles::default()),
             headers: Mutex::new(HashMap::new()),
             warn: Mutex::new(None),
+            renamed: Mutex::new(None),
         }
     }
 
@@ -509,6 +524,26 @@ impl SessionStore {
     /// Send the line naming a skipped log ([`skipped_log_line`]) to `warn` instead of standard error.
     pub fn set_warn(&self, warn: Warn) {
         *self.warn.lock().unwrap_or_else(PoisonError::into_inner) = Some(warn);
+    }
+
+    /// Announce every title this store writes from now on to `listener` ([`RenameListener`]). A second call replaces
+    /// the first, so a store announces to one server: a second router over the same store takes the announcements
+    /// from the first (no in-tree path builds two).
+    pub fn on_renamed(&self, listener: RenameListener) {
+        *self.renamed.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
+    }
+
+    /// Tell the rename listener, if any, about a title just written. Called with the meta lock released, as the event
+    /// listener is, so a listener may read the store; the title service calls it once its own lock is released too.
+    pub(crate) fn announce_title(&self, meta: &SessionMeta) {
+        let listener = self
+            .renamed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(listener) = listener {
+            listener(meta.id(), meta.title().unwrap_or(""));
+        }
     }
 
     /// Whether a session's log can be read at all, judged by its first record ([`read_log_header`]), and reported once
@@ -683,26 +718,34 @@ impl SessionStore {
     /// `normalizeSessionTitle`): controls and escape sequences removed, whitespace collapsed, at most 80
     /// UTF-8 bytes; one with nothing visible left clears, as a blank one does (the route refuses it).
     pub fn rename(&self, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
-        let _meta = self.meta_guard();
-        self.rename_locked(id, title)
+        let renamed = {
+            let _meta = self.meta_guard();
+            self.rename_locked(id, title)?
+        };
+        if let Some(meta) = &renamed {
+            self.announce_title(meta);
+        }
+        Ok(renamed)
     }
 
     /// Write a generated title only while the session still carries `expected` — the name the call started from.
-    /// Answers whether it wrote.
+    /// Answers the record it wrote, if it wrote. It does **not** announce: the caller holds its own lock across this
+    /// write and calls [`Self::announce_title`] once that lock is released, so a listener that calls back into the
+    /// session service cannot deadlock (developer-eight's review of #33).
     pub(crate) fn rename_if_title(
         &self,
         id: &str,
         expected: &str,
         title: &str,
-    ) -> Result<bool, SessionError> {
+    ) -> Result<Option<SessionMeta>, SessionError> {
         let _meta = self.meta_guard();
         let Some(current) = self.list().into_iter().find(|meta| meta.id() == id) else {
-            return Ok(false);
+            return Ok(None);
         };
         if current.title().unwrap_or("") != expected {
-            return Ok(false);
+            return Ok(None);
         }
-        Ok(self.rename_locked(id, title)?.is_some())
+        self.rename_locked(id, title)
     }
 
     /// `rename` with the meta lock already held.
@@ -1587,7 +1630,11 @@ impl SessionStore {
         )?;
         if message.role == Role::User {
             let prompted_at = message.source.is_none().then_some(event.at.as_str());
-            self.write_meta_touch(handle, 1, prompted_at, fallback_title);
+            // Every title the store writes is announced (#33), this one too: once the write that named the session is
+            // done and the meta lock released, as `rename` announces.
+            if let Some(named) = self.write_meta_touch(handle, 1, prompted_at, fallback_title) {
+                self.announce_title(&named);
+            }
         }
         Ok(event)
     }
@@ -1679,33 +1726,31 @@ impl SessionStore {
     /// inherited user message at once and dates nothing, so a fork's row is dated by its creation until its
     /// own first prompt, as DSH's `max(createdAt, lastPromptAt)` dates it.
     fn touch_counting(&self, handle: &SessionHandle, turns: u64, prompted_at: Option<&str>) {
-        self.write_meta_touch(handle, turns, prompted_at, None);
+        let _ = self.write_meta_touch(handle, turns, prompted_at, None);
     }
 
     /// [`SessionStore::touch_counting`], also naming an untitled session with `fallback_title` in the same write
     /// ([`SessionStore::user_message_named`]). The keys change in the order the separate writes changed them —
     /// `updated`, `turns`, then `title` — so the record's bytes are the ones a touch then a rename left.
+    ///
+    /// Answers the record when this write **named** the session, so the caller can announce the title once the meta
+    /// lock (held only inside this call) is released; `None` when it named nothing.
     fn write_meta_touch(
         &self,
         handle: &SessionHandle,
         turns: u64,
         prompted_at: Option<&str>,
         fallback_title: Option<&str>,
-    ) {
+    ) -> Option<SessionMeta> {
         let fallback_title = fallback_title.filter(|title| !title.is_empty());
         if turns == 0 && prompted_at.is_none() && fallback_title.is_none() {
-            return;
+            return None;
         }
         let _meta = self.meta_guard();
-        let Ok(text) = std::fs::read_to_string(&handle.meta) else {
-            return;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&text) else {
-            return;
-        };
-        let Some(mut meta) = SessionMeta::from_value(value) else {
-            return;
-        };
+        let text = std::fs::read_to_string(&handle.meta).ok()?;
+        let value = serde_json::from_str::<Value>(&text).ok()?;
+        let mut meta = SessionMeta::from_value(value)?;
+        let mut named = false;
         if let Some(at) = prompted_at {
             meta.set("updated", Value::String(at.to_string()));
         }
@@ -1721,9 +1766,11 @@ impl SessionStore {
                 meta.remove("title");
             } else {
                 meta.set("title", Value::String(cleaned));
+                named = true;
             }
         }
-        let _ = crate::fsio::write_atomic(&handle.meta, meta.to_file_text());
+        let written = crate::fsio::write_atomic(&handle.meta, meta.to_file_text()).is_ok();
+        (named && written).then_some(meta)
     }
 }
 

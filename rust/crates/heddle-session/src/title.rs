@@ -585,13 +585,21 @@ impl SessionTitles {
 
     /// Write `title` if the call is still current and the session still carries the name it started from.
     fn accept(&self, store: &SessionStore, id: &str, revision: u64, expected: &str, title: &str) {
-        let inner = self.lock();
-        if inner.model.is_none() || inner.work.get(id).map(|state| state.revision) != Some(revision)
-        {
-            return;
+        let written = {
+            let inner = self.lock();
+            if inner.model.is_none()
+                || inner.work.get(id).map(|state| state.revision) != Some(revision)
+            {
+                return;
+            }
+            // The guard is held across the write, so a rename cannot supersede between the check and the write.
+            store.rename_if_title(id, expected, title)
+        };
+        // Announced with the guard released, so a listener that renames through the service (which supersedes under
+        // this same lock) cannot deadlock.
+        if let Ok(Some(meta)) = written {
+            store.announce_title(&meta);
         }
-        // The guard is held across the write, so a rename cannot supersede between the check and the write.
-        let _ = store.rename_if_title(id, expected, title);
     }
 }
 
@@ -688,6 +696,7 @@ mod tests {
                     endpoint: "scripted".to_string(),
                     model: model.map(str::to_string),
                     reasoning_effort: None,
+                    reasoning_effort_default: None,
                     messages: 1,
                     tools: Vec::new(),
                     estimated_tokens: None,
@@ -820,6 +829,100 @@ mod tests {
             fake.requests.lock().unwrap().len(),
             1,
             "only the first prompt earns a call"
+        );
+    }
+
+    /// #33: every title the store writes is announced, after the write, and not only a person's rename. DSH records
+    /// each title change and every view of the session follows it; the server pushes these as `session/renamed`.
+    #[test]
+    fn every_title_the_store_writes_is_announced_after_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new(|| Ok(stop("Quarterly revenue comparison")), false);
+        let service = service(&dir, &fake);
+        type Heard = Vec<(String, String, Option<String>)>;
+        let heard: Arc<Mutex<Heard>> = Arc::default();
+        let recorder = Arc::clone(&heard);
+        let reader = service.clone();
+        service
+            .store()
+            .on_renamed(Arc::new(move |id: &str, title: &str| {
+                // The title the record holds when the announcement is heard: a listener never hears ahead of the file.
+                let stored = reader
+                    .meta(id)
+                    .and_then(|meta| meta.title().map(str::to_string));
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push((id.to_string(), title.to_string(), stored));
+            }));
+        let handle = start(&service, &dir);
+        assert!(
+            heard.lock().unwrap().is_empty(),
+            "a new session is untitled, so nothing is announced"
+        );
+
+        service.user(&handle, PROMPT, None).unwrap();
+        request(&service, &handle, None);
+        service.rename(&handle.id, "named by a person").unwrap();
+        service
+            .user(&handle, "a second prompt names nothing", None)
+            .unwrap();
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            3,
+            "a message that writes no title announces none"
+        );
+        service.rename(&handle.id, "").unwrap();
+        let id = handle.id.clone();
+        let fallback = title_from(PROMPT);
+        let generated = "Quarterly revenue comparison".to_string();
+        let named = "named by a person".to_string();
+        assert_eq!(
+            *heard.lock().unwrap(),
+            vec![
+                (id.clone(), fallback.clone(), Some(fallback)),
+                (id.clone(), generated.clone(), Some(generated)),
+                (id.clone(), named.clone(), Some(named)),
+                (id, String::new(), None),
+            ]
+        );
+    }
+
+    /// developer-eight's review of #33: the model's title was announced while the title service still held its lock,
+    /// so a listener that renames through the service (which supersedes under that lock) deadlocked.
+    #[test]
+    fn a_listener_may_rename_through_the_service_when_it_hears_the_models_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Fake::new(|| Ok(stop("Quarterly revenue comparison")), false);
+        let service = service(&dir, &fake);
+        let renamer = service.clone();
+        service
+            .store()
+            .on_renamed(Arc::new(move |id: &str, title: &str| {
+                if title == "Quarterly revenue comparison" {
+                    renamer.rename(id, "renamed by the listener").unwrap();
+                }
+            }));
+        let handle = start(&service, &dir);
+        let worker = service.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let id = handle.id.clone();
+        std::thread::spawn(move || {
+            worker.user(&handle, PROMPT, None).unwrap();
+            request(&worker, &handle, None);
+            let _ = done.send(());
+        });
+        assert!(
+            finished
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "the model's title is announced with the title lock released, so the listener's rename returns"
+        );
+        assert_eq!(
+            service
+                .meta(&id)
+                .and_then(|meta| meta.title().map(str::to_string)),
+            Some("renamed by the listener".to_string())
         );
     }
 

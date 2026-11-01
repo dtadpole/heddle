@@ -118,6 +118,30 @@ pub struct WorkspaceView {
     pub created_at: String,
     pub updated_at: String,
     pub session_ids: Vec<String>,
+    /// Whether the folder is there — DSH's `Workspace.status()`. Set by `WorkspaceService::views`, which reads the
+    /// disk; the pure `workspace_views` leaves it out, and then it is not written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<FolderStatus>,
+}
+
+/// DSH's `Workspace.status()` (dsh-workspace lib/index.js:154-160, lib/types/types.d.ts:131-136): `ok` when the path is
+/// a directory now, `missing-dir` otherwise. Read live and never written into the record, because a folder that is gone
+/// may only be away for a while (#141).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FolderStatus {
+    Ok,
+    MissingDir,
+}
+
+impl FolderStatus {
+    /// Stat `path` as DSH's `status()` does: a directory is `ok`; anything else, or nothing, is `missing-dir`.
+    pub fn of(path: &std::path::Path) -> Self {
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_dir() => FolderStatus::Ok,
+            _ => FolderStatus::MissingDir,
+        }
+    }
 }
 
 /// A record with the ids of the sessions it accounts for — one row of `heddle workspaces --json`.

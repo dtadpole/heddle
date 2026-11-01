@@ -223,6 +223,13 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     }
   })
 
+  /**
+   * A session's title was written, so every page retitles it (#33). DSH records each title change and every view of the
+   * session follows (inventory-shell S16). That covers a person's rename, the first message's fallback and the title
+   * model's answer, so the push comes from the store's one rename path, not from the rename route alone.
+   */
+  ctx.on('session/renamed', ({ session, title }) => push({ log, subscribers }, 'sessions', { type: 'session/renamed', session, title }))
+
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
     // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
@@ -936,7 +943,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
-    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
+    // The default selection rides along, so a composer opening a fresh session shows and sends it (DSH parity A104).
+    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint(), ctx.model.defaultSelection())
     /**
      * A provider that lists its models already knows each one's context window, and the composer's gauge needs
      * it. The declarative configuration always wins; only an endpoint that declares none asks its provider, and
@@ -985,6 +993,21 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const wanted = url.searchParams.get('path')
+    /**
+     * A folder that is gone (#141) is judged before it is read: under a root it is `404` with DSH's
+     * `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the folder
+     * is gone instead of listing it empty; outside every root it is the `400` below. It is placed through the real path
+     * of what still exists, so the spelling a person typed (`/tmp/x/w` for `/private/tmp/x/w`) is the same folder.
+     */
+    const missing = wanted !== null && wanted.length > 0 ? workspaces.missingFolder(wanted) : undefined
+    if (missing !== undefined) {
+      if (missing.owner === undefined) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `${missing.path} is not under any workspace root` })}\n`)
+      } else {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no entry at "${missing.path}"`, code: 'workspace-file/not-found' })}\n`)
+      }
+      return
+    }
     if (wanted !== null && wanted.length > 0 && workspaces.owner(wanted) === undefined) {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
@@ -1024,7 +1047,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the token and must not be a way to read the whole machine — and the path that is checked is the
    * **canonical** one, so a symlink that resolves outside a root is refused rather than followed. What
    * cannot be shown is a status rather than an empty panel: `404` for a path that is not a file, and
-   * `415` for a file that is not UTF-8 text, each with the sentence the reader produced.
+   * `415` for a file that is not UTF-8 text. Text-read permission denial is a basename-only `400`, like the folder picker (#106);
+   * unexpected filesystem I/O is a named, path-free `500` (#45, scoped Heddle policy).
    */
   if (url.pathname === '/api/file' && request.method === 'GET') {
     const workspaces = ctx.workspace
@@ -1071,9 +1095,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         `${JSON.stringify({ ...reading, ...(await renderSourceOffThread(reading.path, reading.text)) }, null, 2)}\n`,
       )
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const status = message.includes('is not a file') ? 404 : 415
-      respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+      const code = (error as { code?: unknown } | null)?.code
+      if (code === 'workspace-file/unreadable' || code === 'workspace-file/read-failed') {
+        // Scoped Heddle policy (#45), not DSH status parity; never return raw host errors.
+        const denied = code === 'workspace-file/unreadable'
+        respond(response, denied ? 400 : 500, 'application/json', `${JSON.stringify({
+          error: denied ? `cannot read "${basename(canonicalPath(wanted))}": permission denied` : 'cannot read file: I/O error', code,
+        })}\n`)
+      } else {
+        const message = error instanceof Error ? error.message : String(error)
+        const status = message.includes('is not a file') ? 404 : 415
+        respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+      }
     }
     return
   }
@@ -1593,7 +1626,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      const { workspaceIds, moved } = workspaces.reorder(body.workspaceId, typeof before === 'string' ? before : undefined)
+      /**
+       * Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an added, renamed or
+       * removed workspace is, and a page redraws its tree from it. A move that changes nothing is not announced, as
+       * DSH's registry writes nothing then (dsh-workspace lib/index.js:484, :492).
+       */
+      if (moved) push(state, 'workspace', { type: 'workspace/reordered', workspaceIds })
       respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
     } catch (error) {
       const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
@@ -1861,7 +1900,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
     if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
-    push(state, 'sessions', { type: 'session/renamed', session: id, title: meta.title ?? body.title })
+    /** The store's rename announced it, and `session/renamed` pushed it to every page (#33). */
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
@@ -2810,6 +2849,8 @@ export function unknownTurnSession(
     new?: boolean
     /** The agent preset a session this turn creates runs under (inventory A96). */
     preset?: string
+    /** Answer `202 {session, turn}` at acceptance and push the verdict on `/api/events` (#128). */
+    detach?: boolean
   }
   try {
     const parsed: unknown = JSON.parse(raw.length === 0 ? '{}' : raw)
@@ -3034,8 +3075,19 @@ export function unknownTurnSession(
   const handles = state.controllers.get(handle.id) ?? new Set<AbortController>()
   handles.add(controller)
   state.controllers.set(handle.id, handles)
-  respondSse(response)
-  state.clients.add(response)
+  /**
+   * Detached (#128): the answer is `202 {session, turn}` as soon as the turn's prompt is in the log (below), and the
+   * turn's verdict goes out on `/api/events` as a `turn` frame. A browser allows six connections per host, shared by every tab, and a turn that holds its own
+   * response open for minutes holds one of them: five running turns stalled every other request of the page. The
+   * verdict goes through the stream's log after every event the turn appended, so it is replayed to a page that
+   * reconnects and never arrives before the answer it closes. Without `detach` the response streams as before.
+   */
+  const detached = body.detach === true
+  const turnId = newClientId()
+  if (!detached) {
+    respondSse(response)
+    state.clients.add(response)
+  }
   /**
    * Writing to a client that has gone away must not become an uncaught exception.
    *
@@ -3056,48 +3108,83 @@ export function unknownTurnSession(
     if (payload.session !== handle.id) return
     safeWrite(`event: session\ndata: ${JSON.stringify(payload)}\n\n`)
   }
+  /** The turn's terminal frame: on its own response, or as a detached turn's verdict on the stream. */
+  const finish = (name: 'done' | 'cancelled' | 'error', data: Record<string, unknown>) => {
+    if (detached) push(state, 'turn', turnVerdict(turnId, name, data))
+    else safeWrite(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`)
+  }
   // A listener registered through `ctx.on` here would need a fiber of its own, and the
   // request has none, so the turn's events are relayed by subscribing directly to the
-  // same emit the server already listens on for other clients.
-  const unsubscribe = subscribeSessionEvent(ctx, forward)
+  // same emit the server already listens on for other clients. A detached turn relays nothing.
+  const unsubscribe = detached ? () => {} : subscribeSessionEvent(ctx, forward)
+  /**
+   * A detached turn is answered once its first event is in the log, normally its prompt (or the end, if it ends
+   * first, or 10 s at most behind another turn of the session). That is the moment the streamed answer's first frame
+   * used to mark. The page adopts a session it created from this answer and redraws the log from the session's
+   * history, so answering before the prompt was written lost the person's own message from the page.
+   */
+  let recorded: () => void = () => {}
+  const firstRecord = new Promise<void>((resolve) => {
+    recorded = resolve
+  })
+  const stopWatching = detached
+    ? subscribeSessionEvent(ctx, (payload) => {
+        if (payload.session === handle.id) recorded()
+      })
+    : () => {}
+  const running = runTurn(ctx, {
+    session: handle,
+    endpoint,
+    prompt: body.prompt,
+    ...(attachments.length > 0 ? { attachments } : {}),
+    signal: controller.signal,
+    /**
+     * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
+     * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
+     * "backend stopped to respond" on prompts with more than twenty steps.
+     */
+    maxRounds: state.maxRounds,
+    ...(runModel !== undefined ? { model: runModel } : {}),
+    ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
+  })
+  if (detached) {
+    let bound: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      firstRecord,
+      running.then(
+        () => {},
+        () => {},
+      ),
+      new Promise<void>((resolve) => {
+        bound = setTimeout(resolve, 10_000)
+      }),
+    ])
+    clearTimeout(bound)
+    stopWatching()
+    respond(response, 202, 'application/json', `${JSON.stringify({ session: handle.id, turn: turnId })}\n`)
+  }
   try {
-    const result = await runTurn(ctx, {
-      session: handle,
-      endpoint,
-      prompt: body.prompt,
-      ...(attachments.length > 0 ? { attachments } : {}),
-      signal: controller.signal,
-      /**
-       * An interactive turn gets the server's own round budget. Without this it inherited the loop's one-shot
-       * default of eight, and a task that needed more stopped mid-way with an empty answer — the owner's
-       * "backend stopped to respond" on prompts with more than twenty steps.
-       */
-      maxRounds: state.maxRounds,
-      ...(runModel !== undefined ? { model: runModel } : {}),
-      ...(runEffort !== undefined ? { reasoningEffort: runEffort } : {}),
-    })
+    const result = await running
     /**
      * A turn that was stopped is a cancellation, not a completion — including the case where the loop noticed the
      * abort between rounds and returned a result instead of throwing. Without this, the page saw a normal `done`
      * and left the composer in its running state.
      */
     if (controller.signal.aborted) {
-      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      finish('cancelled', { session: handle.id, message: 'stopped' })
       return
     }
-    safeWrite(
-      `event: done\ndata: ${JSON.stringify({
-        session: handle.id,
-        text: result.text,
-        finishReason: result.finishReason,
-        rounds: result.rounds,
-        denials: result.denials,
-        /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
-        ...(result.ended !== undefined ? { ended: result.ended } : {}),
-        /** What the provider said the turn cost; the page derives a rate and a context share from it. */
-        ...(result.usage !== undefined ? { usage: result.usage } : {}),
-      })}\n\n`,
-    )
+    finish('done', {
+      session: handle.id,
+      text: result.text,
+      finishReason: result.finishReason,
+      rounds: result.rounds,
+      denials: result.denials,
+      /** Why the turn stopped early, so the page can say it rather than leaving an empty answer. */
+      ...(result.ended !== undefined ? { ended: result.ended } : {}),
+      /** What the provider said the turn cost; the page derives a rate and a context share from it. */
+      ...(result.usage !== undefined ? { usage: result.usage } : {}),
+    })
   } catch (error) {
     /**
      * A stopped turn is an answer, not a failure: the abort reaches the provider connection and the loop
@@ -3105,7 +3192,7 @@ export function unknownTurnSession(
      * something the reader asked for, so it is its own event and the page settles the row with it.
      */
     if (controller.signal.aborted) {
-      safeWrite(`event: cancelled\ndata: ${JSON.stringify({ session: handle.id, message: 'stopped' })}\n\n`)
+      finish('cancelled', { session: handle.id, message: 'stopped' })
     } else {
       /**
        * The failure is logged as well as streamed. Measured: an error that only reached the
@@ -3118,7 +3205,7 @@ export function unknownTurnSession(
        * a session that is not running kept its spinner and its running row (the owner's "weaving shows for sessions
        * that are not active at all").
        */
-      safeWrite(`event: error\ndata: ${JSON.stringify({ session: handle.id, message: (error as Error).message })}\n\n`)
+      finish('error', { session: handle.id, message: (error as Error).message })
       /**
        * And it is recorded, so it reaches every client and every later read (R-developer-six-2, DSH's
        * `api-session/error`). The `event: error` above told only the client that started the turn: another page
@@ -3368,6 +3455,17 @@ function streamTerminal(request: IncomingMessage, response: ServerResponse, regi
     if (!response.writableEnded && !response.destroyed) response.write(': heartbeat\n\n')
   }, heartbeatInterval())
   beat.unref()
+}
+
+/**
+ * A detached turn's verdict, as the `turn` frame `/api/events` carries (#128): the terminal frame's own fields, its
+ * name as `outcome`, and the turn id the `202` answer gave. The answer's text is left out — the stream already
+ * carried it as the session's own events, and its log keeps every frame for replay. The Rust route's
+ * `turn_verdict` is the same rule.
+ */
+export function turnVerdict(turn: string, outcome: 'done' | 'cancelled' | 'error', data: Record<string, unknown>): Record<string, unknown> {
+  const { text: _text, ...fields } = data
+  return { ...fields, turn, outcome }
 }
 
 /**
@@ -3845,10 +3943,20 @@ export function transcriptTurns(
        */
       const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
       if (event.type === 'turn/failed' && !blocked) {
-        const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
+        const message = typeof event.message === 'string' && event.message.length > 0 ? event.message : undefined
         const last = turns[turns.length - 1]
-        if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
-        else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+        /**
+         * Said once (#153). The loop has already ended this answer with `failed: <message>` (recordUnfinished), and
+         * the route records the same message in `turn/failed`; both were drawn, as "Failed: X; the turn failed: X".
+         * Only the newest row is read, as before: a later turn whose failure left no answer row has its prompt last,
+         * so an earlier answer's identical failure cannot swallow it.
+         */
+        const said = message !== undefined && last !== undefined && last.kind === 'assistant' && (last.ended ?? []).includes(`failed: ${message}`)
+        if (!said) {
+          const reason = `the turn failed: ${message ?? 'unknown error'}`
+          if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
+          else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+        }
       }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()

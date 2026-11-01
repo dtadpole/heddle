@@ -1,0 +1,17 @@
+{"seq":0,"at":"2026-10-31T09:00:00.000Z","type":"session/created","cwd":"/tmp/heddle-recorded-between"}
+{"seq":1,"at":"2026-10-31T09:00:00.100Z","type":"command/run","commandId":"cmd-1","name":"permission","source":{"kind":"user"}}
+{"seq":2,"at":"2026-10-31T09:00:00.110Z","type":"command/done","commandId":"cmd-1","kind":"success","text":"current preset workspace-write (available: read-only, workspace-write, danger-full-access)"}
+{"seq":3,"at":"2026-10-31T09:00:01.000Z","type":"message","message":{"role":"user","content":[{"type":"text","text":"first"}]}}
+{"seq":4,"at":"2026-10-31T09:00:01.100Z","type":"model/request","endpoint":"scripted","messages":1}
+{"seq":5,"at":"2026-10-31T09:00:01.400Z","type":"assistant/completed","text":"answer one"}
+{"seq":6,"at":"2026-10-31T09:00:01.400Z","type":"turn/completed","rounds":1}
+{"seq":7,"at":"2026-10-31T09:00:02.000Z","type":"command/run","commandId":"cmd-2","name":"compact","source":{"kind":"user"}}
+{"seq":8,"at":"2026-10-31T09:00:02.010Z","type":"compaction/start","fromSeq":3,"throughSeq":5,"shadowedSeqs":[3,4,5],"shadowedTokenCount":40,"estimatedTokens":60,"thresholdTokens":838860}
+{"seq":9,"at":"2026-10-31T09:00:02.500Z","type":"compaction/failed","fromSeq":3,"throughSeq":5,"refused":true,"reason":"the summariser returned nothing"}
+{"seq":10,"at":"2026-10-31T09:00:02.510Z","type":"command/done","commandId":"cmd-2","kind":"success","text":"No compactable history yet."}
+{"seq":11,"at":"2026-10-31T09:00:03.000Z","type":"message","message":{"role":"user","content":[{"type":"text","text":"second"}]}}
+{"seq":12,"at":"2026-10-31T09:00:03.100Z","type":"model/request","endpoint":"scripted","messages":3}
+{"seq":13,"at":"2026-10-31T09:00:03.300Z","type":"assistant/completed","text":"answer two"}
+{"seq":14,"at":"2026-10-31T09:00:03.300Z","type":"turn/completed","rounds":1}
+{"seq":15,"at":"2026-10-31T09:00:04.000Z","type":"command/run","commandId":"cmd-3","name":"export","source":{"kind":"user"}}
+{"seq":16,"at":"2026-10-31T09:00:04.010Z","type":"command/done","commandId":"cmd-3","kind":"success","text":"Session log download requested."}

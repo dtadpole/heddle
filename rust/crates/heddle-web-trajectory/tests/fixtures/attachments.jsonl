@@ -1,0 +1,6 @@
+{"seq":1,"at":"2026-10-31T09:00:00.000Z","type":"message","message":{"role":"user","content":[{"type":"text","text":"what is in these"},{"type":"image","name":"screen shot.png","mimeType":"image/png","path":"/tmp/heddle-recorded-attach/uploads/1a2b-screen shot.png","bytes":2048,"sha256":"00"},{"type":"file","name":"notes.txt","path":"/tmp/heddle-recorded-attach/uploads/3c4d-notes.txt","bytes":0,"sha256":"01"},{"type":"image","name":"","mimeType":"image/jpeg","path":"/tmp/heddle-recorded-attach/uploads/5e6f.jpg","bytes":512,"sha256":"02"},{"type":"image","name":"screen shot.png","mimeType":"image/png","path":"/tmp/heddle-recorded-attach/uploads/1a2b-screen shot.png","bytes":2048,"sha256":"00"},{"type":"file","name":"lost.bin","bytes":9,"sha256":"03"}]}}
+{"seq":2,"at":"2026-10-31T09:00:00.100Z","type":"model/request","endpoint":"scripted","messages":1}
+{"seq":3,"at":"2026-10-31T09:00:00.300Z","type":"assistant/completed","text":"a screenshot and some notes"}
+{"seq":4,"at":"2026-10-31T09:00:00.300Z","type":"turn/completed","rounds":1}
+{"seq":5,"at":"2026-10-31T09:00:01.000Z","type":"message","message":{"role":"user","content":[{"type":"file","name":"only.pdf","path":"/tmp/heddle-recorded-attach/uploads/7a8b-only.pdf","bytes":4096,"sha256":"04"}]}}
+{"seq":6,"at":"2026-10-31T09:00:01.100Z","type":"turn/completed","rounds":0}

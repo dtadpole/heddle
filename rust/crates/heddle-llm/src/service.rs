@@ -113,10 +113,25 @@ pub struct ProbeResult {
 pub type RefreshSource =
     Arc<dyn Fn() -> Option<(Vec<EndpointConfig>, Option<String>)> + Send + Sync>;
 
+/// What a new session starts with when it names nothing ([`ModelService::default_selection`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultSelection {
+    /// The default endpoint, when any endpoint is configured.
+    pub endpoint: Option<String>,
+    /// The configured default model, when the endpoint offers it.
+    pub model: Option<String>,
+    /// The configured default effort, when the chosen model declares it.
+    pub reasoning_effort: Option<String>,
+}
+
 /// The model service. Shared as `Arc<ModelService>`; every method takes `&self`.
 pub struct ModelService {
     adapters: std::sync::RwLock<Vec<Arc<dyn Adapter>>>,
     nominated: std::sync::RwLock<Option<String>>,
+    /// The model and effort a new session starts with (`defaultModel`, `defaultEffort` on the model row).
+    defaults: std::sync::RwLock<(Option<String>, Option<String>)>,
+    /// The stale defaults already warned about, so one stale value is said once.
+    warned_defaults: std::sync::Mutex<std::collections::HashSet<String>>,
     refresh: std::sync::RwLock<Option<RefreshSource>>,
     hooks: std::sync::RwLock<Vec<(HooksId, Arc<dyn ModelHooks>)>>,
     next_hooks_id: AtomicU64,
@@ -129,6 +144,8 @@ impl ModelService {
         let service = Self {
             adapters: std::sync::RwLock::new(Vec::new()),
             nominated: std::sync::RwLock::new(None),
+            defaults: std::sync::RwLock::new((None, None)),
+            warned_defaults: std::sync::Mutex::new(std::collections::HashSet::new()),
             refresh: std::sync::RwLock::new(None),
             hooks: std::sync::RwLock::new(Vec::new()),
             next_hooks_id: AtomicU64::new(0),
@@ -277,6 +294,67 @@ impl ModelService {
         }
     }
 
+    /// Record the model and effort a new session starts with when it names none (`setDefaults`).
+    pub fn set_defaults(&self, model: Option<String>, effort: Option<String>) {
+        *self
+            .defaults
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (model, effort);
+    }
+
+    /// What a new session starts with when it names nothing (`defaultSelection`): the default endpoint, the
+    /// configured default model when that endpoint still offers it, and the configured default effort when the chosen
+    /// model still declares it (DSH's `dsh-agent-default-model`). A stale default never fails a session: it falls back
+    /// to the endpoint's own model and level and is warned about once, with `selection_problem`'s sentence.
+    pub fn default_selection(&self) -> DefaultSelection {
+        let Some(endpoint) = self.default_endpoint(None) else {
+            return DefaultSelection::default();
+        };
+        let Some(configured) = self.endpoint(&endpoint) else {
+            return DefaultSelection::default();
+        };
+        let (model, effort) = self
+            .defaults
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let warn = |key: String, problem: &str| {
+            let mut warned = self
+                .warned_defaults
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if warned.insert(key) {
+                tracing::warn!(
+                    "model: the configured default {problem}; the endpoint's own is used instead"
+                );
+            }
+        };
+        let model = model.filter(|model| {
+            match heddle_config::selection_problem(&configured, Some(model), None) {
+                None => true,
+                Some(problem) => {
+                    warn(format!("model:{endpoint}:{model}"), &problem);
+                    false
+                }
+            }
+        });
+        let effort = effort.filter(|effort| {
+            match heddle_config::selection_problem(&configured, model.as_deref(), Some(effort)) {
+                None => true,
+                Some(problem) => {
+                    let shown = model.as_deref().unwrap_or("");
+                    warn(format!("effort:{endpoint}:{shown}:{effort}"), &problem);
+                    false
+                }
+            }
+        });
+        DefaultSelection {
+            endpoint: Some(endpoint),
+            model,
+            reasoning_effort: effort,
+        }
+    }
+
     /// Record the configuration's default, if it names an endpoint that exists (`nominateDefault`).
     pub fn nominate_default(&self, name: &str) {
         if self.names().iter().any(|held| held == name) {
@@ -331,7 +409,12 @@ impl ModelService {
     /// send something other than what was recorded. `NO_ENDPOINT` when the request names no configured endpoint.
     pub fn resolve(&self, request: &GenerateRequest) -> Result<GenerateRequest, ModelError> {
         self.adapter_for(&request.endpoint)?;
-        self.request_through_hooks(request)
+        let effective = self.request_through_hooks(request)?;
+        let answering = self.adapter_for(&effective.endpoint).ok();
+        Ok(with_default_effort(
+            answering.as_deref().map(|adapter| adapter.endpoint()),
+            effective,
+        ))
     }
 
     /// Call one endpoint and stream the answer (`stream`): [`ModelService::resolve`], then
@@ -565,6 +648,39 @@ pub fn last_assistant_text(messages: &[Message]) -> String {
         .unwrap_or_default()
 }
 
+/// A request that names no reasoning effort runs at its model's declared default (#157), as DSH's `resolveCallWithInfo`
+/// resolves `requested ?? reasoning.defaultEffort`, and says so with `reasoning_effort_default`. Applied after the
+/// `model/request` hook, so a selection policy that names a level wins, and on the endpoint that will answer. A model
+/// that declares levels but no default keeps sending nothing: that is the provider's own default.
+pub fn with_default_effort(
+    endpoint: Option<&EndpointConfig>,
+    request: GenerateRequest,
+) -> GenerateRequest {
+    let Some(endpoint) = endpoint else {
+        return request;
+    };
+    if request
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|effort| !effort.is_empty())
+    {
+        return request;
+    }
+    let model = request.model.as_deref().filter(|model| !model.is_empty());
+    match endpoint
+        .reasoning_levels_for(model)
+        .and_then(|levels| levels.default)
+        .filter(|fallback| !fallback.is_empty())
+    {
+        Some(fallback) => GenerateRequest {
+            reasoning_effort: Some(fallback),
+            reasoning_effort_default: Some(true),
+            ..request
+        },
+        None => request,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -575,6 +691,51 @@ mod tests {
     use super::*;
     use crate::adapter::ChunkStream;
     use heddle_config::EndpointKind;
+
+    #[test]
+    fn a_new_session_starts_with_the_configured_default_and_a_stale_one_falls_back() {
+        let levels = json!({ "default": "low", "levels": [
+            { "id": "low", "name": "Low", "value": "low" },
+            { "id": "high", "name": "High", "value": "high" }
+        ] });
+        let endpoint: EndpointConfig = serde_json::from_value(json!({
+            "name": "gateway", "kind": "scripted", "baseUrl": "unused.json", "model": "flash",
+            "models": [
+                { "id": "flash", "name": "Flash", "reasoning": levels },
+                { "id": "pro", "name": "Pro", "reasoning": levels },
+                { "id": "plain", "name": "Plain" }
+            ]
+        }))
+        .unwrap();
+        let service = ModelService::new(vec![endpoint]).unwrap();
+        let selection = |model: Option<&str>, effort: Option<&str>| DefaultSelection {
+            endpoint: Some("gateway".into()),
+            model: model.map(str::to_string),
+            reasoning_effort: effort.map(str::to_string),
+        };
+        assert_eq!(
+            service.default_selection(),
+            selection(None, None),
+            "nothing configured"
+        );
+        service.set_defaults(Some("pro".into()), Some("high".into()));
+        assert_eq!(
+            service.default_selection(),
+            selection(Some("pro"), Some("high"))
+        );
+        service.set_defaults(Some("retired".into()), Some("high".into()));
+        assert_eq!(
+            service.default_selection(),
+            selection(None, Some("high")),
+            "a stale model falls back"
+        );
+        service.set_defaults(Some("plain".into()), Some("high".into()));
+        assert_eq!(
+            service.default_selection(),
+            selection(Some("plain"), None),
+            "an undeclared effort is dropped"
+        );
+    }
 
     struct Fixture {
         dir: PathBuf,
