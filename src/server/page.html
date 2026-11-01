@@ -7386,6 +7386,12 @@ function renderTimeline(timeline_, data = {}) {
     const viewport = rescaleStretch(trajectory.viewport, scale)
     trajectory.viewport = viewport !== null && viewport.to - viewport.from >= 0.999 ? null : viewport
     if (trajectory.barStop !== null) trajectory.barStop = { ...trajectory.barStop, x0: trajectory.barStop.x0 * scale }
+  } else if (before !== null && before.id === data.id && trajectory.barStop !== null) {
+    /**
+     * Another unit: the stop's record is still found by its rank, but where it was drawn means nothing now, so no bar is
+     * nearer than the first in view (developer-ten's N2).
+     */
+    trajectory.barStop = { ...trajectory.barStop, x0: Number.NaN }
   }
   trajectory.overview = state
   /**
@@ -7541,6 +7547,8 @@ function renderTimeline(timeline_, data = {}) {
     hideTip()
     tipTimer = setTimeout(() => {
       tipTimer = null
+      /** A bar a frame's redraw took away under a resting pointer has no place to show a tip at (developer-ten's N1). */
+      if (!tick.isConnected) return
       tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
       tip.hidden = false
       /**
