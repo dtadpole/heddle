@@ -81,6 +81,44 @@ HEDDLE_FOOTNOTE_BROWSER=1 node --test _verifiers_/88-file-preview/check-footnote
 Run from the repository root. The optional browser test is a labelled skip unless requested;
 the default API test still judges the selected build.
 
+## Footnote author literal HTTP regression
+
+[`check-footnote-literals.mjs`](check-footnote-literals.mjs) needs **no browser**. Authored against source
+`d7101503c26daa28df7f3402a8667abd19e06be0`, it complements the functional footnote check above with two
+small synthetic Markdown cases, with and without an actual note. Harmless literal NULs, the former
+marker's proper prefix, bare and numeric lookalikes, and an escaped colon remain author prose; in the
+note case each is immediately adjacent to an actual citation. The escaped-colon lookalike is created
+by ordinary parsing, not recognized by a text postpass. It requires exact author paragraphs, ordinary
+prose emphasis, current plain `<sup>1</sup>` citations, one shared rendered note and one plain ↩ per
+citation. After excluding exact author paragraphs, no generated marker may leak; these anchor-free
+fixtures must acquire no IDs, hrefs or anchors.
+
+This is primarily a TypeScript literal-retention regression, not full footnote grammar, parser-budget
+or security coverage. The default TypeScript CLI must retain U+0000 exactly. For an alternate CLI
+selected with `HEDDLE_BIN`, an unrelated harmless-NUL control must first establish either literal NUL
+retention or U+FFFD normalization, and every marker paragraph must follow that same behavior. The
+check emits that dialect distinction as a diagnostic; a Rust/Comrak normalization result is **not**
+a claim of exact TypeScript byte parity. It introduces no product NUL policy and changes no Rust code.
+
+The check drives the actual built CLI `POST /api/markdown` with authenticated JSON text, honors
+`HEDDLE_BIN`, and uses a private home and registered scratch workspace. The file reader intentionally
+refuses NUL-bearing files as nontext (415); this check does not relax file admission. Port-zero token
+authentication remains in place. Startup, body bytes/time and child
+cleanup are bounded; only exact resolved self-allocated `mkdtemp` directories are removed after the
+child stops. It neither builds nor reads private/live inputs, contacts a model endpoint or needs a
+browser. Actual built-server checks passed **2/2 on TypeScript and 2/2 on Rust**, with no skips.
+TypeScript retained U+0000; Rust's unrelated control established U+FFFD normalization, which remained
+consistent across all marker paragraphs. Both retained the intentional file-reader 415 refusal for
+NUL-bearing files. These endpoint results complement the actual pre-fix TS renderer regressions;
+they do not claim exact NUL byte parity or a full parser/security verdict.
+
+```bash
+node --test _verifiers_/88-file-preview/check-footnote-literals.mjs
+HEDDLE_BIN=/path/to/heddle node --test _verifiers_/88-file-preview/check-footnote-literals.mjs
+```
+
+Run from the repository root after the caller builds the selected CLI.
+
 ## Unicode author anchor attribute HTTP regression
 
 [`check-unicode-anchor-attributes.mjs`](check-unicode-anchor-attributes.mjs) needs **no browser**. Two
