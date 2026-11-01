@@ -739,9 +739,9 @@ impl Terminal {
     /// End the PTY's processes, softly and then for good.
     ///
     /// The descendants are collected first, while the tree is whole. The shell leads its own session inside the
-    /// PTY, so the `script` process group alone would miss it and its jobs. Each one gets SIGHUP, as closing a
-    /// terminal window sends, and SIGTERM. Whatever is still alive after DSH's `disposeGraceMs` gets SIGKILL,
-    /// along with the `script` group and the shell's group.
+    /// PTY, so the wrapper's process group (which holds `script`, #204) alone would miss it and its jobs. Each one
+    /// gets SIGHUP, as closing a terminal window sends, and SIGTERM. Whatever is still alive after DSH's
+    /// `disposeGraceMs` gets SIGKILL, along with the wrapper's group and the shell's group.
     async fn terminate(&self) {
         let grace = Duration::from_millis(self.limits.dispose_grace_ms);
         let Some(leader) = self.pid else {

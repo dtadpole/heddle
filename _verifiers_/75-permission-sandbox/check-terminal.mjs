@@ -429,9 +429,29 @@ test('a server started with SIGQUIT and SIGHUP ignored does not hand them to a t
   }
 })
 
-/** Every live process as `{ pid, ppid, tty }`, from one `ps -A`. */
+/** How long one `ps -A` may run: the products' own process-table helper gives `ps` the same 5 s (#150). */
+const PS_TIMEOUT_MS = 5_000
+
+/**
+ * Every live process as `{ pid, ppid, tty }`, from one `ps -A`. The read is bounded, because under heavy load `ps`
+ * has outlasted the products' 5 s (#150) and an unbounded read would hold the whole lane. A read that runs past
+ * `PS_TIMEOUT_MS` is killed and taken once more; a second one fails the check, naming the stall.
+ */
 function processTable() {
-  return execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8' })
+  const read = () => execFileSync('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', timeout: PS_TIMEOUT_MS, killSignal: 'SIGKILL' })
+  let text
+  try {
+    text = read()
+  } catch (first) {
+    if (first.code !== 'ETIMEDOUT') throw first
+    try {
+      text = read()
+    } catch (second) {
+      if (second.code !== 'ETIMEDOUT') throw second
+      throw new Error(`ps -A ran past ${PS_TIMEOUT_MS} ms twice; no process table to judge`, { cause: second })
+    }
+  }
+  return text
     .split('\n')
     .map((line) => line.trim().split(/\s+/))
     .filter((fields) => fields.length >= 2 && fields.slice(0, 2).every((field) => /^\d+$/.test(field)))
