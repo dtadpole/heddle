@@ -87,6 +87,9 @@ pub const COMPACTION_CANCELLED: &str = "Compaction cancelled.";
 pub const INTERRUPTED_RESULT: &str =
     "error (INTERRUPTED): the turn ended before this call answered";
 
+/// A compaction span a command left open: its `(fromSeq, throughSeq)` as the log holds them.
+type OpenSpan = (Option<Value>, Option<Value>);
+
 /// The plain text of a message's parts.
 fn text_of(message: &Value) -> String {
     message["content"]
@@ -120,9 +123,8 @@ fn text_of(message: &Value) -> String {
 /// command answers the generic words. Such a compaction is the command's, not a turn's pre-step, so it does not
 /// open a turn. A command a closer has answered is no longer open, so a second restart writes nothing more.
 pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Vec<SessionEvent> {
-    // Commands run with no `command/done` yet, in run order, each with the compaction span it left open, if any:
-    // `(fromSeq, throughSeq)` as the log holds them.
-    let mut commands: Vec<(String, Option<(Option<Value>, Option<Value>)>)> = Vec::new();
+    // Commands run with no `command/done` yet, in run order, each with the compaction span it left open, if any.
+    let mut commands: Vec<(String, Option<OpenSpan>)> = Vec::new();
     let mut open = false;
     // Unanswered call ids in the order the model asked for them, with a JavaScript `Map`'s semantics: a call
     // asked for again keeps its place, and an answered one is removed.
