@@ -14179,6 +14179,31 @@ async function refreshQuestionPending(id) {
   }
 }
 
+/** Keep one session's completion reminder in step with a running edge; the panel's own session is never unread. */
+function noteCompletion(id, wasRunning, running) {
+  const unread = WorkspaceTree.completionUnread(unreadSessions.has(id), { wasRunning, running, viewing: id === (current ?? composerKey) })
+  if (unread) unreadSessions.add(id)
+  else unreadSessions.delete(id)
+}
+
+/** A session row's status; an archived row keeps its cell blank, as DSH's does (`client.js:2306`). */
+function sessionRowStatus(node) {
+  const id = node.session.id
+  if (node.archived) return WorkspaceTree.rowStatus()
+  /**
+   * DSH's row draws the primary status's dot and names every status for a screen reader (`SessionStatusDots`,
+   * `client.js:2118-2123`): here the one mark carries them all in its label, so a parent whose background subagent works
+   * says `1 subagent running` even while it is idle itself (issue #187).
+   */
+  const statuses = WorkspaceTree.rowStatuses({
+    pending: pendingInteractions.get(id),
+    running: runningSessions.has(id),
+    runningSubagents: WorkspaceTree.runningChildCount(childSessions, id, runningSessions),
+    completed: unreadSessions.has(id),
+  })
+  return { ...statuses[0], label: statuses.map((status) => status.label).join(', ') }
+}
+
 /** DSH's `StateDot` for a still state: a filled dot at 20% inset, warning for a pending interaction, done for unread. */
 function statusMark(status) {
   if (status.state === 'ongoing') {
