@@ -400,6 +400,15 @@ export function builtinTools(
       const path = String(args.path ?? '')
       if (path.length === 0) return { output: '', error: { code: 'BAD_ARGS', message: 'write_file needs a path' } }
       const target = sandbox.assertWritable(path, context.mode, context.cwd)
+      /**
+       * An existing target that is not a regular file, such as a folder, is refused and named before anything is
+       * written, as DSH's writeText probes it (`dsh-fs-local`): not Node's raw `EISDIR: … open` text (live-testing
+       * issue #237).
+       */
+      const existing = await stat(target).catch(() => undefined)
+      if (existing !== undefined && !existing.isFile()) {
+        return { output: '', error: { code: 'FS_NOT_REGULAR_FILE', message: `cannot write "${displayPath(context.cwd, path)}": not a regular file` } }
+      }
       mkdirSync(dirname(target), { recursive: true })
       const content = String(args.content ?? '')
       writeFileSync(target, content)

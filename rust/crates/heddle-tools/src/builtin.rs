@@ -290,6 +290,18 @@ fn write_file_tool(sandbox: Arc<dyn SandboxGate>) -> Arc<dyn Tool> {
                     ));
                 }
                 let target = sandbox.assert_writable(&path, context.mode())?;
+                // An existing target that is not a regular file, such as a folder, is refused and named before
+                // anything is written, as DSH's writeText probes it (`dsh-fs-local`): not the platform's unnamed
+                // `Is a directory (os error 21)` (live-testing issue #237).
+                if let Ok(info) = tokio::fs::metadata(&target).await
+                    && !info.is_file()
+                {
+                    let shown = requested_display_path(&context.cwd, &path);
+                    return Ok(ToolResult::refused(
+                        codes::FS_NOT_REGULAR_FILE,
+                        format!("cannot write \"{shown}\": not a regular file"),
+                    ));
+                }
                 tokio::fs::create_dir_all(parent_of(&target)).await?;
                 let content = string_arg(&args, "content");
                 tokio::fs::write(&target, &content).await?;
@@ -1090,6 +1102,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.output, "first");
+    }
+
+    #[tokio::test]
+    async fn a_write_aimed_at_a_folder_is_fs_not_regular_file_and_leaves_it_as_it_was() {
+        // Live-testing issue #237: the raw `Is a directory (os error 21)` named no path and came back as TOOL_FAILED;
+        // DSH's writeText probes the target and refuses a non-file as FS_NOT_REGULAR_FILE (`dsh-fs-local`).
+        let root = tempdir();
+        std::fs::create_dir_all(root.path().join("folder")).unwrap();
+        std::fs::write(root.path().join("folder/plain.txt"), "preserved").unwrap();
+        let write = tool("write_file", sandbox(root.path()));
+        let result = write
+            .run(
+                args(json!({ "path": "./folder", "content": "ordinary text" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .expect("a refusal, not a tool failure");
+        let error = result.error.as_ref().expect("refused");
+        assert_eq!(error.code, codes::FS_NOT_REGULAR_FILE);
+        assert_eq!(
+            error.message,
+            format!(
+                "cannot write \"{}/folder\": not a regular file",
+                root.path().display()
+            )
+        );
+        assert_eq!(result.output, "");
+        assert!(root.path().join("folder").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("folder/plain.txt")).unwrap(),
+            "preserved"
+        );
+
+        let result = write
+            .run(
+                args(json!({ "path": "folder/plain.txt", "content": "recovered" })),
+                context_in(root.path(), SandboxMode::DangerFullAccess),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.error, None);
+        assert!(
+            result.output.starts_with("wrote 9 bytes to ")
+                && result.output.ends_with("folder/plain.txt"),
+            "{}",
+            result.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("folder/plain.txt")).unwrap(),
+            "recovered"
+        );
     }
 
     #[tokio::test]
