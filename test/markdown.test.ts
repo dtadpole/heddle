@@ -546,6 +546,21 @@ test('footnote markers preserve bare author tokens, numeric lookalikes and unrel
   assert.equal(renderMarkdown('ordinary paragraphs\n\nno footnotes'), '<p>ordinary paragraphs</p>\n<p>no footnotes</p>\n')
 })
 
+test('footnote rendering leaves escaped marker text and no-footnote literals to the ordinary parser', () => {
+  const source = 'author\0heddle-footnote\\:0\0'
+  const literal = 'author\0heddle-footnote:0\0'
+  assert.equal(renderMarkdown(source), `<p>${literal}</p>\n`)
+  assert.equal(renderInline(source), literal)
+  const html = renderMarkdown(`${source}[^n]\n\n[^n]: note`)
+  assert.ok(html.startsWith(`<p>${literal}<sup>1</sup></p>`))
+  assert.match(html, /note ↩<\/p>/)
+  assert.doesNotMatch(html, /\b(?:href|id)=|<a\b/)
+  renderMarkdown('x[^n]\n\n[^n]: note')
+  renderMarkdown('x'.repeat(65537))
+  assert.equal(renderInline('alone[^n]'), 'alone[^n]')
+  assert.equal(renderMarkdown('---\ntitle: [^n]\n---\n\nplain'), '<section class="frontmatter"><h2>frontmatter</h2><pre><code>title: [^n]</code></pre></section>\n<p>plain</p>\n')
+})
+
 test('footnote references inside notes, including cycles, terminate with complete backrefs', () => {
   const html = renderMarkdown('x[^a].\n\n[^a]: a[^b] self[^a].\n[^b]: b[^a].')
   assert.equal((html.match(/<li>/g) ?? []).length, 2)

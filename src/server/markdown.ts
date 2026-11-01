@@ -364,7 +364,7 @@ marked.use({
  * Narrow footnote support for issue #43. Installed marked has extension hooks but no footnote grammar.
  * DSH collects the first case-insensitive definition, numbers citations in encounter order and renders note
  * block children. Match DSH's plain <sup>number</sup> citations and plain ↩ return markers: neither is a link
- * or an ID target. Generated placeholders are resolved before sanitizing, never by stripping author links/IDs.
+ * or an ID target. The extension emits fixed citation markup directly; no text postpass can consume author literals.
  * The whole document still passes the existing byte/marker budget, nesting bound and output sanitizer.
  */
 interface FootnoteState {
@@ -380,19 +380,11 @@ function freshFootnotes(): FootnoteState {
 let footnotes = freshFootnotes()
 const FOOTNOTE_LABEL = /^\[\^([^\]\s]+)\]/
 const FOOTNOTE_DEFINITION = /^ {0,3}\[\^([^\]\s]+)\]:[ \t]*([^\n]*)(?:\n|$)/
-/** Only renderer-generated placeholders are changed by the postpass; the prefix is absent from source. */
-let footnoteMarker = '\0heddle-footnote:'
-let footnoteMarkup: string[] = []
-function generatedFootnote(markup: string): string {
-  const index = footnoteMarkup.push(markup) - 1
-  return `${footnoteMarker}${index}\0`
-}
-function plainFootnotes(html: string): string {
-  return html.split(footnoteMarker).map((part, index) => {
-    if (index === 0) return part
-    const marker = /^(\d+)\0/.exec(part)
-    return marker === null ? part : (footnoteMarkup[Number(marker[1])] ?? '') + part.slice(marker[0].length)
-  }).join('')
+/** One body scan avoids repeated start-hook suffix scans on documents with no footnote syntax. */
+let footnotesPossible = false
+function resetFootnotes(): void {
+  footnotes = freshFootnotes()
+  footnotesPossible = false
 }
 marked.use({
   extensions: [
@@ -400,7 +392,7 @@ marked.use({
       name: 'footnoteDefinition',
       level: 'block',
       start(source: string) {
-        return footnotes.inDefinition ? undefined : /^ {0,3}\[\^[^\]\s]+\]:/m.exec(source)?.index
+        return !footnotesPossible || footnotes.inDefinition ? undefined : /^ {0,3}\[\^[^\]\s]+\]:/m.exec(source)?.index
       },
       tokenizer(source: string) {
         if (footnotes.inDefinition) return undefined
@@ -438,6 +430,7 @@ marked.use({
       name: 'footnoteReference',
       level: 'inline',
       start(source: string) {
+        if (!footnotesPossible) return undefined
         const at = source.indexOf('[^')
         return at < 0 ? undefined : at
       },
@@ -454,7 +447,7 @@ marked.use({
         if (!footnotes.numbers.has(key)) footnotes.numbers.set(key, footnotes.numbers.size + 1)
         const count = (footnotes.references.get(key) ?? 0) + 1
         footnotes.references.set(key, count)
-        return generatedFootnote(`<sup>${footnotes.numbers.get(key)}</sup>`)
+        return `<sup>${footnotes.numbers.get(key)}</sup>`
       },
     },
   ],
@@ -468,7 +461,7 @@ function footnoteSection(): string {
   }
   if (bodies.size === 0) return ''
   const items = [...bodies].map(([key, body]) => {
-    const back = Array.from({ length: footnotes.references.get(key) ?? 1 }, () => generatedFootnote('↩')).join(' ')
+    const back = Array.from({ length: footnotes.references.get(key) ?? 1 }, () => '↩').join(' ')
     const content = /<\/p>\n$/.test(body) ? body.replace(/<\/p>\n$/, ` ${back}</p>\n`) : `${body}${back}\n`
     return `<li>\n${content}</li>`
   })
@@ -530,7 +523,7 @@ export function renderInline(text: string): string {
   /** An inline span is never a document's preview: its images follow an answer's rule, whatever parsed last. */
   imageBase = undefined
   remoteImagesAllowed = false
-  footnotes = freshFootnotes()
+  resetFootnotes()
   if (!withinParseBudget(String(text ?? ''))) return escapeHtml(String(text ?? ''))
   try {
     return sanitizeHtml(marked.parseInline(escapeLeadingUnderscores(boundNesting(String(text ?? '')))) as string, {
@@ -541,6 +534,8 @@ export function renderInline(text: string): string {
     })
   } catch {
     return escapeHtml(String(text ?? ''))
+  } finally {
+    resetFootnotes()
   }
 }
 
@@ -554,6 +549,7 @@ export function renderMarkdown(source: string, options: { readonly base?: string
   imageBase = options.base
   /** Only a document's preview asks for remote images; an answer, which has no `base`, never does. */
   remoteImagesAllowed = options.remoteImages === true
+  resetFootnotes()
   const text = String(source ?? '').replace(/\r\n?/g, '\n')
   if (!withinParseBudget(text)) return unrendered(text)
   const front = /^---\n([\s\S]*?)\n---\n?/.exec(text)
@@ -563,19 +559,14 @@ export function renderMarkdown(source: string, options: { readonly base?: string
       ? ''
       : `<section class="frontmatter"><h2>frontmatter</h2><pre><code>${escapeHtml((front[1] ?? '').trim())}</code></pre></section>\n`
   let parsed: string
-  footnotes = freshFootnotes()
-  footnoteMarkup = []
-  footnoteMarker = '\0heddle-footnote:'
-  while (body.includes(footnoteMarker)) footnoteMarker += '\0'
+  footnotesPossible = body.includes('[^')
   try {
     parsed = marked.parse(escapeLeadingUnderscores(boundNesting(body))) as string
     parsed += footnoteSection()
-    parsed = plainFootnotes(parsed)
   } catch {
     return unrendered(text)
   } finally {
-    footnotes = freshFootnotes()
-    footnoteMarkup = []
+    resetFootnotes()
   }
   return sanitizeHtml(frontHtml + parsed, {
     /**
