@@ -1,9 +1,9 @@
 ---
 title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
-modified: 2026-10-31T23:10:00Z
+modified: 2026-11-01T17:30:00Z
 level: L3
-version: 1.7.0
+version: 1.8.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -206,6 +206,25 @@ grounded_in:
   keyboard on the recording row, so the next chord is recorded, and Remove and Restore default leave it on their row,
   or on the search field when a search for the old keys no longer matches the row (another tab's change too);
   two Escape presses within 500 ms stop the running turn, one press does not, and a queued message stays queued (S43).
+- `check-locale-*.mjs` — the interface language (#80), one file per section: each starts its own server with a
+  scratch profile and an offline model, opens it from a Chinese browser (`Accept-Language: zh-CN`) and reads the
+  section's words in Chinese, DSH's own where DSH has them, then switches to English through the Settings dialog's
+  Language row on that server and reads the same places in English. The sections: the switch itself
+  ([`check-locale-switch.mjs`](check-locale-switch.mjs)), Settings ([`check-locale-settings.mjs`](check-locale-settings.mjs),
+  [`check-locale-config.mjs`](check-locale-config.mjs)), the access chip ([`check-locale-access.mjs`](check-locale-access.mjs)),
+  the model seat ([`check-locale-model.mjs`](check-locale-model.mjs)), the header
+  ([`check-locale-header.mjs`](check-locale-header.mjs)), the composer ([`check-locale-composer.mjs`](check-locale-composer.mjs)),
+  the sidebar ([`check-locale-sidebar.mjs`](check-locale-sidebar.mjs), [`check-locale-sidebar-tail.mjs`](check-locale-sidebar-tail.mjs)),
+  the dialogs ([`check-locale-dialogs.mjs`](check-locale-dialogs.mjs)), the rows and their hover cards
+  ([`check-locale-rows.mjs`](check-locale-rows.mjs), [`check-locale-hover-cards.mjs`](check-locale-hover-cards.mjs)), the
+  conversation ([`check-locale-blocks.mjs`](check-locale-blocks.mjs), [`check-locale-chat.mjs`](check-locale-chat.mjs)),
+  the panels ([`check-locale-panels.mjs`](check-locale-panels.mjs)), the question card
+  ([`check-locale-questions.mjs`](check-locale-questions.mjs)), the automation tasks
+  ([`check-locale-schedules.mjs`](check-locale-schedules.mjs), [`check-locale-schedule-frequency.mjs`](check-locale-schedule-frequency.mjs)),
+  the Trajectory area ([`check-locale-trajectory.mjs`](check-locale-trajectory.mjs),
+  [`check-locale-trajectory-tail.mjs`](check-locale-trajectory-tail.mjs)), the goal and to-do docks
+  ([`check-locale-goal-todo.mjs`](check-locale-goal-todo.mjs)), the session statistics
+  ([`check-locale-stats.mjs`](check-locale-stats.mjs)) and the background jobs ([`check-locale-jobs.mjs`](check-locale-jobs.mjs)).
 
 **Isolation.** Every check starts its server with the fixture's own `HEDDLE_HOME`, never the operator's: the workspace
 registry, the schedule store and the instructions are read from there. `check-model-switcher.mjs` set none, so every

@@ -189,7 +189,7 @@ test('task timing reads in the page language, and follows a change made in Setti
     assert.ok(pollRow, `the rows are named in Chinese (${JSON.stringify(popover.map((row) => row.open))})`)
     assert.equal(pollRow.remove, '删除提醒：Queue poll')
     assert.equal(pollRow.meta, '2小时一次')
-    assert.match(pollRow.next, /^下次运行 \d{1,2}月\d{1,2}日 \d{2}:\d{2}\((?:2小时|1\d{2}分钟)后\)$/, `the next run in DSH's Chinese, no year (${pollRow.next})`)
+    assert.match(pollRow.next, /^下次运行 \d{1,2}月\d{1,2}日 \d{2}:\d{2}\(2小时后\)$/, `the next run in DSH's Chinese, no year (${pollRow.next})`)
     await browser.evaluate(`(() => { document.getElementById('schedule-reminders').click(); return true })()`)
     assert.ok(await browser.waitFor(`document.getElementById('schedule-catalog-menu') === null`, 5_000), 'the popover closes')
 
@@ -199,7 +199,7 @@ test('task timing reads in the page language, and follows a change made in Setti
     const rows = JSON.parse(await browser.evaluate(ROWS))
     assert.match(rows['Queue poll'], /2小时一次/, rows['Queue poll'])
     assert.match(rows['Queue poll'], /下次计划时间：\d{1,2}月\d{1,2}日 \d{2}:\d{2}/, rows['Queue poll'])
-    assert.match(rows['Queue poll'], /(?:2小时|1\d{2}分钟)后/, rows['Queue poll'])
+    assert.match(rows['Queue poll'], /2小时后/, rows['Queue poll'])
     assert.match(rows['Weekly sync'], /每周一、三 23:00（UTC/, rows['Weekly sync'])
     assert.doesNotMatch(Object.values(rows).join(' '), /Every|Weekly on|Daily at|Monday to Friday|Next scheduled|\bin \d/, 'no English timing is left on the page')
 
