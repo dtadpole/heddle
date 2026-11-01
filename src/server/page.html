@@ -3690,11 +3690,11 @@
     omitted, joined by an en-space middot) and a chevron, collapsing by default to that header. The surface is the
     menu surface the goal dock uses, radius 16, body padding 6/12, list capped at 180px with 8px gaps.
   -->
-  <section id="todo-panel" data-todo-ui="dsh" hidden aria-label="To-dos">
+  <section id="todo-panel" data-todo-ui="dsh" hidden aria-label="To-dos" data-i18n-aria-label="todo.title">
     <div id="todo-body">
       <button id="todo-header" type="button" aria-expanded="false">
         <span id="todo-lead" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="6" height="6" rx="1.5"/><path d="M12 7h9M3 14h6M12 14h9M3 21h6M12 21h9M5 5.5l1.5 1.5 2.5-2.5"/></svg></span>
-        <span id="todo-title">To-dos</span>
+        <span id="todo-title" data-i18n="todo.title">To-dos</span>
         <span id="todo-progress"></span>
         <span id="todo-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg></span>
       </button>
@@ -3710,12 +3710,12 @@
     objective, the phase, the round count, then the person's verbs. The durable phase and activation come from
     `/api/goal`; **running** is the one fact the durable record cannot tell you, so it comes from the live stream.
   -->
-  <div id="goal-bar" data-goal-ui="dsh-parity" hidden role="status" aria-live="polite" aria-label="Session goal">
+  <div id="goal-bar" data-goal-ui="dsh-parity" hidden role="status" aria-live="polite" aria-label="Session goal" data-i18n-aria-label="goal.aria">
     <span id="goal-glyph" aria-hidden="true"><span class="goal-glyph-svg"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M14.5001 8C14.5 9.28552 14.1188 10.5422 13.4045 11.611C12.6903 12.6799 11.6752 13.5129 10.4875 14.0049C9.29982 14.4968 7.99295 14.6255 6.73212 14.3747C5.4713 14.124 4.31314 13.505 3.4041 12.596C2.49514 11.687 1.87614 10.5288 1.62537 9.26798C1.37459 8.00716 1.50331 6.70028 1.99525 5.51261C2.48719 4.32494 3.32025 3.30981 4.3891 2.59557C5.45795 1.88134 6.71458 1.50008 8.0001 1.5" stroke="currentColor"></path><path d="M11.5 8C11.5001 8.69227 11.2948 9.36901 10.9102 9.94463C10.5257 10.5202 9.97901 10.9689 9.33944 11.2338C8.69986 11.4987 7.99609 11.5681 7.31712 11.433C6.63816 11.2979 6.01449 10.9645 5.52501 10.475C5.03548 9.98552 4.70209 9.36185 4.56702 8.68289C4.43195 8.00392 4.50127 7.30015 4.76619 6.66057C5.03112 6.021 5.47976 5.47436 6.05538 5.08978C6.631 4.70519 7.30774 4.49995 8.00001 4.5" stroke="currentColor"></path><path d="M8.00024 7.99976L11.2 4.80005" stroke="currentColor"></path><path d="M12.4719 5.62245C12.4246 5.66972 12.3569 5.69025 12.2913 5.67715L10.7814 5.37555C10.7022 5.35972 10.6402 5.29781 10.6244 5.2186L10.3228 3.70866C10.3097 3.6431 10.3302 3.57533 10.3775 3.52806L12.1826 1.723C12.2863 1.61929 12.4627 1.65879 12.5122 1.79684L12.9271 2.95225C12.9472 3.00847 12.9915 3.05272 13.0477 3.07291L14.2031 3.48774C14.3412 3.5373 14.3807 3.71368 14.277 3.81739L12.4719 5.62245Z" stroke="currentColor"></path></svg></span></span>
     <span id="goal-phase"></span>
-    <span id="goal-objective" aria-label="Goal objective"></span>
+    <span id="goal-objective" aria-label="Goal objective" data-i18n-aria-label="goal.objectiveAria"></span>
     <span id="goal-rounds"></span>
-    <span id="goal-running" hidden><span class="pulse" aria-hidden="true"></span>running</span>
+    <span id="goal-running" hidden><span class="pulse" aria-hidden="true"></span><span data-i18n="goal.running">running</span></span>
     <span id="goal-actions"></span>
   </div>
 
@@ -4411,6 +4411,7 @@ const MESSAGES = Object.freeze({
     'trajectory.lane.tools': 'tools',
     'trajectory.bar.merged': ' · {count} records',
     'trajectory.bar.ttft': ' · TTFT {ttft} · decoding {decoding}',
+    'todo.title': 'To-dos',
     'todo.rowTitle': 'Update to-do list',
     'todo.progress.done': '{count} done',
     'todo.progress.active': '{count} in progress',
@@ -4444,6 +4445,9 @@ const MESSAGES = Object.freeze({
     'goal.action.clear': 'Clear goal',
     'goal.objectivePrompt': 'The goal objective',
     'goal.updateFailed': 'could not update the goal',
+    'goal.running': 'running',
+    'goal.aria': 'Session goal',
+    'goal.objectiveAria': 'Goal objective',
     'chat.loadError': 'Failed to load history: {message} ({code})',
     'chat.noReason': 'no reason given',
     'chat.viewChanges': 'View changes to {path}',
@@ -4940,6 +4944,7 @@ const MESSAGES = Object.freeze({
     'trajectory.lane.tools': '工具',
     'trajectory.bar.merged': ' · {count} 条记录',
     'trajectory.bar.ttft': ' · 首 token {ttft} · 解码 {decoding}',
+    'todo.title': '任务',
     'todo.rowTitle': '更新任务清单',
     'todo.progress.done': '{count} 已完成',
     'todo.progress.active': '{count} 进行中',
@@ -4973,6 +4978,9 @@ const MESSAGES = Object.freeze({
     'goal.action.clear': '清除目标',
     'goal.objectivePrompt': '目标内容',
     'goal.updateFailed': '无法更新目标',
+    'goal.running': '运行中',
+    'goal.aria': '会话目标',
+    'goal.objectiveAria': '目标内容',
     'chat.loadError': '历史加载失败：{message}（{code}）',
     'chat.noReason': '未说明原因',
     'chat.viewChanges': '查看 {path} 的更改',
@@ -6943,11 +6951,11 @@ function paintTodoCard(node) {
   if (raw === null) {
     raw = document.createElement('details')
     raw.className = 'todo-call-raw'
-    const inspect = document.createElement('summary')
-    inspect.textContent = t('chat.inspect')
-    raw.append(inspect)
+    raw.append(document.createElement('summary'))
     body.append(raw)
   }
+  /** Named on every paint, so a language change renames it with the rest of the card (#80). */
+  raw.querySelector(':scope > summary').textContent = t('chat.inspect')
   const home = presentable ? raw : body
   for (const block of [args, result]) if (block !== null && block.parentElement !== home) home.append(block)
   card.hidden = !presentable
@@ -8689,6 +8697,16 @@ async function refreshGoal() {
     if (generation !== goalGeneration) return
     goalView = null
   }
+  paintGoal()
+}
+
+/**
+ * Draw the goal dock from the goal last read. A language change paints from it too (#80), so switching the language
+ * while the server is unreachable leaves the dock in place instead of reading again and losing it.
+ */
+function paintGoal() {
+  const bar = document.getElementById('goal-bar')
+  if (bar === null) return
   if (goalView === null) {
     bar.hidden = true
     return
@@ -8766,11 +8784,12 @@ async function refreshGoal() {
 }
 
 /**
- * A language change redraws the goal dock, the to-do dock and the transcript's to-do cards (#80): the docks re-read
- * their state and draw it in the new language, and each to-do card is painted again from its call.
+ * A language change redraws the goal dock, the to-do dock and the transcript's to-do cards (#80): the docks draw the
+ * state they last read in the new language, and each to-do card is painted again from its call.
  */
 window.addEventListener('heddle:locale', () => {
-  void refreshGoal()
+  /** A hidden dock has nothing to rename; a shown one is the goal last read, painted again without a fetch. */
+  if (document.getElementById('goal-bar')?.hidden === false) paintGoal()
   renderTodo()
   for (const node of log.querySelectorAll('.tool[data-tool-name="todo_write"]')) paintTodoCard(node)
 })
