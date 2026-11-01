@@ -32,6 +32,18 @@ sh verify.sh --json     # one parseable object
 Exit `0` when the claim holds, `1` when it fails, `3` when it could not be judged — a host without a browser is the
 `3` case.
 
+## Encoded Markdown image HTTP regression
+
+[`check-markdown-image-paths.mjs`](check-markdown-image-paths.mjs) needs **no browser**. It starts an isolated
+server on port zero, reads the Markdown preview's emitted image URLs, and verifies exact distinct PNG bytes for
+space, literal-percent and Unicode/ampersand filenames, plus cookie and workspace refusal. It does not judge
+standalone PNG preview, browser image rendering, or query-suffix semantics.
+
+```bash
+node --test check-markdown-image-paths.mjs
+HEDDLE_BIN=/path/to/heddle node --test check-markdown-image-paths.mjs
+```
+
 ## PNG regression
 
 The standalone PNG check in [`check.mjs`](check.mjs) drives offline HTTP and a headless browser against
@@ -68,6 +80,19 @@ HEDDLE_FOOTNOTE_BROWSER=1 node --test _verifiers_/88-file-preview/check-footnote
 
 Run from the repository root. The optional browser test is a labelled skip unless requested;
 the default API test still judges the selected build.
+
+## HTML base policy regression
+
+The HTML check in [`check.mjs`](check.mjs) uses a **headless browser** and reads its actual recorded console
+for `base-uri` violations. It verifies that source base elements are sanitized, no base is injected, the
+`base-uri 'none'` policy and script/form/frame/sandbox restrictions remain intact, and quoted image and
+linked stylesheet resources still load via the authenticated raw route. Relative CSS `url()`/`@import`
+dependencies remain unsupported; this check does not claim full CSS dependency parity or URL isolation.
+
+```bash
+_tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
+HEDDLE_BIN=/path/to/heddle _tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
+```
 
 ## Read next
 

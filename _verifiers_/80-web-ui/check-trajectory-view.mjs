@@ -22,13 +22,10 @@ import { evidencePath, fixtureDir, heddleCommand, isolatedHome, removeDir, repoR
 
 const CAPABILITY = 'the Web UI'
 
-async function startServer(label) {
+async function startServer(label, stepsFor = (work) => [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'the folder holds two files' }, { text: 'second answer' }]) {
   const home = isolatedHome(`trajectory-${label}`)
   const work = fixtureDir(`trajectory-${label}-work`)
-  const { config } = scriptedConfig({
-    home,
-    steps: [{ toolCall: { name: 'list_dir', arguments: { path: work } } }, { text: 'the folder holds two files' }, { text: 'second answer' }],
-  })
+  const { config } = scriptedConfig({ home, steps: stepsFor(work) })
   mkdirSync(work, { recursive: true })
   const child = await startCli(
     ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', join(home, 'sessions')],
@@ -614,8 +611,13 @@ test('an overview tick shows its clock and duration after a 500 ms hover, as DSH
     })
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     /** A page load opens no session of its own (#17, stack 2), so the check opens the one it ran. */
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
@@ -658,8 +660,13 @@ test('an older ledger read that fails after a newer one drew leaves no error und
       body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
     })
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     /** The next ledger read is held, and fails when the check says so. */
     await browser.evaluate(`(() => {
@@ -712,8 +719,13 @@ test('the overview draws one bar per record, and an answer bar splits at its TTF
       body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
     })
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew per-record bars')
@@ -798,8 +810,13 @@ test('a slash command between two turns is drawn where it ran, in its own Betwee
     assert.ok(section.every((row) => row.loose && row.record.afterTurn === 1), `it belongs to no turn and follows turn 1\nsaw: ${shape}`)
     assert.deepEqual(section.map((row) => row.turnStart), [true, false], `and its first row heads its own section\nsaw: ${shape}`)
 
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the table drew rows')
@@ -840,8 +857,13 @@ test('the overview zooms with the wheel, pans with a right-button drag, and a ri
       body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
     })
     await turn.text()
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0', 20_000), 'the overview drew its bars')
@@ -874,16 +896,21 @@ test('the overview zooms with the wheel, pans with a right-button drag, and a ri
     assert.equal(zoomed.zoomed, 'true', 'a wheel up zooms in')
     assert.ok(zoomed.trackWidth > before.trackWidth * 1.5, `the lanes are drawn wider than the strip (${before.trackWidth} to ${zoomed.trackWidth})`)
     /**
-     * A zoomed strip cannot be scrolled by focus (developer-ten's B1): a bar outside the view is no tab stop, and even
-     * focused from script it leaves the strip where it was, so the pointer still maps to the bars under it.
+     * A zoomed strip cannot be scrolled by focus (developer-ten's B1): its one Tab stop is a bar in view (N4), and a bar
+     * outside the view, even focused from script, leaves the strip where it was, so the pointer still maps to the bars
+     * under it.
      */
     const focusState = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const strip = document.getElementById('timeline').getBoundingClientRect()
       const bars = [...document.querySelectorAll('#timeline .tr-bar')]
-      const hidden = bars.filter((bar) => bar.tabIndex === -1)
-      hidden[0]?.focus()
-      return { bars: bars.length, hidden: hidden.length, scrollLeft: document.getElementById('timeline').scrollLeft }
+      const outside = bars.filter((bar) => { const box = bar.getBoundingClientRect(); return box.right < strip.left || box.left > strip.right })
+      const stops = bars.filter((bar) => bar.tabIndex === 0)
+      const stop = stops[0]?.getBoundingClientRect()
+      outside[0]?.focus()
+      return { bars: bars.length, outside: outside.length, stops: stops.length, stopInView: stop !== undefined && stop.right >= strip.left && stop.left <= strip.right, scrollLeft: document.getElementById('timeline').scrollLeft }
     })())`))
-    assert.ok(focusState.hidden < focusState.bars, `the bars in view stay tab stops (${JSON.stringify(focusState)})`)
+    assert.ok(focusState.outside > 0, `the zoom leaves bars outside the view (${JSON.stringify(focusState)})`)
+    assert.deepEqual([focusState.stops, focusState.stopInView], [1, true], `the strip's one Tab stop is a bar in view (${JSON.stringify(focusState)})`)
     assert.equal(focusState.scrollLeft, 0, `focusing a bar outside the view does not scroll the strip (${JSON.stringify(focusState)})`)
     assert.ok(Math.abs(zoomed.trackLeft + (zoomed.trackWidth - before.stripWidth) / 2) < 2, `about the pointer at the middle, the track stays centred (left ${zoomed.trackLeft})`)
 
@@ -956,8 +983,13 @@ test("a user record counts its images and files, and its inspector lists them wi
       `the ledger's user record carries both attachments in order (${JSON.stringify(prompt?.record)})`,
     )
 
-    await browser.goto(server.url)
-    assert.ok(await browser.waitFor('document.querySelector(\'#views button[data-view="trajectory"]\') !== null', 20_000), 'the page loaded')
+    /**
+     * The session is the one the page restores, and boot is waited out. A plain goto lets boot's fresh New session
+     * (restoreSelection's 'start', #17) race the check's own showSession: under load the blank won, and the check waited
+     * 20 s for rows of an empty session (t2-t6 flakes, both builds, main 2c0266dc).
+     */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
     await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
     await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
     assert.ok(await browser.waitFor('document.querySelector("#tr-table tbody .tr-attach-count") !== null', 20_000), 'the user row shows its attachment counts')
@@ -974,5 +1006,297 @@ test("a user record counts its images and files, and its inspector lists them wi
   } finally {
     browser.close()
     await server.close()
+  }
+})
+
+test('a long ledger opens at its tail with a Load earlier first row, which keeps the reader in place, as DSH does', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * S151 (R-developer-eleven-21), DSH's Virtual rows: a long ledger opens with 50 records ending at the tail, snapped to
+   * a section head, and a first-row control draws one earlier page; the overview still reaches every turn. Before this,
+   * every row of every turn was drawn at once.
+   */
+  const calls = (work, count, answer) => [...Array.from({ length: count }, () => ({ toolCall: { name: 'list_dir', arguments: { path: work } } })), { text: answer }]
+  const server = await startServer('ledger-window', (work) => [...calls(work, 30, 'first done'), ...calls(work, 30, 'second done'), ...calls(work, 30, 'third done')])
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    for (const prompt of ['one', 'two', 'three']) {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `turn ${prompt} ran (${turn.status})`)
+      await turn.text()
+    }
+    const rows = (await api(server.url, cookie, `/api/sessions/${encodeURIComponent(session)}?view=ledger`)).body.rows ?? []
+    assert.ok(rows.length > 90, `three turns of 30 calls make a long ledger (${rows.length} rows)`)
+    /** The page's rule, restated: the last 50 rows, snapped back to their section head when that adds at most 50. */
+    const headAt = (index) => { for (let at = index; at >= 0; at -= 1) if (rows[at].turnStart) return at; return 0 }
+    const tail = rows.length - 50
+    const expected = tail - headAt(tail) <= 50 ? headAt(tail) : tail
+    assert.ok(expected > 0, 'the window starts after the first row')
+
+    const open = async () => {
+      /** Opened as the page restores it, after boot, so boot's fresh session cannot take its place. */
+      await browser.gotoSession(server.url, session)
+      assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+      await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+      await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+      assert.ok(await browser.waitFor(`document.querySelectorAll('#tr-table tbody tr[data-index]').length > 0 && document.querySelector('#tr-table tbody tr[data-index="${rows.length - 1}"]') !== null`, 20_000), 'the ledger opens with its last row drawn')
+    }
+    await open()
+    const state = () => browser.evaluate(`JSON.stringify((() => {
+      const body = document.querySelector('#tr-table tbody')
+      const drawn = [...body.querySelectorAll('tr[data-index]')].map((tr) => Number(tr.dataset.index))
+      const control = body.firstElementChild?.classList.contains('tr-more') ? body.firstElementChild.textContent : null
+      return { first: drawn[0], last: drawn[drawn.length - 1], count: drawn.length, control }
+    })())`).then(JSON.parse)
+    const opening = await state()
+    assert.equal(opening.first, expected, `the window opens at the tail's section head (${JSON.stringify(opening)})`)
+    assert.equal(opening.last, rows.length - 1, 'and runs to the last row')
+    assert.equal(opening.control, `Load earlier · ${expected} more records`, 'the first row is the load control')
+
+    /** One click draws the previous 50 rows, snapped back to their section head the same way. */
+    const earlier = (start) => {
+      const target = Math.max(0, start - 50)
+      return target - headAt(target) <= 50 ? headAt(target) : target
+    }
+    const before = await browser.evaluate(`document.querySelector('#tr-table tbody tr[data-index="${expected}"]').getBoundingClientRect().top`)
+    await browser.evaluate(`document.querySelector('#tr-table tbody .tr-more button').click()`)
+    const next = earlier(expected)
+    assert.ok(await browser.waitFor(`document.querySelector('#tr-table tbody tr[data-index]')?.dataset.index === '${next}'`, 5_000), `one click draws the earlier page, from row ${next}`)
+    const after = await browser.evaluate(`document.querySelector('#tr-table tbody tr[data-index="${expected}"]').getBoundingClientRect().top`)
+    assert.ok(Math.abs(after - before) <= 2, `the row that was first stays where it was on screen (${before} to ${after})`)
+    for (let start = next, clicks = 0; start > 0 && clicks < 10; start = earlier(start), clicks += 1) {
+      await browser.evaluate(`document.querySelector('#tr-table tbody .tr-more button').click()`)
+      assert.ok(await browser.waitFor(`document.querySelector('#tr-table tbody tr[data-index]')?.dataset.index === '${earlier(start)}'`, 5_000), `the next click draws from row ${earlier(start)}`)
+    }
+    const whole = await state()
+    assert.equal(whole.control, null, `with nothing earlier, the control is gone (${JSON.stringify(whole)})`)
+    assert.equal(whole.count, rows.length, 'and every row is drawn')
+
+    /** A fresh page opens at the tail again; picking the first turn in the overview draws it. */
+    await open()
+    assert.ok((await state()).control !== null, 'the reload opens at the tail with the control')
+    assert.ok(await browser.waitFor('document.querySelector(\'#timeline .tr-tick[data-turn="1"]\') !== null', 10_000), 'the overview shows the first turn')
+    await browser.evaluate(`document.querySelector('#timeline .tr-tick[data-turn="1"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`)
+    assert.ok(await browser.waitFor(`document.querySelector('#tr-table tbody tr[data-index="0"]') !== null`, 5_000), 'picking a turn before the window draws its rows')
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+test('a read of the same ledger that the server refuses leaves the drawn ledger in place, not a blank pane', async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * showLedger blanked the pane before every read, the live refetch's and a re-entry's alike, and a refused read
+   * (`!response.ok`) returned without drawing. The session's good ledger was then gone until some later read. Under load
+   * the stale-ledger check above found that pane empty for 20 s on both builds. The refusal is simulated on cue.
+   */
+  const server = await startServer('ledger-keep')
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  try {
+    const cookie = await cookieFor(server.url)
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    const turn = await fetch(new URL('/api/turn', server.url), {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt: 'what is in here', folder: server.work, session }),
+    })
+    await turn.text()
+    /** Opened as the page restores it, after boot, so boot's fresh session cannot take its place. */
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    const view = (name) => browser.evaluate(`document.querySelector('#views button[data-view="${name}"]').click()`)
+    await view('trajectory')
+    assert.ok(await browser.waitFor('document.querySelectorAll("#tr-table tbody tr").length > 0', 20_000), 'the ledger is drawn')
+    const drawn = await browser.evaluate('document.querySelectorAll("#tr-table tbody tr").length')
+    /** The next ledger read is refused, as a busy or failing server answers. */
+    await browser.evaluate(`(() => {
+      const original = window.fetch
+      let refuse = true
+      window.fetch = (input, init) => {
+        const address = typeof input === 'string' ? input : input.url
+        if (refuse && address.includes('view=ledger')) {
+          refuse = false
+          window.__refused = true
+          return Promise.resolve(new Response('busy', { status: 503 }))
+        }
+        return original(input, init)
+      }
+      return true
+    })()`)
+    await view('chat')
+    await view('trajectory')
+    assert.ok(await browser.waitFor('window.__refused === true', 10_000), 'the next read was refused')
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    const after = await browser.evaluate('document.querySelectorAll("#tr-table tbody tr").length')
+    assert.equal(after, drawn, `the session's ledger stays drawn after the refused read (${drawn} rows before, ${after} after)`)
+  } finally {
+    browser.close()
+    await server.close()
+  }
+})
+
+/**
+ * S151 (R-developer-eleven-21), developer-ten's N4, N5 and zoom N7: a session of three turns, two close together and then
+ * a 2 s pause before the third, opened in its Trajectory view as the page restores it. The caller closes what it returns.
+ */
+async function openOverview(label) {
+  const server = await startServer(label, (work) => [
+    { toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'one' },
+    { toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'two' },
+    { text: 'three' },
+  ])
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  const close = async () => {
+    browser.close()
+    await server.close()
+  }
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    for (const [prompt, pause] of [['one', 100], ['two', 2_000], ['three', 0]]) {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `turn ${prompt} ran (${turn.status})`)
+      await turn.text()
+      await new Promise((resolve) => setTimeout(resolve, pause))
+    }
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0 && document.querySelector(\'#tr-table tbody tr[data-turn="3"]\') !== null', 20_000), 'the overview drew its bars and the ledger its three turns')
+  } catch (error) {
+    await close()
+    throw error
+  }
+  return { browser, close }
+}
+
+/** The overview's bars in reading order (by start, then lane), its Tab stops, and where the focus is among them. */
+const OVERVIEW_KEYS = `(() => {
+  const lanes = ['input', 'model', 'tools']
+  const bars = [...document.querySelectorAll('#timeline .tr-bar')].sort((a, b) => Number(a.dataset.x0) - Number(b.dataset.x0) || lanes.indexOf(a.dataset.lane) - lanes.indexOf(b.dataset.lane))
+  return { bars, stops: bars.filter((bar) => bar.tabIndex === 0), at: bars.indexOf(document.activeElement) }
+})()`
+const pressOn = (browser, key) => browser.evaluate(`JSON.stringify((() => {
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }))
+  const { bars, stops, at } = ${OVERVIEW_KEYS}
+  return { at, last: bars.length - 1, stops: stops.length, stopIsFocus: stops[0] === document.activeElement }
+})())`).then(JSON.parse)
+
+test("the overview is one Tab stop that the arrows, Home and End move through its bars, as DSH's is one stop", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** N4: every bar was a Tab stop, so Tab walked through every bar of a session (up to some 900) before leaving the strip. */
+  const { browser, close } = await openOverview('overview-keys')
+  try {
+    const stops = JSON.parse(await browser.evaluate(`JSON.stringify((() => { const { bars, stops } = ${OVERVIEW_KEYS}; return { bars: bars.length, stops: stops.length, first: stops[0] === bars[0] } })())`))
+    assert.ok(stops.bars > 3, `the overview has bars to move through (${stops.bars})`)
+    assert.equal(stops.stops, 1, `the strip is one Tab stop, not one per bar (${JSON.stringify(stops)})`)
+    assert.ok(stops.first, 'at first the earliest bar')
+    await browser.evaluate(`(${OVERVIEW_KEYS}).stops[0].focus()`)
+    const right = await pressOn(browser, 'ArrowRight')
+    assert.deepEqual([right.at, right.stops, right.stopIsFocus], [1, 1, true], `ArrowRight moves to the next bar, which becomes the one stop (${JSON.stringify(right)})`)
+    const end = await pressOn(browser, 'End')
+    assert.deepEqual([end.at, end.stopIsFocus], [end.last, true], `End goes to the last bar (${JSON.stringify(end)})`)
+    const home = await pressOn(browser, 'Home')
+    assert.deepEqual([home.at, home.stopIsFocus], [0, true], `Home to the first (${JSON.stringify(home)})`)
+  } finally {
+    await close()
+  }
+})
+
+test("the overview's tip shows whole after a 500 ms hover, on top and inside the window, as DSH's tip floats below its span", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** N5: the tip sat below the strip inside it, under the strip's clip: shown by its own state, never seen on screen. */
+  const { browser, close } = await openOverview('overview-tip')
+  try {
+    await browser.evaluate(`(() => { const bar = document.querySelector('#timeline .tr-bar[data-lane="model"]') ?? document.querySelector('#timeline .tr-bar'); bar.dispatchEvent(new PointerEvent('pointerenter')); return true })()`)
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    /**
+     * Seen means hit: a hit test honours every clip and every layer above the tip. The tip takes no pointer (so it never
+     * steals the hover), and a hit test passes over such an element, so the check lets it take one for the reading only.
+     */
+    const tip = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const tip = document.getElementById('timeline-tip')
+      const box = tip.getBoundingClientRect()
+      tip.style.pointerEvents = 'auto'
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+      tip.style.pointerEvents = ''
+      return { shown: !tip.hidden, text: tip.textContent, seen: top !== null && tip.contains(top), under: top === null ? null : top.tagName + '.' + top.className, cut: tip.scrollWidth > tip.clientWidth, inside: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight }
+    })())`))
+    assert.ok(tip.shown, `the tip shows after the hover (${tip.text})`)
+    assert.ok(tip.seen, `and is seen: nothing covers or clips it (under its middle: ${tip.under})`)
+    assert.ok(!tip.cut && tip.inside, `whole, inside the window (${JSON.stringify(tip)})`)
+  } finally {
+    await close()
+  }
+})
+
+test("in the default equal mode a focus window lights the rows of the bars it covers, and Escape clears it, as on DSH's overview", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Zoom N7: an equal-mode window was read as a stretch of time (a third to two thirds of the session for the middle
+   * turn's bars), which fell in the pause and lit none of that turn's rows. DSH's Escape on the overview clears its
+   * window; the page had no key for it.
+   */
+  const { browser, close } = await openOverview('overview-window')
+  try {
+    const span = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const strip = document.getElementById('timeline').getBoundingClientRect()
+      const boxes = [...document.querySelectorAll('#timeline .tr-bar[data-turn="2"]')].map((bar) => bar.getBoundingClientRect())
+      return { mode: document.getElementById('tr-duration')?.getAttribute('aria-pressed'), from: Math.min(...boxes.map((box) => box.left)) + 1, to: Math.max(...boxes.map((box) => box.right)) - 1, y: strip.top + strip.height / 2 }
+    })())`))
+    assert.notEqual(span.mode, 'true', 'the strip is in its default equal mode')
+    const fire = (type, init) => browser.evaluate(`document.getElementById('timeline').dispatchEvent(new PointerEvent(${JSON.stringify(type)}, { bubbles: true, cancelable: true, pointerId: 41, ...${JSON.stringify(init)} }))`)
+    await fire('pointerdown', { button: 0, buttons: 1, clientX: span.from, clientY: span.y })
+    await fire('pointermove', { button: 0, buttons: 1, clientX: span.to, clientY: span.y })
+    await fire('pointerup', { button: 0, clientX: span.to, clientY: span.y })
+    const lit = () => browser.evaluate(`JSON.stringify((() => {
+      const byTurn = {}
+      for (const tr of document.querySelectorAll('#tr-table tbody tr[data-turn]')) {
+        const turn = byTurn[tr.dataset.turn] ?? (byTurn[tr.dataset.turn] = { lit: 0, dimmed: 0 })
+        if (tr.dataset.focus === 'outside') turn.dimmed += 1
+        else turn.lit += 1
+      }
+      return { byTurn, window: getComputedStyle(document.querySelector('#timeline .tr-focus')).display }
+    })())`).then(JSON.parse)
+    const window = await lit()
+    assert.equal(window.window, 'block', 'the drag drew a window')
+    assert.ok(window.byTurn['2']?.lit > 0 && window.byTurn['2'].dimmed === 0, `every row of the middle turn is lit (${JSON.stringify(window.byTurn)})`)
+    assert.ok(window.byTurn['1']?.lit === 0 && window.byTurn['3']?.lit === 0, `and the turns either side are dimmed (${JSON.stringify(window.byTurn)})`)
+
+    await browser.evaluate(`(document.querySelector('#timeline .tr-bar[tabindex="0"]') ?? document.querySelector('#timeline .tr-bar')).focus()`)
+    await pressOn(browser, 'Escape')
+    const cleared = await lit()
+    assert.equal(cleared.window, 'none', 'Escape from the strip clears the window')
+    assert.ok(Object.values(cleared.byTurn).every((turn) => turn.dimmed === 0), `and every row is lit again (${JSON.stringify(cleared.byTurn)})`)
+  } finally {
+    await close()
   }
 })

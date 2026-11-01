@@ -11,11 +11,12 @@ const begin = page.indexOf('/* overview-viewport:begin */')
 const end = page.indexOf('/* overview-viewport:end */')
 assert.ok(begin !== -1 && end > begin, 'page.html fences overview-viewport')
 type Viewport = { from: number; to: number } | null
-const helpers = new Function(`${page.slice(begin, end)}; return { zoomViewport, panViewport, viewportDomain, viewportMinSpan }`)() as {
+const helpers = new Function(`${page.slice(begin, end)}; return { zoomViewport, panViewport, viewportDomain, viewportMinSpan, viewportShowing }`)() as {
   zoomViewport: (viewport: Viewport, anchor: number, deltaY: number, minSpan: number) => Viewport
   panViewport: (viewport: Viewport, anchorFrom: number, deltaFraction: number) => Viewport
   viewportDomain: (viewport: Viewport, screenFraction: number) => number
   viewportMinSpan: (durationActual: boolean, totalMs: number, records: number) => number
+  viewportShowing: (viewport: Viewport, x0: number, x1: number) => Viewport
 }
 const close = (actual: number | undefined, expected: number, message?: string) => assert.ok(actual !== undefined && Math.abs(actual - expected) < 1e-9, `${message ?? ''} (${actual} vs ${expected})`)
 
@@ -58,4 +59,16 @@ test("the narrowest zoom is DSH's: 20 ms of recorded time, or four records in th
   assert.equal(helpers.viewportMinSpan(true, 15, 50), 1, 'a domain under 20 ms cannot zoom')
   assert.equal(helpers.viewportMinSpan(false, 2000, 3), 1, 'nor can three records')
   assert.equal(helpers.zoomViewport(null, 0.5, 0, 0.01), null, 'and a wheel with no vertical delta changes nothing')
+})
+
+test("a bar the keyboard moves to is brought into view by DSH's rule: the least pan, at the same zoom", () => {
+  const viewport = { from: 0.4, to: 0.6 }
+  assert.equal(helpers.viewportShowing(viewport, 0.5, 0.52), viewport, 'a bar in view leaves the viewport as it is')
+  assert.equal(helpers.viewportShowing(viewport, 0.6, 0.65), viewport, 'and so does one touching its edge')
+  const later = helpers.viewportShowing(viewport, 0.7, 0.75)
+  close(later?.to, 0.75, 'a later bar ends the viewport')
+  close((later?.to ?? 0) - (later?.from ?? 0), 0.2, 'at the same span')
+  close(helpers.viewportShowing(viewport, 0.1, 0.12)?.from, 0.1, 'an earlier bar starts it')
+  close(helpers.viewportShowing(viewport, 0.95, 1.2)?.to, 1, 'and it stays inside the domain')
+  assert.equal(helpers.viewportShowing(null, 0.9, 0.95), null, 'the whole domain shows every bar')
 })
