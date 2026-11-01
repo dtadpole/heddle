@@ -244,7 +244,10 @@ test('a page with nothing open draws no other session\'s turn, its tree still fo
     assert.ok(await pageB.waitFor(`document.getElementById('log').innerText.includes('answer to: OWN beta prompt from page B')`, 20_000), 'and its own answer')
     const own = JSON.parse(await stateB())
     assert.ok(!own.rows.some((text) => text.includes('alpha prompt from page A') || text.includes('held for:')), `and no row of A's\nsaw: ${JSON.stringify(own)}`)
-    assert.equal(own.rows.filter((text) => text.includes('prompt from page')).length, 1, `one user message, its own\nsaw: ${JSON.stringify(own)}`)
+    /** Counted by the user rows themselves: the answer row repeats the prompt ("answer to: …"), so text cannot tell them apart. */
+    const userRows = JSON.parse(await pageB.evaluate(`JSON.stringify([...document.querySelectorAll('#log .turn.user')].map((node) => node.textContent.trim()))`))
+    assert.equal(userRows.length, 1, `one user message, its own\nsaw: ${JSON.stringify(userRows)}`)
+    assert.ok(userRows[0].startsWith('OWN beta prompt from page B'), `and it is B's\nsaw: ${JSON.stringify(userRows)}`)
     let sessionB = null
     for (let attempt = 0; attempt < 60 && sessionB === null; attempt += 1) {
       sessionB = (await listed()).find((meta) => !before.includes(meta.id))?.id ?? null
