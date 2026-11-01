@@ -25,6 +25,8 @@ import { SessionTitles } from './title.ts'
 import { decodeTranscript, encodeFrame, isEventRecord, judgeLogHeader, type LogHeader } from './transcript.ts'
 import { normalizeSessionTitle } from './title-text.ts'
 
+import { formatLock, judgeLock, type LockFile, ownedSentence, ownLock, parseLock, stampLock } from './writer-lock.ts'
+
 /**
  * The session store.
  *
@@ -64,7 +66,8 @@ import { normalizeSessionTitle } from './title-text.ts'
  * **One process writes a session at a time.** The first append takes a writer lock beside the log
  * (`<id>.lock`, or `session.lock` inside an old-layout session directory) and the process keeps it
  * until it lets go or exits; another process that tries to append is refused with DSH's sentence,
- * `session "<id>" is already owned by an active write handle`. Without it, a `heddle web` server and a
+ * `session "<id>" is already owned by an active write handle`, and a lock whose holder is gone is taken over, also when
+ * its pid now names another process (`./writer-lock.ts`, #202). Without it, a `heddle web` server and a
  * `heddle --resume <id> --turn` each appended from their own in-memory seq counter and the log got the
  * same seqs twice (R-developer-eight-27). See {@link SessionOwnedError} and `acquireWriterLock`.
  */
@@ -623,21 +626,29 @@ export function underArchivedSession(
 /**
  * A write refused because another process holds the session's writer lock.
  *
- * The sentence is DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and the
- * code is the one its session controller answers a resume with (`session/writer-held`); the holder's pid is added in
- * brackets because a person who is refused needs to know which process to stop. Read-only access is never refused.
+ * The sentence opens with DSH's `SessionAlreadyOwnedError` word for word (`@deepseek-ai/dsh-session-persistence`), and
+ * the code is the one its session controller answers a resume with (`session/writer-held`). The holder's pid and command
+ * name are added in brackets because a person who is refused needs to know which process to stop, and the lock file is
+ * named with how to clear it when that process is not heddle (#202, `ownedSentence` in `./writer-lock.ts`, the same
+ * words as the Rust build's `SessionError::AlreadyOwned`). Read-only access is never refused.
  */
 export class SessionOwnedError extends Error {
   readonly code = 'session/writer-held'
   readonly id: string
   /** The process named in the lock, when the lock named one. */
   readonly pid: number | undefined
+  /** That process's command name, when the system said it. */
+  readonly processName: string | undefined
+  /** The lock file's name (`<id>.lock`, or `session.lock` in an old-layout directory). */
+  readonly lock: string | undefined
 
-  constructor(id: string, pid?: number) {
-    super(`session "${id}" is already owned by an active write handle${pid !== undefined ? ` (process ${pid})` : ''}`)
+  constructor(id: string, pid?: number, processName?: string, lock?: string) {
+    super(ownedSentence(id, pid, processName, lock))
     this.name = 'SessionAlreadyOwnedError'
     this.id = id
     this.pid = pid
+    this.processName = processName
+    this.lock = lock
   }
 }
 
@@ -700,48 +711,35 @@ export function readLogHeader(path: string): LogHeader {
  * Where a session's writer lock is: `<id>.lock` beside its log, or `session.lock` inside an old-layout session
  * directory — DSH's `session.lock`, named the way this layout names everything else of one session.
  *
- * The Rust store uses the same path and the same contents (the holder's pid and a newline), so either build refuses
- * a writer the other one holds.
+ * The Rust store uses the same path and the same contents (the holder's pid, boot and start: `./writer-lock.ts`), so
+ * either build refuses a writer the other one holds, and takes over a lock the other one left behind.
  */
 export function lockPath(handle: SessionHandle): string {
   return basename(handle.meta) === 'meta.json' ? join(handle.dir, 'session.lock') : join(handle.dir, `${handle.id}.lock`)
 }
 
-/**
- * How long a lock file with no pid in it is taken to be one being written, rather than one left half-written.
- *
- * The holder creates the file and writes its pid in the next call, so an empty lock older than this is debris.
- */
-const UNWRITTEN_LOCK_GRACE_MS = 5_000
-
 /** The lock files this process holds, and how many stores in it hold each — the last one to let go removes it. */
 const heldByProcess = new Map<string, number>()
 let exitHookInstalled = false
 
-/** Whether a process with this pid exists. A process this user may not signal (`EPERM`) exists. */
-function processAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM'
-  }
-}
-
-/** The pid a lock file names, or undefined when it names none. */
-function lockHolder(text: string): number | undefined {
-  const trimmed = text.trim()
-  if (!/^\d+$/.test(trimmed)) return undefined
-  const pid = Number(trimmed)
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
-}
-
 /** Remove a lock file only if it still names this process, so letting go never removes somebody else's lock. */
 function removeOwnLock(path: string): void {
   try {
-    if (lockHolder(readFileSync(path, 'utf8')) === process.pid) unlinkSync(path)
+    if (parseLock(readFileSync(path, 'utf8'))?.pid === process.pid) unlinkSync(path)
   } catch {
     // Already gone, or unreadable: there is nothing of ours left to remove.
+  }
+}
+
+/** A lock file as it is now, for {@link judgeLock}; undefined when there is none. */
+function readLockFile(path: string): LockFile | undefined {
+  try {
+    const text = readFileSync(path, 'utf8')
+    const stat = statSync(path)
+    return { text, mtimeMs: stat.mtimeMs, ...(process.platform !== 'win32' ? { uid: stat.uid } : {}) }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw error
   }
 }
 
@@ -749,11 +747,12 @@ function removeOwnLock(path: string): void {
  * Take a session's writer lock for this process, or throw {@link SessionOwnedError}.
  *
  * DSH arbitrates with a kernel `flock(2)` on `session.lock`, which Node cannot take without a native addon; a lock
- * file created with `O_EXCL` and naming its holder's pid is the portable equivalent both builds can share. What
- * flock gives for free is supplied by hand: a holder that died without letting go (a crash, `SIGKILL`) leaves a
- * file naming a pid that no longer exists, and that lock is removed and taken rather than blocking the session
- * forever. A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled writer's
- * resumed appends tear the log.
+ * file created with `O_EXCL` and naming its holder is the portable equivalent both builds can share. What flock gives
+ * for free is supplied by hand: a holder that died without letting go (a crash, `SIGKILL`, a power cut) leaves a file
+ * naming a process that is gone, or a pid the system has since given to another process, and that lock is removed
+ * and taken rather than blocking the session for as long as that process lives (#202; the rules are `judgeLock`'s in
+ * `./writer-lock.ts`). A live holder is never expropriated, as in DSH: there is no expiry that could let a stalled
+ * writer's resumed appends tear the log.
  *
  * Answers whether this process **took** the lock now (true) or already held it through another store (false): only a
  * fresh take is a write-open after whatever wrote the session before, which is when an unfinished turn is closed.
@@ -777,7 +776,9 @@ function acquireWriterLock(path: string, id: string): boolean {
     try {
       const fd = openSync(path, 'wx')
       try {
-        writeSync(fd, `${process.pid}\n`)
+        const own = ownLock()
+        writeSync(fd, formatLock(own))
+        stampLock(fd, own)
       } finally {
         closeSync(fd)
       }
@@ -786,29 +787,23 @@ function acquireWriterLock(path: string, id: string): boolean {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
-    let text: string
-    let modified: number
-    try {
-      text = readFileSync(path, 'utf8')
-      modified = statSync(path).mtimeMs
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
-      throw error
+    const file = readLockFile(path)
+    if (file === undefined) continue
+    /**
+     * A lock naming this process that this process does not hold is a previous process's that had the same pid. It is
+     * replaced rather than kept: its boot and start are that process's, so another reader would judge it stale.
+     */
+    if (parseLock(file.text)?.pid !== process.pid) {
+      const verdict = judgeLock(file)
+      if (verdict.kind === 'held') throw new SessionOwnedError(id, verdict.pid, verdict.name, basename(path))
     }
-    const holder = lockHolder(text)
-    if (holder === process.pid) {
-      take()
-      return true
-    }
-    if (holder !== undefined && processAlive(holder)) throw new SessionOwnedError(id, holder)
-    if (holder === undefined && Date.now() - modified < UNWRITTEN_LOCK_GRACE_MS) throw new SessionOwnedError(id)
     try {
       unlinkSync(path)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
   }
-  throw new SessionOwnedError(id)
+  throw new SessionOwnedError(id, undefined, undefined, basename(path))
 }
 
 /** Let go of one store's hold on a lock; the last hold in this process removes the file. */
@@ -1437,7 +1432,8 @@ export class SessionStore {
   }
 
   /**
-   * Whether a live writer holds the session: this process (through any store), or the live process its lock names.
+   * Whether a live writer holds the session: this process (through any store), or the live process its lock names,
+   * judged as a writer judges it (`judgeLock`, #202), so a lock whose pid now names another process holds nothing.
    *
    * A reader asks it before it shows a session's unfinished turn as closed (`SessionService.events`): a turn whose
    * writer is alive may still be running, and one whose writer is gone never will. A lock naming this process that
@@ -1446,14 +1442,15 @@ export class SessionStore {
   writerHeld(handle: SessionHandle): boolean {
     const path = lockPath(handle)
     if (heldByProcess.has(path)) return true
-    let text: string
+    let file: LockFile | undefined
     try {
-      text = readFileSync(path, 'utf8')
+      file = readLockFile(path)
     } catch {
       return false
     }
-    const holder = lockHolder(text)
-    return holder !== undefined && holder !== process.pid && processAlive(holder)
+    const holder = file !== undefined ? parseLock(file.text)?.pid : undefined
+    if (file === undefined || holder === undefined || holder === process.pid) return false
+    return judgeLock(file).kind === 'held'
   }
 
   /**
