@@ -124,6 +124,20 @@ the earlier full-suite jobs failure remains known, not waived. The named pre-pus
 owner review must approve the exact candidate SHA before MAIN; this patch does not land on main or
 update any live server/settings.
 
+## Actual resource-policy regression
+
+[`check-preview-resource-policy.mjs`](check-preview-resource-policy.mjs) drives the delivered CLI selected
+by `HEDDLE_BIN`, not a source-import double. It pins authenticated fixed-shell headers and the complete main
+CSP, then uses a controlled alternate HTTPS origin with test-only certificate trust bypass. In both built
+backends, two cases passed and no cases failed: child CSS applied, child and CSS images decoded, valid WAV
+loaded under the child policy, main CSS/media requests were blocked by its exact response CSP, and a remote
+Markdown image still decoded in the main DOM. These results do not certify TLS trust or supported production
+audio/video rendering. The valid-font decode subtest was explicitly UNJUDGED because no workspace font
+fixture was provided; font-src is still pinned by headers, and the owner's separate request-count probe
+covers its CSP boundary. The first Resource Timing ownership wait failed and was replaced by decoded-asset
+and actual asset-server evidence, not by relaxing production policy. Full integration and live acceptance
+remain pending; the earlier full-suite jobs timing failure is not waived.
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.
