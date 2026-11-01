@@ -560,6 +560,14 @@ pub fn decode_goal_change(event: &Value) -> Result<Option<GoalChange>, GoalError
     }))
 }
 
+/// An ISO-8601 UTC time (`YYYY-MM-DDTHH:MM:SS[.fff…]Z`) as a key that orders as the instants do: the fraction is
+/// padded to nanoseconds, so `…:00Z` sorts before `…:00.500Z` whichever build wrote either.
+fn instant_key(at: &str) -> String {
+    let body = at.strip_suffix('Z').unwrap_or(at);
+    let (whole, fraction) = body.split_once('.').unwrap_or((body, ""));
+    format!("{whole}.{fraction:0<9}")
+}
+
 /// Fold a session's events into its current goal — strictly.
 ///
 /// Fails (`GOAL_INVALID_LOG`) rather than producing a plausible wrong state when: a create happens while a
@@ -585,7 +593,7 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
     let mut last_ref: Option<GoalRef> = None;
     let mut seen: std::collections::HashSet<GoalId> = std::collections::HashSet::new();
     // The session's own birth, and when its goal last changed: a seeded change predates the birth. Both are the
-    // logs' ISO-8601 UTC times, which order as strings.
+    // logs' ISO-8601 UTC times, compared through `instant_key` so a seconds-only or a finer stamp orders right.
     let mut born_at: Option<String> = None;
     let mut changed_at: Option<String> = None;
 
@@ -710,7 +718,7 @@ pub fn fold_goal(events: &[Value]) -> Result<FoldedGoal, GoalError> {
     }
 
     let inherited_by_fork = goal.is_some()
-        && matches!((&changed_at, &born_at), (Some(changed), Some(born)) if changed < born);
+        && matches!((&changed_at, &born_at), (Some(changed), Some(born)) if instant_key(changed) < instant_key(born));
     Ok(FoldedGoal {
         goal,
         rounds_started,
@@ -1554,6 +1562,13 @@ mod tests {
             GoalActivation::Armed,
             "a resume in the branch is the branch's own, and survives a restart"
         );
+    }
+
+    #[test]
+    fn instant_keys_order_seconds_only_and_finer_stamps_as_the_instants() {
+        assert!(instant_key("2026-11-01T00:00:00Z") < instant_key("2026-11-01T00:00:00.500Z"));
+        assert!(instant_key("2026-11-01T00:00:00.5Z") == instant_key("2026-11-01T00:00:00.500Z"));
+        assert!(instant_key("2026-11-01T00:00:00.999999Z") < instant_key("2026-11-01T00:00:01Z"));
     }
 
     #[test]
