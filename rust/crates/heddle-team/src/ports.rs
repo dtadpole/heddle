@@ -81,6 +81,12 @@ pub trait TeamStore: Send + Sync {
     /// Every event of the session's log, in order, each the JSON object of one log line (with `seq`, `at`,
     /// `type`). An error when the session does not exist.
     fn read(&self, session: &str) -> Result<Vec<Value>, PortError>;
+    /// The seqs on the session's surface, in surface order, when the store can fold it; `None` when it cannot, and
+    /// then a policy note anywhere in the log counts (issue #185).
+    fn surface_nodes(&self, session: &str) -> Option<Vec<u64>> {
+        let _ = session;
+        None
+    }
 
     /// The session's metadata record, or `None` when there is no such session.
     fn meta(&self, session: &str) -> Option<SessionMetaView>;
