@@ -49,10 +49,10 @@ test('a turn whose records in one lane are too dense to tell apart, or one narro
 
 test('a bar names its TTFT split after its clock, and a merged bar how many records it holds', () => {
   const startsAt = Date.parse('2026-10-31T09:00:00.000Z')
-  const split = helpers.timelineRecordText({ ...record(1, 'model', 'assistant', 0.25, 0.5, { ttftMs: 300, decodingMs: 900 }), kinds: ['assistant'], merged: 1 }, 4000, startsAt)
+  const split = helpers.timelineRecordText({ ...record(1, 'model', 'assistant', 0.25, 0.5, { ttftMs: 300, decodingMs: 900 }), kinds: ['assistant'], merged: 1, rank0: 0, rank1: 0 }, 4000, startsAt)
   assert.match(split.when, / · TTFT 300 ms · decoding 900 ms$/)
   assert.equal(split.label, 'turn 1 · assistant')
-  const merged = helpers.timelineRecordText({ ...record(2, 'tools', 'tool', 0.1, 0.4), kinds: ['tool'], merged: 13 }, 4000, startsAt)
+  const merged = helpers.timelineRecordText({ ...record(2, 'tools', 'tool', 0.1, 0.4), kinds: ['tool'], merged: 13, rank0: 0, rank1: 12 }, 4000, startsAt)
   assert.equal(merged.label, 'turn 2 · tool · 13 records')
   assert.doesNotMatch(merged.when, /TTFT/)
 })
