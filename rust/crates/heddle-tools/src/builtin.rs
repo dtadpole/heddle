@@ -841,10 +841,28 @@ pub struct ShellEnd {
     pub limit_ms: u64,
 }
 
-/// `bash`'s answer for a command that ended: the stop or the wall time, else the combined output cut to
-/// `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a nonzero exit, each with the
-/// sandbox facts. Shared by the foreground run and the jobs row's promoting run (`heddle-jobs`), so a call answers
-/// the same however it was run.
+/// A finished command's stdout, then its stderr in a `[stderr]` section, as DSH's bash renders a run
+/// (`dsh-tool-bash` renderResult): when stdout has text that does not end in a newline, one is added before the
+/// marker; with no stderr, stdout alone. The jobs row's `job_output` reads mark stderr the same way. Live-testing
+/// issue #246: both builds glued the streams, so `printf out; printf err >&2` came back as `outerr` and a warning
+/// read as ordinary output. Stated differences kept: heddle cuts the combined text ([`truncate_output_at`]), keeps
+/// its error line first, and keeps its own answer for a run that printed nothing.
+pub fn marked_streams(stdout: &str, stderr: &str) -> String {
+    if stderr.is_empty() {
+        return stdout.to_owned();
+    }
+    let separator = if !stdout.is_empty() && !stdout.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    format!("{stdout}{separator}[stderr]\n{stderr}")
+}
+
+/// `bash`'s answer for a command that ended: the stop or the wall time, else stdout and the marked stderr
+/// ([`marked_streams`]) cut to `output_limit` with the sandbox's reading (a runner failure outranks a denial) or a
+/// nonzero exit, each with the sandbox facts. Shared by the foreground run and the jobs row's promoting run
+/// (`heddle-jobs`), so a call answers the same however it was run.
 pub fn shell_result(
     sandbox: &dyn SandboxGate,
     end: &ShellEnd,
@@ -873,7 +891,7 @@ pub fn shell_result(
         let data = serde_json::Map::from_iter([("sandbox".to_owned(), facts())]);
         return ToolResult::refused(code, message).with_data(data);
     }
-    let trimmed = truncate_output_at(&format!("{}{}", end.stdout, end.stderr), output_limit);
+    let trimmed = truncate_output_at(&marked_streams(&end.stdout, &end.stderr), output_limit);
     let code = end.code.unwrap_or(1);
     let outcome = match confined {
         None => SandboxOutcome::Exited,
@@ -1327,7 +1345,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.error.as_ref().unwrap().code, codes::EXIT);
-        assert!(result.output.contains("out") && result.output.contains("err"));
+        assert_eq!(result.output, "out\n[stderr]\nerr\n");
+    }
+
+    #[tokio::test]
+    async fn stdout_and_stderr_come_back_apart_with_a_stderr_marker_as_dsh_renders_them() {
+        // Live-testing issue #246: both builds glued the streams, `printf out; printf err >&2` -> `outerr`.
+        let root = tempdir();
+        let bash = tool("bash", sandbox(root.path()));
+        let mut seen = Vec::new();
+        for command in [
+            "printf out; printf err >&2",
+            "printf 'out\\n'; printf err >&2",
+            "printf err >&2",
+            "printf out",
+        ] {
+            let result = bash
+                .run(
+                    args(json!({ "command": command })),
+                    context_in(root.path(), SandboxMode::DangerFullAccess),
+                )
+                .await
+                .unwrap();
+            assert!(result.error.is_none(), "{command}: {result:?}");
+            seen.push(result.output);
+        }
+        assert_eq!(
+            seen,
+            [
+                "out\n[stderr]\nerr",
+                "out\n[stderr]\nerr",
+                "[stderr]\nerr",
+                "out"
+            ]
+        );
+    }
+
+    #[test]
+    fn marked_streams_adds_a_newline_only_when_stdout_lacks_one() {
+        assert_eq!(marked_streams("out", "err"), "out\n[stderr]\nerr");
+        assert_eq!(marked_streams("out\n", "err"), "out\n[stderr]\nerr");
+        assert_eq!(marked_streams("", "err"), "[stderr]\nerr");
+        assert_eq!(marked_streams("out", ""), "out");
+        assert_eq!(marked_streams("", ""), "");
     }
 
     #[test]
