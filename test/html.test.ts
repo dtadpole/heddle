@@ -70,6 +70,34 @@ test('base filtering handles comment endings and disabled-scripting noscript wit
   assert.equal(rewriteResources('<div title="a > <base>">ok</div><base title=unquoted" href=https://example.invalid/>end', '/docs', serve), '<div title="a > <base>">ok</div>end')
 })
 
+test('base removal cannot splice DATA text into a new base or comment', () => {
+  for (const [source, expected] of [
+    ['<<base>base href=https://example.invalid/>x', '&lt;base href=https://example.invalid/>x'],
+    ['<<base>!-- hidden --><base href=https://example.invalid/>x', '&lt;!-- hidden -->x'],
+    ['<<base><base>base href=https://example.invalid/>x', '&lt;base href=https://example.invalid/>x'],
+    ['İ雪<<<base>base href=https://example.invalid/>x', 'İ雪<&lt;base href=https://example.invalid/>x'],
+    ['<div title="<">text</div><base>x', '<div title="<">text</div>x'],
+    ['<!-- < --><base>x', '<!-- < -->x'],
+    ['<textarea><</textarea><base>x', '<textarea><</textarea>x'],
+  ]) {
+    assert.equal(rewriteResources(source!, '/docs', serve), expected, source)
+  }
+})
+
+test('many base removals protect each splice with bounded output growth', () => {
+  const count = 4096
+  const source = '<<base><base>base href=https://example.invalid/>x'.repeat(count)
+  const expected = '&lt;base href=https://example.invalid/>x'.repeat(count)
+  const output = rewriteResources(source, '/docs', serve)
+  assert.equal(output, expected)
+  assert.ok(output.length <= source.length + 3 * count, 'at most one entity expansion per splice; no fixed-point rescans')
+  assert.equal(
+    rewriteResources(`<${'<base>'.repeat(count)}base href=https://example.invalid/>x`, '/docs', serve),
+    '&lt;base href=https://example.invalid/>x',
+    'adjacent removals do not repeatedly escape an already protected output boundary',
+  )
+})
+
 test('base filtering applies inside nested markup without removing neighbouring elements', () => {
   assert.equal(rewriteResources('<template><base href="https://example.invalid/"><p>template</p></template><svg><base href="https://example.invalid/"></base><text>svg</text></svg>', '/docs', serve), '<template><p>template</p></template><svg></base><text>svg</text></svg>')
 })
