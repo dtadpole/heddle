@@ -36,8 +36,8 @@ pub use collate::compare_names;
 pub use error::WorkspaceError;
 pub use file::{FILE_LIMIT_BYTES, FileReadError, FileReading, read_file_text};
 pub use record::{
-    BootstrapReport, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord, WorkspaceRemoval,
-    WorkspaceStoreShape, WorkspaceView, listing_row,
+    BootstrapReport, FolderStatus, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord,
+    WorkspaceRemoval, WorkspaceStoreShape, WorkspaceView, listing_row,
 };
 pub use service::{
     DEFAULT_WORKSPACE_DIRECTORY, WorkspaceConfig, WorkspaceService, default_workspace_directory,
