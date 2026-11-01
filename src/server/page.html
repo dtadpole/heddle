@@ -3624,16 +3624,16 @@
     silently did not. A band that scrolls the ledger cannot live inside the thing it scrolls.
   -->
   <div id="tr-toolbar" data-view="trajectory" hidden>
-    <button type="button" id="tr-duration" aria-pressed="false" title="Use actual duration">Duration</button>
-    <button type="button" id="tr-turns" aria-pressed="false" title="Collapse turns">Turns</button>
-    <button type="button" id="tr-calls" aria-pressed="false" title="Collapse calls">Calls</button>
+    <button type="button" id="tr-duration" aria-pressed="false" title="Use actual duration" data-i18n="trajectory.toolbar.duration" data-i18n-title="trajectory.toolbar.useActualDuration">Duration</button>
+    <button type="button" id="tr-turns" aria-pressed="false" title="Collapse turns" data-i18n="trajectory.toolbar.turns" data-i18n-title="trajectory.toolbar.collapseTurns">Turns</button>
+    <button type="button" id="tr-calls" aria-pressed="false" title="Collapse calls" data-i18n="trajectory.toolbar.calls" data-i18n-title="trajectory.toolbar.collapseCalls">Calls</button>
     <span id="tr-status"></span>
     <label id="tr-search">
       <span aria-hidden="true">⌕</span>
-      <input id="tr-search-input" type="search" placeholder="Search" aria-label="Search trajectory" />
+      <input id="tr-search-input" type="search" placeholder="Search" aria-label="Search trajectory" data-i18n-placeholder="trajectory.toolbar.searchPlaceholder" data-i18n-aria-label="trajectory.toolbar.search" />
     </label>
   </div>
-  <div id="timeline" data-view="trajectory" aria-label="trajectory timeline" role="navigation" hidden></div>
+  <div id="timeline" data-view="trajectory" aria-label="trajectory timeline" data-i18n-aria-label="trajectory.timeline.aria" role="navigation" hidden></div>
   <div id="ledger" data-view="trajectory" role="tabpanel" aria-labelledby="tab-trajectory" hidden></div>
   <div id="file" data-view="file" role="tabpanel" aria-labelledby="tab-file" hidden>
     <header id="file-head"></header>
@@ -4333,6 +4333,84 @@ const MESSAGES = Object.freeze({
     'hover.status.running': 'Running',
     'hover.status.idle': 'Idle',
     'hover.archived': 'Archived',
+    'trajectory.kind.user': 'USER',
+    'trajectory.kind.assistant': 'ASSISTANT',
+    'trajectory.kind.reasoning': 'THINK',
+    'trajectory.kind.tool': 'TOOL',
+    'trajectory.kind.context': 'CONTEXT',
+    'trajectory.kind.system': 'SYSTEM',
+    'trajectory.kind.compaction': 'COMPACTED',
+    'trajectory.toolCallOnly': '(tool call only)',
+    'trajectory.section.betweenTurns': 'Between turns',
+    'trajectory.turn.label': 'Turn {turn}',
+    'trajectory.section.continued': '{label} (continued)',
+    'trajectory.group.step': 'Step {step}',
+    'trajectory.attachment.imageName': 'Image {index}',
+    'trajectory.attachment.file': 'File',
+    'trajectory.attachment.list': 'Attachments',
+    'trajectory.column.event': 'Event',
+    'trajectory.column.content': 'Content',
+    'trajectory.details.resize': 'resize the details pane',
+    'trajectory.details.resizeTitle': 'Drag to resize. Double-click to reset.',
+    'trajectory.loadEarlier.one': 'Load earlier · {count} more record',
+    'trajectory.loadEarlier.other': 'Load earlier · {count} more records',
+    'trajectory.loadEarlier.match.one': ' · {count} match',
+    'trajectory.loadEarlier.match.other': ' · {count} matches',
+    'trajectory.runningSuffix': ' · running',
+    'trajectory.details.close': 'close details',
+    'trajectory.tab.summary': 'Summary',
+    'trajectory.tab.payload': 'Payload',
+    'trajectory.tab.result': 'Result',
+    'trajectory.tab.schema': 'Schema',
+    'trajectory.tab.timing': 'Timing',
+    'trajectory.record.noPayload': 'nothing was recorded as a payload',
+    'trajectory.record.noResult': 'no result recorded',
+    'trajectory.record.noResultShort': '(no result recorded)',
+    'trajectory.details.hierarchy': 'Hierarchy',
+    'trajectory.details.turn': 'Turn',
+    'trajectory.details.none': 'none',
+    'trajectory.details.step': 'Step',
+    'trajectory.details.model': 'Model',
+    'trajectory.details.status': 'Status',
+    'trajectory.status.running': 'Running',
+    'trajectory.status.failed': 'Failed',
+    'trajectory.status.completed': 'Completed',
+    'trajectory.details.content': 'Content',
+    'trajectory.record.parameters': 'Parameters',
+    'trajectory.record.toolUndescribed': 'this profile does not describe that tool',
+    'trajectory.timing.started': 'Started',
+    'trajectory.timing.duration': 'Duration',
+    'trajectory.timing.ttft': 'TTFT',
+    'trajectory.timing.turnDuration': 'Turn duration',
+    'trajectory.timing.stepDuration': 'Step duration',
+    'trajectory.timing.inputTokens': 'Input tokens',
+    'trajectory.timing.outputTokens': 'Output tokens',
+    'trajectory.timing.tokenSource': 'Token source',
+    'trajectory.tick.turn': 'turn {turn}',
+    'trajectory.tick.records': 'records',
+    'trajectory.tick.startUnknown': 'start unknown',
+    'trajectory.tick.running': 'running',
+    'trajectory.legend.recorded': '{duration} recorded',
+    'trajectory.legend.turns': '{count} turn(s)',
+    'trajectory.toolbar.duration': 'Duration',
+    'trajectory.toolbar.useActualDuration': 'Use actual duration',
+    'trajectory.toolbar.turns': 'Turns',
+    'trajectory.toolbar.collapseTurns': 'Collapse turns',
+    'trajectory.toolbar.calls': 'Calls',
+    'trajectory.toolbar.collapseCalls': 'Collapse calls',
+    'trajectory.toolbar.searchPlaceholder': 'Search',
+    'trajectory.toolbar.search': 'Search trajectory',
+    'trajectory.timeline.aria': 'trajectory timeline',
+    'trajectory.status.records': '{count} records',
+    'trajectory.status.turns': '{count} turns',
+    'trajectory.status.in': 'in {count}',
+    'trajectory.status.out': 'out {count}',
+    'trajectory.status.estimated': '{count} estimated',
+    'trajectory.lane.input': 'input',
+    'trajectory.lane.model': 'model',
+    'trajectory.lane.tools': 'tools',
+    'trajectory.bar.merged': ' · {count} records',
+    'trajectory.bar.ttft': ' · TTFT {ttft} · decoding {decoding}',
     'chat.viewChanges': 'View changes to {path}',
     'composer.editQueued': 'Edit queued message',
     'composer.saveQueued': 'Save queued message',
@@ -4749,6 +4827,84 @@ const MESSAGES = Object.freeze({
     'hover.status.running': '进行中',
     'hover.status.idle': '空闲',
     'hover.archived': '已归档',
+    'trajectory.kind.user': '用户',
+    'trajectory.kind.assistant': '助手',
+    'trajectory.kind.reasoning': '思考',
+    'trajectory.kind.tool': '工具',
+    'trajectory.kind.context': '上下文',
+    'trajectory.kind.system': '系统',
+    'trajectory.kind.compaction': '已压缩',
+    'trajectory.toolCallOnly': '（仅工具调用）',
+    'trajectory.section.betweenTurns': '轮次之间',
+    'trajectory.turn.label': '第 {turn} 轮',
+    'trajectory.section.continued': '{label}（续）',
+    'trajectory.group.step': '第 {step} 步',
+    'trajectory.attachment.imageName': '图片 {index}',
+    'trajectory.attachment.file': '文件',
+    'trajectory.attachment.list': '附件',
+    'trajectory.column.event': '事件',
+    'trajectory.column.content': '内容',
+    'trajectory.details.resize': '调整事件详情宽度',
+    'trajectory.details.resizeTitle': '拖动调整大小；双击恢复默认值。',
+    'trajectory.loadEarlier.one': '加载更早的记录 · 还有 {count} 条',
+    'trajectory.loadEarlier.other': '加载更早的记录 · 还有 {count} 条',
+    'trajectory.loadEarlier.match.one': ' · {count} 处匹配',
+    'trajectory.loadEarlier.match.other': ' · {count} 处匹配',
+    'trajectory.runningSuffix': ' · 运行中',
+    'trajectory.details.close': '关闭详情',
+    'trajectory.tab.summary': '概述',
+    'trajectory.tab.payload': '参数',
+    'trajectory.tab.result': '结果',
+    'trajectory.tab.schema': 'Schema',
+    'trajectory.tab.timing': '计时',
+    'trajectory.record.noPayload': '未捕获参数',
+    'trajectory.record.noResult': '未捕获结果',
+    'trajectory.record.noResultShort': '（未捕获结果）',
+    'trajectory.details.hierarchy': '层级',
+    'trajectory.details.turn': '轮次',
+    'trajectory.details.none': '无',
+    'trajectory.details.step': '步骤',
+    'trajectory.details.model': '模型',
+    'trajectory.details.status': '状态',
+    'trajectory.status.running': '运行中',
+    'trajectory.status.failed': '失败',
+    'trajectory.status.completed': '已完成',
+    'trajectory.details.content': '内容',
+    'trajectory.record.parameters': '参数',
+    'trajectory.record.toolUndescribed': '此配置档案没有描述这个工具',
+    'trajectory.timing.started': '开始时间',
+    'trajectory.timing.duration': '时长',
+    'trajectory.timing.ttft': '首 token 延迟',
+    'trajectory.timing.turnDuration': '轮次时长',
+    'trajectory.timing.stepDuration': '步骤时长',
+    'trajectory.timing.inputTokens': '输入 token 数',
+    'trajectory.timing.outputTokens': '输出 token 数',
+    'trajectory.timing.tokenSource': 'token 来源',
+    'trajectory.tick.turn': '第 {turn} 轮',
+    'trajectory.tick.records': '记录',
+    'trajectory.tick.startUnknown': '开始时间未知',
+    'trajectory.tick.running': '运行中',
+    'trajectory.legend.recorded': '已记录 {duration}',
+    'trajectory.legend.turns': '{count} 轮',
+    'trajectory.toolbar.duration': '时长',
+    'trajectory.toolbar.useActualDuration': '使用实际时长',
+    'trajectory.toolbar.turns': '轮次',
+    'trajectory.toolbar.collapseTurns': '收起所有轮次',
+    'trajectory.toolbar.calls': '调用',
+    'trajectory.toolbar.collapseCalls': '收起所有调用',
+    'trajectory.toolbar.searchPlaceholder': '搜索',
+    'trajectory.toolbar.search': '搜索轨迹',
+    'trajectory.timeline.aria': '轨迹时间线',
+    'trajectory.status.records': '{count} 条记录',
+    'trajectory.status.turns': '{count} 轮',
+    'trajectory.status.in': '输入 {count}',
+    'trajectory.status.out': '输出 {count}',
+    'trajectory.status.estimated': '估算 {count}',
+    'trajectory.lane.input': '输入',
+    'trajectory.lane.model': '模型',
+    'trajectory.lane.tools': '工具',
+    'trajectory.bar.merged': ' · {count} 条记录',
+    'trajectory.bar.ttft': ' · 首 token {ttft} · 解码 {decoding}',
     'chat.viewChanges': '查看 {path} 的更改',
     'composer.editQueued': '编辑排队消息',
     'composer.saveQueued': '保存排队消息',
@@ -7293,14 +7449,24 @@ const trajectory = {
   domainEnd: undefined,
 }
 
-/** DSH's kind vocabulary, which the table's tags speak. */
+/** DSH's kind vocabulary, which the table's tags speak (English; the page language's word is `trajectory.kind.<kind>`). */
 const KIND_LABEL = { user: 'USER', assistant: 'ASSISTANT', reasoning: 'THINK', tool: 'TOOL', context: 'CONTEXT', system: 'SYSTEM', compaction: 'COMPACTED' }
+
+/** A row's kind tag in the page language: DSH's `kind.*` (用户, 助手, 工具 …); an unknown kind is its name in capitals. */
+function kindLabel(kind) {
+  return Object.hasOwn(KIND_LABEL, kind) ? t(`trajectory.kind.${kind}`) : String(kind).toUpperCase()
+}
+
+/** An answer that only called tools: its preview is DSH's `(tool call only)`, which the server writes in English. */
+function toolCallOnly(record) {
+  return record.kind === 'assistant' && (String(record.text ?? '').split('\n')[0] ?? '') === ''
+}
 
 /** A record's one-line body: its first line, or what the row is when it has none. */
 function previewOf(record) {
   const text = String(record.text ?? '').split('\n')[0] ?? ''
   if (text !== '') return text
-  if (record.kind === 'assistant') return '(tool call only)'
+  if (record.kind === 'assistant') return t('trajectory.toolCallOnly')
   if (record.kind === 'tool') return record.name ?? record.label ?? 'tool'
   return record.label ?? record.kind
 }
@@ -7349,9 +7515,12 @@ function rowsOf(data) {
   return rows
 }
 
-/** DSH's label for a section head: `Between turns` for records outside every turn, else `Turn N`. */
-function sectionLabel(row) {
-  return row.loose ? 'Between turns' : 'Turn ' + row.turn
+/**
+ * DSH's label for a section head: `Between turns` for records outside every turn, else `Turn N`. `words` is the page's
+ * t() (#80), which the page passes; without it, as test/page-ledger-rows.test.ts calls it, the English.
+ */
+function sectionLabel(row, words = (key, vars) => (key === 'trajectory.section.betweenTurns' ? 'Between turns' : 'Turn ' + vars.turn)) {
+  return row.loose ? words('trajectory.section.betweenTurns', {}) : words('trajectory.turn.label', { turn: row.turn })
 }
 
 /**
@@ -7414,8 +7583,9 @@ function attachmentCounts(attachments) {
  * One inspector row's words for an attachment, DSH's: its recorded name (an unnamed image, numbered among the images),
  * then its size and type. A zero-byte file keeps its size.
  */
-function attachmentLine(item, imageNumber) {
-  const name = typeof item?.name === 'string' && item.name !== '' ? item.name : item?.kind === 'image' ? 'Image ' + imageNumber : 'File'
+function attachmentLine(item, imageNumber, words = (key, vars) => (key === 'trajectory.attachment.imageName' ? 'Image ' + vars.index : 'File')) {
+  /** `words` is the page's t() (#80), which the page passes; without it, as the unit test calls it, the English. */
+  const name = typeof item?.name === 'string' && item.name !== '' ? item.name : item?.kind === 'image' ? words('trajectory.attachment.imageName', { index: imageNumber }) : words('trajectory.attachment.file', {})
   const bytes = typeof item?.bytes === 'number' && Number.isFinite(item.bytes) ? item.bytes : 0
   const size = bytes < 1024 ? bytes + ' B' : bytes < 1024 * 1024 ? (bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0) + ' KB' : (bytes / (1024 * 1024)).toFixed(1) + ' MB'
   return { name, detail: [size, typeof item?.mimeType === 'string' && item.mimeType !== '' ? item.mimeType : null].filter(Boolean).join(' · ') }
@@ -7464,9 +7634,10 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   const headRow = document.createElement('tr')
   const eventHead = document.createElement('th')
   eventHead.className = 'tr-th-event'
-  eventHead.textContent = 'Event'
+  eventHead.textContent = t('trajectory.column.event')
   const contentHead = document.createElement('th')
-  contentHead.textContent = 'Content'
+  contentHead.className = 'tr-th-content'
+  contentHead.textContent = t('trajectory.column.content')
   headRow.append(eventHead, contentHead)
   head.append(headRow)
   table.append(head, document.createElement('tbody'))
@@ -7478,7 +7649,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   resize.className = 'tr-d-resize'
   resize.setAttribute('role', 'separator')
   resize.setAttribute('aria-orientation', 'vertical')
-  resize.setAttribute('aria-label', 'resize the details pane')
+  resize.setAttribute('aria-label', t('trajectory.details.resize'))
   const setWidth = (width) => {
     const bounds = split.getBoundingClientRect()
     const clamped = Math.max(280, Math.min(width, Math.max(320, bounds.width - 280)))
@@ -7486,7 +7657,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
     resize.setAttribute('aria-valuenow', String(Math.round(clamped)))
   }
   // DSH's separator says "Drag to resize. Double-click to reset." — a gesture a reader can discover.
-  resize.title = 'Drag to resize. Double-click to reset.'
+  resize.title = t('trajectory.details.resizeTitle')
   resize.addEventListener('dblclick', () => {
     details.style.width = ''
     resize.removeAttribute('aria-valuenow')
@@ -7506,17 +7677,7 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   split.append(pane, resize, details)
   ledger.replaceChildren(split)
 
-  const status = document.getElementById('tr-status')
-  if (status !== null) {
-    const ledgerData = data.ledger ?? {}
-    const bits = [ledgerData.records ?? trajectory.rows.length, 'records']
-    if ((ledgerData.turns?.length ?? 0) > 0) bits.push(ledgerData.turns.length + ' turns')
-    const tokens = ledgerData.tokens ?? {}
-    if (tokens.input !== undefined) bits.push('in ' + tokens.input)
-    if (tokens.output !== undefined) bits.push('out ' + tokens.output)
-    if (tokens.estimated !== undefined) bits.push(tokens.estimated + ' estimated')
-    status.textContent = bits.join(' · ')
-  }
+  paintTrajectoryStatus(data)
   renderTimeline(timeline_, data)
   renderRows()
 }
@@ -7570,7 +7731,7 @@ function loadEarlierNode(start, matches) {
   cell.colSpan = 2
   const button = document.createElement('button')
   button.type = 'button'
-  button.textContent = 'Load earlier · ' + start + (start === 1 ? ' more record' : ' more records') + (matches === null ? '' : ' · ' + matches + (matches === 1 ? ' match' : ' matches'))
+  button.textContent = t(start === 1 ? 'trajectory.loadEarlier.one' : 'trajectory.loadEarlier.other', { count: start }) + (matches === null ? '' : t(matches === 1 ? 'trajectory.loadEarlier.match.one' : 'trajectory.loadEarlier.match.other', { count: matches }))
   button.addEventListener('click', () => {
     revealRows(earlierWindowStart(trajectory.rows, start, LEDGER_WINDOW))
     /** The button is redrawn, so focus goes to the new control, or to the row that was first, without undoing the scroll. */
@@ -7623,13 +7784,13 @@ function rowNode(row, index) {
     rail.className = 'tr-rail'
     const label = document.createElement('span')
     label.className = 'tr-turn-label'
-    label.textContent = sectionLabel(row) + (row.continued === true ? ' (continued)' : '')
+    label.textContent = row.continued === true ? t('trajectory.section.continued', { label: sectionLabel(row, t) }) : sectionLabel(row, t)
     event.append(rail, label)
   }
   const tag = document.createElement('span')
   tag.className = 'tr-kind'
   tag.dataset.kind = row.kind
-  tag.textContent = KIND_LABEL[row.kind] ?? String(row.kind).toUpperCase()
+  tag.textContent = kindLabel(row.kind)
   const when = document.createElement('span')
   when.className = 'tr-when'
   when.textContent = clock(record.startedAt) ?? ''
@@ -7647,7 +7808,7 @@ function rowNode(row, index) {
   } else {
     const text = document.createElement('span')
     text.className = 'tr-text'
-    text.textContent = (row.preview ?? previewOf(record)) + (record.inFlight === true ? ' · running' : '')
+    text.textContent = (toolCallOnly(record) ? t('trajectory.toolCallOnly') : row.preview ?? previewOf(record)) + (record.inFlight === true ? t('trajectory.runningSuffix') : '')
     content.append(text)
     /** A user record counts what it carried beside its text, as DSH's does, an attachment-only record included. */
     const counts = attachmentCounts(record.attachments)
@@ -7769,15 +7930,15 @@ function renderDetails(row) {
   const tag = document.createElement('span')
   tag.className = 'tr-kind'
   tag.dataset.kind = row.kind
-  tag.textContent = KIND_LABEL[row.kind] ?? String(row.kind).toUpperCase()
+  tag.textContent = kindLabel(row.kind)
   const where = document.createElement('span')
   where.className = 'tr-d-where'
-  where.textContent = [sectionLabel(row), row.step !== undefined ? 'Step ' + row.step : null].filter(Boolean).join(' · ')
+  where.textContent = [sectionLabel(row, t), row.step !== undefined ? t('trajectory.group.step', { step: row.step }) : null].filter(Boolean).join(' · ')
   const close = document.createElement('button')
   close.type = 'button'
   close.className = 'tr-d-close'
   close.textContent = '×'
-  close.setAttribute('aria-label', 'close details')
+  close.setAttribute('aria-label', t('trajectory.details.close'))
   close.addEventListener('click', () => {
     details.hidden = true
     trajectory.selected = -1
@@ -7794,11 +7955,11 @@ function renderDetails(row) {
    * "it ran this" into "this is what running it means".
    */
   const sections = [
-    ['Summary', () => summarySection(row, record, step)],
-    ['Payload', () => (row.inspection?.payload !== undefined ? htmlBlock(row.inspection.payload) : String(record.text ?? '') === '' ? trEmpty('nothing was recorded as a payload') : trPre(String(record.text)))],
-    ['Result', () => (row.inspection?.result !== undefined ? htmlBlock(row.inspection.result) : String(record.result ?? '') === '' ? trEmpty('no result recorded') : trPre(String(record.result)))],
-    ...(row.kind === 'tool' ? [['Schema', () => schemaSection(row, record)]] : []),
-    ['Timing', () => timingSection(record, turn, step)],
+    [t('trajectory.tab.summary'), () => summarySection(row, record, step)],
+    [t('trajectory.tab.payload'), () => (row.inspection?.payload !== undefined ? htmlBlock(row.inspection.payload) : String(record.text ?? '') === '' ? trEmpty(t('trajectory.record.noPayload')) : trPre(String(record.text)))],
+    [t('trajectory.tab.result'), () => (row.inspection?.result !== undefined ? htmlBlock(row.inspection.result) : String(record.result ?? '') === '' ? trEmpty(t('trajectory.record.noResult')) : trPre(String(record.result)))],
+    ...(row.kind === 'tool' ? [[t('trajectory.tab.schema'), () => schemaSection(row, record)]] : []),
+    [t('trajectory.tab.timing'), () => timingSection(record, turn, step)],
   ]
   const show = (index) => {
     tabs.querySelectorAll('.tr-d-tab').forEach((tab, at) => tab.setAttribute('aria-selected', at === index ? 'true' : 'false'))
@@ -7828,7 +7989,7 @@ function attachmentList(attachments) {
   let images = 0
   for (const item of attachments) {
     if (item?.kind === 'image') images += 1
-    const words = attachmentLine(item, images)
+    const words = attachmentLine(item, images, t)
     const url = typeof item?.url === 'string' && item.url !== '' ? item.url + (current === null ? '' : (item.url.includes('?') ? '&' : '?') + 'session=' + encodeURIComponent(current)) : null
     const entry = document.createElement('li')
     entry.dataset.kind = item?.kind === 'image' ? 'image' : 'file'
@@ -7872,20 +8033,20 @@ function summarySection(row, record, step) {
    */
   const box = document.createElement('div')
   box.append(
-    accOpen('Hierarchy', trRows([['Turn', row.loose ? 'none' : row.turn], ['Step', row.step], ['Model', step?.model]])),
-    accOpen('Status', trRows([['Status', record.inFlight === true ? 'Running' : record.state === 'error' ? 'Failed' : 'Completed']])),
+    accOpen(t('trajectory.details.hierarchy'), trRows([[t('trajectory.details.turn'), row.loose ? t('trajectory.details.none') : row.turn], [t('trajectory.details.step'), row.step], [t('trajectory.details.model'), step?.model]])),
+    accOpen(t('trajectory.details.status'), trRows([[t('trajectory.details.status'), record.inFlight === true ? t('trajectory.status.running') : record.state === 'error' ? t('trajectory.status.failed') : t('trajectory.status.completed')]])),
   )
   if (row.kind === 'tool') {
     box.append(
-      accOpen('Payload', row.inspection?.payload !== undefined ? htmlBlock(row.inspection.payload) : trPre(String(record.text ?? ''))),
-      accOpen('Result', row.inspection?.result !== undefined ? htmlBlock(row.inspection.result) : trPre(String(record.result ?? '(no result recorded)'))),
-      accOpen('Schema', schemaSection(row, record)),
+      accOpen(t('trajectory.tab.payload'), row.inspection?.payload !== undefined ? htmlBlock(row.inspection.payload) : trPre(String(record.text ?? ''))),
+      accOpen(t('trajectory.tab.result'), row.inspection?.result !== undefined ? htmlBlock(row.inspection.result) : trPre(String(record.result ?? t('trajectory.record.noResultShort')))),
+      accOpen(t('trajectory.tab.schema'), schemaSection(row, record)),
     )
   } else if (record.text !== undefined && String(record.text) !== '') {
-    box.append(accOpen('Content', trPre(String(record.text))))
+    box.append(accOpen(t('trajectory.details.content'), trPre(String(record.text))))
   }
-  if (Array.isArray(record.attachments) && record.attachments.length > 0) box.append(accOpen('Attachments', attachmentList(record.attachments)))
-  box.append(accOpen('Timing', timingSection(record, trajectory.turns.get(row.turn), step)))
+  if (Array.isArray(record.attachments) && record.attachments.length > 0) box.append(accOpen(t('trajectory.attachment.list'), attachmentList(record.attachments)))
+  box.append(accOpen(t('trajectory.tab.timing'), timingSection(record, trajectory.turns.get(row.turn), step)))
   if (record.note !== undefined) box.append(trEmpty(String(record.note)))
   return box
 }
@@ -7919,32 +8080,32 @@ function schemaSection(row, record) {
     heading.className = 'tr-d-where'
     heading.textContent = rendered.name
     box.append(heading, trPre(rendered.description ?? ''))
-    box.append(trSection('Parameters'), htmlBlock(rendered.parameters))
+    box.append(trSection(t('trajectory.record.parameters')), htmlBlock(rendered.parameters))
     return box
   }
   const tool = (trajectory.tools ?? []).find((entry) => entry.name === name)
   if (tool === undefined) {
-    box.append(trEmpty('this profile does not describe that tool'))
+    box.append(trEmpty(t('trajectory.record.toolUndescribed')))
     return box
   }
   const heading = document.createElement('div')
   heading.className = 'tr-d-where'
   heading.textContent = tool.name
   box.append(heading, trPre(tool.description ?? ''))
-  box.append(trSection('Parameters'), trPre(JSON.stringify(tool.parameters ?? {}, null, 2)))
+  box.append(trSection(t('trajectory.record.parameters')), trPre(JSON.stringify(tool.parameters ?? {}, null, 2)))
   return box
 }
 
 function timingSection(record, turn, step) {
   return trRows([
-    ['Started', clock(record.startedAt)],
-    ['Duration', human(record.durationMs)],
-    ['TTFT', human(record.ttftMs)],
-    ['Turn duration', human(turn?.durationMs)],
-    ['Step duration', human(step?.durationMs)],
-    ['Input tokens', record.usage?.inputTokens],
-    ['Output tokens', record.usage?.outputTokens],
-    ['Token source', record.usageSource],
+    [t('trajectory.timing.started'), clock(record.startedAt)],
+    [t('trajectory.timing.duration'), human(record.durationMs)],
+    [t('trajectory.timing.ttft'), human(record.ttftMs)],
+    [t('trajectory.timing.turnDuration'), human(turn?.durationMs)],
+    [t('trajectory.timing.stepDuration'), human(step?.durationMs)],
+    [t('trajectory.timing.inputTokens'), record.usage?.inputTokens],
+    [t('trajectory.timing.outputTokens'), record.usage?.outputTokens],
+    [t('trajectory.timing.tokenSource'), record.usageSource],
   ])
 }
 
@@ -7960,8 +8121,9 @@ function timelineDuration(lasted) {
  * because DSH's overview invents no elapsed time for work in flight. Positions are fractions of the timeline's domain,
  * which starts at `startsAtMs` and lasts `totalMs`. Pure, and fenced so test/page-timeline-tip.test.ts judges it.
  */
-function timelineTickText(span, totalMs, startsAtMs) {
-  const label = 'turn ' + span.turn + ' · ' + ((span.kinds ?? []).join(', ') || 'records')
+function timelineTickText(span, totalMs, startsAtMs, words = (key, vars) => ({ 'trajectory.tick.turn': 'turn ' + vars.turn, 'trajectory.tick.records': 'records', 'trajectory.tick.startUnknown': 'start unknown', 'trajectory.tick.running': 'running' })[key]) {
+  /** `words` is the page's t() (#80), which the page passes; without it, as the unit test calls it, the English. */
+  const label = words('trajectory.tick.turn', { turn: span.turn }) + ' · ' + ((span.kinds ?? []).join(', ') || words('trajectory.tick.records', {}))
   const lasted = Math.max(0, (span.end - span.start) * totalMs)
   const duration = timelineDuration(lasted)
   let clock = null
@@ -7970,7 +8132,7 @@ function timelineTickText(span, totalMs, startsAtMs) {
     const two = (value) => String(value).padStart(2, '0')
     clock = two(at.getHours()) + ':' + two(at.getMinutes()) + ':' + two(at.getSeconds()) + '.' + String(at.getMilliseconds()).padStart(3, '0')
   }
-  const when = span.running ? [clock ?? 'start unknown', 'running'] : [clock, duration].filter((part) => part !== null)
+  const when = span.running ? [clock ?? words('trajectory.tick.startUnknown', {}), words('trajectory.tick.running', {})] : [clock, duration].filter((part) => part !== null)
   return { label, when: when.join(' · ') }
 }
 /* timeline-tip:end */
@@ -8021,11 +8183,15 @@ function overviewBars(records, trackPx) {
   return bars
 }
 
-/** A bar's words: the tick's label and clock, then the TTFT split when it has one, or how many records it merges. */
-function timelineRecordText(bar, totalMs, startsAtMs) {
-  const text = timelineTickText(bar, totalMs, startsAtMs)
-  const label = bar.merged > 1 ? text.label + ' · ' + bar.merged + ' records' : text.label
-  const split = Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) ? ' · TTFT ' + timelineDuration(bar.ttftMs) + ' · decoding ' + timelineDuration(bar.decodingMs) : ''
+/**
+ * A bar's words: the tick's label and clock, then the TTFT split when it has one, or how many records it merges.
+ * `words` is the page's t() (#80), which the page passes; without it, as the unit test calls it, the English.
+ */
+function timelineRecordText(bar, totalMs, startsAtMs, words) {
+  const say = words ?? ((key, vars) => (key === 'trajectory.bar.merged' ? ' · ' + vars.count + ' records' : ' · TTFT ' + vars.ttft + ' · decoding ' + vars.decoding))
+  const text = words === undefined ? timelineTickText(bar, totalMs, startsAtMs) : timelineTickText(bar, totalMs, startsAtMs, words)
+  const label = bar.merged > 1 ? text.label + say('trajectory.bar.merged', { count: bar.merged }) : text.label
+  const split = Number.isFinite(bar.ttftMs) && Number.isFinite(bar.decodingMs) ? say('trajectory.bar.ttft', { ttft: timelineDuration(bar.ttftMs), decoding: timelineDuration(bar.decodingMs) }) : ''
   return { label, when: text.when + split }
 }
 /* overview-bars:end */
@@ -8098,7 +8264,7 @@ function renderTimeline(timeline_, data = {}) {
     laneBox.dataset.lane = lane
     const label = document.createElement('span')
     label.className = 'tr-lane-label'
-    label.textContent = lane
+    label.textContent = t(`trajectory.lane.${lane}`)
     const track = document.createElement('div')
     track.className = 'tr-lane-track'
     laneBox.append(label, track)
@@ -8136,7 +8302,7 @@ function renderTimeline(timeline_, data = {}) {
           element.dataset.split = 'true'
           element.style.setProperty('--ttft', ((bar.ttftMs / (bar.ttftMs + bar.decodingMs)) * 100).toFixed(1) + '%')
         }
-        const text = timelineRecordText(bar, total, startsAtMs)
+        const text = timelineRecordText(bar, total, startsAtMs, t)
         element.dataset.tipLabel = text.label
         element.dataset.tipWhen = text.when
         element.setAttribute('aria-label', text.label + ' · ' + text.when)
@@ -8159,7 +8325,7 @@ function renderTimeline(timeline_, data = {}) {
        * The details wait for a 500 ms hover, as DSH's do, in the strip's own tip rather than a native title (which the
        * browser shows on its own delay, with no clock); the same words are the tick's accessible name.
        */
-      const text = timelineTickText(span, total, startsAtMs)
+      const text = timelineTickText(span, total, startsAtMs, t)
       tick.dataset.tipLabel = text.label
       tick.dataset.tipWhen = text.when
       tick.setAttribute('aria-label', text.label + ' · ' + text.when)
@@ -8351,9 +8517,48 @@ function renderTimeline(timeline_, data = {}) {
   }
   const legend = document.createElement('div')
   legend.id = 'timeline-legend'
-  legend.textContent = [human(total) + ' recorded', spans.length + ' turn(s)'].filter(Boolean).join(' · ')
+  legend.textContent = [t('trajectory.legend.recorded', { duration: human(total) }), t('trajectory.legend.turns', { count: spans.length })].filter(Boolean).join(' · ')
   timeline.append(legend)
 }
+
+/** The toolbar's status: how many records and turns, and the tokens in, out and estimated, in the page language. */
+function paintTrajectoryStatus(data) {
+  const status = document.getElementById('tr-status')
+  if (status === null) return
+  const ledgerData = data.ledger ?? {}
+  const bits = [t('trajectory.status.records', { count: ledgerData.records ?? trajectory.rows.length })]
+  if ((ledgerData.turns?.length ?? 0) > 0) bits.push(t('trajectory.status.turns', { count: ledgerData.turns.length }))
+  const tokens = ledgerData.tokens ?? {}
+  if (tokens.input !== undefined) bits.push(t('trajectory.status.in', { count: tokens.input }))
+  if (tokens.output !== undefined) bits.push(t('trajectory.status.out', { count: tokens.output }))
+  if (tokens.estimated !== undefined) bits.push(t('trajectory.status.estimated', { count: tokens.estimated }))
+  status.textContent = bits.join(' · ')
+}
+
+/**
+ * A language change redraws what the Trajectory area draws by script (#80): the table's heads and the separator, the
+ * rows (their window kept), the open inspector on the tab it showed, and the timeline (its zoom kept).
+ */
+window.addEventListener('heddle:locale', () => {
+  if (trajectory.data === null || trajectory.data === undefined || ledger.querySelector('#tr-table') === null) return
+  scheduleSetText(ledger.querySelector('#tr-table .tr-th-event'), t('trajectory.column.event'))
+  scheduleSetText(ledger.querySelector('#tr-table .tr-th-content'), t('trajectory.column.content'))
+  const resize = ledger.querySelector('.tr-d-resize')
+  if (resize !== null) {
+    resize.setAttribute('aria-label', t('trajectory.details.resize'))
+    resize.title = t('trajectory.details.resizeTitle')
+  }
+  paintTrajectoryStatus(trajectory.data)
+  renderRows()
+  const details = document.getElementById('tr-details')
+  const row = trajectory.rows[trajectory.selected]
+  if (details !== null && !details.hidden && row !== undefined) {
+    const shown = [...details.querySelectorAll('.tr-d-tab')].findIndex((tab) => tab.getAttribute('aria-selected') === 'true')
+    renderDetails(row)
+    if (shown > 0) details.querySelectorAll('.tr-d-tab')[shown]?.click()
+  }
+  renderTimeline(trajectory.timeline, trajectory.data)
+})
 
 /** DSH's toolbar: the duration mode, the two collapse switches, and search. */
 function wireTrajectoryToolbar() {
