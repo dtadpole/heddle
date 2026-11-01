@@ -99,7 +99,7 @@ window.__riskFixtureReady = () => { current = 'risk-fixture'; accessMode = 'work
     await key('Enter', 'Enter')
     await browser.waitFor('document.getElementById("access").disabled === false')
     assert.equal(writes.length, 1, 'only confirmed native Enable activation attempts a request')
-    assert.match(writes[0].path, /\/permission$/)
+    assert.equal(writes[0].path, '/api/sessions/risk-fixture/permission', 'confirmation targets only the fixture session')
     assert.deepEqual(JSON.parse(writes[0].body), { mode: 'danger-full-access', confirm: 'full-access' })
     assert.equal(await browser.evaluate('document.getElementById("access-label").textContent'), 'Workspace Write', 'fixture refused the write')
   } finally {
