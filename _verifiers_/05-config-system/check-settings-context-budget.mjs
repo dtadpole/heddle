@@ -1,9 +1,9 @@
 // The context row's values are judged where they are written (issue #212). Settings used to save a context window of
 // 0, a negative ratio, or a retained ratio at or above the trigger ratio, and every later turn on that server then
 // failed with "retainTokens (…) is not below thresholdTokens (…)" until someone repaired the patch by hand; the TS build
-// also saved a negative or fractional window, which the Rust build refused. Now each is refused at Save with 422
-// settings-rejected, in the same words on both builds — the schema's bounds in Schemastery's words, and the budget rule
-// in DSH's compaction-basic words — and the profile patch is left as it was. A valid budget is written and a turn runs
+// also saved a negative or fractional window, which the Rust build refused in other words. Now each is refused at Save
+// with 422 settings-rejected, in one sentence on both builds — the context rule's bounds and budget, in DSH's
+// compaction-basic words — and the profile patch is left as it was. A valid budget is written and a turn runs
 // on it after a restart; `config --validate` refuses a hand-edited patch in the same words. Runs against whichever
 // harness HEDDLE_BIN names, or the TypeScript build, on a scratch profile.
 import assert from 'node:assert/strict'
@@ -86,12 +86,13 @@ async function write(server, ns, update) {
 
 /** developer-six's rows from #212, and the neighbours of each bound, with the one sentence both builds say. */
 const REFUSED = [
-  [{ contextWindow: -5 }, 'context: $.contextWindow expected number >= 1 but got -5'],
-  [{ contextWindow: 1.5 }, 'context: $.contextWindow expected number multiple of 1 but got 1.5'],
-  [{ contextWindow: 0 }, 'context: $.contextWindow expected number >= 1 but got 0'],
-  [{ thresholdRatio: -1 }, 'context: $.thresholdRatio expected number >= 0 but got -1'],
-  [{ thresholdRatio: 2 }, 'context: $.thresholdRatio expected number <= 1 but got 2'],
-  [{ retainTokens: 2.5 }, 'context: $.retainTokens expected number multiple of 1 but got 2.5'],
+  [{ contextWindow: -5 }, 'context: contextWindow (-5) must be a positive integer'],
+  [{ contextWindow: 1.5 }, 'context: contextWindow (1.5) must be a positive integer'],
+  [{ contextWindow: 0 }, 'context: contextWindow (0) must be a positive integer'],
+  [{ thresholdRatio: -1 }, 'context: thresholdRatio (-1) must be a number in (0, 1]'],
+  [{ thresholdRatio: 2 }, 'context: thresholdRatio (2) must be a number in (0, 1]'],
+  [{ retainTokens: 2.5 }, 'context: retainTokens (2.5) must be a non-negative integer'],
+  [{ summarizeMaxTokens: 0 }, 'context: summarizeMaxTokens (0) must be a positive integer'],
   [{ thresholdRatio: 0 }, 'context: thresholdRatio (0) must be a number in (0, 1]'],
   [{ retainRatio: 0.99, thresholdRatio: 0.5 }, 'context: retainRatio (0.99) must be less than the resolved thresholdRatio (0.5)'],
   [{ thresholdTokens: 400, retainTokens: 500 }, 'context: retainTokens (500) must be less than thresholdTokens (400)'],
