@@ -8718,6 +8718,22 @@ function paintComposerAccess() {
   field.readOnly = readOnly || unavailable
   document.getElementById('subagent-readonly').hidden = !readOnly
   document.body.dataset.composer = readOnly ? 'read-only' : unavailable ? 'unavailable' : 'writable'
+  gateModelSeat()
+}
+
+/** A subagent's session offers no model choice (`SessionRules.modelSelectable`, issue #175); its seat still names it. */
+function gateModelSeat() {
+  const modelTrigger = document.getElementById('model-trigger')
+  if (modelTrigger === null) return
+  const gated = current !== null && !SessionRules.modelSelectable(listedMetas.get(current))
+  if (gated) {
+    modelTrigger.disabled = true
+    modelTrigger.dataset.subagent = 'true'
+    modelTrigger.title = 'Model selection is unavailable for a subagent session'
+  } else if (modelTrigger.dataset.subagent === 'true') {
+    delete modelTrigger.dataset.subagent
+    renderModelSeat()
+  }
 }
 
 /**
@@ -12934,7 +12950,7 @@ function renderModelSeat() {
     modelTrigger.title = 'no model'
     return
   }
-  modelTrigger.disabled = false
+  modelTrigger.disabled = modelTrigger.dataset.subagent === 'true'
   const option = configuredEndpoint(wanted)
   if (option === undefined) {
     /**
@@ -17189,7 +17205,17 @@ const SessionRules = (() => {
     return subagentMode(meta) === 'one-shot'
   }
 
-  return { subagentMode, sidebarSessions, composerReadOnly }
+  /**
+   * Whether a person may choose this session's model: not for any subagent's session, a teammate's included. DSH's
+   * `model` command is `available: (session) => sessions.subagentAddress(session.sessionId) === void 0`, and its options
+   * and onSelect throw "model selection is unavailable for addressed subagent sessions" (dsh-client-ui-model-selection)
+   * (issue #175); a child's model and effort come from its delegation.
+   */
+  function modelSelectable(meta) {
+    return subagentMode(meta) === null
+  }
+
+  return { subagentMode, sidebarSessions, composerReadOnly, modelSelectable }
 })()
 /* session-rules:end */
 
