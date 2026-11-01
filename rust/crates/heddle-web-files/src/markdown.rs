@@ -632,10 +632,19 @@ mod tests {
     #[test]
     fn a_footnote_is_a_reference_and_its_definition() {
         let html = render("A claim[^1].\n\n[^1]: the source\n");
-        assert!(html.contains("<sup>1</sup>"), "plain numbered reference: {html}");
-        assert!(html.contains("class=\"footnotes\""), "notes section: {html}");
+        assert!(
+            html.contains("<sup>1</sup>"),
+            "plain numbered reference: {html}"
+        );
+        assert!(
+            html.contains("class=\"footnotes\""),
+            "notes section: {html}"
+        );
         assert!(html.contains("↩"), "plain return marker: {html}");
-        assert!(!html.contains("href=") && !html.contains("id="), "no generated click targets: {html}");
+        assert!(
+            !html.contains("href=") && !html.contains("id="),
+            "no generated click targets: {html}"
+        );
         assert!(html.contains("the source"), "{html}");
         assert!(!html.contains("[^1]"), "not literal markdown: {html}");
     }
@@ -645,9 +654,20 @@ mod tests {
         let html = render(
             "claim[^n] again[^n].\n\n[^n]: first *paragraph*.\n\n    second **paragraph** with [bad](javascript:alert(1)).\n\nfollowing prose.",
         );
-        assert_eq!(html.matches("<sup>1</sup>").count(), 2, "same number for repeats: {html}");
-        assert_eq!(html.matches('↩').count(), 2, "one plain return per occurrence: {html}");
-        assert!(!html.contains("href=\"#fn") && !html.contains("id=\"fn"), "no generated targets: {html}");
+        assert_eq!(
+            html.matches("<sup>1</sup>").count(),
+            2,
+            "same number for repeats: {html}"
+        );
+        assert_eq!(
+            html.matches('↩').count(),
+            2,
+            "one plain return per occurrence: {html}"
+        );
+        assert!(
+            !html.contains("href=\"#fn") && !html.contains("id=\"fn"),
+            "no generated targets: {html}"
+        );
         assert!(html.contains("<em>paragraph</em>"), "{html}");
         assert!(html.contains("<strong>paragraph</strong>"), "{html}");
         assert!(html.contains("following prose."), "{html}");
@@ -656,15 +676,29 @@ mod tests {
 
     #[test]
     fn concatenated_answers_have_no_generated_footnote_ids_or_cross_answer_links() {
-        let html = ["Alpha", "Beta"].map(|name| render(&format!(
-            "{name}[^n] again[^n].\n\n[^n]: {name} **note**.\n\n    - {name} item"
-        ))).join("");
-        assert_eq!(html.matches("<section class=\"footnotes\">").count(), 2, "{html}");
+        let html = ["Alpha", "Beta"]
+            .map(|name| {
+                render(&format!(
+                    "{name}[^n] again[^n].\n\n[^n]: {name} **note**.\n\n    - {name} item"
+                ))
+            })
+            .join("");
+        assert_eq!(
+            html.matches("<section class=\"footnotes\">").count(),
+            2,
+            "{html}"
+        );
         assert_eq!(html.matches("<sup>1</sup>").count(), 4, "{html}");
         assert_eq!(html.matches('↩').count(), 4, "{html}");
-        assert!(!html.contains("href=") && !html.contains("id="), "no generated targets: {html}");
+        assert!(
+            !html.contains("href=") && !html.contains("id="),
+            "no generated targets: {html}"
+        );
         for name in ["Alpha", "Beta"] {
-            assert!(html.contains(&format!("{name} <strong>note</strong>")), "{html}");
+            assert!(
+                html.contains(&format!("{name} <strong>note</strong>")),
+                "{html}"
+            );
             assert!(html.contains(&format!("<li>{name} item</li>")), "{html}");
         }
     }
@@ -678,13 +712,34 @@ mod tests {
             "[^n]: [safe](https://example.com) <span id=\"fn-body\">body</span> [fragment](#fn-body)."
         ));
         assert!(html.contains("claim<sup>1</sup>"), "{html}");
-        assert!(html.contains("id=\"fnref-n\""), "raw citation retained: {html}");
-        assert!(html.contains("id=\"fn-author\""), "raw definition retained: {html}");
-        assert!(html.contains("href=\"#fnref-n\""), "raw backref retained: {html}");
-        assert!(html.contains("href=\"#fn-n\""), "ordinary fragment retained: {html}");
-        assert!(html.contains("href=\"https://example.com\""), "note link retained: {html}");
-        assert!(html.contains("id=\"fn-body\""), "note body ID retained: {html}");
-        assert!(html.contains("href=\"#fn-body\""), "note body fragment retained: {html}");
+        assert!(
+            html.contains("id=\"fnref-n\""),
+            "raw citation retained: {html}"
+        );
+        assert!(
+            html.contains("id=\"fn-author\""),
+            "raw definition retained: {html}"
+        );
+        assert!(
+            html.contains("href=\"#fnref-n\""),
+            "raw backref retained: {html}"
+        );
+        assert!(
+            html.contains("href=\"#fn-n\""),
+            "ordinary fragment retained: {html}"
+        );
+        assert!(
+            html.contains("href=\"https://example.com\""),
+            "note link retained: {html}"
+        );
+        assert!(
+            html.contains("id=\"fn-body\""),
+            "note body ID retained: {html}"
+        );
+        assert!(
+            html.contains("href=\"#fn-body\""),
+            "note body fragment retained: {html}"
+        );
     }
 
     #[test]
@@ -1121,7 +1176,10 @@ fn protect_raw_html<'a>(
     for node in root.descendants() {
         // Image labels are rendered as escaped alt text, not HTML; hiding them would change that text.
         if node.ancestors().any(|ancestor| {
-            matches!(ancestor.data.borrow().value, comrak::nodes::NodeValue::Image(_))
+            matches!(
+                ancestor.data.borrow().value,
+                comrak::nodes::NodeValue::Image(_)
+            )
         }) {
             continue;
         }
@@ -1175,14 +1233,14 @@ fn plain_footnotes(html: &str) -> String {
             // The numeric reference is the only comrak sup wrapping a semantic footnote-ref anchor.
             if let Some(anchor_end) = tag_end(html, end) {
                 let anchor = &html[end..anchor_end];
-                if anchor.contains(" data-footnote-ref>") {
-                    if let Some(close) = html[anchor_end..].find("</a></sup>") {
-                        out.push_str("<sup>");
-                        out.push_str(&html[anchor_end..anchor_end + close]);
-                        out.push_str("</sup>");
-                        index = anchor_end + close + "</a></sup>".len();
-                        continue;
-                    }
+                if anchor.contains(" data-footnote-ref>")
+                    && let Some(close) = html[anchor_end..].find("</a></sup>")
+                {
+                    out.push_str("<sup>");
+                    out.push_str(&html[anchor_end..anchor_end + close]);
+                    out.push_str("</sup>");
+                    index = anchor_end + close + "</a></sup>".len();
+                    continue;
                 }
             }
             out.push_str(tag);
