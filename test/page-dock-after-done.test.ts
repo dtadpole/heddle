@@ -146,7 +146,9 @@ function firstTurn(order: string[]): Promise<{ first: Seen | null; last: Seen }>
       async () => { await sessionLands; return frame('session', { session: N, event: { type: 'message' } }) },
       async () => { await doneLands; return frame('done', { session: N, text: 'answer', finishReason: 'stop', rounds: 1, denials: [] }) },
     ]
-    const sendTurn = async () => ({ ok: true, body: { getReader() { return { read: async () => (steps.length === 0 ? { done: true } : { done: false, value: await steps.shift()() }) } } } })
+    /** #128: the page follows the stream before it sends, and a server without detach streams the turn. */
+    const events = { whenOpen: async () => {} }
+    const sendTurn = async () => ({ ok: true, headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) }, body: { getReader() { return { read: async () => (steps.length === 0 ? { done: true } : { done: false, value: await steps.shift()() }) } } } })
     ${source('runTurn')}
     const settle = async () => { for (let round = 0; round < 10; round += 1) await new Promise((resolve) => setImmediate(resolve)) }
     ;(async () => {
