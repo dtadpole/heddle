@@ -146,6 +146,8 @@ test('a steer sent during a step that calls a tool is written after the result, 
   const home = fixtureDir('steer-tool')
   httpConfig({ home, baseUrl: double.url })
   const server = await startServer(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
+    // The machine's own HOME stays out of the run: its ~/.heddle and instructions are not the fixture's.
+    HOME: home,
     HEDDLE_HOME: home,
     HEDDLE_CONFIG: join(home, 'heddle.json'),
   })

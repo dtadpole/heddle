@@ -82,7 +82,7 @@ interface Harness {
   remount(): void
   row: Node
   root: Node
-  steer(text: string): Promise<boolean>
+  steer(text: string): Promise<string | false>
   requests: string[]
 }
 function harness(): Harness {
@@ -137,7 +137,8 @@ function harness(): Harness {
     })
   `, {
     root, row, requests,
-    fetch: async (_url: string, options: { body: string }) => { requests.push(options.body); return { ok: true } },
+    // #31: an accepted steer answers its id, which steerNow returns (the dock keeps the row as steering until the claim).
+    fetch: async (_url: string, options: { body: string }) => { requests.push(options.body); return { ok: true, status: 200, json: async () => ({ accepted: true, steerId: 'synthetic-steer' }) } },
     document: {
       createElement: (tag: string) => new Node(tag),
       createTextNode: (text: string) => { const node = new Node('#text'); node.textContent = text; return node },
@@ -251,6 +252,6 @@ test('actual history draw rebuilds masked goal input and ignores removed placeho
 
 test('actual steering request retains original synthetic provider-facing text', async () => {
   const h = harness()
-  assert.equal(await h.steer('use ' + fakeKey), true)
+  assert.notEqual(await h.steer('use ' + fakeKey), false, 'the steer was accepted')
   assert.equal(JSON.parse(h.requests[0]!).prompt, 'use ' + fakeKey)
 })

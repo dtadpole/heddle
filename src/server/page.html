@@ -9485,7 +9485,7 @@ function reacquireBaselines() {
          * And the dock's steering rows (#31): a steer claimed while the page was away never reached `claimSteer`, so the
          * shown session's view is read again and the rows reconciled from it. A replay usually brings the claim back on its
          * own; this read is for a `reset` (a server restart, a cursor too old) and for a return online, where no replay
-         * comes (developer-ten's review of d642122d, R1).
+         * comes.
          */
         await refreshSteers(composerKey)
       } while (baselineAgain)
