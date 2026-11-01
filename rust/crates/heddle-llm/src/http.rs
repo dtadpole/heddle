@@ -464,12 +464,81 @@ fn says_context_too_long(body: &str) -> bool {
 /// "context window", "too many tokens", "reduce the length of the messages", "exceeds the model's context",
 /// Anthropic's "prompt is too long" and `request_too_large`, "input/prompt/request is too long/large for this model"),
 /// otherwise `HTTP`. Case-insensitive.
+///
+/// A body that says the account's quota, balance or credits are spent is `QUOTA` at any status (S31).
 pub fn failure_code(status: u16, body: &str) -> &'static str {
     if matches!(status, 400 | 413 | 422) && says_context_too_long(body) {
         crate::error::CONTEXT_WINDOW_EXCEEDED
+    } else if says_quota_spent(body) {
+        crate::error::code::QUOTA_EXCEEDED
     } else {
         crate::error::code::HTTP
     }
+}
+
+/// Whether a refusal says the account's quota, balance or credits are spent (S31). DSH's `isQuotaExceededError`
+/// (`dsh-llm`), pattern for pattern, with `_`, `-` and white space as one separator and whole words only:
+/// "insufficient quota/balance/credit(s)", "quota/usage limit exceeded/exhausted/reached", "exceed(ed/s) [your/the]
+/// [current] quota", "balance/credit(s) exhausted/depleted", "out of credit(s)/budget". The TypeScript build matches the
+/// same five regular expressions (`QUOTA_PATTERNS`).
+fn says_quota_spent(body: &str) -> bool {
+    // Words are runs of letters and digits; `joined[k]` says whether only white space, `_` and `-` stand between word
+    // `k - 1` and word `k`, which is what the patterns' `[\s_-]+` allows. Punctuation between two words breaks a phrase.
+    let lowered = body.to_lowercase();
+    let mut words: Vec<&str> = Vec::new();
+    let mut joined: Vec<bool> = Vec::new();
+    let mut gap_is_spacing = true;
+    let mut start: Option<usize> = None;
+    for (at, c) in lowered.char_indices() {
+        if c.is_alphanumeric() {
+            if start.is_none() {
+                start = Some(at);
+            }
+            continue;
+        }
+        if let Some(from) = start.take() {
+            words.push(&lowered[from..at]);
+            joined.push(gap_is_spacing);
+            gap_is_spacing = true;
+        }
+        if !(c.is_whitespace() || c == '_' || c == '-') {
+            gap_is_spacing = false;
+        }
+    }
+    if let Some(from) = start {
+        words.push(&lowered[from..]);
+        joined.push(gap_is_spacing);
+    }
+    let is = |at: usize, options: &[&str]| words.get(at).is_some_and(|word| options.contains(word));
+    // Words `at..at + count` form one phrase: every gap inside it is spacing only.
+    let phrase = |at: usize, count: usize| {
+        (at + 1..at + count).all(|k| joined.get(k).copied().unwrap_or(false))
+    };
+    (0..words.len()).any(|at| {
+        // insufficient (quota|balance|credit|credits)
+        (is(at, &["insufficient"]) && is(at + 1, &["quota", "balance", "credit", "credits"]) && phrase(at, 2))
+            // (quota|usage limit) (exceeded|exhausted|reached)
+            || (is(at, &["quota"]) && is(at + 1, &["exceeded", "exhausted", "reached"]) && phrase(at, 2))
+            || (is(at, &["usage"])
+                && is(at + 1, &["limit"])
+                && is(at + 2, &["exceeded", "exhausted", "reached"])
+                && phrase(at, 3))
+            // exceed(ed|s) [your|the] [current] quota
+            || (is(at, &["exceed", "exceeded", "exceeds"]) && {
+                let mut next = at + 1;
+                if is(next, &["your", "the"]) {
+                    next += 1;
+                }
+                if is(next, &["current"]) {
+                    next += 1;
+                }
+                is(next, &["quota"]) && phrase(at, next - at + 1)
+            })
+            // (balance|credit|credits) (exhausted|depleted)
+            || (is(at, &["balance", "credit", "credits"]) && is(at + 1, &["exhausted", "depleted"]) && phrase(at, 2))
+            // out of (credit|credits|budget)
+            || (is(at, &["out"]) && is(at + 1, &["of"]) && is(at + 2, &["credit", "credits", "budget"]) && phrase(at, 3))
+    })
 }
 
 /// What a failed response says, in the provider's words rather than its JSON (`providerMessage`).
@@ -504,26 +573,115 @@ pub const WINDOW_REMEDY: &str = "The conversation is larger than this model's co
 /// not make the conversation fit — a refusal it fixed is retried and never shown — and in that case the conversation
 /// is larger than this model can take, so the remedy is a model with a larger window, or a `/compact` run on one before
 /// coming back.
+///
+/// A refused credential says so, and the provider's own words are left out (S31): DSH's chat shows only "API key is
+/// invalid" for an `AUTH` failure (401 or 403), since a provider's sentence can echo part of the key. A quota refusal
+/// adds DSH's "Request quota exhausted." to the provider's sentence.
 pub fn failure_message(endpoint: &str, status: u16, body: &str) -> String {
+    if matches!(status, 401 | 403) {
+        return format!("'{endpoint}' answered {status} — {AUTH_FAILURE}");
+    }
     let said = provider_message(body);
     let head = if said.is_empty() {
         format!("'{endpoint}' answered {status}")
     } else {
         format!("'{endpoint}' answered {status} — {said}")
     };
-    if failure_code(status, body) != crate::error::CONTEXT_WINDOW_EXCEEDED {
-        return head;
-    }
-    if head.ends_with(['.', '!', '?']) {
-        format!("{head} {WINDOW_REMEDY}")
+    let code = failure_code(status, body);
+    let remedy = if code == crate::error::CONTEXT_WINDOW_EXCEEDED {
+        WINDOW_REMEDY
+    } else if code == crate::error::code::QUOTA_EXCEEDED {
+        QUOTA_FAILURE
     } else {
-        format!("{head}. {WINDOW_REMEDY}")
+        return head;
+    };
+    if head.ends_with(['.', '!', '?']) {
+        format!("{head} {remedy}")
+    } else {
+        format!("{head}. {remedy}")
     }
 }
+
+/// A 401 or 403's sentence: DSH's "API key is invalid" (`message.failure.auth`), with where to look; the TypeScript
+/// build says the same words (`AUTH_FAILURE`).
+pub const AUTH_FAILURE: &str = "API key is invalid; check the key this endpoint reads.";
+
+/// What a quota refusal adds to the provider's sentence: DSH's `message.failure.quota` (`QUOTA_FAILURE`).
+pub const QUOTA_FAILURE: &str = "Request quota exhausted.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_credential_says_the_key_is_invalid_without_the_providers_words() {
+        // S31: DSH's chat shows only "API key is invalid" for an AUTH failure; the provider's sentence can echo the key.
+        let body = r#"{"error":{"message":"Incorrect API key provided: sk-abc****wxyz","code":"invalid_api_key"}}"#;
+        let said = failure_message("scripted", 401, body);
+        assert_eq!(
+            said,
+            "'scripted' answered 401 — API key is invalid; check the key this endpoint reads."
+        );
+        assert!(!said.contains("sk-"));
+        assert_eq!(
+            failure_message("scripted", 403, "forbidden"),
+            "'scripted' answered 403 — API key is invalid; check the key this endpoint reads."
+        );
+        assert_eq!(failure_code(401, body), crate::error::code::HTTP);
+    }
+
+    #[test]
+    fn a_quota_refusal_is_its_own_code_at_any_status_and_says_so() {
+        let openai = r#"{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota"}}"#;
+        assert_eq!(
+            failure_code(429, openai),
+            crate::error::code::QUOTA_EXCEEDED
+        );
+        assert_eq!(
+            failure_message("scripted", 429, openai),
+            "'scripted' answered 429 — You exceeded your current quota, please check your plan and billing details. Request quota exhausted."
+        );
+        let deepseek = r#"{"error":{"message":"Insufficient Balance"}}"#;
+        assert_eq!(
+            failure_code(402, deepseek),
+            crate::error::code::QUOTA_EXCEEDED
+        );
+        assert_eq!(
+            failure_message("deepseek", 402, deepseek),
+            "'deepseek' answered 402 — Insufficient Balance. Request quota exhausted."
+        );
+        for body in [
+            "quota_exceeded",
+            "usage limit reached for this month",
+            "credits exhausted",
+            "Balance depleted",
+            "you are out of budget",
+            "exceeds the quota",
+        ] {
+            assert_eq!(
+                failure_code(429, body),
+                crate::error::code::QUOTA_EXCEEDED,
+                "{body}"
+            );
+        }
+        // A plain rate limit stays HTTP (the retry policy's RATE_LIMIT), and so does a quota word on its own.
+        for body in [
+            r#"{"error":{"message":"Rate limit reached for requests"}}"#,
+            "quota. exceeded",
+            "the quota is fine",
+            "insufficiently quoted",
+        ] {
+            assert_eq!(failure_code(429, body), crate::error::code::HTTP, "{body}");
+        }
+        assert_eq!(
+            failure_message(
+                "scripted",
+                429,
+                r#"{"error":{"message":"Rate limit reached for requests"}}"#
+            ),
+            "'scripted' answered 429 — Rate limit reached for requests"
+        );
+    }
     use crate::error::CONTEXT_WINDOW_EXCEEDED;
 
     fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -679,9 +837,10 @@ mod tests {
                 "'chat' answered 400 — This model's maximum context length is 8192 tokens. {WINDOW_REMEDY}"
             )
         );
+        // Any other failure keeps the provider's sentence and adds nothing (a 401 or 403 says the key is invalid, S31).
         assert_eq!(
-            failure_message("chat", 401, r#"{"error":{"message":"bad key"}}"#),
-            "'chat' answered 401 — bad key"
+            failure_message("chat", 500, r#"{"error":{"message":"upstream broke"}}"#),
+            "'chat' answered 500 — upstream broke"
         );
         assert_eq!(failure_message("chat", 503, ""), "'chat' answered 503");
     }

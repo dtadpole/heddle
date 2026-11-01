@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'node:https'
 import type { IncomingMessage } from 'node:http'
 
 import { parseRetryAfter } from '../config/retry.ts'
-import { CONTEXT_WINDOW_EXCEEDED, ModelError } from './types.ts'
+import { CONTEXT_WINDOW_EXCEEDED, ModelError, QUOTA_EXCEEDED } from './types.ts'
 
 /**
  * The patterns a provider uses for "the request did not fit", checked case-insensitively.
@@ -30,11 +30,25 @@ const WINDOW_PATTERNS = [
   /(?:input|prompt|request) is too (?:long|large) for (?:this|the) model/i,
 ]
 
+/**
+ * Whether a refusal says the account's quota, balance or credits are spent (S31). DSH's `isQuotaExceededError`
+ * (`dsh-llm`), pattern for pattern: OpenAI's `insufficient_quota` ("You exceeded your current quota"), DeepSeek's
+ * "Insufficient Balance", and the usual "quota exceeded", "credits exhausted", "out of credits" wordings.
+ */
+const QUOTA_PATTERNS = [
+  /\binsufficient[\s_-]+(?:quota|balance|credits?)\b/i,
+  /\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|exhausted|reached)\b/i,
+  /\bexceed(?:ed|s)?[\s_-]+(?:(?:your|the)[\s_-]+)?(?:current[\s_-]+)?quota\b/i,
+  /\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b/i,
+  /\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b/i,
+]
+
 /** The error code one failed response deserves, given its status and body. */
 export function failureCode(status: number, body: string): string {
   if (status === 400 || status === 413 || status === 422) {
     if (WINDOW_PATTERNS.some((pattern) => pattern.test(body))) return CONTEXT_WINDOW_EXCEEDED
   }
+  if (QUOTA_PATTERNS.some((pattern) => pattern.test(body))) return QUOTA_EXCEEDED
   return 'HTTP'
 }
 
@@ -76,11 +90,24 @@ export const WINDOW_REMEDY =
  * window, or a `/compact` run on one before coming back.
  */
 export function failureMessage(endpoint: string, status: number, body: string): string {
+  /**
+   * A refused credential says so, and the provider's own words are left out (S31): DSH's chat shows only
+   * "API key is invalid" for an `AUTH` failure (401 or 403), since a provider's sentence can echo part of the key.
+   */
+  if (status === 401 || status === 403) return `'${endpoint}' answered ${status} — ${AUTH_FAILURE}`
   const said = providerMessage(body)
   const head = `'${endpoint}' answered ${status}${said ? ` — ${said}` : ''}`
-  if (failureCode(status, body) !== CONTEXT_WINDOW_EXCEEDED) return head
-  return `${/[.!?]$/.test(head) ? head : `${head}.`} ${WINDOW_REMEDY}`
+  const code = failureCode(status, body)
+  const remedy = code === CONTEXT_WINDOW_EXCEEDED ? WINDOW_REMEDY : code === QUOTA_EXCEEDED ? QUOTA_FAILURE : undefined
+  if (remedy === undefined) return head
+  return `${/[.!?]$/.test(head) ? head : `${head}.`} ${remedy}`
 }
+
+/** A 401 or 403's sentence: DSH's "API key is invalid" (`message.failure.auth`), with where to look. */
+export const AUTH_FAILURE = 'API key is invalid; check the key this endpoint reads.'
+
+/** What a quota refusal adds to the provider's sentence: DSH's `message.failure.quota`. */
+export const QUOTA_FAILURE = 'Request quota exhausted.'
 
 /**
  * The wire, on `node:http` rather than `fetch`.

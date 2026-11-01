@@ -14,6 +14,9 @@ pub mod code {
     /// The provider refused the request because it did not fit the window — the one HTTP failure the harness
     /// recovers from (the loop offers it on `agent/request-error`, compaction answers with a reduction and a retry).
     pub const CONTEXT_WINDOW_EXCEEDED: &str = "CONTEXT_WINDOW_EXCEEDED";
+    /// A refusal that says the account's quota or balance is spent, at any status (S31): DSH's `QUOTA_EXCEEDED_CODE`,
+    /// which its retry policy never repeats (a quota-worded 429 is not a rate limit).
+    pub const QUOTA_EXCEEDED: &str = "QUOTA";
     /// Any other non-2xx answer.
     pub const HTTP: &str = "HTTP";
     /// The socket was idle past the endpoint's `timeoutMs`.
