@@ -8592,6 +8592,11 @@ async function showSession(id) {
       note.setAttribute('role', 'alert')
       note.textContent = historyFailureText(response.status, response.statusText, failure)
       log.append(note)
+      /** The draft that takes its place starts from the default selection, not the vanished session's (A104). */
+      chosenEndpoint = null
+      chosenModel = defaultSelection.model
+      chosenEffort = defaultSelection.effort
+      renderModelSeat()
       paintEmptyState()
       applySessionAccess(null)
       /** And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open to lock. */
@@ -12802,6 +12807,8 @@ let endpointDefault = null
 /** What this page will ask with. `null` means "whatever the server defaults to". */
 let chosenEndpoint = null
 let chosenModel = null
+/** The run's default selection as the endpoint list last named it (A104): what a fresh draft starts from. */
+let defaultSelection = { model: null, effort: null }
 let chosenEffort = null
 /** Which pane the open menu shows: the two-row root, the model list or the effort list. */
 let modelPane = 'root'
@@ -13584,6 +13591,19 @@ async function loadEndpoints() {
     const body = await response.json()
     endpointOptions = Array.isArray(body.endpoints) ? body.endpoints : []
     endpointDefault = typeof body.default === 'string' ? body.default : null
+    /**
+     * A page that has chosen nothing yet starts from the run's default selection (the model row's defaultModel and
+     * defaultEffort, which the server already checked against the default endpoint; DSH's default model selection),
+     * so a fresh session shows and sends it. A session's own recorded selection still wins when one is opened.
+     */
+    defaultSelection = {
+      model: typeof body.defaultModel === 'string' ? body.defaultModel : null,
+      effort: typeof body.defaultEffort === 'string' ? body.defaultEffort : null,
+    }
+    if (chosenEndpoint === null && chosenModel === null && chosenEffort === null) {
+      chosenModel = defaultSelection.model
+      chosenEffort = defaultSelection.effort
+    }
   } catch (error) {
     setNote(`could not read the endpoint list: ${(error && error.message) || error}`)
   }
