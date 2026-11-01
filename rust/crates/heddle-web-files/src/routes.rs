@@ -27,7 +27,7 @@
 //!
 //! | Method and path | Answers |
 //! |---|---|
-//! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text · `403 {error, code: "workspace-file/unreadable"}` text-read permission denied · `500 {error, code: "workspace-file/read-failed"}` unexpected text-read I/O |
+//! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text · `400 {error, code: "workspace-file/unreadable"}` text-read permission denied (basename only, like #106) · `500 {error, code: "workspace-file/read-failed"}` unexpected text-read I/O |
 //! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf>"`, or for a leaf beyond visible ASCII (or with `"` or `\`) `attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded leaf>` (`attachment_disposition`) · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
 //! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
@@ -253,7 +253,9 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
 /// Scoped Heddle policy (#45), not a DSH HTTP status contract.
 fn file_read_error(error: FileReadError) -> Response {
     let (status, code) = match &error {
-        FileReadError::Unreadable => (StatusCode::FORBIDDEN, Some("workspace-file/unreadable")),
+        FileReadError::Unreadable { .. } => {
+            (StatusCode::BAD_REQUEST, Some("workspace-file/unreadable"))
+        }
         FileReadError::ReadFailed => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Some("workspace-file/read-failed"),
@@ -721,10 +723,12 @@ mod tests {
     async fn named_read_failures_have_scoped_status_and_no_host_details() {
         for (error, status, code, message) in [
             (
-                FileReadError::Unreadable,
-                Status::FORBIDDEN,
+                FileReadError::Unreadable {
+                    name: "denied.txt".into(),
+                },
+                Status::BAD_REQUEST,
                 "workspace-file/unreadable",
-                "cannot read file: permission denied",
+                "cannot read \"denied.txt\": permission denied",
             ),
             (
                 FileReadError::ReadFailed,

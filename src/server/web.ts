@@ -1046,7 +1046,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the token and must not be a way to read the whole machine — and the path that is checked is the
    * **canonical** one, so a symlink that resolves outside a root is refused rather than followed. What
    * cannot be shown is a status rather than an empty panel: `404` for a path that is not a file, and
-   * `415` for a file that is not UTF-8 text. Text-read permission denial is a named, path-free `403`;
+   * `415` for a file that is not UTF-8 text. Text-read permission denial is a basename-only `400`, like the folder picker (#106);
    * unexpected filesystem I/O is a named, path-free `500` (#45, scoped Heddle policy).
    */
   if (url.pathname === '/api/file' && request.method === 'GET') {
@@ -1098,8 +1098,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       if (code === 'workspace-file/unreadable' || code === 'workspace-file/read-failed') {
         // Scoped Heddle policy (#45), not DSH status parity; never return raw host errors.
         const denied = code === 'workspace-file/unreadable'
-        respond(response, denied ? 403 : 500, 'application/json', `${JSON.stringify({
-          error: denied ? 'cannot read file: permission denied' : 'cannot read file: I/O error', code,
+        respond(response, denied ? 400 : 500, 'application/json', `${JSON.stringify({
+          error: denied ? `cannot read "${basename(canonicalPath(wanted))}": permission denied` : 'cannot read file: I/O error', code,
         })}\n`)
       } else {
         const message = error instanceof Error ? error.message : String(error)

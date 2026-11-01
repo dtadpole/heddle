@@ -16,7 +16,9 @@ test('file preview permission refusal is named, path-free and distinct from nonf
   const scratch = mkdtempSync(join(resolve('.heddle-tmp'), 'file-preview-errors-'))
   const workspace = join(scratch, 'workspace')
   mkdirSync(workspace)
-  const denied = join(workspace, 'denied.txt')
+  const privateFolder = join(workspace, 'private-folder')
+  mkdirSync(privateFolder)
+  const denied = join(privateFolder, 'denied.txt')
   writeFileSync(denied, 'private fixture text')
   const mode = statSync(denied).mode & 0o777
   let app: Awaited<ReturnType<typeof boot>> | undefined
@@ -31,7 +33,7 @@ test('file preview permission refusal is named, path-free and distinct from nonf
     } catch (error) {
       assert.equal((error as NodeJS.ErrnoException).code, 'EACCES', 'real host denial, not a mock')
     }
-    const expected = { code: 'workspace-file/unreadable', message: 'cannot read file: permission denied' }
+    const expected = { code: 'workspace-file/unreadable', message: 'cannot read "denied.txt": permission denied' }
     assert.throws(() => readFileText(denied), expected)
     process.env.HEDDLE_HOME = join(scratch, 'home')
     process.env.HEDDLE_CONFIG = join(scratch, 'config.json')
@@ -50,10 +52,20 @@ test('file preview permission refusal is named, path-free and distinct from nonf
     assert.throws(() => readFileText(loop), { code: 'workspace-file/read-failed', message: 'cannot read file: I/O error' })
     const failed = await call(loop)
     assert.equal(failed.status, 500, 'unexpected filesystem failures are not nonfile or unsupported')
-    assert.deepEqual(await failed.json(), { error: 'cannot read file: I/O error', code: 'workspace-file/read-failed' })
+    assert.equal(failed.headers.get('content-type'), 'application/json')
+    assert.equal(failed.headers.get('cache-control'), 'no-store')
+    const failedBody = await failed.text()
+    assert.deepEqual(JSON.parse(failedBody), { error: 'cannot read file: I/O error', code: 'workspace-file/read-failed' })
+    assert.doesNotMatch(failedBody, /ELOOP|stat|realpath|loop\.txt/)
+    assert.equal(failedBody.includes(workspace), false, 'no host path in unexpected I/O errors')
     const refusal = await call(denied)
-    assert.equal(refusal.status, 403)
-    assert.deepEqual(await refusal.json(), { error: expected.message, code: expected.code })
+    assert.equal(refusal.status, 400, 'same unreadable status as folder/picker #106')
+    assert.equal(refusal.headers.get('content-type'), 'application/json')
+    assert.equal(refusal.headers.get('cache-control'), 'no-store')
+    const refusalBody = await refusal.text()
+    assert.deepEqual(JSON.parse(refusalBody), { error: expected.message, code: expected.code })
+    assert.equal(refusalBody.includes(privateFolder), false, 'basename only, no host directory')
+    assert.doesNotMatch(refusalBody, /EACCES|EPERM|open|private-folder/)
     assert.equal((await call(denied, false)).status, 401, 'authentication still precedes file access')
     for (const path of [workspace, join(workspace, 'missing.txt')]) assert.equal((await call(path)).status, 404)
     const binary = join(workspace, 'binary.bin')

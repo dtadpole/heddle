@@ -35,9 +35,9 @@ pub struct FileReading {
 /// Why a file was refused. The messages are the TypeScript build's, and a verifier matches `not a file`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FileReadError {
-    /// Scoped Heddle permission refusal (#45), not DSH HTTP status parity; no host path.
-    #[error("cannot read file: permission denied")]
-    Unreadable,
+    /// Permission refusal (#45): only the basename, never a host path; the API answers 400 like #106.
+    #[error("cannot read \"{name}\": permission denied")]
+    Unreadable { name: String },
     /// Unexpected filesystem I/O is not a missing file or unsupported text.
     #[error("cannot read file: I/O error")]
     ReadFailed,
@@ -97,7 +97,12 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
 fn read_failure(error: std::io::Error, path: &str) -> FileReadError {
     use std::io::ErrorKind;
     match error.kind() {
-        ErrorKind::PermissionDenied => FileReadError::Unreadable,
+        ErrorKind::PermissionDenied => FileReadError::Unreadable {
+            name: Path::new(path)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        },
         ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::IsADirectory => {
             FileReadError::NotAFile(path.to_owned())
         }
@@ -140,9 +145,11 @@ mod tests {
         assert_eq!(
             read_failure(
                 Error::new(ErrorKind::PermissionDenied, "private host path"),
-                "/private"
+                "/private/host/denied.txt"
             ),
-            FileReadError::Unreadable
+            FileReadError::Unreadable {
+                name: "denied.txt".into()
+            }
         );
         assert_eq!(
             read_failure(Error::other("private host path"), "/private"),
@@ -176,7 +183,7 @@ mod tests {
         assert_eq!(denial.kind(), std::io::ErrorKind::PermissionDenied);
         assert_eq!(
             read_file_text(&path, None).unwrap_err().to_string(),
-            "cannot read file: permission denied"
+            "cannot read \"denied.txt\": permission denied"
         );
         drop(restore);
         assert_eq!(

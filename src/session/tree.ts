@@ -304,8 +304,10 @@ export function readFileText(path: string, options: { readonly limit?: number } 
  */
 export class FilePreviewError extends Error {
   readonly code: 'workspace-file/unreadable' | 'workspace-file/read-failed'
-  constructor(code: 'workspace-file/unreadable' | 'workspace-file/read-failed') {
-    super(code === 'workspace-file/unreadable' ? 'cannot read file: permission denied' : 'cannot read file: I/O error')
+  constructor(code: 'workspace-file/unreadable', name: string)
+  constructor(code: 'workspace-file/read-failed')
+  constructor(code: 'workspace-file/unreadable' | 'workspace-file/read-failed', name?: string) {
+    super(code === 'workspace-file/unreadable' ? `cannot read "${basename(name!)}": permission denied` : 'cannot read file: I/O error')
     this.code = code
     this.name = 'FilePreviewError'
   }
@@ -314,7 +316,7 @@ export class FilePreviewError extends Error {
 /** Classify filesystem failures by code, not by a filename or an OS error's sentence. */
 function fileReadFailure(error: unknown, path: string): Error {
   const code = (error as NodeJS.ErrnoException | null)?.code
-  if (code === 'EACCES' || code === 'EPERM') return new FilePreviewError('workspace-file/unreadable')
+  if (code === 'EACCES' || code === 'EPERM') return new FilePreviewError('workspace-file/unreadable', basename(path))
   if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return new Error(`${path} is not a file`)
   return new FilePreviewError('workspace-file/read-failed')
 }

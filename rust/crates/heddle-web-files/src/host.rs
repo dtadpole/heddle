@@ -41,9 +41,9 @@ pub struct FileReading {
 /// Why a file has no text to show. The route maps each to a status and answers `{"error": <message>}`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FileReadError {
-    /// Permission refusal — Heddle's scoped `403 workspace-file/unreadable` policy (#45).
-    #[error("cannot read file: permission denied")]
-    Unreadable,
+    /// Permission refusal — `400 workspace-file/unreadable` like #106, basename only (#45).
+    #[error("cannot read \"{name}\": permission denied")]
+    Unreadable { name: String },
     /// Unexpected filesystem I/O — `500 workspace-file/read-failed`, never raw host errors.
     #[error("cannot read file: I/O error")]
     ReadFailed,
