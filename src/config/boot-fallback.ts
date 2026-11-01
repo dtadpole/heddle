@@ -65,11 +65,22 @@ export async function bootFallback(
       }
       const label = composed.row.id ?? composed.row.name
       const fallback = under?.find((candidate) => (candidate.row.id ?? candidate.row.name) === label)
-      if (fallback !== undefined && (await judgeRow(fallback.row, beneath)).problems.length === 0) {
+      if (fallback !== undefined) {
+        /**
+         * Only the config is taken from beneath; the row that runs keeps its own component, enablement and injections,
+         * so it is that row, with that config, that must pass — a hand-edited block can change more than the config.
+         * Its config fields take the provenance of the layers they now come from.
+         */
         const { config: _broken, ...rest } = composed.row
-        out.push({ ...composed, row: fallback.row.config === undefined ? rest : { ...rest, config: fallback.row.config } })
-        notes.push(`heddle: ${said} (in ${file}); this run uses the value beneath it until Settings saves or resets it`)
-        continue
+        const row = fallback.row.config === undefined ? rest : { ...rest, config: fallback.row.config }
+        const judgedFallback = await judgeRow(row, layers)
+        if (judgedFallback.checked && judgedFallback.problems.length === 0) {
+          const isConfig = (field: { readonly field: string }) => field.field === 'config' || field.field.startsWith('config.')
+          const fields = [...composed.fields.filter((field) => !isConfig(field)), ...fallback.fields.filter(isConfig)]
+          out.push({ ...composed, row, fields })
+          notes.push(`heddle: ${said} (in ${file}); this run uses the value beneath it until Settings saves or resets it`)
+          continue
+        }
       }
     }
     out.push(composed)

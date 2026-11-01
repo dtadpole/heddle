@@ -64,3 +64,35 @@ test('a refused value outside the block keeps its row and is named; a valid tree
     valid.done()
   }
 })
+
+test('the running row with the config from beneath must pass, and its config provenance follows the fallback', async () => {
+  // developer-two's case: beneath, the row is disabled with a bad value; a hand-edited block enables it with another.
+  const root = join(tmpdir(), `heddle-boot-fallback-${process.pid}-disabled`)
+  rmSync(root, { recursive: true, force: true })
+  const profile = join(root, 'home/profiles/dev')
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(join(profile, 'cordis.yml'), `- insert:\n    - id: context\n      name: ${SERVICE}\n      disabled: true\n      config:\n        contextWindow: -7\n`)
+  writeFileSync(join(profile, 'heddle.patch.yml'), `${SETTINGS_BEGIN}\n- patch:\n    - id: "context"\n      disabled: false\n      config: {"contextWindow": -5}\n${SETTINGS_END}\n`)
+  const env = { HEDDLE_HOME: join(root, 'home'), HOME: root }
+  try {
+    const layers = defaultLayers({ profile: 'dev', env })
+    const target = settingsTarget({ profile: 'dev' }, layers, env)
+    assert.ok(target !== undefined)
+    const rows = compose(layers, env)
+    assert.equal(rows[0]?.row.disabled, false, 'the block enables the row')
+    const result = await bootFallback(layers, rows, layersBeneathSettings(layers, target, env), target.path, env)
+    assert.deepEqual(result.rows[0]?.row.config, { contextWindow: -5 }, 'nothing falls back')
+    assert.ok(result.notes[0]?.endsWith('fix it in the file or run `heddle config --validate`'), result.notes[0])
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+
+  const f = fixture('provenance', block('{"contextWindow": -5}'))
+  try {
+    const result = await bootFallback(f.layers, compose(f.layers, f.env), layersBeneathSettings(f.layers, f.target, f.env), f.target.path, f.env)
+    const files = (result.rows[0]?.fields ?? []).filter((field) => field.field.startsWith('config')).map((field) => field.file)
+    assert.deepEqual([...new Set(files)], [join(f.root, 'home/profiles/dev/cordis.yml')], 'the config is reported from the layer it now comes from')
+  } finally {
+    f.done()
+  }
+})
