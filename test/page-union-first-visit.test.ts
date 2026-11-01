@@ -42,10 +42,10 @@ const verdicts = (() => {
   return start < 0 ? 'const turnVerdicts = { receive() {}, wait: () => new Promise(() => {}), lateTail() {}, endIdle() {} }' : page.slice(start, page.indexOf('\n})()\n', start) + 6)
 })()
 
-const MINE = 'session-12121212-1212-4121-8121-121212121212'
-const THEIRS = 'session-34343434-3434-4343-8343-343434343434'
-const B = 'session-56565656-5656-4565-8565-565656565656'
-const SECOND = 'session-78787878-7878-4787-8787-787878787878'
+const MINE = 'session-dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const THEIRS = 'session-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+const B = 'session-ffffffff-ffff-4fff-8fff-ffffffffffff'
+const SECOND = 'session-99999999-9999-4999-8999-999999999999'
 
 interface Union {
   stream(session: string, event: Record<string, unknown>): void
