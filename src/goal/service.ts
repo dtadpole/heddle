@@ -105,6 +105,11 @@ export interface FoldedGoal {
   readonly updatedAt?: string
   /** The latest mutation identity, including a clear tombstone. */
   readonly lastRef?: GoalRef
+  /**
+   * The current goal came with a fork's seed and was not changed in this session since (issue #166): its last
+   * `goal/change` is older than the session's own `session/created`, as a seed keeps the source's times.
+   */
+  readonly inheritedByFork?: true
 }
 
 /** Configuration of the goal service. */
@@ -262,8 +267,12 @@ export function foldGoal(events: readonly SessionEvent[]): FoldedGoal {
   let updatedAt: string | undefined
   let lastRef: GoalRef | undefined
   const seen = new Set<GoalId>()
+  /** The session's own birth, and when its goal last changed: a seeded change predates the birth. */
+  let bornAt: number | undefined
+  let changedAt: number | undefined
 
   for (const event of events) {
+    if (event.type === 'session/created' && bornAt === undefined) bornAt = Date.parse(String(event.at))
     const round = goalRoundOf(event)
     if (round !== undefined) {
       if (goal !== undefined && round.goalId === goal.id && round.revision === goal.revision && round.round > roundsStarted) {
@@ -273,6 +282,7 @@ export function foldGoal(events: readonly SessionEvent[]): FoldedGoal {
     }
     const change = decodeGoalChange(event)
     if (change === undefined) continue
+    changedAt = Date.parse(String(event.at))
 
     if ('cleared' in change) {
       if (goal === undefined) fail('a clear tombstone needs a current goal to clear')
@@ -322,6 +332,7 @@ export function foldGoal(events: readonly SessionEvent[]): FoldedGoal {
     ...(createdAt !== undefined ? { createdAt } : {}),
     ...(updatedAt !== undefined ? { updatedAt } : {}),
     ...(lastRef !== undefined ? { lastRef } : {}),
+    ...(goal !== undefined && bornAt !== undefined && changedAt !== undefined && changedAt < bornAt ? { inheritedByFork: true as const } : {}),
   }
 }
 
@@ -422,7 +433,7 @@ export class GoalService extends Service {
     const current = this.expectCurrent(folded, ref)
     const resumable: GoalPhase[] = ['active', 'paused', 'blocked']
     if (!resumable.includes(current.phase)) this.transitionError(current, 'resume', resumable)
-    if (current.phase === 'active' && this.activationOf(handle, current) === 'armed') {
+    if (current.phase === 'active' && this.activationOf(handle, current, folded.inheritedByFork === true) === 'armed') {
       throw new GoalError(`goal ${current.id} is already active and armed`, 'GOAL_INVALID_TRANSITION')
     }
     if (folded.roundsStarted >= current.maxGoalRounds) {
@@ -525,8 +536,14 @@ export class GoalService extends Service {
    * This is a deliberate divergence from DSH, which disarms a reopened goal to stop a restarted process
    * spending rounds unsupervised; the cost of that is exactly the behaviour the owner rejected.
    */
-  private activationOf(handle: SessionHandle, goal: GoalSnapshot): GoalActivation {
-    return this.activation.get(handle.id) ?? (goal.phase === 'active' ? 'armed' : 'disarmed')
+  private activationOf(handle: SessionHandle, goal: GoalSnapshot, inheritedByFork = false): GoalActivation {
+    /**
+     * A goal a fork brought along stays, with its phase, revisions and round count, but an active one is **disarmed**
+     * in the branch until a person resumes it there (issue #166; dsh-goal: "After session resume or fork, the goal
+     * ... [is] all still there. Automatic continuation is the exception: an active goal is disarmed"). Read from the
+     * log, so a restart keeps the branch quiet too; the owner's restart rule still re-arms a goal the session set.
+     */
+    return this.activation.get(handle.id) ?? (goal.phase === 'active' && !inheritedByFork ? 'armed' : 'disarmed')
   }
 
   private view(handle: SessionHandle, folded: FoldedGoal): GoalView | undefined {
@@ -536,7 +553,7 @@ export class GoalService extends Service {
       roundsStarted: folded.roundsStarted,
       createdAt: folded.createdAt ?? '',
       updatedAt: folded.updatedAt ?? '',
-      activation: this.activationOf(handle, folded.goal),
+      activation: this.activationOf(handle, folded.goal, folded.inheritedByFork === true),
     }
   }
 }
