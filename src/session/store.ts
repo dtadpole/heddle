@@ -496,19 +496,22 @@ export function inheritsAnswer(events: readonly SessionEvent[]): boolean {
  * Whether a fork inherits an event of this type.
  *
  * DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a child
- * here inherits the same — with four exceptions, each an event that belongs to the **source** rather than to the
+ * here inherits the same — with three exceptions, each an event that belongs to the **source** rather than to the
  * conversation, and that this store has no inherited-prefix mark to neutralise (DSH passes `inheritedEventCount` to every
  * projection, dsh-session/lib/index.js:1418-1426; heddle's folds read the whole log):
  *
  * - `session/created`: the child writes its own, with its own clock.
  * - `transcript/repaired`: it reports bytes cut from the source's file, not the child's.
- * - `goal/change`: heddle arms an active goal whenever a process folds one (src/goal/service.ts, `activationOf`), so an
- *   inherited goal would start spending rounds in the branch; DSH disarms it after a fork.
  * - `team/*`: the team journal names the source as its Lead (`teamId`), and `foldTeam` refuses a foreign one, so a
  *   copied journal would break the child's team tools.
  */
+/*
+ * A `goal/change` is inherited (issue #166): the branch keeps the goal, its phase, revisions and round count, as DSH's
+ * does, and the goal service reads an inherited active goal as disarmed (`foldGoal`'s `inheritedByFork`, from the
+ * seed's older times), so it spends no rounds in the branch until a person resumes it there.
+ */
 export function inheritedByFork(type: string): boolean {
-  return type !== 'session/created' && type !== 'transcript/repaired' && type !== 'goal/change' && !type.startsWith('team/')
+  return type !== 'session/created' && type !== 'transcript/repaired' && !type.startsWith('team/')
 }
 
 /** A recorded field that names one other event by its seq, in a log-only record (a compaction's own bookkeeping). */
