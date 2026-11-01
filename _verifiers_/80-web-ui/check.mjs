@@ -429,8 +429,8 @@ test('the page is served under a strict script policy that allows its own inline
   /**
    * The page-level Content-Security-Policy (defence in depth behind the sanitizer, live issues developer-two-6 and -7),
    * approved by the coordinator as option (1). Both builds compute it from the page as served: 'self' and the sha256
-   * of each inline script for scripts. Existing https: permissions for images, styles, fonts and media remain
-   * until the owner's actual-resource probe passes for the fixed-shell preview's own response policy (issue #50).
+   * of each inline script for scripts. Markdown images render in the main DOM, retaining HTTPS image permission;
+   * remote styles, fonts and media use the fixed HTML shell's separate response policy (issue #50).
    */
   const server = await startServer('csp')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -446,10 +446,10 @@ test('the page is served under a strict script policy that allows its own inline
     const expected = [
       "default-src 'self'",
       ["script-src 'self'", ...scripts.map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)].join(' '),
-      "style-src 'self' 'unsafe-inline' https:",
+      "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob: https:",
-      "font-src 'self' data: https:",
-      "media-src 'self' https:",
+      "font-src 'self' data:",
+      "media-src 'self'",
       "frame-src 'self'",
       "object-src 'none'",
       "base-uri 'self'",

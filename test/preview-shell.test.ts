@@ -7,7 +7,7 @@ import { boot, settle } from '../src/boot.ts'
 import { PREVIEW_CSP, PREVIEW_FRAME_CSP, PREVIEW_SHELL } from '../src/server/html.ts'
 import { startWebServer } from '../src/server/web.ts'
 
-// Authored under D067 STATICONLY. Do not run until the owner's resource gate permits suites.
+// The fixed authenticated shell has a response CSP independent of the main DOM's page policy.
 test('fixed HTML shell is authenticated, private, empty and independent of query paths', async () => {
   const root = mkdtempSync(join(tmpdir(), 'heddle-preview-shell-'))
   const home = join(root, 'home')

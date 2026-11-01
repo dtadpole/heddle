@@ -4168,19 +4168,19 @@ export function inlineScripts(html: string): string[] {
  *
  * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
  * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
- * follows every page change). The HTML preview now loads a fixed shell with its own response policy (#50), but
- * the existing main-page `https:` permissions remain until the owner's actual-resource probe passes. D067 currently
- * permits static work only; policy tightening is not inferred from source inspection. Rust `page_policy` agrees.
+ * follows every page change). The HTML preview loads a fixed shell with its own response policy (#50), separate
+ * from this main DOM policy. Markdown images render in the main DOM and retain HTTPS; remote styles, fonts and
+ * media belong to the HTML shell policy, not this page. Rust `page_policy` agrees.
  */
 export function pagePolicy(html: string, browserEnabled = false): string {
   const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)
   return [
     "default-src 'self'",
     ["script-src 'self'", ...hashes].join(' '),
-    "style-src 'self' 'unsafe-inline' https:",
+    "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
-    "font-src 'self' data: https:",
-    "media-src 'self' https:",
+    "font-src 'self' data:",
+    "media-src 'self'",
     browserEnabled ? 'frame-src http: https:' : "frame-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",

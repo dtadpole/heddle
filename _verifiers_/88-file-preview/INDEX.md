@@ -70,7 +70,7 @@ _tools_/local-build/run --ts -- node --test --test-name-pattern='an html documen
 HEDDLE_BIN=/path/to/heddle _tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
 ```
 
-## Fixed HTML shell #50 static checkpoint
+## Fixed HTML shell #50
 
 Owner design 808e serves a constant empty `GET /api/html/frame` behind the existing auth door. Its
 response CSP is `PREVIEW_CSP` plus `frame-ancestors 'self'` and `sandbox allow-same-origin`; the
@@ -97,15 +97,32 @@ and `two` instead of only `one`; its 150 ms observation is not a synchronization
 highlight parity test could not read its cwd-relative local dependency directory, absent in the new
 worktree even though ancestor module imports resolved. The parent subsequently linked existing
 dependencies for its build; this fixes that environment premise but does not retroactively pass the
-suite or waive the jobs failure. Build/browser results and the actual-resource premise remain pending;
-no blind full-suite retry or unrelated jobs test change is claimed here.
+suite or waive the jobs failure. At that shell checkpoint build/browser results and the actual-resource
+premise were pending; no blind full-suite retry or unrelated jobs test change is claimed here.
 
-The separately owned actual-resource browser probe is still pending. It must establish post-load
-injection resource/CSP behavior, including remote HTTPS resources and parent detached parsing, before
-main-page HTTPS permissions can be tightened. Those permissions are unchanged in both builds. Source
-inspection and authored local CSS/image assertions are not that PASS. If the owner probe disproves
-the fixed-shell premise, stop and revise the design. Owner10 must review the exact source commit
-before landing; this checkpoint neither lands on main nor updates a live server/settings.
+## Main DOM and fixed-shell resource policies
+
+Owner2b2f approved the separate #50 policy change on top of the fixed-shell candidate `b375c6ab`.
+Markdown images render in the main DOM, so the main page retains `img-src 'self' data: blob: https:`.
+In both builds only main-page `style-src`, `font-src` and `media-src` lose `https:`; their exact values
+are `style-src 'self' 'unsafe-inline'`, `font-src 'self' data:` and `media-src 'self'`. Script hashes,
+Browser-dependent frames, object, base, ancestor and form directives are unchanged. The HTML shell
+has its own response policy; `PREVIEW_CSP` and `PREVIEW_FRAME_CSP` retain all existing resource
+permissions and restrictions. No ephemeral store, server sanitizer or referrer meta is introduced.
+The owner's CSS-origin Referer observation is a non-regression and does not require a policy workaround.
+
+This patch depends on the fixed authenticated shell; it is not a standalone `srcdoc` change. Exact
+TypeScript and Rust assertions cover both Browser booleans and the unchanged child policies, and
+part 80's exact expected main-page policy is updated for the same three directives with HTTPS images
+kept. The old main-page policy fails the new focused TypeScript assertion specifically on the three
+remaining HTTPS permissions (exit 1); after the change the five focused TypeScript policy assertions
+pass (exit 0), and `npm run check` passes (exit 0), both using `_tools_/local-build/run --ts` after
+fresh D067 clearance. The part 80 check passes Node syntax checking; its browser runtime verdict is
+not inferred. Rust, build and browser validation remain the parent's responsibility;
+the earlier full-suite jobs failure remains known, not waived. The named pre-push public gate is
+`node _tools_/public-hygiene/gate.mjs --range b375c6ab..HEAD` on the normal separate branch. Source
+owner review must approve the exact candidate SHA before MAIN; this patch does not land on main or
+update any live server/settings.
 
 ## Read next
 
