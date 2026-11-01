@@ -65,7 +65,8 @@ function harness(deferredCommands = false) {
   }
   const api = runInNewContext(`
     let current = null, unavailableSession = null, selectedPath = 'old', view = 'chat', showGeneration = 0;
-    let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
+    let sessionStats = null, liveRounds = 0, liveUsage, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
+    const liveTurns = new Map();
     let sessionLoading = null, composerKey = 'S', accessMode;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map();

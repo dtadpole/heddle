@@ -63,7 +63,8 @@ function harness() {
   const api = runInNewContext(`
     let current = null, composerKey = '', view = 'chat', showGeneration = 0, unavailableSession = null, selectedPath = null;
     const unreadSessions = new Set(), sessionMetas = new Map();
-    let sessionStats, liveRounds, liveUsage, liveTurns, liveGenerationMs, liveDecodeTokens, liveRoundStartedAt;
+    let sessionStats, liveRounds, liveUsage, liveGenerationMs, liveDecodeTokens, liveRoundStartedAt;
+    const liveTurns = new Map();
     let seat = '', activeFolder = null, selected = null;
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map(), recordedSelections = new Set();

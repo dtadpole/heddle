@@ -483,7 +483,7 @@ function runTurnHarness(answer: string) {
   const calls: string[] = []
   const harness = runInNewContext(
     `
-    let runningTick = 0, liveTurns = 0, liveRounds = 0, liveUsage, stopRequested = false, directTurnPending = 0, directPendingKey = null;
+    let runningTick = 0, liveRounds = 0, liveUsage, stopRequested = false, directTurnPending = 0, directPendingKey = null;
     let current = 'S', activeFolder = null;
     const QUEUE_KEY_NONE = '';
     const stopButton = { disabled: true };

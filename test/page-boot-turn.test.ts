@@ -45,7 +45,6 @@ function harness(created: string): Run {
     const selectionForSeat = () => ({})
     let activeFolder = null
     let workspaceRoutes = 'served'
-    let liveTurns = 0
     let directTurnPending = 0
     let directPendingKey = null
     let stopRequested = false

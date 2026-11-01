@@ -35,7 +35,9 @@ interface Read {
   reject(error: Error): void
 }
 interface Snapshot {
-  current: string
+  current: string | null
+  counts: [string, number][]
+  dockHidden: boolean
   stats: unknown
   rounds: number
   usage?: unknown
@@ -59,7 +61,10 @@ interface Harness {
   baseline(): void
   completed(): void
   refresh(): Promise<void>
-  switchSession(): void
+  switchSession(id?: string): void
+  blank(): void
+  unavailable(): void
+  created(order: 'before' | 'after'): Promise<void>
   snapshot(): Snapshot
   reads: Read[]
   paints: Snapshot[]
@@ -73,14 +78,15 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
 function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
   const reads: Read[] = []
   const paints: Snapshot[] = []
-  const names = ['runTurn', 'sendTurn', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'drawKeptEvents', 'keptToDraw', 'refreshSessionStats', 'updateStatusBar',
+  const names = ['runTurn', 'sendTurn', 'adoptSession', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'drawKeptEvents', 'keptToDraw', 'refreshSessionStats', 'updateStatusBar',
     'addUsage', 'formatTokenCount', 'formatRate', 'formatCacheHit', 'formatDurationMs',
     'formatExactCount', 'formatWindow', 'statPanelRows']
   const h = runInNewContext(`
     let current = 'S', composerKey = 'S';
     const view = 'chat';
     let sessionStats = null, liveRounds = 3, liveUsage = initialUsage;
-    let liveTurns = 0, liveGenerationMs = 1000, liveDecodeTokens = 20, liveRoundStartedAt = 7;
+    ${page.match(/(?:let|const) liveTurns = [^\n]+/)?.[0]}
+    let liveGenerationMs = 1000, liveDecodeTokens = 20, liveRoundStartedAt = 7;
     let stopRequested = true;
     const stopButton = { disabled: true }, QUEUE_KEY_NONE = 'none', activeFolder = null;
     const runningSessions = new Set(['S']), runningSince = new Map([['S', 0]]), queues = new Map();
@@ -89,7 +95,10 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     let posts = 0, accepted = 0;
     const NOT_FORWARDED = new Set([502, 503, 504]), RETRY_DELAY_MS = 0;
     const hideApproval = () => {}, drawTurnFailure = () => {};
-    const turnVerdicts = { wait: async () => ({ session: 'S', outcome, message: 'provider failed' }) };
+    const turnVerdicts = { wait: async () => {
+      if (adoptionOrder === 'after') persistedUser('N', 20);
+      return { session: adoptionOrder ? 'N' : 'S', outcome, message: 'provider failed' };
+    } };
     let sessionListener;
     const events = { addEventListener(name, listener) {
       if (name === 'session') sessionListener = listener;
@@ -99,7 +108,13 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     const endpointOptions = [], endpointDefault = null;
     let chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set();
-    const unavailableSession = null;
+    let unavailableSession = null;
+    const firstTreeReady = Promise.resolve(), workspaceRoutes = 'absent';
+    const newConversationTarget = () => null;
+    let directTurnPending = 0, directPendingKey = null;
+    const rememberCurrent = () => {}, chooseWorkspace = () => {}, renderQueue = () => {}, pumpQueue = async () => {};
+    const fetchSessionAccess = async () => {}, stopTurn = async () => {};
+    let adoptionOrder = null;
     const windowFor = () => undefined;
     const cells = new Map();
     const statusBar = { hidden: false, querySelector(selector) {
@@ -125,6 +140,11 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
       posts += 1;
       if (admission === 'offline') throw new Error('offline fetch');
       if (admission === 'refused') return { ok: false, status: 400, text: async () => 'refused before admission' };
+      if (adoptionOrder) {
+        if (adoptionOrder === 'before') persistedUser('N', 20);
+        return { ok: true, status: 202, headers: { get: () => 'application/json' },
+          json: async () => ({ session: 'N', turn: 'new-turn' }) };
+      }
       persistedUser('S', 9 + posts);
       if (admission === 'lost-ack') throw new Error('acknowledgment lost');
       if (admission === 'detached') return {
@@ -143,7 +163,8 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
     ${sessionListenerSource()}
     function snapshot() {
       return { current, stats: sessionStats, rounds: liveRounds, usage: liveUsage,
-        turns: liveTurns, turnsText: statusBar.querySelector('[data-stat="turns"]').textContent,
+        counts: liveTurns instanceof Map ? [...liveTurns] : [['global', liveTurns]], dockHidden: statusBar.hidden,
+        turns: liveTurns instanceof Map ? (liveTurns.get(current) ?? 0) : liveTurns, turnsText: statusBar.querySelector('[data-stat="turns"]').textContent,
         generationMs: liveGenerationMs, decodeTokens: liveDecodeTokens,
         roundStartedAt: liveRoundStartedAt,
         steps: statusBar.querySelector('[data-stat="steps"]').textContent,
@@ -167,9 +188,12 @@ function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
          sessionListener({ data: JSON.stringify({ session: 'S', event: { type: 'turn/completed', seq: 11 } }) });
        },
        refresh: refreshSessionStats,
-       switchSession: () => {
-         current = 'T'; sessionStats = { turns: 9, steps: 10, usage: { inputTokens: 7, outputTokens: 2 } };
-         liveRounds = 4; liveUsage = { inputTokens: 3, outputTokens: 1 }; liveTurns = 2;
+       blank: () => { current = null; composerKey = QUEUE_KEY_NONE; sessionStats = null; stopRequested = false; updateStatusBar(); },
+       unavailable: () => { current = null; unavailableSession = 'missing'; updateStatusBar(); },
+       created: (order) => { adoptionOrder = order; return runTurn('own prompt', QUEUE_KEY_NONE); },
+       switchSession: (id = 'T') => {
+         current = id; sessionStats = { turns: 9, steps: 10, usage: { inputTokens: 7, outputTokens: 2 } };
+         liveRounds = 4; liveUsage = { inputTokens: 3, outputTokens: 1 }; if (liveTurns instanceof Map) liveTurns.set(id, liveTurns.get(id) ?? 2); else liveTurns = 2;
          liveGenerationMs = 200; liveDecodeTokens = 5; liveRoundStartedAt = 123;
          updateStatusBar();
        }, snapshot })
@@ -250,6 +274,43 @@ test('turn admission: an observed persisted prompt counts even when its acknowle
   // sendTurn retains its existing retry policy: both attempts really persisted one prompt in this fixture.
   assert.equal(h.admission().posts, 2)
   assert.equal(h.snapshot().turns, 2, 'count persisted messages rather than successful acknowledgments')
+})
+
+for (const order of ['before', 'after'] as const) {
+  test(`turn admission N1: no-current external user then created-session own user ${order} 202 adoption shows one turn`, async () => {
+    const h = harness('detached', 'error')
+    h.blank()
+    h.emitUser('external', 1)
+    assert.equal(h.snapshot().dockHidden, true, 'no session still has no dock')
+    await h.created(order)
+    const at = h.snapshot()
+    assert.equal(at.current, 'N', 'actual runTurn adopts the 202-created session')
+    assert.equal(at.turns, 1, 'its known persisted user survives either adoption order')
+    assert.equal(at.turnsText, '1 turns', 'the external user must not make the created session say two')
+    assert.deepEqual(at.counts, [['external', 1], ['N', 1]], 'both sessions retain only their own live facts')
+    const refreshing = h.refresh()
+    assert.equal(h.reads[0]!.url, '/api/sessions/N')
+    h.reads[0]!.resolve({ ok: true, json: async () => ({ stats: { turns: 1 } }) })
+    await refreshing
+    assert.equal(h.snapshot().turnsText, '1 turns', 'the created-session fold counts its prompt once')
+    assert.deepEqual(h.snapshot().counts, [['external', 1]], 'reading N clears N only, not the external session')
+  })
+}
+
+test('turn admission: a shown-session fold preserves another session count and unavailable history guards counting', async () => {
+  const h = harness()
+  h.emitUser('T', 1)
+  h.emitUser('S', 2)
+  assert.equal(h.snapshot().turnsText, '1 turns', 'T never changes S dock')
+  const refreshing = h.refresh()
+  pendingRead(h).resolve({ ok: true, json: async () => ({ stats: { turns: 1 } }) })
+  await refreshing
+  assert.deepEqual(h.snapshot().counts, [['T', 1]], 'only the read session clears')
+  h.unavailable()
+  const before = h.snapshot()
+  h.emitUser('T', 3)
+  h.emitUser('missing', 4)
+  assert.deepEqual(h.snapshot(), before, 'unavailable history cannot become a partial live count or dock')
 })
 
 test('turn admission: existing session filter and history cutoff count only new shown-session user facts', () => {

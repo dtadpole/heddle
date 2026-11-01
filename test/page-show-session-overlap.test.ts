@@ -49,7 +49,8 @@ function harness(options: { holdGoal?: boolean } = {}): Page {
   const opened = runInNewContext(
     `
     let current = null, unavailableSession = null, selectedPath = null, view = 'chat';
-    let sessionStats = null, liveRounds = 0, liveUsage, liveTurns = 0, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
+    let sessionStats = null, liveRounds = 0, liveUsage, liveGenerationMs = 0, liveDecodeTokens = 0, liveRoundStartedAt = null;
+    const liveTurns = new Map();
     let showGeneration = 0, selectionSeq = 0;
     const schedState = { drawer: null };
     const unreadSessions = new Set();

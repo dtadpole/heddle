@@ -79,7 +79,6 @@ function harness(): { page: Page; answer: (reply: Reply) => void } {
     const latestSelection = new Map();
     const serverSeats = new Map();
     const heldSeats = new Map();
-    let liveTurns = 0;
     const QUEUE_KEY_NONE = '';
     let activeFolder = null;
     const firstTreeReady = Promise.resolve(), workspaceRoutes = 'absent';

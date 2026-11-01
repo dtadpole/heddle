@@ -7686,7 +7686,6 @@ async function showSession(id) {
   sessionStats = null
   liveRounds = 0
   liveUsage = undefined
-  liveTurns = 0
   liveGenerationMs = 0
   liveDecodeTokens = 0
   liveRoundStartedAt = null
@@ -7805,6 +7804,7 @@ async function showSession(id) {
     adoptViewSelection(id, body, selectionAt)
     /** The same answer that carries the transcript carries the statistics its dock prints. */
     sessionStats = body.stats ?? null
+    liveTurns.delete(id)
     updateStatusBar()
     /** The session's own access mode, which is what the chip must show after a reload. */
     applySessionAccess(body.permission?.mode ?? null)
@@ -8672,7 +8672,13 @@ events.addEventListener('session', (message) => {
   // Keep all-session lifecycle bookkeeping above, but no transcript drawing while unavailable.
   if (unavailableSession !== null) return
   const shown = current ?? unavailableSession
-  if (shown && payload.session !== shown) return
+  if (shown && payload.session !== shown) {
+    // Retain other sessions' persisted facts without drawing them into this conversation (#116).
+    if (event.type === 'message' && event.message.role === 'user') {
+      liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
+    }
+    return
+  }
   /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
   if (sessionLoading !== null && payload.session === sessionLoading.id) {
     sessionLoading.events.push(payload)
@@ -8785,7 +8791,7 @@ function drawSessionEvent(payload) {
   } else if (event.type === 'message' && event.message.role === 'user') {
     // Count the same persisted fact as both backend folds, not a local send attempt (#116).
     // An admitted prompt still counts if its provider fails or its acknowledgment is lost.
-    liveTurns += 1
+    liveTurns.set(payload.session, (liveTurns.get(payload.session) ?? 0) + 1)
     updateStatusBar()
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
@@ -10120,6 +10126,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
         if (current !== null && current !== payload.session) void showSession(payload.session)
         else {
           current = payload.session
+          updateStatusBar()
           rememberCurrent()
           chooseWorkspace(null)
           adoptSession(payload.session)
@@ -10410,10 +10417,11 @@ let liveRounds = 0
 let liveUsage = undefined
 /**
  * Persisted user messages delivered since the durable fold was read. The same facts count in both backend
- * folds; a local submission or admission acknowledgment alone is not a message (#116). The session listener
- * filters other sessions and keeps events during history reads, whose cutoff excludes facts already folded.
+ * folds; a local submission or admission acknowledgment alone is not a message (#116). Keep each session's
+ * count even before a new turn adopts its id, without letting another session's messages contaminate its dock.
+ * History reads keep their events until the cutoff excludes facts already folded.
  */
-let liveTurns = 0
+const liveTurns = new Map()
 /**
  * The rate's halves for the round in flight: when its request opened, the time to its done frame, and the
  * output tokens that frame reported. Reset when the durable fold is re-read, so a finished turn is counted
@@ -10749,7 +10757,7 @@ function updateStatusBar() {
     statusBar.hidden = true
     return
   }
-  const turns = (sessionStats?.turns ?? 0) + liveTurns
+  const turns = (sessionStats?.turns ?? 0) + (liveTurns.get(current) ?? 0)
   const steps = (sessionStats?.steps ?? 0) + liveRounds
   const usage = addUsage(sessionStats?.usage, liveUsage)
   const cell = (name) => statusBar.querySelector(`[data-stat="${name}"]`)
@@ -10831,7 +10839,7 @@ async function refreshSessionStats() {
     sessionStats = body.stats ?? null
     liveUsage = undefined
     liveRounds = 0
-    liveTurns = 0
+    liveTurns.delete(id)
     liveGenerationMs = 0
     liveDecodeTokens = 0
     liveRoundStartedAt = null
