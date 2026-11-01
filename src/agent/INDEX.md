@@ -7,7 +7,7 @@ a running turn hand a scoped task to a child agent and receive its final answer.
 | File | What it is |
 |---|---|
 | [`loop.ts`](loop.ts) | one turn: record the prompt, ask the model, run the tools it asks for, repeat until it stops |
-| [`subagent.ts`](subagent.ts) | a child agent as its own session, attributed by `parentSession`/`origin`/`delegationDepth`, with depth and active limits and its answer folded from its own log |
+| [`subagent.ts`](subagent.ts) | a child agent as its own session, attributed by `parentSession`/`origin`/`delegationDepth`, with depth and active limits and its answer folded from its own log; at a server start, a child a previous process left mid-turn is closed and reported to its parent as interrupted (`reportInterrupted`, #170) |
 
 The DSH reading that grounds the delegation model is
 [`_context_/dsh-mechanisms/dsh-agent-teams.md`](../../_context_/dsh-mechanisms/dsh-agent-teams.md).

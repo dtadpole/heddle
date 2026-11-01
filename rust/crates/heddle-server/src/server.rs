@@ -1033,7 +1033,11 @@ fn listing_entry(meta: &SessionMeta, state: &AppState) -> Value {
         return value;
     };
     let snapshot = state.runs().snapshot(&meta.id);
-    object.insert("running".into(), Value::Bool(snapshot.running));
+    // A turn the route did not start counts too (issue #187): a background subagent's child, a teammate, a notice's
+    // or a goal round runs on the agent runtime, and DSH's list says such a session is running — its tree counts a
+    // parent's running children from it (`dsh-client-ui-workspace` `runningChildCount`, "1 subagent running").
+    let running = snapshot.running || state.harness().turns.is_live(&meta.id);
+    object.insert("running".into(), Value::Bool(running));
     if let Some(since) = snapshot.running_since {
         object.insert("runningSince".into(), Value::String(iso_time(since)));
     }
@@ -5786,6 +5790,57 @@ mod tests {
             self.interrupted.lock().unwrap().push(session.to_owned());
             self.is_live(session)
         }
+    }
+
+    /// Issue #187: a session whose turn runs on the agent runtime (a background subagent's child) is listed
+    /// running, though the route never started it; the idle parent is not.
+    #[tokio::test]
+    async fn the_listing_counts_a_turn_the_agent_runtime_holds_as_running() {
+        let parent = "session-00000000-0000-0000-0000-000000000001";
+        let child = "session-00000000-0000-0000-0000-000000000002";
+        let mut sessions = Sessions::with_one();
+        let mut rest = Map::new();
+        rest.insert("parentSession".into(), Value::String(parent.into()));
+        rest.insert("origin".into(), Value::String("subagent".into()));
+        sessions.metas.push(SessionMeta {
+            id: child.into(),
+            rest,
+            ..SessionMeta::default()
+        });
+        let runner = Arc::new(LiveTurns {
+            live: vec![child.to_owned()],
+            interrupted: std::sync::Mutex::new(Vec::new()),
+        });
+        let (router, _) = ServerBuilder::new(
+            Harness::new(
+                Arc::new(sessions),
+                Arc::new(Models),
+                runner,
+                Arc::new(Sandbox),
+                PathBuf::from("/work"),
+            ),
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("listing-live-child")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let (status, _, bytes) = call(&router, Method::GET, "/api/sessions", Some(&cookie)).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let running = |id: &str| {
+            body.as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["id"] == id)
+                .map(|entry| entry["running"].clone())
+        };
+        assert_eq!(running(child), Some(Value::Bool(true)), "{body}");
+        assert_eq!(running(parent), Some(Value::Bool(false)), "{body}");
     }
 
     #[tokio::test]

@@ -864,12 +864,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
      * "Weaving" row reconcile against. A page can miss the end of a turn (an error event, a reload mid-turn, a
      * dropped stream); without an authoritative answer that miss became a session that never stops looking active.
      */
+    /**
+     * A turn the route did not start counts too (issue #187): a background subagent's child, a teammate, a notice's
+     * or a goal round run on the agent runtime, and DSH's list says such a session is running — its tree counts a
+     * parent's running children from it (`dsh-client-ui-workspace` `runningChildCount`, "1 subagent running").
+     */
+    const turns = ctx.get('turns') as TurnRegistry | undefined
     const sessions = ctx.session.list().map((entry) => {
       const since = state.runningSince.get(entry.id)
       const completed = state.completedAt.get(entry.id)
       return {
         ...entry,
-        running: (state.running.get(entry.id) ?? 0) > 0,
+        running: (state.running.get(entry.id) ?? 0) > 0 || turns?.isRunning(entry.id) === true,
         ...(since !== undefined ? { runningSince: new Date(since).toISOString() } : {}),
         ...(completed !== undefined ? { turnCompletedAt: new Date(completed).toISOString() } : {}),
       }
@@ -944,7 +950,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
 
   if (url.pathname === '/api/endpoints' && request.method === 'GET') {
     const endpoints = ctx.model.list()
-    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint())
+    // The default selection rides along, so a composer opening a fresh session shows and sends it (DSH parity A104).
+    const described = describeEndpoints(endpoints, ctx.model.defaultEndpoint(), ctx.model.defaultSelection())
     /**
      * A provider that lists its models already knows each one's context window, and the composer's gauge needs
      * it. The declarative configuration always wins; only an endpoint that declares none asks its provider, and
@@ -1047,7 +1054,8 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
    * the token and must not be a way to read the whole machine — and the path that is checked is the
    * **canonical** one, so a symlink that resolves outside a root is refused rather than followed. What
    * cannot be shown is a status rather than an empty panel: `404` for a path that is not a file, and
-   * `415` for a file that is not UTF-8 text, each with the sentence the reader produced.
+   * `415` for a file that is not UTF-8 text. Text-read permission denial is a basename-only `400`, like the folder picker (#106);
+   * unexpected filesystem I/O is a named, path-free `500` (#45, scoped Heddle policy).
    */
   if (url.pathname === '/api/file' && request.method === 'GET') {
     const workspaces = ctx.workspace
@@ -1094,9 +1102,18 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
         `${JSON.stringify({ ...reading, ...(await renderSourceOffThread(reading.path, reading.text)) }, null, 2)}\n`,
       )
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      const status = message.includes('is not a file') ? 404 : 415
-      respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+      const code = (error as { code?: unknown } | null)?.code
+      if (code === 'workspace-file/unreadable' || code === 'workspace-file/read-failed') {
+        // Scoped Heddle policy (#45), not DSH status parity; never return raw host errors.
+        const denied = code === 'workspace-file/unreadable'
+        respond(response, denied ? 400 : 500, 'application/json', `${JSON.stringify({
+          error: denied ? `cannot read "${basename(canonicalPath(wanted))}": permission denied` : 'cannot read file: I/O error', code,
+        })}\n`)
+      } else {
+        const message = error instanceof Error ? error.message : String(error)
+        const status = message.includes('is not a file') ? 404 : 415
+        respond(response, status, 'application/json', `${JSON.stringify({ error: message })}\n`)
+      }
     }
     return
   }

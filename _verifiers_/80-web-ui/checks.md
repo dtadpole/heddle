@@ -39,6 +39,41 @@ grounded_in:
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
   not a historical rail-specific label.
+- [`check-user-secret-mask.mjs`](check-user-secret-mask.mjs) — issue #84's sent human bubble, driven through the
+  delivered TypeScript CLI or `HEDDLE_BIN` Rust CLI with a private fixture home/workspace and a port-zero local
+  provider double. Two deterministic, non-provider-issued `FAKE` credentials use installed literal `sk-` and
+  `ghp_` prefixes, valid numeric suffix minimums and a digit for the `sk-` shape. Actual textarea/Send gestures
+  judge actual asterisks by default, two independent SVG icon toggles, reveal-one-not-the-other, hide, a real
+  session-switch remount and page reload returning masked. A second ordinary UI message makes the minimap
+  reachable; its first-user preview is judged masked when accessible, otherwise explicitly diagnosed as unavailable.
+  The provider's real request must contain the exact original prompt, and the real user Copy handler must give
+  a browser-local `writeText` recorder that same raw original. No OS/global clipboard is read. No newly introduced
+  raw attribute, title or aria value is allowed; the existing user-row raw Copy snapshot is explicitly excluded.
+  Named sessions avoid automatic title calls and a 1,000,000-token window avoids provider compaction calls.
+  Startup, fetch plus body consumption, provider request bodies and browser/CLI/provider cleanup have bounds;
+  `HEDDLE_VERIFY_UI=0` uses the standard labelled skip, not an environment assertion. Author-only product-source
+  pin is `659588`, with identical product source at `422c7d2a` as confirmed by the parent. This entry records no
+  executed result; source-owner-ten exact review and both actual TypeScript/Rust execution gates belong to the
+  parent. Queue/steering buffers, goal/automatic messages and assistant rendering are outside this check, as are
+  real keys and any claim that server logs, storage or provider transport redact secrets.
+- [`check-user-text-surfaces.mjs`](check-user-text-surfaces.mjs) — issue #84 part 2, authored against product source
+  `60c67da5`, not an executed result. Actual `heddleCommand` honours both the TypeScript CLI and `HEDDLE_BIN`;
+  a private home/workspace and port-zero offline provider double hold the first real turn while Enter queues
+  deterministic valid `FAKE` `sk-`/`ghp_` values. The `sk-` key straddles the 200-character display boundary:
+  `#queue .preview` (the actual queue-preview surface) must mask before truncation, and its full `title` must mask
+  both keys, including the second wholly beyond the preview. Preview text is noninteractive with no eye/reveal
+  buttons; existing Edit opens the exact raw value, Cancel retains it, Save restores the masked preview/title,
+  and the actual second provider request receives the exact saved raw text with no cancelled edit.
+  Actual composer input/Enter submits `/goal <FAKE objective>`; the Command input bubble and `.hc-args` must
+  mask both keys, including after history reload, while `GET /api/goal` returns the exact raw objective.
+  **Goal result `.hc-text` and goal bar are intentionally OUT; this is not whole-screen privacy or backend,
+  log or transport redaction.** A private final profile patch removes `goal-driver`, no automatic goal round is
+  planned, `--max-rounds 1` caps explicit turns, and the double refuses calls beyond the two queue turns.
+  Named sessions avoid title calls; the private child environment inherits no provider/proxy/HEDDLE overrides.
+  Startup, hold response, request/body consumption and browser/CLI/provider cleanup are bounded; standard
+  `HEDDLE_VERIFY_UI=0` skips before fixtures. Existing part 1/provider/Copy checks are not duplicated.
+  No real keys, live Settings/auth files or host/private key data are read. Source/menu-owner review and both
+  delivered-build execution gates belong to the parent; this entry records authored intent, not runtime proof.
 - [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
