@@ -109,7 +109,7 @@ function harness() {
     ${source('rememberCurrent')}
     ${source('showSession')}
     ${legacyLoopSource}
-    ${registrationSource}
+    ${registrationSource};
     ({ show: showSession,
        saved: () => WorkspaceTree.savedSelection(localStorage.getItem(WorkspaceTree.SELECTION_KEY)),
        record: (id) => WorkspaceTree.selectionRecord(id), key: WorkspaceTree.SELECTION_KEY,
