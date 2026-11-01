@@ -8267,7 +8267,15 @@ function adoptLooseEvents(session, draw) {
   for (const payload of held) {
     if (payload.session !== session) continue
     if (sessionLoading !== null && payload.session === sessionLoading.id) sessionLoading.events.push(payload)
-    else drawSessionEvent(payload)
+    else {
+      drawSessionEvent(payload)
+      /**
+       * A fast first turn can complete while it is still held (the 202 answers at the first record or at the turn's end,
+       * whichever comes first). runTurn's `done` repeats the rest of the listener's settle half, but only the listener
+       * offers the answer's Branch action, so a held completion offers it here (developer-ten's N1 on #142).
+       */
+      if (payload.event?.type === 'turn/completed' && typeof payload.event.seq === 'number') markBranchable(payload.event.seq)
+    }
   }
 }
 
