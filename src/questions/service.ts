@@ -280,7 +280,9 @@ export class QuestionService extends Service {
    *
    * `continuable: false` asks a question that only this turn can take: if the turn ends without an answer and without a
    * Stop (the process died), the request reads as cancelled instead of `continued` (#228). It is written on the
-   * `question/asked` event only when false, so every other request's event is unchanged.
+   * `question/asked` event only when false, so every other request's event is unchanged. It is meant for untimed waits:
+   * a timed wait that runs out writes `pending` and drops its waiter, so the request then reads as cancelled and refuses
+   * an answer.
    */
   ask(
     handle: SessionHandle,

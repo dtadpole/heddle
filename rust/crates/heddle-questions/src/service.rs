@@ -345,7 +345,9 @@ impl QuestionService {
     /// `continuable: false` asks a question only this turn can take: if the turn ends without an answer and without a
     /// Stop (the process died), the request reads as cancelled (`interrupted`) instead of `continued`, and an answer is
     /// refused (#228). DSH keeps only `ask_user_question` calls answerable past their turn; `exit_plan_mode`'s plan
-    /// review fails closed after a reload. It is written on `question/asked` only when false.
+    /// review fails closed after a reload. It is written on `question/asked` only when false. It is meant for untimed
+    /// waits: a timed wait that runs out writes `pending` and drops its waiter, so the request then reads as cancelled
+    /// and refuses an answer.
     pub async fn ask_with(
         &self,
         session: &str,
