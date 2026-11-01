@@ -896,16 +896,21 @@ test('the overview zooms with the wheel, pans with a right-button drag, and a ri
     assert.equal(zoomed.zoomed, 'true', 'a wheel up zooms in')
     assert.ok(zoomed.trackWidth > before.trackWidth * 1.5, `the lanes are drawn wider than the strip (${before.trackWidth} to ${zoomed.trackWidth})`)
     /**
-     * A zoomed strip cannot be scrolled by focus (developer-ten's B1): a bar outside the view is no tab stop, and even
-     * focused from script it leaves the strip where it was, so the pointer still maps to the bars under it.
+     * A zoomed strip cannot be scrolled by focus (developer-ten's B1): its one Tab stop is a bar in view (N4), and a bar
+     * outside the view, even focused from script, leaves the strip where it was, so the pointer still maps to the bars
+     * under it.
      */
     const focusState = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const strip = document.getElementById('timeline').getBoundingClientRect()
       const bars = [...document.querySelectorAll('#timeline .tr-bar')]
-      const hidden = bars.filter((bar) => bar.tabIndex === -1)
-      hidden[0]?.focus()
-      return { bars: bars.length, hidden: hidden.length, scrollLeft: document.getElementById('timeline').scrollLeft }
+      const outside = bars.filter((bar) => { const box = bar.getBoundingClientRect(); return box.right < strip.left || box.left > strip.right })
+      const stops = bars.filter((bar) => bar.tabIndex === 0)
+      const stop = stops[0]?.getBoundingClientRect()
+      outside[0]?.focus()
+      return { bars: bars.length, outside: outside.length, stops: stops.length, stopInView: stop !== undefined && stop.right >= strip.left && stop.left <= strip.right, scrollLeft: document.getElementById('timeline').scrollLeft }
     })())`))
-    assert.ok(focusState.hidden < focusState.bars, `the bars in view stay tab stops (${JSON.stringify(focusState)})`)
+    assert.ok(focusState.outside > 0, `the zoom leaves bars outside the view (${JSON.stringify(focusState)})`)
+    assert.deepEqual([focusState.stops, focusState.stopInView], [1, true], `the strip's one Tab stop is a bar in view (${JSON.stringify(focusState)})`)
     assert.equal(focusState.scrollLeft, 0, `focusing a bar outside the view does not scroll the strip (${JSON.stringify(focusState)})`)
     assert.ok(Math.abs(zoomed.trackLeft + (zoomed.trackWidth - before.stripWidth) / 2) < 2, `about the pointer at the middle, the track stays centred (left ${zoomed.trackLeft})`)
 
@@ -1086,5 +1091,156 @@ test('a long ledger opens at its tail with a Load earlier first row, which keeps
   } finally {
     browser.close()
     await server.close()
+  }
+})
+
+/**
+ * S151 (R-developer-eleven-21), developer-ten's N4, N5 and zoom N7: a session of three turns, two close together and then
+ * a 2 s pause before the third, opened in its Trajectory view as the page restores it. The caller closes what it returns.
+ */
+async function openOverview(label) {
+  const server = await startServer(label, (work) => [
+    { toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'one' },
+    { toolCall: { name: 'list_dir', arguments: { path: work } } },
+    { text: 'two' },
+    { text: 'three' },
+  ])
+  const browser = await openBrowser({ width: 1440, height: 1000 })
+  const close = async () => {
+    browser.close()
+    await server.close()
+  }
+  try {
+    const cookie = await cookieFor(server.url)
+    const origin = new URL(server.url).origin
+    await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
+    const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    const session = opened.body.session?.id ?? opened.body.id
+    for (const [prompt, pause] of [['one', 100], ['two', 2_000], ['three', 0]]) {
+      const turn = await fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: server.work, session }),
+      })
+      assert.equal(turn.status, 200, `turn ${prompt} ran (${turn.status})`)
+      await turn.text()
+      await new Promise((resolve) => setTimeout(resolve, pause))
+    }
+    await browser.gotoSession(server.url, session)
+    assert.ok(await browser.waitFor('document.body.dataset.ready === "true"', 20_000), 'the page loaded')
+    await browser.evaluate(`(async () => { await showSession(${JSON.stringify(session)}); return true })()`)
+    await browser.evaluate(`document.querySelector('#views button[data-view="trajectory"]').click()`)
+    assert.ok(await browser.waitFor('document.querySelectorAll("#timeline .tr-bar").length > 0 && document.querySelector(\'#tr-table tbody tr[data-turn="3"]\') !== null', 20_000), 'the overview drew its bars and the ledger its three turns')
+  } catch (error) {
+    await close()
+    throw error
+  }
+  return { browser, close }
+}
+
+/** The overview's bars in reading order (by start, then lane), its Tab stops, and where the focus is among them. */
+const OVERVIEW_KEYS = `(() => {
+  const lanes = ['input', 'model', 'tools']
+  const bars = [...document.querySelectorAll('#timeline .tr-bar')].sort((a, b) => Number(a.dataset.x0) - Number(b.dataset.x0) || lanes.indexOf(a.dataset.lane) - lanes.indexOf(b.dataset.lane))
+  return { bars, stops: bars.filter((bar) => bar.tabIndex === 0), at: bars.indexOf(document.activeElement) }
+})()`
+const pressOn = (browser, key) => browser.evaluate(`JSON.stringify((() => {
+  document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }))
+  const { bars, stops, at } = ${OVERVIEW_KEYS}
+  return { at, last: bars.length - 1, stops: stops.length, stopIsFocus: stops[0] === document.activeElement }
+})())`).then(JSON.parse)
+
+test("the overview is one Tab stop that the arrows, Home and End move through its bars, as DSH's is one stop", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** N4: every bar was a Tab stop, so Tab walked through every bar of a session (up to some 900) before leaving the strip. */
+  const { browser, close } = await openOverview('overview-keys')
+  try {
+    const stops = JSON.parse(await browser.evaluate(`JSON.stringify((() => { const { bars, stops } = ${OVERVIEW_KEYS}; return { bars: bars.length, stops: stops.length, first: stops[0] === bars[0] } })())`))
+    assert.ok(stops.bars > 3, `the overview has bars to move through (${stops.bars})`)
+    assert.equal(stops.stops, 1, `the strip is one Tab stop, not one per bar (${JSON.stringify(stops)})`)
+    assert.ok(stops.first, 'at first the earliest bar')
+    await browser.evaluate(`(${OVERVIEW_KEYS}).stops[0].focus()`)
+    const right = await pressOn(browser, 'ArrowRight')
+    assert.deepEqual([right.at, right.stops, right.stopIsFocus], [1, 1, true], `ArrowRight moves to the next bar, which becomes the one stop (${JSON.stringify(right)})`)
+    const end = await pressOn(browser, 'End')
+    assert.deepEqual([end.at, end.stopIsFocus], [end.last, true], `End goes to the last bar (${JSON.stringify(end)})`)
+    const home = await pressOn(browser, 'Home')
+    assert.deepEqual([home.at, home.stopIsFocus], [0, true], `Home to the first (${JSON.stringify(home)})`)
+  } finally {
+    await close()
+  }
+})
+
+test("the overview's tip shows whole after a 500 ms hover, on top and inside the window, as DSH's tip floats below its span", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /** N5: the tip sat below the strip inside it, under the strip's clip: shown by its own state, never seen on screen. */
+  const { browser, close } = await openOverview('overview-tip')
+  try {
+    await browser.evaluate(`(() => { const bar = document.querySelector('#timeline .tr-bar[data-lane="model"]') ?? document.querySelector('#timeline .tr-bar'); bar.dispatchEvent(new PointerEvent('pointerenter')); return true })()`)
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    /**
+     * Seen means hit: a hit test honours every clip and every layer above the tip. The tip takes no pointer (so it never
+     * steals the hover), and a hit test passes over such an element, so the check lets it take one for the reading only.
+     */
+    const tip = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const tip = document.getElementById('timeline-tip')
+      const box = tip.getBoundingClientRect()
+      tip.style.pointerEvents = 'auto'
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)
+      tip.style.pointerEvents = ''
+      return { shown: !tip.hidden, text: tip.textContent, seen: top !== null && tip.contains(top), under: top === null ? null : top.tagName + '.' + top.className, cut: tip.scrollWidth > tip.clientWidth, inside: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight }
+    })())`))
+    assert.ok(tip.shown, `the tip shows after the hover (${tip.text})`)
+    assert.ok(tip.seen, `and is seen: nothing covers or clips it (under its middle: ${tip.under})`)
+    assert.ok(!tip.cut && tip.inside, `whole, inside the window (${JSON.stringify(tip)})`)
+  } finally {
+    await close()
+  }
+})
+
+test("in the default equal mode a focus window lights the rows of the bars it covers, and Escape clears it, as on DSH's overview", async (context) => {
+  if (!skipUnless(context, /web/.test((await runCli(['--help'])).stdout), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * Zoom N7: an equal-mode window was read as a stretch of time (a third to two thirds of the session for the middle
+   * turn's bars), which fell in the pause and lit none of that turn's rows. DSH's Escape on the overview clears its
+   * window; the page had no key for it.
+   */
+  const { browser, close } = await openOverview('overview-window')
+  try {
+    const span = JSON.parse(await browser.evaluate(`JSON.stringify((() => {
+      const strip = document.getElementById('timeline').getBoundingClientRect()
+      const boxes = [...document.querySelectorAll('#timeline .tr-bar[data-turn="2"]')].map((bar) => bar.getBoundingClientRect())
+      return { mode: document.getElementById('tr-duration')?.getAttribute('aria-pressed'), from: Math.min(...boxes.map((box) => box.left)) + 1, to: Math.max(...boxes.map((box) => box.right)) - 1, y: strip.top + strip.height / 2 }
+    })())`))
+    assert.notEqual(span.mode, 'true', 'the strip is in its default equal mode')
+    const fire = (type, init) => browser.evaluate(`document.getElementById('timeline').dispatchEvent(new PointerEvent(${JSON.stringify(type)}, { bubbles: true, cancelable: true, pointerId: 41, ...${JSON.stringify(init)} }))`)
+    await fire('pointerdown', { button: 0, buttons: 1, clientX: span.from, clientY: span.y })
+    await fire('pointermove', { button: 0, buttons: 1, clientX: span.to, clientY: span.y })
+    await fire('pointerup', { button: 0, clientX: span.to, clientY: span.y })
+    const lit = () => browser.evaluate(`JSON.stringify((() => {
+      const byTurn = {}
+      for (const tr of document.querySelectorAll('#tr-table tbody tr[data-turn]')) {
+        const turn = byTurn[tr.dataset.turn] ?? (byTurn[tr.dataset.turn] = { lit: 0, dimmed: 0 })
+        if (tr.dataset.focus === 'outside') turn.dimmed += 1
+        else turn.lit += 1
+      }
+      return { byTurn, window: getComputedStyle(document.querySelector('#timeline .tr-focus')).display }
+    })())`).then(JSON.parse)
+    const window = await lit()
+    assert.equal(window.window, 'block', 'the drag drew a window')
+    assert.ok(window.byTurn['2']?.lit > 0 && window.byTurn['2'].dimmed === 0, `every row of the middle turn is lit (${JSON.stringify(window.byTurn)})`)
+    assert.ok(window.byTurn['1']?.lit === 0 && window.byTurn['3']?.lit === 0, `and the turns either side are dimmed (${JSON.stringify(window.byTurn)})`)
+
+    await browser.evaluate(`(document.querySelector('#timeline .tr-bar[tabindex="0"]') ?? document.querySelector('#timeline .tr-bar')).focus()`)
+    await pressOn(browser, 'Escape')
+    const cleared = await lit()
+    assert.equal(cleared.window, 'none', 'Escape from the strip clears the window')
+    assert.ok(Object.values(cleared.byTurn).every((turn) => turn.dimmed === 0), `and every row is lit again (${JSON.stringify(cleared.byTurn)})`)
+  } finally {
+    await close()
   }
 })
