@@ -128,7 +128,7 @@ async function modelDouble() {
 function startServer(home, work, config) {
   const child = spawn(
     ...heddleCommand(['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', join(home, 'sessions')]),
-    { cwd: work, env: { ...process.env, HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: work, env: { ...process.env, HOME: home, HEDDLE_HOME: home, HEDDLE_CONFIG: config }, stdio: ['ignore', 'pipe', 'pipe'] },
   )
   let output = ''
   child.stdout.on('data', (chunk) => (output += chunk))
