@@ -235,6 +235,11 @@ pub struct SettingsView {
     pub has_document: bool,
     /// One per addressed row.
     pub namespaces: Vec<SettingsNamespace>,
+    /// Why the profile patch could not be read (#165), when it could not: the forms then show the running
+    /// configuration, as DSH's settings read projects the running configuration without parsing the file, and a
+    /// write is refused with this same sentence. It names the file and position and quotes none of the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_error: Option<String>,
 }
 
 /// Per-entry revisions for one process: 1 the first time an entry is read, one more each time the raw
@@ -277,13 +282,37 @@ pub struct PlannedWrite {
     pub ns: String,
 }
 
-/// A field name that holds a credential: `apiKey`, `apiToken`, `token`, `secret`, `password`,
-/// whatever the case. Such a field is a secret slot even when written literally.
+/// A field name that holds a credential, whatever the case and separators (issue #118), so the settings view never
+/// returns what `/api/endpoints` hides. The name is matched with its case folded and its separators dropped
+/// (`api_key`, `API-Key` and `apiKey` are one name), by what it ends with (`…key`, `…token`, `…secret`, `…password`,
+/// or a key, token or secret file such as `apiKeyFile`, whose path names the account holding the key), or by
+/// holding `password`, `authorization` or `credential` anywhere. `maxOutputTokens` ends in `tokens` and stays
+/// readable. Such a field is a secret slot even when written literally. The twin of `src/config/settings.ts`'s.
 pub fn is_secret_key(key: &str) -> bool {
-    matches!(
-        key.to_ascii_lowercase().as_str(),
-        "apikey" | "apitoken" | "token" | "secret" | "password"
-    )
+    const ENDINGS: [&str; 8] = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "keyfile",
+        "tokenfile",
+        "secretfile",
+    ];
+    const PARTS: [&str; 3] = ["password", "authorization", "credential"];
+    let name: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    ENDINGS.iter().any(|ending| name.ends_with(ending))
+        || PARTS.iter().any(|part| name.contains(part))
+}
+
+/// A field whose every value is a credential though its names are not: an endpoint's `headers` (issue #118), where
+/// an `Authorization: Bearer …` goes. The view keeps one secret slot per header, as `/api/endpoints` keeps the names.
+pub fn is_secret_container(key: &str) -> bool {
+    key.eq_ignore_ascii_case("headers")
 }
 
 /// Every entry's form for a run booted from `layers`, re-reading the target from disk.
@@ -295,6 +324,17 @@ pub fn describe_settings(
     revisions: &SettingsRevisions,
 ) -> Result<SettingsView, ConfigError> {
     let state = State::read(layers, target, env)?;
+    describe_state(&state, target, env, catalog, revisions)
+}
+
+/// Every entry's form for an already read state.
+fn describe_state(
+    state: &State,
+    target: Option<&SettingsTarget>,
+    env: &Env,
+    catalog: &dyn ComponentCatalog,
+    revisions: &SettingsRevisions,
+) -> Result<SettingsView, ConfigError> {
     let rows = compose(&state.current, env)?;
     let base_rows = compose(&state.base, env).ok();
     let anchor = anchor_dir(&state.current);
@@ -317,6 +357,7 @@ pub fn describe_settings(
         writable: target.is_some(),
         has_document: target.is_some_and(|target| target.path.exists()),
         namespaces,
+        document_error: None,
     })
 }
 
@@ -417,6 +458,8 @@ pub struct SettingsService {
     writing: Mutex<()>,
     live: Vec<String>,
     applier: Option<SettingsApplier>,
+    /// The last state read whole: the running configuration a broken patch falls back to (#165).
+    last_good: Mutex<Option<State>>,
 }
 
 /// Apply entry `ns`'s newly composed, resolved config to the running tree; an error is the running tree's refusal.
@@ -442,6 +485,7 @@ impl SettingsService {
             writing: Mutex::new(()),
             live: Vec::new(),
             applier: None,
+            last_good: Mutex::new(None),
         })
     }
 
@@ -457,13 +501,35 @@ impl SettingsService {
 
     /// Every entry's form, the target re-read.
     pub fn describe(&self) -> Result<SettingsView, ConfigError> {
-        let mut view = describe_settings(
-            &self.layers,
+        let mut last_good = self
+            .last_good
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, document_error) =
+            match State::read(&self.layers, self.target.as_ref(), &self.env) {
+                Ok(state) => {
+                    *last_good = Some(state.clone());
+                    (state, None)
+                }
+                // A hand edit broke the patch: the running configuration is intact, so its forms stay readable and
+                // only a write is refused (it re-reads the file and fails with this same sentence).
+                Err(error) if self.target.is_some() => {
+                    let state = last_good
+                        .clone()
+                        .unwrap_or_else(|| State::boot(&self.layers, self.target.as_ref()));
+                    (state, Some(error.problems().join("; ")))
+                }
+                Err(error) => return Err(error),
+            };
+        drop(last_good);
+        let mut view = describe_state(
+            &state,
             self.target.as_ref(),
             &self.env,
             self.catalog.as_ref(),
             &self.revisions,
         )?;
+        view.document_error = document_error;
         for entry in &mut view.namespaces {
             if self.applier.is_some() && self.live.contains(&entry.ns) {
                 entry.applies = "live".to_string();
@@ -657,6 +723,7 @@ fn rejected(error: ConfigError) -> SettingsError {
 }
 
 /// The layers with the target as it is on disk now, and without its settings block.
+#[derive(Clone)]
 struct State {
     target: Option<SettingsTarget>,
     /// The layers as booted, the target as it was then.
@@ -673,6 +740,24 @@ struct State {
 }
 
 impl State {
+    /// The run's boot layers as a state: what a broken patch falls back to before any read succeeded.
+    fn boot(layers: &[NamedLayer], target: Option<&SettingsTarget>) -> Self {
+        let base = layers
+            .iter()
+            .filter(|layer| target.is_none_or(|target| Path::new(&layer.file) != target.path))
+            .cloned()
+            .collect();
+        Self {
+            target: target.cloned(),
+            boot: layers.to_vec(),
+            before: String::new(),
+            after: String::new(),
+            managed: Vec::new(),
+            current: layers.to_vec(),
+            base,
+        }
+    }
+
     fn read(
         layers: &[NamedLayer],
         target: Option<&SettingsTarget>,
@@ -1091,6 +1176,17 @@ fn walk_secrets(
                         path: path.clone(),
                         set: !matches!(child, LayerValue::Null),
                     });
+                } else if let (true, LayerValue::Mapping(headers)) =
+                    (is_secret_container(key), child)
+                {
+                    for (name, header) in headers {
+                        path.push(name.clone());
+                        slots.push(SecretSlot {
+                            path: path.clone(),
+                            set: !matches!(header, LayerValue::Null),
+                        });
+                        path.pop();
+                    }
                 } else {
                     walk_secrets(child, path, env, slots);
                 }
@@ -1165,13 +1261,28 @@ fn apply_write(
                 "a settings write names a field, not the whole config".to_string(),
             ));
         }
+        let into_headers = path[..path.len() - 1]
+            .iter()
+            .any(|segment| is_secret_container(segment))
+            || path.last().is_some_and(|last| {
+                is_secret_container(last)
+                    && value
+                        .is_some_and(|value| value.as_object().is_some_and(|map| !map.is_empty()))
+            });
         if path.iter().any(|segment| is_secret_key(segment))
+            || into_headers
             || secrets
                 .iter()
                 .any(|secret| path.starts_with(secret) || secret.starts_with(path))
         {
             return Err(SettingsError::Rejected(format!(
                 "'{}' is a secret: credentials come from the environment or the machine file, not the profile",
+                path.join(".")
+            )));
+        }
+        if value.is_some_and(holds_secret) {
+            return Err(SettingsError::Rejected(format!(
+                "the value for '{}' holds a credential field; credentials come from the environment or the machine file, not the profile",
                 path.join(".")
             )));
         }
@@ -1239,6 +1350,20 @@ fn secret_paths(raw: &LayerValue) -> Vec<Vec<String>> {
         .into_iter()
         .map(|slot| slot.path)
         .collect()
+}
+
+/// Whether a written value carries a credential field or header value anywhere inside it (issue #118).
+fn holds_secret(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(holds_secret),
+        Value::Object(map) => map.iter().any(|(key, child)| {
+            is_secret_key(key)
+                || (is_secret_container(key)
+                    && child.as_object().is_some_and(|headers| !headers.is_empty()))
+                || holds_secret(child)
+        }),
+        _ => false,
+    }
 }
 
 fn holds_reference(value: &Value) -> bool {
@@ -1344,6 +1469,61 @@ fn unset_path(value: &mut LayerValue, path: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_names_are_secret_by_ending_or_part_and_headers_hold_only_secrets() {
+        for name in [
+            "apiKey",
+            "api_key",
+            "API-Key",
+            "apiToken",
+            "token",
+            "accessToken",
+            "refreshToken",
+            "secret",
+            "clientSecret",
+            "password",
+            "dbPassword",
+            "privateKey",
+            "apiKeyFile",
+            "authorization",
+            "credentials",
+        ] {
+            assert!(is_secret_key(name), "{name} is a credential name");
+        }
+        for name in [
+            "maxOutputTokens",
+            "contextWindow",
+            "model",
+            "baseUrl",
+            "keyboard",
+            "headers",
+        ] {
+            assert!(!is_secret_key(name), "{name} is not");
+        }
+        assert!(is_secret_container("headers") && !is_secret_container("header"));
+        let raw = LayerValue::from(serde_json::json!({
+            "endpoints": [{
+                "name": "one",
+                "apiKeyFile": "/srv/keys/one.txt",
+                "clientSecret": "s3",
+                "headers": { "Authorization": "Bearer abc", "X-Trace": "on" },
+            }],
+        }));
+        let paths: Vec<String> = secret_slots(&raw, &Env::default())
+            .into_iter()
+            .map(|slot| slot.path.join("."))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "endpoints.0.apiKeyFile",
+                "endpoints.0.clientSecret",
+                "endpoints.0.headers.Authorization",
+                "endpoints.0.headers.X-Trace",
+            ]
+        );
+    }
     use crate::{Schema, StaticCatalog, default_layers};
     use serde_json::json;
 
@@ -1933,6 +2113,89 @@ mod tests {
             applied.lock().unwrap().len(),
             1,
             "a restart entry is not applied"
+        );
+        std::fs::remove_dir_all(&fixture.root).ok();
+    }
+
+    #[test]
+    fn a_broken_patch_keeps_the_forms_on_the_running_configuration_and_refuses_only_a_write() {
+        // #165: DSH's settings read projects the running configuration; only a write parses the file.
+        let fixture = Fixture::new("broken-patch");
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap();
+        service
+            .write("tools", &update(json!({ "bashTimeoutMs": 45000 })), None)
+            .unwrap();
+        let good = entry(&service.describe().unwrap(), "tools").value.clone();
+        let text = std::fs::read_to_string(fixture.patch_file()).unwrap();
+        let broken = format!("{text}proxyKey: sk-live-ABCDEF0123456789\nbroken: [unclosed\n");
+        std::fs::write(fixture.patch_file(), &broken).unwrap();
+        let view = service.describe().unwrap();
+        let problem = view.document_error.clone().expect("the view says why");
+        assert!(problem.contains("is not valid YAML"), "{problem}");
+        assert!(
+            !problem.contains("sk-live") && !problem.contains("proxyKey"),
+            "none of the file: {problem}"
+        );
+        assert_eq!(
+            entry(&view, "tools").value,
+            good,
+            "the running configuration, as last read whole"
+        );
+        let wire = serde_json::to_value(&view).unwrap();
+        assert!(wire["documentError"].is_string());
+        let refused = service
+            .write("tools", &update(json!({ "label": "x" })), None)
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("is not valid YAML"),
+            "{refused}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.patch_file()).unwrap(),
+            broken,
+            "the file is left as it was"
+        );
+        std::fs::write(fixture.patch_file(), &text).unwrap();
+        assert_eq!(
+            service.describe().unwrap().document_error,
+            None,
+            "a fixed file reads whole again"
+        );
+        std::fs::remove_dir_all(&fixture.root).ok();
+    }
+
+    #[test]
+    fn a_patch_broken_before_any_read_falls_back_to_the_boot_configuration() {
+        let fixture = Fixture::new("broken-at-boot");
+        std::fs::write(
+            fixture.patch_file(),
+            "- patch:\n    - id: tools\n      config: {bashTimeoutMs: 7}\n",
+        )
+        .unwrap();
+        let service = SettingsService::new(
+            &fixture.options(Vec::new()),
+            &[],
+            fixture.env.clone(),
+            Box::new(fixture.catalog.clone()),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.patch_file(),
+            "- patch:\n    - id: tools\n      config: {bashTimeoutMs: [7\n",
+        )
+        .unwrap();
+        let view = service.describe().unwrap();
+        assert!(view.document_error.is_some());
+        assert_eq!(
+            entry(&view, "tools").value["bashTimeoutMs"],
+            json!(7),
+            "the value the run booted with"
         );
         std::fs::remove_dir_all(&fixture.root).ok();
     }

@@ -235,6 +235,13 @@ test('a settled answer is drawn as the document it is, and the renderer is the s
   try {
     await browser.goto(child.url)
     assert.ok(await browser.waitFor('document.getElementById("log") !== null', 20_000), 'the panel is up')
+    /**
+     * The turn below is posted by another client, so the page sees it only through its event stream: it is posted once
+     * that stream is open. Posted as the page loaded, it raced the stream's opening. Main won by about 10 ms, and #128's
+     * shared stream, which opens once its tab holds the lock, lost: its source was made 9 ms after the turn was posted
+     * and received none of the turn's frames.
+     */
+    assert.ok(await browser.waitFor("document.body.dataset.connection === 'open'", 20_000), 'the page follows the event stream')
     const cookie = await cookieFor(child.url)
 
     const turn = await fetch(new URL('/api/turn', child.url), {

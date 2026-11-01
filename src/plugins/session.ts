@@ -32,6 +32,10 @@ export default class SessionPlugin extends SessionService {
       onEvent: (handle, event) => {
         ctx.emit('session/event', { session: handle.id, event })
       },
+      /** Every title the store writes, through the same seam: the Web UI pushes it as `session/renamed` (#33). */
+      onRenamed: (id, title) => {
+        ctx.emit('session/renamed', { session: id, title })
+      },
     })
 
     /**

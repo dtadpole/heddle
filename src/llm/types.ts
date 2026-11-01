@@ -102,6 +102,12 @@ export interface GenerateRequest {
    * does not hold can never be displayed and silently not sent.
    */
   readonly reasoningEffort?: string
+  /**
+   * Set by `ModelService.resolve` when `reasoningEffort` is the model's declared default because the request named
+   * none (#157), as DSH's `prepareCall` records `adapterDefaults: { reasoningEffort: true }`: the level the call runs at,
+   * marked as a default rather than a person's choice.
+   */
+  readonly reasoningEffortDefault?: true
   /** Ask the transport to stream; adapters that must stream ignore `false`. */
   readonly stream?: boolean
   /** Opaque identity carried through the waterfall for logging and retries. */
@@ -497,6 +503,15 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'session/event'(payload: { readonly session: string; readonly event: { readonly seq: number; readonly at: string; readonly type: string; readonly [key: string]: unknown } }): void
+
+    /**
+     * A session's title was written: a person's rename, the first message's fallback, a fork's name or the title model's
+     * answer (#33). The title lives in the meta record, so no `session/event` carries it.
+     *
+     * @param payload - the session id and the title now stored (`''` when cleared).
+     * @mode emit
+     */
+    'session/renamed'(payload: { readonly session: string; readonly title: string }): void
   }
 }
 
