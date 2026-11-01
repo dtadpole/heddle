@@ -490,7 +490,14 @@ test('search never lists a New session placeholder, open or not, even by its wor
   ]
   const workspaces = [workspace('w-kestrel', '/code/kestrel', { sessionIds: sessions.map((meta) => meta.id) })]
   assert.deepEqual(hits(tree.search(workspaces, sessions, 'kestrel')), ['s-talked', 's-named'], 'by the workspace name: the conversations, no placeholder')
-  assert.deepEqual(hits(tree.search(workspaces, sessions, 'kestrel', { current: 's-blank-open' })), ['s-talked', 's-named'], 'not even the open one')
+  /**
+   * Not even the open one. `search` takes no `current` — the page never gives it one — so the open blank reaches it only
+   * among the rows it is handed. The tree's own rows hold it (`withOpenBlank` keeps the open blank and drops the older one),
+   * and those rows are what the page searches when the sessions read fails (`treeIndex`, #58).
+   */
+  const drawnRows = tree.flatten(tree.deriveGroups(workspaces, sessions, { current: 's-blank-open' })).flatMap((group) => group.sessions)
+  assert.deepEqual(drawnRows.map((meta) => meta.id).filter((id) => id.startsWith('s-blank')), ['s-blank-open'], 'the tree draws the open blank, and only that one')
+  assert.deepEqual(hits(tree.search(workspaces, drawnRows, 'kestrel')), ['s-talked', 's-named'], 'not even the open one')
   assert.deepEqual(hits(tree.search(workspaces, sessions, 'named')), ['s-named'], 'a titled zero-turn session is found by its title')
 })
 

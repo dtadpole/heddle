@@ -1,8 +1,8 @@
 ---
 title: The heddle-server crate
 created: 2026-10-23T00:55:27Z
-modified: 2026-10-31T05:45:53Z
-version: 0.4.5
+modified: 2026-10-31T15:30:32Z
+version: 0.4.6
 description: The Rust port crate for the HTTP server, the token, the live stream and the page it serves — its public API, the route table with owners, and the port plan.
 grounded_in:
   - source: rust/ULTIMATE_GOAL.md
@@ -61,7 +61,7 @@ As of 2026-10-24 on main `445ea43`.
 | `selection` | the endpoint, model and reasoning-level ladders, and the running-turn rule for the `model/request` waterfall |
 | `command` | `heddle web`'s entry point under D-043: `Command::Web`, `Args` (`host`, `port`, `endpoint`, `max_rounds`, `dry_run`, `json`), `Context` (the `Harness`, the event hub, feature routers, session views, asset roots, the secret path, boot notes, a shutdown token) and `async fn run(..) -> i32`, printing `runWeb`'s lines byte for byte |
 | `adapters` | the trait implementations over the real crates, as each crate's API reaches `main`: `StoreSessions` (`SessionService` over `heddle_session::SessionService`) and `session_event_listener` (the store's event listener, publishing into the `EventHub`) |
-| `services` | the seam to the harness: `SessionService`, `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, `TurnInterrupter` (the agent runtime's live-turn registry, so a Stop also reaches a goal round or a reminder's turn the server did not start, #93), `SessionActivity` with `ActivityItem { kind, id, label }` (work besides turns that an archive is refused by or stops: the jobs row's live jobs, DSH's `workspace/session-activity`), collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
+| `services` | the seam to the harness: `SessionService` (with `on_renamed`: a store that announces every title it writes, each pushed as `session/renamed`, #33; `TitleListener` is its listener), `WorkspaceService`, `ModelService`, `TurnRunner`, `SandboxService`, `ApprovalService`, `GoalService`, `TodoService`, `TeamService`, `AttachmentReader`, `MarkdownRenderer`, `SessionStatsProjector`, `TurnInterrupter` (the agent runtime's live-turn registry, so a Stop also reaches a goal round or a reminder's turn the server did not start, #93), `SessionActivity` with `ActivityItem { kind, id, label }` (work besides turns that an archive is refused by or stops: the jobs row's live jobs, DSH's `workspace/session-activity`), collected in `Harness`; `Harness::builder` / `HarnessBuilder` for the binary's composition, `Harness::unavailable` for a boot whose plugins have not loaded (the door answers; every service route refuses, naming the missing service), and `attachment_reader` / `markdown_renderer` / `stats_projector` to wrap a function as one of the optional services |
 | `server` | `ServerOptions`, `ServerBuilder` (`mount`, `mount_router`, `session_view`, `into_router`, `start`, which attaches the approval answerer and serves every connection with Nagle off, as Node does), `AppState`, `Feature`, `SessionView`, `WebServer` (`url`, `announce`, `close`, which detaches the answerer), `DryRunPlan`, `DEFAULT_PORT = 3082`, `CORE_ROUTES` |
 
 ### How a feature crate mounts its routes
