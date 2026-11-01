@@ -368,6 +368,7 @@
    * Configuration: one form per profile entry, over `GET` and `POST /api/settings` (DSH's settings page). A row is a
    * label, its control and a Reset for a value this profile overrides; the actions span the form.
    */
+  #settings-config-note[data-state='error'] { color: #ff7b72; }
   #settings-config { display: flex; flex-direction: column; gap: .35rem; }
   .settings-entry { border: 1px solid var(--line); border-radius: 10px; }
   .settings-entry > summary { display: flex; gap: .6rem; align-items: baseline; padding: .5rem .6rem; font-size: .875rem; cursor: pointer; }
@@ -14698,6 +14699,7 @@ function renderSettingsConfig(view, failure) {
   const host = document.getElementById('settings-config')
   const note = document.getElementById('settings-config-note')
   host.replaceChildren()
+  delete note.dataset.state
   if (failure !== undefined) {
     note.textContent = `could not read the settings: ${failure}`
     return
@@ -14716,7 +14718,7 @@ function renderSettingsConfig(view, failure) {
   if (typeof view.documentError === 'string' && view.documentError.length > 0) {
     note.textContent = `The profile patch could not be read, so these values are the running configuration and Save is refused until the file is fixed: ${view.documentError}`
     note.dataset.state = 'error'
-  } else delete note.dataset.state
+  }
   for (const entry of view.namespaces) host.append(settingsEntryForm(entry))
 }
 

@@ -56,7 +56,6 @@ function startServer(args, env) {
   })
 }
 
-/** The committed projections, with the home placeholder resolved as each build resolves it. */
 async function call(server, method, path, body) {
   const response = await fetch(`${server.base}${path}?token=${server.token}`, {
     method,
