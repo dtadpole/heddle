@@ -1161,16 +1161,35 @@ fn new_session_preset(state: &AppState, named: Option<&str>) -> Option<String> {
 }
 
 fn service_refusal(error: ServiceError, status: StatusCode) -> Response {
+    // A workspace list whose file does not read is a `500` whichever route met it (#196).
+    let status = if error.code.as_deref() == Some(crate::services::WORKSPACE_REGISTRY_UNREADABLE) {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        status
+    };
     match error.code {
         Some(code) => respond::error_with_code(status, error.message, code),
         None => respond::error(status, error.message),
     }
 }
 
+/// A workspace list whose file does not read (#196): `500 {error, code: "workspace/registry-unreadable"}` with the file's
+/// name and the reason, which every route that reads or writes the list answers before anything else — web.ts answers
+/// the service's throw the same way, wherever it comes from. `None` when the list reads.
+fn unreadable_registry(workspaces: &dyn crate::services::WorkspaceService) -> Option<Response> {
+    workspaces
+        .readable()
+        .err()
+        .map(|error| service_refusal(error, StatusCode::INTERNAL_SERVER_ERROR))
+}
+
 async fn create_session(State(state): State<AppState>, body: JsonBody) -> Response {
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     let branch = body
         .non_empty("branch")
         .map(canonical_path)
@@ -1209,6 +1228,9 @@ async fn folder_session(State(state): State<AppState>, body: JsonBody) -> Respon
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     let folder = body.non_empty("folder").map(canonical_path);
     let Some(folder) = folder.filter(|folder| workspaces.owns(folder)) else {
         return respond::error(
@@ -1689,6 +1711,9 @@ async fn tree(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     // A folder that is gone (#141) is judged before it is read, as web.ts does: under a root it is `404` with DSH's
     // `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the
     // folder is gone instead of listing it empty; outside every root it is the `400` below. It is placed through
@@ -1737,6 +1762,9 @@ async fn list_workspaces(State(state): State<AppState>) -> Response {
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     let sessions = state.harness().sessions.list();
     match workspaces.views(&sessions) {
         Ok(views) => respond::json(StatusCode::OK, &json!({"workspaces": views})),
@@ -1790,6 +1818,9 @@ async fn add_workspace(State(state): State<AppState>, body: JsonBody) -> Respons
             );
         }
     }
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     match workspaces.add(&path, name) {
         Ok((record, created)) => {
             if created {
@@ -1814,6 +1845,9 @@ async fn initialize_default_workspace(State(state): State<AppState>) -> Response
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     let sessions = state.harness().sessions.list();
     match workspaces.initialize_default(&sessions) {
         Ok(record) => respond::json(
@@ -1839,6 +1873,9 @@ async fn rename_workspace(
     let Some(title) = body.str("title") else {
         return respond::error(StatusCode::BAD_REQUEST, "a title is required");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     match workspaces.rename(&id, title) {
         Ok(Some(record)) => {
             state.events().push(
@@ -1862,6 +1899,9 @@ async fn remove_workspace(
     let Some(workspaces) = state.harness().workspaces.as_ref() else {
         return respond::plugin_missing("workspace");
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     if !workspaces.find(&id) {
         return respond::error(StatusCode::NOT_FOUND, format!("no workspace {id}"));
     }
@@ -1898,6 +1938,9 @@ async fn insert_workspace_before(State(state): State<AppState>, body: JsonBody) 
             );
         }
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     match workspaces.reorder(id, before) {
         Ok((order, moved)) => {
             // Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an
@@ -2163,6 +2206,9 @@ async fn html_preview(
             "that path is not under any workspace root",
         );
     };
+    if let Some(refusal) = unreadable_registry(workspaces.as_ref()) {
+        return refusal;
+    }
     let path = canonical_path(wanted);
     if !workspaces.owns(&path) {
         return respond::error(
@@ -2381,6 +2427,17 @@ async fn turn(State(state): State<AppState>, body: JsonBody) -> Response {
         {
             return preset_fixed(recorded);
         }
+    }
+    // A turn that names a folder adopts it into the workspace list once its session is open (`ensure_owner` below).
+    // With a list whose file does not read, the turn is refused here, before a session is opened or created, with the
+    // error every workspace route answers (#196): the adoption would have written a fresh list over the damaged one,
+    // and whether the folder is already known cannot be told without the list. A turn naming only a session reads no
+    // list and still runs. web.ts asks `ctx.workspace?.check()` at the same point.
+    if folder.is_some()
+        && let Some(workspaces) = state.harness().workspaces.as_ref()
+        && let Some(refusal) = unreadable_registry(workspaces.as_ref())
+    {
+        return refusal;
     }
     let session = if let Some(resume) = resume {
         // A resumed session keeps the selection it recorded; only a session this request creates is
@@ -2694,6 +2751,12 @@ fn terminal_session(
         .sessions
         .meta(id.as_str())
         .ok_or_else(|| Box::new(respond::no_session(id.as_str())))?;
+    if let Some(workspaces) = &state.harness().workspaces
+        && !lenient
+        && let Some(refusal) = unreadable_registry(workspaces.as_ref())
+    {
+        return Err(Box::new(refusal));
+    }
     if let Some(workspaces) = &state.harness().workspaces
         && !lenient
         && !workspaces.owns(&canonical_path(meta.cwd.as_deref().unwrap_or("")))
@@ -3792,6 +3855,151 @@ mod tests {
         // The trait's own default — a registry that does not model first use — answers `null`.
         let none = crate::services::WorkspaceService::initialize_default(&NoDefault, &[]).unwrap();
         assert_eq!(none, None);
+    }
+
+    /// A registry whose file does not read (#196): it says so through `readable`, and any other question is a route
+    /// that went on to read or write the list after it was told it cannot.
+    struct UnreadableWorkspaces;
+
+    const UNREADABLE_SENTENCE: &str =
+        "the workspace list could not be read: workspaces.json: not valid JSON";
+
+    impl crate::services::WorkspaceService for UnreadableWorkspaces {
+        fn owns(&self, _path: &std::path::Path) -> bool {
+            panic!("a route asked whether a root owns a path after the list said it cannot be read")
+        }
+        fn readable(&self) -> Result<(), ServiceError> {
+            Err(ServiceError::with_code(
+                UNREADABLE_SENTENCE,
+                crate::services::WORKSPACE_REGISTRY_UNREADABLE,
+            ))
+        }
+        fn tree(
+            &self,
+            _path: Option<&std::path::Path>,
+            _archived: crate::services::ArchivedFilter,
+            _sessions: &[SessionMeta],
+        ) -> Result<Value, ServiceError> {
+            panic!("the tree was read after the list said it cannot be read")
+        }
+        fn add(
+            &self,
+            _path: &std::path::Path,
+            _name: Option<&str>,
+        ) -> Result<(Value, bool), ServiceError> {
+            panic!("a folder was registered after the list said it cannot be read")
+        }
+        fn find(&self, _id: &str) -> bool {
+            panic!("a workspace was looked up after the list said it cannot be read")
+        }
+        fn remove(&self, _id: &str, _sessions: &[SessionMeta]) -> Result<Value, ServiceError> {
+            panic!("a workspace was removed after the list said it cannot be read")
+        }
+        fn rename(&self, _id: &str, _title: &str) -> Result<Option<Value>, ServiceError> {
+            panic!("a workspace was renamed after the list said it cannot be read")
+        }
+        fn ensure_owner(&self, _folder: &std::path::Path) {
+            panic!("a turn adopted its folder after the list said it cannot be read")
+        }
+    }
+
+    #[tokio::test]
+    async fn every_workspace_route_and_a_turn_naming_a_folder_answer_an_unreadable_list_with_500_first()
+     {
+        let mut unreadable = harness();
+        unreadable.workspaces = Some(Arc::new(UnreadableWorkspaces));
+        let (router, _) = ServerBuilder::new(
+            unreadable,
+            ServerOptions {
+                token: Some("test-token".into()),
+                secret_path: Some(temp_secret("workspaces-unreadable")),
+                ..ServerOptions::default()
+            },
+        )
+        .into_router(3082)
+        .expect("the test router");
+        let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
+        let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
+        let folder = std::env::temp_dir().to_string_lossy().into_owned();
+        let expected =
+            json!({"error": UNREADABLE_SENTENCE, "code": "workspace/registry-unreadable"});
+        let judge = |what: &str, status: StatusCode, bytes: &[u8]| {
+            assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{what}: {}",
+                body_text(bytes)
+            );
+            let body: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(body, expected, "{what}");
+        };
+        for (what, method, uri) in [
+            (
+                "GET /api/workspaces",
+                Method::GET,
+                "/api/workspaces".to_string(),
+            ),
+            ("GET /api/tree", Method::GET, "/api/tree".to_string()),
+            (
+                "GET /api/tree?path=",
+                Method::GET,
+                format!("/api/tree?path={folder}"),
+            ),
+            (
+                "DELETE /api/workspaces/:id",
+                Method::DELETE,
+                "/api/workspaces/w-1".to_string(),
+            ),
+            (
+                "POST /api/workspaces/default",
+                Method::POST,
+                "/api/workspaces/default".to_string(),
+            ),
+        ] {
+            let (status, _, bytes) = call(&router, method, &uri, Some(&cookie)).await;
+            judge(what, status, &bytes);
+        }
+        for (what, uri, body) in [
+            (
+                "POST /api/workspaces",
+                "/api/workspaces",
+                json!({"path": folder}),
+            ),
+            (
+                "POST /api/workspaces/insertBefore",
+                "/api/workspaces/insertBefore",
+                json!({"workspaceId": "w-1"}),
+            ),
+            (
+                "POST /api/sessions",
+                "/api/sessions",
+                json!({"branch": folder}),
+            ),
+            (
+                "a turn naming a folder",
+                "/api/turn",
+                json!({"prompt": "hello", "folder": folder, "new": true}),
+            ),
+        ] {
+            let (status, bytes) = post_json(&router, uri, &cookie, &body.to_string()).await;
+            judge(what, status, &bytes);
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(Method::PATCH)
+                    .uri("/api/workspaces/w-1")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":"Renamed"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        judge("PATCH /api/workspaces/:id", status, &bytes);
     }
 
     /// A registry double that keeps every trait default, so the default `initialize_default` is the one judged.

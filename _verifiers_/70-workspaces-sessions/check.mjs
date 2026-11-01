@@ -4,7 +4,7 @@
  * words in those comments, never backticks.
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, realpathSync, truncateSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import { test } from 'node:test'
@@ -2895,6 +2895,221 @@ test('a workspace moved before another keeps its place across a restart, as DSH 
     removeDir(h.home)
     removeDir(h.work)
     for (const folder of [...folders, late]) removeDir(folder)
+  }
+})
+
+test('a workspace list that cannot be read is refused on every route, never written over, and comes back whole once fixed (#196)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  /**
+   * GitHub issue #196, by developer-six's J176 and J176b. Measured before the fix, on both builds: one trailing comma in
+   * workspaces.json read as no workspaces (GET 200 []), and the next turn in w1 wrote [w1 (auto)] over the file; an empty
+   * file was rebuilt from the sessions alone at the next start and written at once; a file the server may not read listed
+   * nothing, and the Rust build then accepted a turn and an add and renamed a new file over it. Every registration, title
+   * and order was lost, and nothing said so.
+   *
+   * DSH fails closed: a stored record that does not match its schema is invalid-record (dsh-storage-domain
+   * lib/index.js:419-433), a file that is not JSON is malformed-medium (dsh-storage-json lib/index.js:91-98), and moving a
+   * bad document aside is opt-in (backup-and-skip), which the workspace domain does not take (dsh-workspace
+   * lib/index.js:255-268). So: every workspace route and a turn naming a folder answer 500 with the file's name and the
+   * reason, nothing writes over the file, one server line names the whole path, and the fixed file brings all four back.
+   */
+  const h = harness('registry-unreadable')
+  const names = ['w1', 'w2', 'w3', 'w4']
+  const folders = Object.fromEntries(names.map((name) => [name, fixtureDir(`registry-unreadable-${name}`)]))
+  const late = fixtureDir('registry-unreadable-w5')
+  const file = join(h.home, 'workspaces.json')
+  const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')]
+  let live
+  try {
+    const boot = async () => {
+      try {
+        live = await startServer(serverArgs, h.env)
+      } catch (error) {
+        assert.fail(`the server starts and prints its login line, whatever the workspace list holds\n${error.message}`)
+      }
+      const origin = new URL(live.url).origin
+      const handshake = await fetch(live.url, { redirect: 'manual' })
+      const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]
+      return async (path, init = {}) => {
+        const response = await fetch(origin + path, { ...init, headers: { cookie, 'content-type': 'application/json' } })
+        const text = await response.text()
+        let body
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+        return { status: response.status, body, text }
+      }
+    }
+    const restart = async () => {
+      live?.kill()
+      live = undefined
+      await new Promise((done) => setTimeout(done, 300))
+      return boot()
+    }
+    let call = await boot()
+    const ids = {}
+    for (const name of names) {
+      const added = await call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: folders[name] }) })
+      assert.equal(added.status, 200, `${name} is registered (${added.text})`)
+      ids[name] = added.body.record.id
+    }
+    const renamed = await call(`/api/workspaces/${ids.w2}`, { method: 'PATCH', body: JSON.stringify({ title: 'Second (renamed)' }) })
+    assert.equal(renamed.status, 200, `w2 is renamed (${renamed.text})`)
+    const moved = await call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: ids.w3, beforeWorkspaceId: ids.w1 }) })
+    assert.equal(moved.status, 200, `w3 is moved (${moved.text})`)
+    for (const name of ['w1', 'w2']) {
+      const made = await call('/api/sessions', { method: 'POST', body: JSON.stringify({ branch: folders[name] }) })
+      assert.equal(made.status, 200, `${name} gets a session (${made.text})`)
+    }
+    const named = Object.fromEntries(Object.entries(ids).map(([name, id]) => [id, name]))
+    const listed = async () => {
+      const answer = await call('/api/workspaces')
+      assert.equal(answer.status, 200, `the workspace list reads (${answer.text})`)
+      return answer.body.workspaces.filter((view) => named[view.id] !== undefined).map((view) => `${named[view.id]}=${view.title}:${view.origin}`)
+    }
+    const expected = [`w4=${basename(folders.w4)}:added`, 'w2=Second (renamed):added', `w3=${basename(folders.w3)}:added`, `w1=${basename(folders.w1)}:added`]
+    const whole = await listed()
+    assert.deepEqual(whole.map((entry) => entry.split('=')[0]), ['w4', 'w2', 'w3', 'w1'], `the order J176 sets up (${whole.join(', ')})`)
+    assert.equal(whole[1], 'w2=Second (renamed):added', 'with the title a person gave')
+    const titled = whole
+    const good = readFileSync(file)
+    const sessionsBefore = (await call('/api/sessions')).body.length
+
+    /** Every route that reads or writes the list, and a turn naming a known folder and a new one. */
+    const refusals = async (reason, stage) => {
+      const sentence = `the workspace list could not be read: workspaces.json: ${reason}`
+      for (const [what, answer] of [
+        ['GET /api/workspaces', () => call('/api/workspaces')],
+        ['GET /api/tree', () => call('/api/tree')],
+        ['a turn in w1', () => call('/api/turn', { method: 'POST', body: JSON.stringify({ folder: folders.w1, new: true, prompt: 'are the workspaces there?' }) })],
+        ['a turn in a folder nobody registered', () => call('/api/turn', { method: 'POST', body: JSON.stringify({ folder: late, new: true, prompt: 'adopt me' }) })],
+        ['registering w5', () => call('/api/workspaces', { method: 'POST', body: JSON.stringify({ path: late }) })],
+        ['renaming w1', () => call(`/api/workspaces/${ids.w1}`, { method: 'PATCH', body: JSON.stringify({ title: 'Another title' }) })],
+        ['moving w1', () => call('/api/workspaces/insertBefore', { method: 'POST', body: JSON.stringify({ workspaceId: ids.w1 }) })],
+        ['deleting w4', () => call(`/api/workspaces/${ids.w4}`, { method: 'DELETE' })],
+      ]) {
+        const refused = await answer()
+        assert.equal(refused.status, 500, `${stage}: ${what} is refused (${refused.text})`)
+        assert.deepEqual(refused.body, { error: sentence, code: 'workspace/registry-unreadable' }, `${stage}: ${what} answers the same words on both builds`)
+        assert.ok(!refused.text.includes(h.home), `${stage}: ${what} names the file, not the home folder (${refused.text})`)
+      }
+      const cli = await runCli(adminArgs(h, ['workspaces', '--json']), { env: h.env, cwd: h.work })
+      assert.notEqual(cli.code, 0, `${stage}: the command line's listing is refused too\n${cli.stdout}${cli.stderr}`)
+      assert.ok(cli.stderr.includes(sentence), `${stage}: in the same words\n${cli.stderr}`)
+      assert.equal((await call('/api/sessions')).body.length, sessionsBefore, `${stage}: no refused turn opened a session`)
+    }
+    /** The server's lines that name the file; one per damage. */
+    const fileLines = () => live.output().split('\n').filter((line) => line.includes(file) && /unreadable workspace list/.test(line))
+
+    // 1. One comma after "version": 3 (J176 step 1).
+    const comma = Buffer.from(good.toString('utf8').replace('"version": 3,', '"version": 3,,'))
+    assert.ok(!comma.equals(good), 'the comma is in the file')
+    writeFileSync(file, comma)
+    await refusals('not valid JSON', 'a trailing comma')
+    assert.ok(readFileSync(file).equals(comma), 'the damaged file is byte for byte what it was: no turn, register or rename wrote over it')
+    assert.equal(fileLines().length, 1, `one server line names the file and the parse error\n${live.output()}`)
+    assert.match(fileLines()[0], /: not valid JSON \(/, 'with the parser\'s words')
+
+    // 2. An empty file, as a failed truncate-then-write leaves, and a restart (J176 step 3).
+    writeFileSync(file, '')
+    call = await restart()
+    await refusals('the file is empty', 'an empty file after a restart')
+    assert.equal(statSync(file).size, 0, 'the start rebuilt nothing from the sessions and wrote nothing: the file is still empty')
+    assert.equal(fileLines().length, 1, `the restarted server names the file once\n${live.output()}`)
+
+    // 3. A file the server may not read (J176b).
+    writeFileSync(file, good)
+    const root = typeof process.getuid === 'function' && process.getuid() === 0
+    if (!root) {
+      chmodSync(file, 0o000)
+      try {
+        await refusals('permission denied', 'a file with mode 000')
+      } finally {
+        chmodSync(file, 0o600)
+      }
+      assert.ok(readFileSync(file).equals(good), 'nothing was renamed over the file the server could not read')
+    }
+
+    // 4. Fixed, and a restart: all four come back, with the title and the order (J176's expectation).
+    writeFileSync(file, good)
+    call = await restart()
+    assert.deepEqual(await listed(), titled, 'all four are back, with the title and the order')
+    assert.deepEqual(titled, expected, 'and they are the four a person registered, none adopted')
+    const turned = await call('/api/turn', { method: 'POST', body: JSON.stringify({ folder: folders.w1, new: true, prompt: 'are the workspaces there?' }) })
+    assert.equal(turned.status, 200, `and a turn runs again (${turned.text})`)
+    assert.deepEqual(await listed(), titled, 'without changing the list')
+  } finally {
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
+    for (const folder of [...Object.values(folders), late]) removeDir(folder)
+  }
+})
+
+test('the tree says in the server\'s words that the workspace list cannot be read, and draws no rows (#196)', async (context) => {
+  if (!skipUnless(context, (await supportsCommands()) && (await supportsWeb()), CAPABILITY)) return
+  if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
+  /**
+   * The page's half of #196. Before the fix the page read GET /api/workspaces' 200 [] as no workspaces and drew an
+   * empty tree; with the route answering 500, the tree took any refusal for a server older than the route, said "this
+   * server predates the workspace tree", and listed the sessions flat, and first use then said "Unable to create default
+   * workspace". Either reads as a complete answer. The tree must say the server's own sentence, naming the file and the
+   * reason, and draw no rows; once the file is fixed, a reload draws the workspace again.
+   */
+  const h = harness('registry-unreadable-page')
+  const file = join(h.home, 'workspaces.json')
+  let live
+  let browser
+  try {
+    live = await startServer(
+      ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', join(h.home, 'sessions')],
+      { ...h.env, HOME: h.home },
+    )
+    const origin = new URL(live.url).origin
+    const cookie = String((await fetch(live.url, { redirect: 'manual' })).headers.get('set-cookie') ?? '').split(';')[0]
+    const added = await fetch(`${origin}/api/workspaces`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: h.work }) })
+    assert.equal(added.status, 200, `the folder is registered (${await added.text()})`)
+    const good = readFileSync(file, 'utf8')
+    writeFileSync(file, good.replace('"version": 3,', '"version": 3,,'))
+    const sentence = 'the workspace list could not be read: workspaces.json: not valid JSON'
+
+    browser = await openBrowser()
+    await browser.goto(live.url)
+    const read = async () =>
+      JSON.parse(
+        await browser.evaluate(`JSON.stringify({
+          note: document.getElementById('tree-note').textContent,
+          hidden: document.getElementById('tree-note').hidden,
+          rows: document.querySelectorAll('#tree .row').length,
+        })`),
+      )
+    try {
+      await browser.waitFor(`document.getElementById('tree-note').textContent === ${JSON.stringify(sentence)}`, 20_000)
+    } catch {
+      assert.fail(`the tree's note says the server's sentence\nsaw ${JSON.stringify(await read())}`)
+    }
+    await browser.evaluate(`new Promise((done) => setTimeout(() => done('settled'), 800))`)
+    const damaged = await read()
+    assert.equal(damaged.note, sentence, `the note still says it once the page has settled, not a first-use or flat-list note\n${JSON.stringify(damaged)}`)
+    assert.equal(damaged.hidden, false, 'and it is shown')
+    assert.equal(damaged.rows, 0, 'and no row is drawn, so nothing reads as a complete list')
+    assert.equal(readFileSync(file, 'utf8'), good.replace('"version": 3,', '"version": 3,,'), 'the page wrote nothing over the file')
+
+    writeFileSync(file, good)
+    await browser.goto(live.url)
+    try {
+      await browser.waitFor(`document.querySelectorAll('#tree .row').length > 0`, 20_000)
+    } catch {
+      assert.fail(`fixed, the reload draws the workspace again\nsaw ${JSON.stringify(await read())}`)
+    }
+    assert.notEqual((await read()).note, sentence, 'and the note is gone')
+  } finally {
+    browser?.close()
+    live?.kill()
+    removeDir(h.home)
+    removeDir(h.work)
   }
 })
 

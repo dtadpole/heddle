@@ -62,7 +62,13 @@ impl Harness {
 
     fn input(&self) -> TreeInput {
         TreeInput {
-            roots: self.workspaces.list().iter().map(TreeRoot::from).collect(),
+            roots: self
+                .workspaces
+                .list()
+                .unwrap()
+                .iter()
+                .map(TreeRoot::from)
+                .collect(),
             sessions: self.sessions(),
             generated: self.workspaces.generated().to_vec(),
             archived: ArchivedFilter::Hide,
@@ -251,9 +257,9 @@ fn a_workspace_accounts_for_its_folders_and_the_nearest_root_owns_a_session() {
     );
     assert_eq!(report.workspaces, 1);
 
-    let record = h.workspaces.find(&work).unwrap();
+    let record = h.workspaces.find(&work).unwrap().unwrap();
     assert_eq!(record.id, root.id);
-    let owned = h.workspaces.sessions(&record, &all);
+    let owned = h.workspaces.sessions(&record, &all).unwrap();
     assert_eq!(
         owned.len(),
         3,
@@ -294,19 +300,20 @@ fn a_workspace_accounts_for_its_folders_and_the_nearest_root_owns_a_session() {
     assert_eq!(report.created, 1, "the sibling is adopted as its own root");
     assert_eq!(
         h.workspaces
-            .sessions(&h.workspaces.find(&work).unwrap(), &all)
+            .sessions(&h.workspaces.find(&work).unwrap().unwrap(), &all)
+            .unwrap()
             .len(),
         3,
         "the root accounts only for its own"
     );
-    let adopted = h.workspaces.find(&sibling).unwrap();
+    let adopted = h.workspaces.find(&sibling).unwrap().unwrap();
     assert_eq!(
-        h.workspaces.sessions(&adopted, &all).len(),
+        h.workspaces.sessions(&adopted, &all).unwrap().len(),
         1,
         "the sibling accounts only for its own"
     );
     assert_eq!(
-        h.workspaces.owner(&deeper).map(|record| record.id),
+        h.workspaces.owner(&deeper).unwrap().map(|record| record.id),
         Some(root.id),
         "the nearest root above a folder owns it"
     );
@@ -446,7 +453,7 @@ fn a_file_under_a_root_reads_and_a_path_outside_one_has_no_owner() {
         .to_string_lossy()
         .into_owned();
     assert!(
-        h.workspaces.owner(&outside_file).is_none(),
+        h.workspaces.owner(&outside_file).unwrap().is_none(),
         "the refusal is the caller's, made on the canonical path"
     );
     assert!(read_file_text(&outside_file, None).is_ok());

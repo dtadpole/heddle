@@ -309,10 +309,23 @@ pub fn workspace_not_found(id: &str) -> ServiceError {
     )
 }
 
+/// The code a workspace list whose file does not read is answered with, `500` on every route that reads or writes the
+/// list (#196; `WorkspaceRegistryUnreadable` in `src/workspace/service.ts`).
+pub const WORKSPACE_REGISTRY_UNREADABLE: &str = "workspace/registry-unreadable";
+
 /// The workspace registry and the tree, as the routes use them. Paths are canonical when they arrive.
 pub trait WorkspaceService: Send + Sync {
-    /// Whether some registered root owns `path` (is it under a workspace root).
+    /// Whether some registered root owns `path` (is it under a workspace root). A registry that does not read owns
+    /// nothing; the routes ask [`WorkspaceService::readable`] first to say why.
     fn owns(&self, path: &Path) -> bool;
+
+    /// Whether the registry reads: `Err` with code [`WORKSPACE_REGISTRY_UNREADABLE`] and the sentence `the workspace list
+    /// could not be read: workspaces.json: <reason>` when its file exists and cannot be read (#196), which every route
+    /// that reads or writes the list answers `500` before anything else. The default reads always, for doubles that do
+    /// not model the file.
+    fn readable(&self) -> Result<(), ServiceError> {
+        Ok(())
+    }
 
     /// One level of the folder tree: the roots when `path` is `None`, else the children of `path`.
     fn tree(

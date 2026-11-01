@@ -95,12 +95,15 @@ pub struct WorkspaceRemoval {
 }
 
 /// What `bootstrap` did: how many workspaces there are now, how many sessions it looked at, and how
-/// many roots it had to create.
+/// many roots it had to create. `skipped` when the record could not be read, so nothing was rebuilt and
+/// nothing written (#196); serialized only then, as the TypeScript build's `skipped: true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct BootstrapReport {
     pub workspaces: usize,
     pub attached: usize,
     pub created: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 /// One workspace as the Web UI's workspace tree reads it — `GET /api/workspaces`, DSH's `WorkspaceView`

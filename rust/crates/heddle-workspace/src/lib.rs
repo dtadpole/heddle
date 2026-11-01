@@ -33,15 +33,15 @@ pub mod service;
 pub mod tree;
 
 pub use collate::compare_names;
-pub use error::WorkspaceError;
+pub use error::{REGISTRY_UNREADABLE, WorkspaceError};
 pub use file::{FILE_LIMIT_BYTES, FileReadError, FileReading, read_file_text};
 pub use record::{
     BootstrapReport, FolderStatus, WorkspaceAddition, WorkspaceOrigin, WorkspaceRecord,
     WorkspaceRemoval, WorkspaceStoreShape, WorkspaceView, listing_row,
 };
 pub use service::{
-    DEFAULT_WORKSPACE_DIRECTORY, WorkspaceConfig, WorkspaceService, default_workspace_directory,
-    default_workspace_file, workspace_views,
+    DEFAULT_WORKSPACE_DIRECTORY, Warn, WorkspaceConfig, WorkspaceService,
+    default_workspace_directory, default_workspace_file, unreadable_registry_line, workspace_views,
 };
 pub use tree::{
     ArchivedFilter, NodeKind, TreeInput, TreeNode, TreeRoot, TreeSession, badge_for, classify,

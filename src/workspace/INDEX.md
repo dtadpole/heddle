@@ -1,6 +1,6 @@
 ---
 title: Workspace
-version: 1.2.0
+version: 1.3.0
 description: Workspaces as target folders with records, the sessions grouped under them, and how a root came to exist.
 grounded_in:
   - source: human-authored
@@ -29,6 +29,16 @@ folder** plus the record that says it is one:
   A new root is prepended; `insertBefore()` moves one root before another, or last, which is DSH's
   `workspace/insertBefore` and what the page's drag asks for (`POST /api/workspaces/insertBefore`).
   It rewrites that array and nothing else, so the file keeps the shape both builds read.
+
+**A record that cannot be read is refused, never read as empty** (#196). A missing file is the empty list of a fresh
+home; a file that exists and does not read whole — an I/O failure (`permission denied`, a folder in its place), bytes
+that are not UTF-8, an empty file, text that is not JSON, or JSON that is not a workspace list — makes every read and
+every write throw `WorkspaceRegistryUnreadable` (`the workspace list could not be read: workspaces.json: <reason>`,
+code `workspace/registry-unreadable`, which the routes answer `500`). `bootstrap` rebuilds nothing over it, and one line
+names the whole path (`heddle workspace: unreadable workspace list <path>: <reason> …`). That is DSH's default: a
+stored record that does not match is `invalid-record`, and moving it aside (`backup-and-skip`) is opt-in, which the
+workspace domain does not take. Writes go through a temporary file renamed over the record, synced as DSH's
+`writeAtomic` is, and the file is judged again just before, so a write never replaces a file that did not read.
 
 `remove()` exists because unregistering is not the same as forgetting: `bootstrap` re-creates a root
 for any folder that has sessions and no owner, so a removed root that still holds sessions would come

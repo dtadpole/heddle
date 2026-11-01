@@ -335,6 +335,7 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
       ...(options.pluginModuleNames !== undefined ? { pluginModuleNames: options.pluginModuleNames } : {}),
       ...(options.settings !== undefined ? { settings: options.settings } : {}),
     }).catch((error: unknown) => {
+      if (registryRefusal(response, error)) return
       if (!response.writableEnded && !response.destroyed) {
         try {
           response.writeHead(500, { 'content-type': 'text/plain' })
@@ -1429,6 +1430,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       const record = workspaces.initializeDefault(ctx.session.list())
       respond(response, 200, 'application/json', `${JSON.stringify({ workspace: record ?? null }, null, 2)}\n`)
     } catch (error) {
+      if (registryRefusal(response, error)) return
       respond(response, 500, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace/default-failed' })}\n`)
     }
     return
@@ -1555,6 +1557,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       push(state, 'workspace', { type: 'workspace/removed', id })
       respond(response, 200, 'application/json', `${JSON.stringify(outcome, null, 2)}\n`)
     } catch (error) {
+      if (registryRefusal(response, error)) return
       respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message })}\n`)
     }
     return
@@ -1590,6 +1593,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       push(state, 'workspace', { type: 'workspace/renamed', workspace: record })
       respond(response, 200, 'application/json', `${JSON.stringify(record, null, 2)}\n`)
     } catch (error) {
+      if (registryRefusal(response, error)) return
       if ((error as { code?: unknown }).code === 'workspace/name-conflict') {
         respond(response, 409, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace/name-conflict' })}\n`)
         return
@@ -2954,6 +2958,13 @@ export function unknownTurnSession(
     }
   }
   /**
+   * A turn that names a folder adopts it into the workspace list once its session is open (`ensureOwner` below). With a
+   * list whose file cannot be read, the turn is refused here, before a session is opened or created, with the error every
+   * workspace route answers (#196): the adoption would have written a fresh list over the damaged one, and whether the
+   * folder is already known cannot be told without the list. A turn naming only a session reads no list and still runs.
+   */
+  if (folder !== null) ctx.workspace?.check()
+  /**
    * A session this route opens is born **untitled**, as DSH's is (#68): its first message writes the fallback name and
    * the session layer's title coordinator asks the model for the title (`../session/title.ts`). A title given here would
    * read as a person's name, and no title would ever be generated.
@@ -3574,6 +3585,19 @@ export function inlineContentType(path: string): string | null {
 function refuseWhileClosing(response: ServerResponse, state: RequestState): boolean {
   if (!state.lifecycle.closing) return false
   respond(response, 503, 'application/json', `${JSON.stringify({ error: 'the server is shutting down', code: 'server/closing' })}\n`)
+  return true
+}
+
+/**
+ * A workspace list whose file cannot be read (#196): `500 {error, code: 'workspace/registry-unreadable'}`, the error every
+ * route that reads or writes the list answers, wherever the throw comes from (`WorkspaceRegistryUnreadable` in
+ * `../workspace/service.ts`). Answers whether it was that error; anything else is the caller's.
+ */
+function registryRefusal(response: ServerResponse, error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code !== 'workspace/registry-unreadable') return false
+  if (!response.writableEnded && !response.destroyed && !response.headersSent) {
+    respond(response, 500, 'application/json', `${JSON.stringify({ error: (error as Error).message, code: 'workspace/registry-unreadable' })}\n`)
+  }
   return true
 }
 

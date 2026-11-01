@@ -1,7 +1,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
@@ -98,6 +98,172 @@ export class WorkspaceOrderInvalid extends Error {
   }
 }
 
+/**
+ * The workspace list's file exists and cannot be read: reading it fails (it may not be read, or it is a folder), its
+ * bytes are not UTF-8, it is empty, it is not JSON, or its JSON is not a workspace list (#196). The route answers it `500` with this code, and the message names the file by its
+ * **name** alone, because it reaches HTTP answers and the absolute path would put the home folder into them (#130's
+ * rule); the server's own line ({@link unreadableRegistryLine}) names the whole path.
+ *
+ * DSH fails closed here: a stored record that does not match its schema throws `DomainError('invalid-record')`
+ * (dsh-storage-domain lib/index.js:419-433), a file that is not JSON is `malformed-medium` (dsh-storage-json
+ * lib/index.js:91-98), and moving a bad document aside is a policy a domain must opt into
+ * (`invalidRecords: 'backup-and-skip'`, dsh-storage-domain lib/index.js:69-72, :369-376), which the workspace domain does
+ * not (dsh-workspace lib/index.js:255-268). So heddle refuses too: nothing reads it as an empty list, and nothing is
+ * written over it until it reads again.
+ */
+export class WorkspaceRegistryUnreadable extends Error {
+  readonly code = 'workspace/registry-unreadable'
+  /** The absolute path of the file. */
+  readonly file: string
+  /** Why it cannot be read, in the words both builds use (`the file is empty`, `not valid JSON`, `permission denied`, …). */
+  readonly reason: string
+
+  constructor(file: string, reason: string) {
+    super(`the workspace list could not be read: ${basename(file)}: ${reason}`)
+    this.name = 'WorkspaceRegistryUnreadable'
+    this.file = file
+    this.reason = reason
+  }
+}
+
+/**
+ * The line the server prints, once, when the workspace list cannot be read; the Rust service prints the same (#196). It
+ * names the whole path, and for a file that is not JSON the parser's own words in brackets, which say where: those are
+ * each build's own parser's, so they stay out of the HTTP answer, whose words are the same on both builds.
+ */
+export function unreadableRegistryLine(file: string, reason: string, detail?: string): string {
+  const because = detail === undefined ? reason : `${reason} (${detail})`
+  return `heddle workspace: unreadable workspace list ${file}: ${because}; it is left as it is, and every workspace change is refused until it reads`
+}
+
+/** The parsed file, or why it is not a workspace list. A file that does not exist is the empty list of a fresh home. */
+type RegistryReading =
+  | { readonly kind: 'read'; readonly shape: WorkspaceStoreShape }
+  | { readonly kind: 'unreadable'; readonly reason: string; readonly detail?: string }
+
+/**
+ * Read and judge the workspace list's file (#196). Missing is the empty list; anything that exists and does not read
+ * whole is `unreadable` with a reason the Rust build words the same way (`judge_registry` in
+ * `rust/crates/heddle-workspace/src/service.rs`):
+ *
+ * - an I/O failure: `permission denied`, `it is a folder, not a file`, else `it cannot be read (<code>)`;
+ * - bytes that are not UTF-8: `not UTF-8 text` (decoded strictly, so a bad byte is not quietly replaced and written back);
+ * - nothing but JSON whitespace: `the file is empty`, which is what a truncate-then-write leaves when the write fails;
+ * - text that is not JSON: `not valid JSON`, with the parser's own words, which say where, kept for the server's line;
+ * - JSON that is not a workspace list: `not a workspace list: …`, naming what is wrong.
+ *
+ * What a version-1 or a hand-made file may leave out still reads with its defaults, as before: a missing `workspaces` or
+ * `workspaceIds`, a record with no `id`, `origin` or times. A record without a string `path` and `title` used to be
+ * skipped, and the next write dropped it for good; it is now a reason, as a record that does not match is
+ * `invalid-record` in DSH.
+ */
+function judgeRegistry(file: string): RegistryReading {
+  let bytes: Buffer
+  try {
+    bytes = readFileSync(file)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return { kind: 'read', shape: { version: 3, workspaceIds: [], workspaces: {} } }
+    if (code === 'EACCES' || code === 'EPERM') return { kind: 'unreadable', reason: 'permission denied' }
+    if (code === 'EISDIR') return { kind: 'unreadable', reason: 'it is a folder, not a file' }
+    // The code only: the message of an I/O error carries the absolute path, and the reason reaches HTTP answers.
+    return { kind: 'unreadable', reason: `it cannot be read (${code ?? 'an I/O error'})` }
+  }
+  let text: string
+  try {
+    // `ignoreBOM` keeps a byte-order mark in the text, as the Rust build's `from_utf8` does, so both refuse it as JSON.
+    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+  } catch {
+    return { kind: 'unreadable', reason: 'not UTF-8 text' }
+  }
+  // JSON's own whitespace, as the Rust build trims it: a byte-order mark alone is not JSON, and not an empty file either.
+  if (/^[ \t\n\r]*$/.test(text)) return { kind: 'unreadable', reason: 'the file is empty' }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    return { kind: 'unreadable', reason: 'not valid JSON', detail: (error as Error).message }
+  }
+  return shapeOf(parsed)
+}
+
+/** A parsed file as the workspace list, or why it is not one (see {@link judgeRegistry}). */
+function shapeOf(parsed: unknown): RegistryReading {
+  const refuse = (what: string): RegistryReading => ({ kind: 'unreadable', reason: `not a workspace list: ${what}` })
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return refuse('it is not a JSON object')
+  const document = parsed as { workspaceIds?: unknown; workspaces?: unknown; defaultWorkspaceId?: unknown }
+  if (document.workspaceIds !== undefined && (!Array.isArray(document.workspaceIds) || document.workspaceIds.some((id) => typeof id !== 'string'))) {
+    return refuse('"workspaceIds" is not a list of ids')
+  }
+  if (document.workspaces !== undefined && (typeof document.workspaces !== 'object' || document.workspaces === null || Array.isArray(document.workspaces))) {
+    return refuse('"workspaces" is not an object')
+  }
+  const workspaces: Record<string, WorkspaceRecord> = {}
+  for (const [id, value] of Object.entries((document.workspaces ?? {}) as Record<string, unknown>)) {
+    const record = value as (Partial<Record<keyof WorkspaceRecord, unknown>> & { sessionIds?: unknown }) | null
+    if (typeof record !== 'object' || record === null || Array.isArray(record) || typeof record.path !== 'string' || typeof record.title !== 'string') {
+      return refuse(`workspace "${id}" needs a path and a title`)
+    }
+    /**
+     * Rebuilt field by field rather than spread, so a version-1 file's `sessionIds` is dropped on the way in as well as
+     * on the way out. A spread would carry it forward forever.
+     */
+    workspaces[id] = {
+      id: typeof record.id === 'string' ? record.id : id,
+      path: record.path,
+      title: record.title,
+      origin: record.origin === 'auto' ? 'auto' : 'added',
+      createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date(0).toISOString(),
+      updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
+    }
+  }
+  return {
+    kind: 'read',
+    shape: {
+      version: 3,
+      workspaceIds: (document.workspaceIds as string[] | undefined) ?? [],
+      workspaces,
+      ...(typeof document.defaultWorkspaceId === 'string' ? { defaultWorkspaceId: document.defaultWorkspaceId } : {}),
+    },
+  }
+}
+
+/**
+ * Replace a file whole: a temporary file beside it, synced, renamed over it, and the folder synced — DSH's `writeAtomic`
+ * (dsh-storage-json lib/index.js:25-40), and what the Rust service does. A write that fails, or a process killed in the
+ * middle of one, leaves the old file as it was; `writeFileSync` truncated it first, so the same failure left an empty file,
+ * which the next start read as no workspaces at all (#196). Written here rather than shared with the session store's
+ * writers, so the two change independently.
+ */
+function writeFileAtomic(file: string, text: string): void {
+  const directory = dirname(file)
+  mkdirSync(directory, { recursive: true })
+  const temporary = join(directory, `.${basename(file)}.${process.pid}.${randomUUID()}.tmp`)
+  try {
+    const fd = openSync(temporary, 'wx')
+    try {
+      writeSync(fd, text)
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(temporary, file)
+  } catch (error) {
+    rmSync(temporary, { force: true })
+    throw error
+  }
+  try {
+    const fd = openSync(directory, 'r')
+    try {
+      fsyncSync(fd)
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    // A platform that cannot sync a folder still has the rename, which is what a reader needs.
+  }
+}
+
 /** What `add` reports: the record, and whether this call is what created it. */
 export interface WorkspaceAddition {
   readonly record: WorkspaceRecord
@@ -169,45 +335,51 @@ export class WorkspaceService extends Service {
     this.generated = config.generated ?? []
   }
 
-  /** The whole record, read from disk each time rather than cached. */
+  /**
+   * Where the line naming an unreadable workspace list goes ({@link unreadableRegistryLine}); standard error unless a
+   * caller collects it.
+   */
+  warn: (message: string) => void = (message) => void process.stderr.write(`${message}\n`)
+
+  /** The unreadable state last named, file, reason and detail, so one damage is one line however often it is read. */
+  private reported: string | undefined
+
+  /**
+   * The whole record, read from disk each time rather than cached.
+   *
+   * A file that does not exist is the empty record of a fresh home. A file that exists and does not read whole throws
+   * {@link WorkspaceRegistryUnreadable} — never the empty record, because every write starts from what this answers, and
+   * an empty answer was written straight over the damaged file (#196). The first read of a damage prints one line naming
+   * the file; a read that succeeds again forgets it, so a later damage is named again.
+   */
   read(): WorkspaceStoreShape {
-    try {
-      const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as {
-        version?: number
-        workspaceIds?: string[]
-        workspaces?: Record<string, Partial<WorkspaceRecord> & { sessionIds?: unknown }>
-        defaultWorkspaceId?: unknown
-      }
-      const workspaces: Record<string, WorkspaceRecord> = {}
-      for (const [id, record] of Object.entries(parsed.workspaces ?? {})) {
-        if (typeof record?.path !== 'string' || typeof record?.title !== 'string') continue
-        /**
-         * Rebuilt field by field rather than spread, so a version-1 file's `sessionIds` is dropped
-         * on the way in as well as on the way out. A spread would carry it forward forever.
-         */
-        workspaces[id] = {
-          id: typeof record.id === 'string' ? record.id : id,
-          path: record.path,
-          title: record.title,
-          origin: record.origin === 'auto' ? 'auto' : 'added',
-          createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date(0).toISOString(),
-          updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : new Date(0).toISOString(),
-        }
-      }
-      return {
-        version: 3,
-        workspaceIds: parsed.workspaceIds ?? [],
-        workspaces,
-        ...(typeof parsed.defaultWorkspaceId === 'string' ? { defaultWorkspaceId: parsed.defaultWorkspaceId } : {}),
-      }
-    } catch {
-      return { version: 3, workspaceIds: [], workspaces: {} }
+    const reading = judgeRegistry(this.file)
+    if (reading.kind === 'read') {
+      this.reported = undefined
+      return reading.shape
     }
+    const key = `${this.file}\n${reading.reason}\n${reading.detail ?? ''}`
+    if (this.reported !== key) {
+      this.reported = key
+      this.warn(unreadableRegistryLine(this.file, reading.reason, reading.detail))
+    }
+    throw new WorkspaceRegistryUnreadable(this.file, reading.reason)
   }
 
+  /** Whether the record reads: throws {@link WorkspaceRegistryUnreadable} when it does not, before a caller writes anything else. */
+  check(): void {
+    this.read()
+  }
+
+  /**
+   * Write the record whole ({@link writeFileAtomic}), and never over a file that does not read (#196): every write here
+   * starts from {@link read}, which already refuses one, and the file is judged again at the last moment, so a file that
+   * was damaged in between is refused rather than replaced.
+   */
   private write(shape: WorkspaceStoreShape): void {
-    mkdirSync(dirname(this.file), { recursive: true })
-    writeFileSync(this.file, `${JSON.stringify({ ...shape, version: 3 }, null, 2)}\n`)
+    const onDisk = judgeRegistry(this.file)
+    if (onDisk.kind === 'unreadable') throw new WorkspaceRegistryUnreadable(this.file, onDisk.reason)
+    writeFileAtomic(this.file, `${JSON.stringify({ ...shape, version: 3 }, null, 2)}\n`)
   }
 
   /** Every workspace, in the collection's order. */
@@ -491,19 +663,33 @@ export class WorkspaceService extends Service {
    *
    * DSH does the same at startup by grouping stored headers by canonical cwd. Idempotent: a session
    * already accounted for creates nothing.
+   *
+   * A record that cannot be read is **not** rebuilt from the sessions (#196): that rebuild wrote at once, so an empty or
+   * damaged file became a list of adopted folders, and every registration, title and order was lost. The start goes on
+   * with the line {@link read} printed, adopts nothing, writes nothing, and reports `skipped`.
    */
-  bootstrap(all: readonly SessionMeta[]): { readonly workspaces: number; readonly attached: number; readonly created: number } {
+  bootstrap(all: readonly SessionMeta[]): {
+    readonly workspaces: number
+    readonly attached: number
+    readonly created: number
+    readonly skipped?: true
+  } {
     let attached = 0
     let created = 0
-    for (const meta of all) {
-      const canonical = canonicalPath(meta.cwd)
-      if (this.owner(canonical) === undefined) {
-        this.ensure(canonical, undefined, { origin: 'auto' })
-        created += 1
+    try {
+      for (const meta of all) {
+        const canonical = canonicalPath(meta.cwd)
+        if (this.owner(canonical) === undefined) {
+          this.ensure(canonical, undefined, { origin: 'auto' })
+          created += 1
+        }
+        attached += 1
       }
-      attached += 1
+      return { workspaces: this.list().length, attached, created }
+    } catch (error) {
+      if (!(error instanceof WorkspaceRegistryUnreadable)) throw error
+      return { workspaces: 0, attached, created, skipped: true }
     }
-    return { workspaces: this.list().length, attached, created }
   }
 }
 

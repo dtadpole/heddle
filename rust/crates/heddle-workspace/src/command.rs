@@ -112,13 +112,17 @@ fn canonical_in(cwd: &Path, target: &str) -> String {
 }
 
 /// An id-or-path argument: an id the record holds is kept as written; anything else is a path,
-/// resolved against the run's directory.
-fn id_or_path(workspaces: &WorkspaceService, cwd: &Path, target: &str) -> String {
-    if workspaces.read().workspaces.contains_key(target) {
+/// resolved against the run's directory. A record that does not read is the command's refusal (#196).
+fn id_or_path(
+    workspaces: &WorkspaceService,
+    cwd: &Path,
+    target: &str,
+) -> Result<String, crate::WorkspaceError> {
+    Ok(if workspaces.read()?.workspaces.contains_key(target) {
         target.to_string()
     } else {
         canonical_in(cwd, target)
-    }
+    })
 }
 
 fn record_value(record: &crate::record::WorkspaceRecord) -> Value {
@@ -130,12 +134,19 @@ fn workspaces(args: &Args, context: &Context<'_>, out: &mut dyn Write, err: &mut
     let Some(workspaces) = context.workspaces else {
         return refuse(err, NO_WORKSPACE);
     };
-    let records = workspaces.list();
+    // A record that does not read is refused, never listed as no workspaces (#196).
+    let records = match workspaces.list() {
+        Ok(records) => records,
+        Err(error) => return refuse(err, error),
+    };
     let all = context.sessions.list();
+    let owned = |record: &crate::record::WorkspaceRecord| {
+        WorkspaceService::sessions_among(record, &all, &records)
+    };
     if args.json {
         let rows: Vec<Value> = records
             .iter()
-            .map(|record| listing_row(record, &workspaces.sessions(record, &all)))
+            .map(|record| listing_row(record, &owned(record)))
             .collect();
         write_pretty(out, &Value::Array(rows));
         return 0;
@@ -147,7 +158,7 @@ fn workspaces(args: &Args, context: &Context<'_>, out: &mut dyn Write, err: &mut
         workspaces.file()
     );
     for record in &records {
-        let owned = workspaces.sessions(record, &all);
+        let owned = owned(record);
         let _ = writeln!(
             out,
             "  {}  {}  {} session(s)",
@@ -215,7 +226,10 @@ fn workspace_remove(
     let Some(workspaces) = context.workspaces else {
         return refuse(err, NO_WORKSPACE);
     };
-    let target = id_or_path(workspaces, &context.cwd, target);
+    let target = match id_or_path(workspaces, &context.cwd, target) {
+        Ok(target) => target,
+        Err(error) => return refuse(err, error),
+    };
     let removal = match workspaces.remove(&target, &context.sessions.list(), args.force) {
         Ok(removal) => removal,
         Err(error) => return refuse(err, error),
@@ -254,7 +268,10 @@ fn workspace_rename(
     let Some(workspaces) = context.workspaces else {
         return refuse(err, NO_WORKSPACE);
     };
-    let target = id_or_path(workspaces, &context.cwd, target);
+    let target = match id_or_path(workspaces, &context.cwd, target) {
+        Ok(target) => target,
+        Err(error) => return refuse(err, error),
+    };
     let renamed = match workspaces.rename(&target, args.name.as_deref().unwrap_or("")) {
         Ok(Some(renamed)) => renamed,
         Ok(None) => {
@@ -292,10 +309,14 @@ fn tree_command(
     let Some(workspaces) = context.workspaces else {
         return refuse(err, NO_WORKSPACE);
     };
-    // A path outside every root is refused rather than walked: the tree is a view of the folders a person
-    // registered, not a listing of the machine.
+    // A record that does not read is refused (#196); a path outside every root is refused rather than walked:
+    // the tree is a view of the folders a person registered, not a listing of the machine.
+    let records = match workspaces.list() {
+        Ok(records) => records,
+        Err(error) => return refuse(err, error),
+    };
     if let Some(path) = &wanted
-        && workspaces.owner(path).is_none()
+        && WorkspaceService::owner_among(path, &records).is_none()
     {
         return refuse(
             err,
@@ -307,7 +328,7 @@ fn tree_command(
     let mut generated = workspaces.generated().to_vec();
     generated.extend(args.generated.iter().cloned());
     let input = TreeInput {
-        roots: workspaces.list().iter().map(TreeRoot::from).collect(),
+        roots: records.iter().map(TreeRoot::from).collect(),
         sessions: context.sessions.list(),
         generated,
         archived: ArchivedFilter::Hide,
@@ -377,8 +398,12 @@ fn file_command(
         return refuse(err, NO_WORKSPACE);
     };
     // The same fence as the tree, judged on the canonical path, so a symlink that resolves outside every
-    // root is refused rather than followed.
-    if workspaces.owner(&wanted).is_none() {
+    // root is refused rather than followed; a record that does not read is refused too (#196).
+    let owner = match workspaces.owner(&wanted) {
+        Ok(owner) => owner,
+        Err(error) => return refuse(err, error),
+    };
+    if owner.is_none() {
         return refuse(
             err,
             format!(
@@ -850,7 +875,7 @@ mod tests {
         assert!(Path::new(definition).exists());
         assert!(definition.starts_with(&format!("{branch}/_sessions_/")));
         // The branch had no root, so it was adopted: a session always has a workspace.
-        assert!(home.workspaces.owner(&branch).is_some());
+        assert!(home.workspaces.owner(&branch).unwrap().is_some());
         assert_eq!(home.sessions.list()[0].title(), Some("A named session"));
 
         let (code, text, _) = home.run(Command::SessionNew, target(&branch));

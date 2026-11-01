@@ -583,9 +583,12 @@ impl WorkspacePort for WorkspaceView {
         PathBuf::from(self.service.file())
     }
 
+    // The port answers no error, and only tests read it: a record that does not read (#196) lists nothing here, while
+    // every production reader — the server's routes and the workspace commands — answers the error.
     fn list(&self) -> Vec<Record> {
         self.service
             .list()
+            .unwrap_or_default()
             .iter()
             .filter_map(|record| serde_json::to_value(record).ok())
             .collect()
@@ -597,6 +600,7 @@ impl WorkspacePort for WorkspaceView {
         };
         self.service
             .sessions(&record, &self.metas(all))
+            .unwrap_or_default()
             .iter()
             .map(|meta| meta.to_value())
             .collect()
@@ -628,6 +632,8 @@ impl WorkspacePort for WorkspaceView {
     fn owner(&self, path: &std::path::Path) -> Option<Record> {
         self.service
             .owner(&path.to_string_lossy())
+            .ok()
+            .flatten()
             .and_then(|record| serde_json::to_value(record).ok())
     }
 

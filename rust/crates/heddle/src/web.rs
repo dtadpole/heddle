@@ -827,9 +827,10 @@ impl heddle_web_files::host::FilesHost for PageHost {
         use heddle_web_files::host::WorkspaceAnswer;
         match &self.workspaces {
             None => WorkspaceAnswer::NotLoaded,
+            // A record that does not read owns nothing (#196): the file routes refuse as outside.
             Some(workspaces) => match workspaces.owner(&path.to_string_lossy()) {
-                Some(_) => WorkspaceAnswer::Owned,
-                None => WorkspaceAnswer::Outside,
+                Ok(Some(_)) => WorkspaceAnswer::Owned,
+                Ok(None) | Err(_) => WorkspaceAnswer::Outside,
             },
         }
     }
@@ -1006,7 +1007,8 @@ fn refusal(error: impl std::fmt::Display) -> ServiceError {
 }
 
 /// A workspace refusal with its code when it has one, so the route answers it: a folder the tree may not
-/// read is `workspace-file/unreadable`, a `400` (#106).
+/// read is `workspace-file/unreadable`, a `400` (#106); a workspace list whose file does not read is
+/// `workspace/registry-unreadable`, a `500` (#196).
 fn coded_refusal(error: heddle_workspace::WorkspaceError) -> ServiceError {
     match error.code() {
         Some(code) => ServiceError::with_code(error.to_string(), code),
@@ -1016,7 +1018,13 @@ fn coded_refusal(error: heddle_workspace::WorkspaceError) -> ServiceError {
 
 impl heddle_server::services::WorkspaceService for Workspaces {
     fn owns(&self, path: &std::path::Path) -> bool {
-        self.service.owner(&path_text(path)).is_some()
+        // A record that does not read owns nothing, so a fence refuses (#196); the routes ask `readable` first and
+        // answer the error itself.
+        matches!(self.service.owner(&path_text(path)), Ok(Some(_)))
+    }
+
+    fn readable(&self) -> Result<(), ServiceError> {
+        self.service.check().map_err(coded_refusal)
     }
 
     fn tree(
@@ -1031,6 +1039,7 @@ impl heddle_server::services::WorkspaceService for Workspaces {
             roots: self
                 .service
                 .list()
+                .map_err(coded_refusal)?
                 .iter()
                 .map(heddle_workspace::TreeRoot::from)
                 .collect(),
@@ -1052,13 +1061,16 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         path: &std::path::Path,
         name: Option<&str>,
     ) -> Result<(Value, bool), ServiceError> {
-        let addition = self.service.add(&path_text(path), name).map_err(refusal)?;
+        let addition = self
+            .service
+            .add(&path_text(path), name)
+            .map_err(coded_refusal)?;
         let record = serde_json::to_value(&addition.record).map_err(refusal)?;
         Ok((record, addition.created))
     }
 
     fn find(&self, id: &str) -> bool {
-        self.service.find(id).is_some()
+        matches!(self.service.find(id), Ok(Some(_)))
     }
 
     fn remove(
@@ -1071,7 +1083,7 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         let removal = self
             .service
             .remove(id, &self.sessions.list(), true)
-            .map_err(refusal)?;
+            .map_err(coded_refusal)?;
         serde_json::to_value(&removal).map_err(refusal)
     }
 
@@ -1083,7 +1095,7 @@ impl heddle_server::services::WorkspaceService for Workspaces {
                 heddle_workspace::WorkspaceError::NameConflict(_) => {
                     ServiceError::with_code(error.to_string(), "workspace/name-conflict")
                 }
-                other => refusal(other),
+                other => coded_refusal(other),
             })?;
         match renamed {
             Some(record) => serde_json::to_value(&record).map(Some).map_err(refusal),
@@ -1100,7 +1112,11 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         _sessions: &[heddle_server::services::SessionMeta],
     ) -> Result<Value, ServiceError> {
         // The booted store's own records, as `tree` and `remove` read them.
-        serde_json::to_value(self.service.views(&self.sessions.list())).map_err(refusal)
+        let views = self
+            .service
+            .views(&self.sessions.list())
+            .map_err(coded_refusal)?;
+        serde_json::to_value(views).map_err(refusal)
     }
 
     fn insert_before(&self, id: &str, before: Option<&str>) -> Result<Vec<String>, ServiceError> {
@@ -1115,7 +1131,7 @@ impl heddle_server::services::WorkspaceService for Workspaces {
                 heddle_workspace::WorkspaceError::OrderInvalid(missing) => {
                     heddle_server::services::workspace_not_found(&missing)
                 }
-                other => refusal(other),
+                other => coded_refusal(other),
             })
     }
 
@@ -1128,7 +1144,7 @@ impl heddle_server::services::WorkspaceService for Workspaces {
         match self
             .service
             .initialize_default(&self.sessions.list())
-            .map_err(refusal)?
+            .map_err(coded_refusal)?
         {
             Some(record) => serde_json::to_value(&record).map(Some).map_err(refusal),
             None => Ok(None),

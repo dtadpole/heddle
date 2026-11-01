@@ -20600,6 +20600,22 @@ async function renderTree() {
       paintConversationTarget()
       return
     }
+    /**
+     * A workspace list whose file cannot be read (#196) is said in the server's own sentence, which names the file and
+     * the reason, and no tree is drawn: an empty tree, or the flat list below, would read as a complete answer.
+     */
+    const refusal = workspaceResponse.ok ? null : await workspaceResponse.clone().json().catch(() => null)
+    if (refusal?.code === 'workspace/registry-unreadable') {
+      workspaceRoutes = 'served'
+      treeGroups = []
+      treeTops = []
+      knownWorkspaces = []
+      treeList.replaceChildren()
+      rowIndex.clear()
+      setNote(refusal.error)
+      paintConversationTarget()
+      return
+    }
     if (!workspaceResponse.ok) {
       workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
@@ -21602,6 +21618,11 @@ async function initializeDefaultWorkspace() {
     /** No workspace plugin, or a server older than the route: the tree has already said what it can, so say nothing. */
     if (response.status === 503 || response.status === 404) return
     const body = await response.json().catch(() => ({}))
+    /** The tree already says that the workspace list cannot be read, in the server's words (#196): keep that note. */
+    if (body.code === 'workspace/registry-unreadable') {
+      setNote(body.error)
+      return
+    }
     if (!response.ok) throw new Error(body.error ?? String(response.status))
     if (typeof body.workspace?.path !== 'string') return
     /** As in DSH, a later navigation wins: a session opened or a folder aimed at meanwhile keeps the selection. */
