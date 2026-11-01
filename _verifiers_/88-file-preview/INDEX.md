@@ -59,11 +59,13 @@ Run from the repository root; build the selected CLI through its corresponding r
 
 ## Text-read failure policy — issue #45
 
-Both builds classify an OS permission-denied text read as HTTP `403` with
-`{"error":"cannot read file: permission denied","code":"workspace-file/unreadable"}`.
+Both builds classify an OS permission-denied text read as HTTP `400` with
+`{"error":"cannot read \"denied.txt\": permission denied","code":"workspace-file/unreadable"}`
+for a file named `denied.txt`. This is the owner's unreadable policy shared with the folder/picker
+refusal in issue #106; only the basename is shown.
 Unexpected filesystem I/O is HTTP `500` with
 `{"error":"cannot read file: I/O error","code":"workspace-file/read-failed"}`.
-Neither answer exposes a host path or raw OS error. Missing paths and directories retain `404`;
+Neither answer exposes a parent directory or raw OS error. Missing paths and directories retain `404`;
 binary and invalid UTF-8 retain `415`. Authentication and canonical workspace ownership still
 precede reading. PNG metadata and raw-byte routes are not changed by this text-read policy.
 
@@ -87,6 +89,36 @@ silently claiming denial coverage. These tests do not judge rendered browser err
 ```bash
 _tools_/local-build/run --ts -- node --test test/file-preview-errors.test.ts test/tree.test.ts test/read-file-errors.test.ts
 ```
+
+### Delivered-CLI HTTP regression
+
+[`check-read-failures.mjs`](check-read-failures.mjs) needs **no browser** and never builds the product.
+It starts the selected actual CLI on loopback port zero with its own private home, offline scripted
+configuration and named workspace. Its unique scratch directory is under the initialized, realpathed
+shared test root. Only its own nested `denied.txt` changes to mode `000`; the mode is restored before
+cleanup. A host (including root) that can still read it skips the permission subtest as **unjudged**,
+not passing; the other HTTP controls still run. The shared runner returns `3` for that skip.
+
+The check asserts exact `400 workspace-file/unreadable` JSON with basename-only permission text,
+JSON/no-store headers and no parent paths or raw Node errors; it also pins missing/nonregular `404`,
+binary/invalid UTF-8 `415`, unauthenticated `401`, outside/canonical-symlink `400`, restored-file and
+readable-control `200`. A real self-symlink gives `500 workspace-file/read-failed` with only the generic
+I/O sentence. That loop case follows inspected canonical-path fallback, ownership and actual host-reader
+wiring in **both** servers, not merely an in-process reader test. Startup, headers/body consumption,
+response size, overall test and owned-process shutdown are bounded. No rendered File-panel error body
+or path header is judged by this HTTP-only check.
+
+The parent/caller must pin and build each selected product first; this verifier uses those artifacts
+unchanged and does not run build, cargo, a browser or an existing daemon. From the repository root:
+
+```bash
+node --check _verifiers_/88-file-preview/check-read-failures.mjs
+node _tools_/verify-runner/run.mjs _verifiers_/88-file-preview/check-read-failures.mjs --json
+HEDDLE_BIN=/path/to/pinned/heddle node _tools_/verify-runner/run.mjs _verifiers_/88-file-preview/check-read-failures.mjs --json
+```
+
+The folder's existing `check*.mjs` entry-point discovery includes this check automatically.
+This entry describes authored coverage, not execution evidence; a parent-run result is required.
 
 ## Read next
 
