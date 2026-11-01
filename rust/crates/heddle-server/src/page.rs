@@ -96,9 +96,9 @@ fn has_src_attribute(attributes: &str) -> bool {
 ///
 /// Defence in depth behind the sanitizer (live issues developer-two-6 and -7), approved by the coordinator as option
 /// (1): `script-src` is strict ('self' and the sha256 of each inline script of the page as served); images,
-/// stylesheets, fonts and media may also come over `https:` only because the HTML preview is a `srcdoc` frame, which
-/// inherits this policy, and a previewed document may load remote assets under its own policy (issue #50 would
-/// serve the preview at its own URL and drop them).
+/// stylesheets, fonts and media retain the existing `https:` permission until the owner's actual-resource probe
+/// passes for the fixed-shell preview (#50). D067 allows static work only; source inspection does not authorize
+/// tightening these permissions.
 pub fn page_policy(html: &str) -> String {
     page_policy_with_browser(html, false)
 }

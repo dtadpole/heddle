@@ -70,6 +70,28 @@ _tools_/local-build/run --ts -- node --test --test-name-pattern='an html documen
 HEDDLE_BIN=/path/to/heddle _tools_/local-build/run --ts -- node --test --test-name-pattern='an html document is previewed' _verifiers_/88-file-preview/check.mjs
 ```
 
+## Fixed HTML shell #50 static checkpoint
+
+Owner design 808e serves a constant empty `GET /api/html/frame` behind the existing auth door. Its
+response CSP is `PREVIEW_CSP` plus `frame-ancestors 'self'` and `sandbox allow-same-origin`; the
+response also has `nosniff`, `no-store` and `no-referrer`. The parent still fetches document JSON and
+uses the same DOMPurify configuration. Only clean output is parsed and imported into a fresh current
+frame after the fixed same-origin HTML shell loads; cancellation and late failures cannot publish
+into a newer selection. No server sanitizer, path-reading shell, POST store or asset bridge is added.
+
+Authored regressions are in [`preview-shell.test.ts`](../../test/preview-shell.test.ts),
+[`page-file-selection.test.ts`](../../test/page-file-selection.test.ts), and the Rust server/preview
+unit tests. Existing browser checks now inspect the loaded frame DOM and response headers rather
+than source-document markup. **All runtime verdicts remain UNJUDGED** under D067 because available
+disk is below 16 GiB; no suite, typecheck, build, browser or Cargo run is authorized here.
+
+The separately owned actual-resource browser probe is still pending. It must establish post-load
+injection resource/CSP behavior, including remote HTTPS resources and parent detached parsing, before
+main-page HTTPS permissions can be tightened. Those permissions are unchanged in both builds. Source
+inspection and authored local CSS/image assertions are not that PASS. If the owner probe disproves
+the fixed-shell premise, stop and revise the design. Owner10 must review the exact source commit
+before landing; this checkpoint neither lands on main nor updates a live server/settings.
+
 ## Read next
 
 [`checks.md`](checks.md) for the surface and the renderers; [`rendering.md`](rendering.md) for rendering fidelity; [`readings.md`](readings.md) for the measured verdicts; [`../INDEX.md`](../INDEX.md) for the verifications.

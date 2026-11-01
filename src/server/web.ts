@@ -24,7 +24,7 @@ import { createDirectory, DirectoryError, listDirectory } from './directories.ts
 import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
-import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
+import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, PREVIEW_FRAME_CSP, PREVIEW_SHELL, rewriteResources } from './html.ts'
 import { renderMarkdownOffThread } from './markdown.ts'
 import { acceptedLanguages, documentLanguage, negotiateLocale, type Locale } from '../config/locale.ts'
 import { presetRoster, type PresetDefinition, type PresetResolution } from '../config/presets.ts'
@@ -805,6 +805,16 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     } catch {
       respond(response, 404, 'text/plain', 'the sanitiser is not installed\n')
     }
+    return
+  }
+
+  // Behind the existing auth door; deliberately no query parsing, workspace lookup or file read.
+  if (url.pathname === '/api/html/frame' && request.method === 'GET') {
+    respond(response, 200, 'text/html; charset=utf-8', PREVIEW_SHELL, {
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': PREVIEW_FRAME_CSP,
+    })
     return
   }
 
@@ -4158,10 +4168,9 @@ export function inlineScripts(html: string): string[] {
  *
  * Defence in depth behind the sanitizer (live issues developer-two-6 and -7). Approved by the coordinator as option (1):
  * `script-src` is strict ('self' and the sha256 of each inline script, computed from the page as served, so the policy
- * follows every page change); images, stylesheets, fonts and media may also come over `https:` only because the HTML
- * preview is a `srcdoc` frame, which inherits this policy, and a previewed document may load remote assets under its own
- * `PREVIEW_CSP`. Serving the preview at its own URL (issue #50) would let these drop `https:`. The Rust `page_policy`
- * writes the same.
+ * follows every page change). The HTML preview now loads a fixed shell with its own response policy (#50), but
+ * the existing main-page `https:` permissions remain until the owner's actual-resource probe passes. D067 currently
+ * permits static work only; policy tightening is not inferred from source inspection. Rust `page_policy` agrees.
  */
 export function pagePolicy(html: string, browserEnabled = false): string {
   const hashes = inlineScripts(html).map((code) => `'sha256-${createHash('sha256').update(code, 'utf8').digest('base64')}'`)

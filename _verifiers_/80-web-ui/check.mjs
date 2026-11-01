@@ -487,7 +487,7 @@ test('the page is served under a strict script policy that allows its own inline
     /** textContent, not innerText: the document's heading is drawn in capitals, and innerText reads what is drawn. */
     assert.ok(await browser.waitFor('document.getElementById("file-body")?.textContent.includes("Notes")', 15_000), 'a markdown file opens')
     await browser.evaluate(`${fileRow('page.html')}.click()`)
-    assert.ok(await browser.waitFor('document.getElementById("html-view") !== null && !document.getElementById("html-view").hidden && (document.getElementById("html-view").srcdoc ?? "").includes("Preview")', 15_000), 'and an HTML preview')
+    assert.ok(await browser.waitFor('document.getElementById("html-view") !== null && !document.getElementById("html-view").hidden && (document.getElementById("html-view").contentDocument?.body?.textContent ?? "").includes("Preview")', 15_000), 'and an HTML preview')
     assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'a turn, a file and a preview break no directive')
     await browser.evaluate(`(() => { const element = document.createElement('script'); element.textContent = 'window.__injected = true'; document.body.append(element) })()`)
     await browser.waitFor('Array.isArray(window.__csp) && window.__csp.length > 0', 5_000)
