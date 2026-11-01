@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -32,6 +32,15 @@ function timedPatch(dir, seconds) {
   return path
 }
 
+/** A profile holding the project's tree with absolute module names, so settings writes stay inside `home`. */
+function scratchProfile(home) {
+  const profile = join(home, 'questions-profile')
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(join(profile, 'cordis.yml'), '[]\n')
+  writeFileSync(join(profile, 'heddle.patch.yml'), readFileSync(join(repoRoot, 'heddle.patch.yml'), 'utf8').replaceAll('name: ./src/', `name: ${repoRoot}/src/`))
+  return profile
+}
+
 /** Start a scripted server; `home` may be given to restart over the same store. */
 function startServer(label, steps, options = {}) {
   return new Promise((resolvePromise, reject) => {
@@ -42,7 +51,10 @@ function startServer(label, steps, options = {}) {
       const { config } = scriptedConfig({ home, steps })
       const child = spawn(
         ...heddleCommand([
-          'web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'),
+          'web', '--host', '127.0.0.1', '--port', '0',
+          // A scratch profile of the project's own tree: the language choice below is a settings write, and it must land
+          // in this profile's patch, never in the repository's heddle.patch.yml.
+          '--profile', scratchProfile(home),
           ...(options.patch !== undefined ? ['--patch', options.patch] : []),
           '--endpoint', 'scripted', '--session-root', join(home, 'sessions'),
         ]),
