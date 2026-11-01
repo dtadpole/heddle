@@ -3957,10 +3957,20 @@ export function transcriptTurns(
        */
       const blocked = (event.reason as { kind?: unknown } | null | undefined)?.kind === 'blocked'
       if (event.type === 'turn/failed' && !blocked) {
-        const reason = `the turn failed: ${typeof event.message === 'string' && event.message.length > 0 ? event.message : 'unknown error'}`
+        const message = typeof event.message === 'string' && event.message.length > 0 ? event.message : undefined
         const last = turns[turns.length - 1]
-        if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
-        else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+        /**
+         * Said once (#153). The loop has already ended this answer with `failed: <message>` (recordUnfinished), and
+         * the route records the same message in `turn/failed`; both were drawn, as "Failed: X; the turn failed: X".
+         * Only the newest row is read, as before: a later turn whose failure left no answer row has its prompt last,
+         * so an earlier answer's identical failure cannot swallow it.
+         */
+        const said = message !== undefined && last !== undefined && last.kind === 'assistant' && (last.ended ?? []).includes(`failed: ${message}`)
+        if (!said) {
+          const reason = `the turn failed: ${message ?? 'unknown error'}`
+          if (last !== undefined && last.kind === 'assistant') turns[turns.length - 1] = { ...last, ended: [...(last.ended ?? []), reason] }
+          else turns.push({ kind: 'assistant', text: '', ended: [reason] })
+        }
       }
       /** A completion or any other record ends the run of deltas that preceded it. */
       closeRuns()

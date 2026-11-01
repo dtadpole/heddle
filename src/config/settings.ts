@@ -93,6 +93,12 @@ export interface SettingsView {
   readonly writable: boolean
   readonly hasDocument: boolean
   readonly namespaces: readonly SettingsNamespace[]
+  /**
+   * Why the profile patch could not be read (#165), when it could not: the forms then show the running configuration,
+   * as DSH's settings read projects `configEditor.configuration()` without parsing the file, and a write is refused
+   * with this same sentence. It names the file, line and reason and quotes none of the file.
+   */
+  readonly documentError?: string
 }
 
 /** A refused write; `code` is DSH's wire code. */
@@ -206,6 +212,8 @@ export class SettingsService {
   private readonly schemaOf: SchemaReader
   private readonly applier: Applier | undefined
   private serial: Promise<unknown> = Promise.resolve()
+  /** The last state read whole, which is the running configuration a broken patch falls back to (#165). */
+  private lastGood: State | undefined
 
   // Fields are assigned explicitly: Node runs this file by stripping types, which parameter properties defeat.
   constructor(
@@ -226,7 +234,18 @@ export class SettingsService {
 
   /** Every entry's form, the target re-read. */
   async describe(): Promise<SettingsView> {
-    const state = readState(this.layers, this.target, this.env)
+    let state: State
+    let documentError: string | undefined
+    try {
+      state = readState(this.layers, this.target, this.env)
+      this.lastGood = state
+    } catch (error) {
+      if (!(error instanceof ConfigError) || this.target === undefined) throw error
+      // A hand edit broke the patch: the running configuration is still intact, so its forms stay readable and only a
+      // write is refused (it re-reads the file and fails with this same sentence).
+      documentError = error.problems.join('; ')
+      state = this.lastGood ?? bootState(this.layers, this.target)
+    }
     const rows = compose(state.current, this.env)
     let baseRows: readonly ComposedRow[] | undefined
     try {
@@ -240,7 +259,12 @@ export class SettingsService {
       if (ns === undefined) continue
       namespaces.push(await namespaceOf(state, ns, row, baseRows, this.env, this.revisions, this.schemaOf, this.applier !== undefined))
     }
-    return { writable: this.target !== undefined, hasDocument: this.target !== undefined && existsSync(this.target.path), namespaces }
+    return {
+      writable: this.target !== undefined,
+      hasDocument: this.target !== undefined && existsSync(this.target.path),
+      namespaces,
+      ...(documentError !== undefined ? { documentError } : {}),
+    }
   }
 
   /** Check, write and re-read entry `ns`; resolves to its new form. Writes run one at a time. */
@@ -390,6 +414,11 @@ interface State {
   readonly managed: readonly (readonly [string, unknown])[]
   readonly current: readonly NamedLayer[]
   readonly base: readonly NamedLayer[]
+}
+
+/** The run's boot layers as a state: what a broken patch falls back to before any read succeeded. */
+function bootState(layers: readonly NamedLayer[], target: SettingsTarget | undefined): State {
+  return { target, boot: layers, before: '', after: '', managed: [], current: layers, base: layers.filter((layer) => target === undefined || layer.file !== target.path) }
 }
 
 function readState(layers: readonly NamedLayer[], target: SettingsTarget | undefined, env: NodeJS.ProcessEnv): State {

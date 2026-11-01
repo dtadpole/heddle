@@ -371,6 +371,7 @@
    * Configuration: one form per profile entry, over `GET` and `POST /api/settings` (DSH's settings page). A row is a
    * label, its control and a Reset for a value this profile overrides; the actions span the form.
    */
+  #settings-config-note[data-state='error'] { color: #ff7b72; }
   #settings-config { display: flex; flex-direction: column; gap: .35rem; }
   .settings-entry { border: 1px solid var(--line); border-radius: 10px; }
   .settings-entry > summary { display: flex; gap: .6rem; align-items: baseline; padding: .5rem .6rem; font-size: .875rem; cursor: pointer; }
@@ -2847,8 +2848,12 @@
   }
   #timeline:empty { display: none; }
   .tr-lanes { position: relative; }
-  /** An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration. */
-  #timeline-tip { position: absolute; top: calc(100% + .25rem); z-index: 5; display: flex; flex-direction: column; gap: .1rem; max-width: 220px; padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
+  /**
+   * An overview tick's details, 500 ms into a hover (DSH's overview): its turn and kinds, then its clock and duration.
+   * Fixed, as DSH's tooltip floats in its own layer: placed under the strip inside it, the strip's clip hid it whole,
+   * and a 220 px box cut the TTFT line (developer-ten's N5). The script places it by the tick, inside the window.
+   */
+  #timeline-tip { position: fixed; top: 0; left: 0; z-index: 40; display: flex; flex-direction: column; gap: .1rem; max-width: calc(100vw - 16px); padding: .3rem .5rem; font-size: .72rem; white-space: nowrap; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); pointer-events: none; }
   #timeline-tip[hidden] { display: none; }
   #timeline-tip span { font-family: var(--mono); opacity: .75; }
   .tr-lane { position: relative; height: 15px; }
@@ -6186,7 +6191,13 @@ async function showView(next) {
 /** Read the ledger projection for one session and draw it. */
 let ledgerFetches = 0
 async function showLedger(id) {
-  ledger.replaceChildren()
+  /**
+   * Another session's ledger is taken down at once, so it is never read as this one's. The same session's drawn ledger
+   * stays until the new read draws over it (renderLedger replaces the pane): a live refetch, or entering the view again,
+   * used to blank the pane first, and a read the server refused (`!response.ok`) then left it blank for good. Under load,
+   * 80's stale-ledger check caught that pane empty for 20 s on both builds.
+   */
+  if (trajectory.data?.id !== id) ledger.replaceChildren()
   /**
    * Only the newest request draws. Without this, two overlapping reads can land out of order and the older
    * one paints last, which is the other half of the stacked-draw bug.
@@ -6204,8 +6215,10 @@ async function showLedger(id) {
      * drawn would otherwise append its error under the new ledger (developer-two, reproduced in a component run).
      */
     if (ticket !== ledgerFetches) return
+    /** The drawn ledger now stays under a failed read, so an earlier failure's note gives way: one note, not a stack. */
+    ledger.querySelector('.tr-read-failed')?.remove()
     const note = document.createElement('div')
-    note.className = 'turn denied'
+    note.className = 'turn denied tr-read-failed'
     note.textContent = 'could not read the ledger: ' + (error && error.message)
     ledger.append(note)
   }
@@ -6328,8 +6341,8 @@ const trajectory = {
   focus: null,
   /** The overview's zoom (`zoomViewport`): null for the whole domain; kept across a live refetch of the same session. */
   viewport: null,
-  domainStart: undefined,
-  domainEnd: undefined,
+  /** The overview's one Tab stop, `{ id, key }` (turn, lane and ordinal), kept across a redraw of the same session. */
+  barStop: null,
 }
 
 /** DSH's kind vocabulary, which the table's tags speak. */
@@ -6484,13 +6497,6 @@ function renderLedger(data, timeline_ = { spans: [], durationMs: 0 }) {
   trajectory.selected = -1
   trajectory.expanded.clear()
   trajectory.focus = null
-  const times = trajectory.rows
-    .map((row) => row.record?.startedAt)
-    .filter((at) => typeof at === 'string')
-    .map((at) => Date.parse(at))
-    .filter((at) => !Number.isNaN(at))
-  trajectory.domainStart = times.length > 0 ? Math.min(...times) : undefined
-  trajectory.domainEnd = times.length > 0 ? Math.max(...times) : undefined
 
   /** DSH's shape: a scroll pane holding one table, and a details pane on the right. */
   const split = document.createElement('div')
@@ -7105,11 +7111,83 @@ function viewportDomain(viewport, screenFraction) {
   if (viewport === null || viewport === undefined) return screenFraction
   return viewport.from + screenFraction * (viewport.to - viewport.from)
 }
+
+/**
+ * A viewport that shows the stretch `[x0, x1]`, by DSH's rule for its selected span: unchanged when the stretch is in
+ * view (touching an edge counts, as for a tab stop), else moved at the same zoom just far enough to bring it in, from
+ * the side it lies on. The whole domain shows everything.
+ */
+function viewportShowing(viewport, x0, x1) {
+  if (viewport === null || viewport === undefined) return null
+  if (x1 >= viewport.from && x0 <= viewport.to) return viewport
+  const span = viewport.to - viewport.from
+  const start = Math.min(Math.max(x1 < viewport.from ? x0 : x1 - span, 0), 1 - span)
+  return { from: start, to: start + span }
+}
 /* overview-viewport:end */
+
+/* overview-keys:begin */
+/**
+ * Where a key moves the overview's one tab stop. The strip is a single Tab stop, as DSH's overview is (developer-ten's
+ * N4: a stop per bar made Tab walk through hundreds), and the arrows move among its bars. `bars` are `{ x0, lane }` in
+ * reading order (by start, then lane: input, model, tools) and `at` is the focused bar's index. Left and Right step
+ * through that order, Home and End go to its ends, and Up and Down change lane, to the bar nearest in time in the next
+ * lane that has one. Returns the index to focus, or null for a key the strip leaves alone. Pure, and fenced so
+ * test/page-overview-keys.test.ts judges it.
+ */
+function overviewKeyTarget(bars, at, key) {
+  if (bars.length === 0 || at < 0 || at >= bars.length) return null
+  if (key === 'Home') return 0
+  if (key === 'End') return bars.length - 1
+  if (key === 'ArrowLeft') return Math.max(0, at - 1)
+  if (key === 'ArrowRight') return Math.min(bars.length - 1, at + 1)
+  if (key !== 'ArrowUp' && key !== 'ArrowDown') return null
+  const lanes = ['input', 'model', 'tools']
+  const step = key === 'ArrowUp' ? -1 : 1
+  const here = bars[at]
+  for (let lane = lanes.indexOf(here.lane) + step; lane >= 0 && lane < lanes.length; lane += step) {
+    let best = -1
+    bars.forEach((bar, index) => {
+      if (bar.lane !== lanes[lane]) return
+      if (best === -1 || Math.abs(bar.x0 - here.x0) < Math.abs(bars[best].x0 - here.x0)) best = index
+    })
+    if (best !== -1) return best
+  }
+  return at
+}
+/* overview-keys:end */
+
+/* overview-focus:begin */
+/**
+ * The recorded time a focus window lights (developer-ten's zoom N7). A window is a stretch `[from, to]` of the strip's
+ * domain, and the rows are lit by when they started. In the actual mode the domain is the timeline's own clock, which
+ * starts at `startsAtMs` and lasts `totalMs` (to the latest end, not to the rows' latest start). In the equal mode the
+ * domain is record slots, not time: the window lights the items whose slots it touches, from the first of them to start
+ * to the last moment one of them can hold a row (`last`, a fraction like `start`; a record's own start, a turn's end).
+ * A window that touches no slot lights nothing. `items` are `{ x0, x1, start, last? }`. Returns `{ from, to }` in epoch
+ * milliseconds, or null when there is no clock to judge rows by. Pure, and fenced so test/page-overview-focus.test.ts
+ * judges it.
+ */
+function focusWindowTime(from, to, items, durationActual, startsAtMs, totalMs) {
+  if (!Number.isFinite(startsAtMs) || !(totalMs > 0)) return null
+  if (durationActual) return { from: startsAtMs + from * totalMs, to: startsAtMs + to * totalMs }
+  const touched = items.filter((item) => item.x1 >= from && item.x0 <= to)
+  if (touched.length === 0) return { from: Infinity, to: -Infinity }
+  /** Half a millisecond either side: a row's time is whole milliseconds, and the fractions come back through floats. */
+  return {
+    from: startsAtMs + Math.min(...touched.map((item) => item.start)) * totalMs - 0.5,
+    to: startsAtMs + Math.max(...touched.map((item) => item.last ?? item.start)) * totalMs + 0.5,
+  }
+}
+/* overview-focus:end */
 
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
+  /** A redraw (a live refetch, every 500 ms while a turn runs) keeps the keyboard where it was: on its bar, focused. */
+  const refocus = timeline.contains(document.activeElement)
   timeline.replaceChildren()
+  timeline.dataset.window = 'false'
+  if (trajectory.barStop?.id !== data.id) trajectory.barStop = null
   const spans = timeline_?.spans ?? []
   if (spans.length === 0) return
   const total = timeline_?.durationMs ?? 0
@@ -7126,6 +7204,9 @@ function renderTimeline(timeline_, data = {}) {
     : records.map((record, index) => ({ ...record, x0: index / records.length, x1: (index + 0.9) / records.length }))
   const wrapper = document.createElement('div')
   wrapper.className = 'tr-lanes'
+  /** The lanes are one control, entered by one Tab stop and moved in with the arrows (a toolbar's roving tabindex). */
+  wrapper.setAttribute('role', 'toolbar')
+  wrapper.setAttribute('aria-label', 'Timeline overview')
   const focusBox = document.createElement('div')
   focusBox.className = 'tr-focus'
   wrapper.append(focusBox)
@@ -7154,10 +7235,12 @@ function renderTimeline(timeline_, data = {}) {
     const track = tracks.get(lane)
     /**
      * With per-record data, the lane draws DSH's per-record bars; an answer from a server without records keeps one tick
-     * per turn. Bars are buttons like ticks, so Tab reaches them and Enter picks their turn; their listeners are the
-     * strip's own, below. A bar is placed by its layout (`x0`/`x1`) and speaks its recorded time.
+     * per turn. Bars are buttons like ticks, so the keyboard reaches them (the strip's one Tab stop, then the arrows) and
+     * Enter picks their turn; their listeners are the strip's own, below. A bar is placed by its layout (`x0`/`x1`) and
+     * speaks its recorded time. Its ordinal among its turn's bars in the lane names it across a redraw.
      */
     if (bars !== null) {
+      const ordinals = new Map()
       for (const bar of bars) {
         if (bar.lane !== lane) continue
         const element = document.createElement('button')
@@ -7165,6 +7248,8 @@ function renderTimeline(timeline_, data = {}) {
         element.className = 'tr-tick tr-bar'
         element.dataset.lane = lane
         element.dataset.turn = String(bar.turn)
+        element.dataset.ordinal = String(ordinals.get(bar.turn) ?? 0)
+        ordinals.set(bar.turn, (ordinals.get(bar.turn) ?? 0) + 1)
         element.dataset.kind = bar.kinds.join(' ')
         element.dataset.x0 = String(bar.x0)
         element.dataset.x1 = String(bar.x1)
@@ -7193,6 +7278,10 @@ function renderTimeline(timeline_, data = {}) {
       const width = trajectory.durationActual ? Math.max(span.end - span.start, 0.004) : equal * 0.9
       tick.style.left = (left * 100).toFixed(3) + '%'
       tick.style.width = (width * 100).toFixed(3) + '%'
+      /** A tick has a layout like a bar's, so the zoom's tab stop and the arrows treat both alike (developer-ten's note). */
+      tick.dataset.x0 = String(left)
+      tick.dataset.x1 = String(left + width)
+      tick.dataset.ordinal = '0'
       if (span.running) tick.dataset.running = 'true'
       /**
        * The details wait for a 500 ms hover, as DSH's do, in the strip's own tip rather than a native title (which the
@@ -7230,6 +7319,21 @@ function renderTimeline(timeline_, data = {}) {
     focusBox.style.left = (Math.max(left, 0) * 100).toFixed(2) + '%'
     focusBox.style.width = (Math.max(Math.min(right, 1) - Math.max(left, 0), 0) * 100).toFixed(2) + '%'
   }
+  /**
+   * The strip's one Tab stop (developer-ten's N4; DSH's overview is one stop too): the bar the keyboard last stood on,
+   * while it is in view, else the first bar in view, so Tab never lands on a bar the strip does not show. The arrows
+   * move it (`overviewKeyTarget`), in reading order: by start, then lane.
+   */
+  const inOrder = () => [...wrapper.querySelectorAll('.tr-tick')].sort((left, right) => Number(left.dataset.x0) - Number(right.dataset.x0) || lanes.indexOf(left.dataset.lane) - lanes.indexOf(right.dataset.lane))
+  const stopKey = (tick) => tick.dataset.turn + '|' + tick.dataset.lane + '|' + tick.dataset.ordinal
+  const inView = (tick) => {
+    const viewport = trajectory.viewport
+    return viewport === null || viewport === undefined || (Number(tick.dataset.x1) >= viewport.from && Number(tick.dataset.x0) <= viewport.to)
+  }
+  const makeStop = (stop) => {
+    for (const tick of wrapper.querySelectorAll('.tr-tick')) tick.tabIndex = tick === stop ? 0 : -1
+    trajectory.barStop = stop === null ? null : { id: data.id, key: stopKey(stop) }
+  }
   const applyViewport = () => {
     const viewport = trajectory.viewport
     const span = viewport === null ? 1 : viewport.to - viewport.from
@@ -7239,14 +7343,13 @@ function renderTimeline(timeline_, data = {}) {
       track.style.right = viewport === null ? '' : 'auto'
     }
     wrapper.dataset.zoomed = viewport === null ? 'false' : 'true'
-    /** Only a bar inside the viewport is a tab stop, so Tab never lands on a bar the strip does not show. */
-    for (const bar of wrapper.querySelectorAll('.tr-bar')) {
-      const inside = viewport === null || (Number(bar.dataset.x1) >= viewport.from && Number(bar.dataset.x0) <= viewport.to)
-      bar.tabIndex = inside ? 0 : -1
-    }
+    const ticks = inOrder()
+    const kept = trajectory.barStop === null ? undefined : ticks.find((tick) => stopKey(tick) === trajectory.barStop.key && inView(tick))
+    makeStop(kept ?? ticks.find(inView) ?? null)
     drawFocus()
   }
   applyViewport()
+  if (refocus) wrapper.querySelector('.tr-tick[tabindex="0"]')?.focus({ preventScroll: true })
   /** One tip for the strip: shown 500 ms into a hover over a tick, gone when the pointer leaves or presses. */
   const tip = document.createElement('div')
   tip.id = 'timeline-tip'
@@ -7284,10 +7387,17 @@ function renderTimeline(timeline_, data = {}) {
     tipTimer = setTimeout(() => {
       tipTimer = null
       tip.replaceChildren(Object.assign(document.createElement('strong'), { textContent: tick.dataset.tipLabel ?? '' }), Object.assign(document.createElement('span'), { textContent: tick.dataset.tipWhen ?? '' }))
+      tip.hidden = false
+      /**
+       * Under the strip at the tick, as DSH's tip sits below its span, kept inside the window: shifted left when it would
+       * pass the right edge, and above the strip when there is no room below. Measured once shown, at its own width.
+       */
       const strip = timeline.getBoundingClientRect()
       const at = tick.getBoundingClientRect()
-      tip.style.left = Math.max(0, Math.min(at.left - strip.left, strip.width - 220)) + 'px'
-      tip.hidden = false
+      const width = tip.offsetWidth
+      const height = tip.offsetHeight
+      tip.style.left = Math.max(8, Math.min(at.left, window.innerWidth - width - 8)) + 'px'
+      tip.style.top = (strip.bottom + 4 + height <= window.innerHeight - 4 ? strip.bottom + 4 : Math.max(4, strip.top - height - 4)) + 'px'
     }, 500)
   }, true)
   wrapper.addEventListener('pointerleave', (pointerEvent) => {
@@ -7314,10 +7424,15 @@ function renderTimeline(timeline_, data = {}) {
       trajectory.focus = null
     } else {
       focusDomain = { from, to }
-      const start = trajectory.domainStart
-      const end = trajectory.domainEnd
-      trajectory.focus = start !== undefined && end !== undefined && end > start ? { from: start + from * (end - start), to: start + to * (end - start) } : null
+      /**
+       * The window's stretch is the strip's domain: the timeline's clock in the actual mode, record slots in the equal
+       * one (`focusWindowTime`). It was read as the rows' first to last start in both, which lit the wrong rows in the
+       * default mode wherever time was not spread evenly (developer-ten's zoom N7).
+       */
+      const slots = bars !== null ? placed : spans.map((span, index) => ({ x0: index * equal, x1: index * equal + equal * 0.9, start: span.start, last: span.end }))
+      trajectory.focus = focusWindowTime(from, to, slots, trajectory.durationActual, startsAtMs, total)
     }
+    timeline.dataset.window = focusDomain === null ? 'false' : 'true'
     drawFocus()
     /** A focus window that reaches rows before the drawn window draws them first, so they can be lit or dimmed. */
     const focus = trajectory.focus
@@ -7388,6 +7503,38 @@ function renderTimeline(timeline_, data = {}) {
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
     setWindow(Math.min(startX, x), Math.max(startX, x))
   }
+  /**
+   * The keyboard, from the strip's one Tab stop: the arrows, Home and End move it among the bars, a zoomed strip panning
+   * just far enough to show the bar (DSH's rule for its selected span); Enter picks the bar's turn, as a click does; and
+   * Escape clears the focus window, as Escape on DSH's overview does. A bar the keyboard stands on stays the stop.
+   */
+  wrapper.addEventListener('focusin', (focusEvent) => {
+    const tick = tickOf(focusEvent.target)
+    if (tick !== null && tick.tabIndex !== 0) makeStop(tick)
+  })
+  wrapper.addEventListener('keydown', (keyEvent) => {
+    if (keyEvent.altKey || keyEvent.ctrlKey || keyEvent.metaKey || keyEvent.isComposing) return
+    if (keyEvent.key === 'Escape') {
+      if (focusDomain === null) return
+      keyEvent.preventDefault()
+      setWindow(0, 0)
+      return
+    }
+    const tick = tickOf(keyEvent.target)
+    if (tick === null) return
+    const ticks = inOrder()
+    const target = overviewKeyTarget(ticks.map((each) => ({ x0: Number(each.dataset.x0), lane: each.dataset.lane })), ticks.indexOf(tick), keyEvent.key)
+    if (target === null) return
+    keyEvent.preventDefault()
+    const next = ticks[target]
+    const shown = viewportShowing(trajectory.viewport, Number(next.dataset.x0), Number(next.dataset.x1))
+    if (shown !== trajectory.viewport) {
+      trajectory.viewport = shown
+      applyViewport()
+    }
+    makeStop(next)
+    next.focus({ preventScroll: true })
+  })
   const legend = document.createElement('div')
   legend.id = 'timeline-legend'
   legend.textContent = [human(total) + ' recorded', spans.length + ' turn(s)'].filter(Boolean).join(' · ')
@@ -7407,9 +7554,15 @@ function wireTrajectoryToolbar() {
       trajectory[key] = !trajectory[key]
       button.setAttribute('aria-pressed', trajectory[key] ? 'true' : 'false')
       if (key === 'durationActual') {
-        /** Record slots and recorded time are different domains, with different floors: a zoom does not carry over. */
+        /**
+         * Record slots and recorded time are different domains, with different floors: neither a zoom nor a focus window
+         * carries over. The redraw drops the window from the strip, so the rows it dimmed are lit again with it.
+         */
         trajectory.viewport = null
+        const hadFocus = trajectory.focus !== null
+        trajectory.focus = null
         renderTimeline(trajectory.timeline, trajectory.data)
+        if (hadFocus) renderRows()
       }
       else renderRows()
     })
@@ -14063,13 +14216,14 @@ async function showHtml(path, body, ticket) {
     RETURN_DOM: false,
   })
   /**
-   * The policy goes in as the first thing in the document, and `base` after it, so a relative reference the browser
-   * resolves itself — a `url()` inside a stylesheet, which the rewrite cannot see — still lands beside the document.
+   * The policy goes first in the document, with no injected base, as in DSH's basic static HTML preview (#40).
+   * Quoted resource attributes already point at the authenticated raw route. A filesystem-folder base neither
+   * serves relative CSS dependencies through that route nor complies with base-uri 'none'; CSS url()/@import
+   * dependency rewriting remains a separate limitation rather than a reason to widen this policy.
    */
-  const base = path.slice(0, path.lastIndexOf('/') + 1)
   const framed = clean.replace(
     /<head([^>]*)>/i,
-    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}"><base href="${base}">`,
+    `<head$1><meta http-equiv="Content-Security-Policy" content="${body.csp ?? ''}">`,
   )
   htmlView.setAttribute('sandbox', 'allow-same-origin')
   /**
@@ -15563,7 +15717,10 @@ async function fillSettings() {
       const response = await fetch(path)
       if (response.ok) return { body: await response.json() }
       if (response.status === 404) return { missing: true }
-      return { failure: `the server answered ${response.status}`, status: response.status }
+      // The server's own sentence when it sent one (#165): the file, line and reason, not only the status.
+      const refusal = await response.json().catch(() => null)
+      const said = refusal !== null && typeof refusal.error === 'string' && refusal.error.length > 0 ? refusal.error : null
+      return { failure: said ?? `the server answered ${response.status}`, status: response.status }
     } catch (error) {
       return { failure: (error && error.message) || String(error) }
     }
@@ -15662,6 +15819,7 @@ function renderSettingsConfig(view, failure) {
   const host = document.getElementById('settings-config')
   const note = document.getElementById('settings-config-note')
   host.replaceChildren()
+  delete note.dataset.state
   if (failure !== undefined) {
     note.textContent = `could not read the settings: ${failure}`
     return
@@ -15673,6 +15831,14 @@ function renderSettingsConfig(view, failure) {
   note.textContent = view.writable
     ? 'Changes are written to this profile\u2019s patch.'
     : 'This run has no profile patch to write (start it with --profile, or from a project without --patch); values are read-only.'
+  /**
+   * A hand edit that broke the patch (#165): the forms show the running configuration, as DSH's do, and the note says
+   * why a Save will be refused until the file is fixed, in the server's words (file, line, reason; none of the file).
+   */
+  if (typeof view.documentError === 'string' && view.documentError.length > 0) {
+    note.textContent = `The profile patch could not be read, so these values are the running configuration and Save is refused until the file is fixed: ${view.documentError}`
+    note.dataset.state = 'error'
+  }
   for (const entry of view.namespaces) host.append(settingsEntryForm(entry))
 }
 
@@ -16435,14 +16601,16 @@ function isStopSequence(previous, now) {
   return previous !== null && now - previous >= 0 && now - previous <= STOP_SEQUENCE_MS
 }
 /**
- * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover or the approval
- * card. DSH breaks the stop sequence on each, so Escape closing the model menu or an approval card never also counts
- * toward a stop. Read in the capture phase, before those controls close themselves.
+ * Whether something on screen takes this Escape for itself: an open dialog, a menu, the usage popover, the approval
+ * card, or the trajectory overview clearing its focus window. DSH breaks the stop sequence on each, so Escape closing
+ * the model menu or an approval card never also counts toward a stop. Read in the capture phase, before those controls
+ * close themselves.
  */
 function uiTakesEscape() {
   if (document.querySelector('dialog[open]') !== null) return true
   if ([...document.querySelectorAll('[role="menu"]')].some((menu) => !menu.hidden)) return true
   if (statPopoverKind !== null) return true
+  if (timeline?.dataset.window === 'true' && timeline.contains(document.activeElement)) return true
   const card = document.getElementById('approval-card')
   return card !== null && !card.hidden
 }

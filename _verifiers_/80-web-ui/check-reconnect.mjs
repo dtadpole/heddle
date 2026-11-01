@@ -163,6 +163,17 @@ const INSTRUMENT = `(() => {
 
 const OFFLINE = { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }
 const ONLINE = { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }
+/**
+ * `navigator.onLine` held at online whatever the machine's own network is doing. ONLINE is DevTools' "No throttling",
+ * and Chrome takes it as no override at all: its renderer clears the navigator override unless a call is offline or
+ * names a latency above 0 or a throughput of 0 or more (`IsActiveNetworkStateOverride`, blink
+ * inspector_network_agent.cc). `navigator.onLine` then reads the machine's own state. That was offline on 31 Oct
+ * between 14:55:39 and 14:56:50, when the Mac's Wi-Fi dropped (link down, then up again, in the system log). The runs
+ * at cf8483e5 fell in that window, and both waited 5 s for an `online` that the browser had no reason to report. The
+ * server is on 127.0.0.1 and needs no network, so going back online is said as an override (a throughput of 0, which
+ * the renderer counts as active and which throttles nothing: `overrideNetworkState` only sets `navigator`).
+ */
+const ONLINE_STATE = { offline: false, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }
 
 const sessionRow = (id) => `document.querySelector('#tree li[data-kind="session"][data-session-id="${id}"]')`
 const sessionLabel = (id) => `(${sessionRow(id)}?.querySelector(':scope > .row .label')?.textContent ?? null)`
@@ -296,12 +307,13 @@ test('a rename and a workspace delete the server applied as the browser went off
     /**
      * DevTools' Offline: `emulateNetworkConditions` fails the page's requests and, being the deprecated whole-page form,
      * also moves `navigator.onLine` and fires `offline` / `online`. Its successor splits the two, so the navigator half
-     * is also asked for by name where the browser has it (`overrideNetworkState`, experimental; refused elsewhere).
+     * is also asked for by name where the browser has it (`overrideNetworkState`, experimental; refused elsewhere), and
+     * back online it is `ONLINE_STATE`, an override that holds whatever the machine's own network is doing.
      */
     const network = async (conditions) => {
       await browser.send('Network.emulateNetworkConditions', conditions)
       try {
-        await browser.send('Network.overrideNetworkState', conditions)
+        await browser.send('Network.overrideNetworkState', conditions.offline ? conditions : ONLINE_STATE)
       } catch {
         // A browser without the split method moved navigator.onLine with the call above.
       }
@@ -310,6 +322,11 @@ test('a rename and a workspace delete the server applied as the browser went off
 
     await browser.gotoSession(server.url, kept)
     await until('document.body.dataset.ready === "true"', 'the page finishes loading')
+    /**
+     * Online from here on, whatever the machine's own network is doing (`ONLINE_STATE`): a page loaded while the
+     * machine's Wi-Fi is down starts offline, and then the cut below would not even fire `offline`.
+     */
+    await network(ONLINE)
     await until(`document.getElementById('session-title')?.textContent === 'kept notes'`, 'the page opens the session it was given by name')
     await openWorkspace(browser, outerPath, `${sessionRow(renamed)} !== null && ${workspaceRow(innerPath)} !== undefined`)
     await until(`${sessionLabel(renamed)} === 'before the cut' && ${workspaceRow(innerPath)} !== undefined`, 'the session to rename and the nested workspace are drawn')
