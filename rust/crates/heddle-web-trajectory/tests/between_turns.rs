@@ -58,33 +58,66 @@ fn model_selection_is_metadata_not_a_leading_trajectory_section() {
         json!({"seq":7,"at":"2026-10-31T09:00:02.200Z","type":"assistant/completed","text":"second"}),
         json!({"seq":8,"at":"2026-10-31T09:00:02.200Z","type":"turn/completed","rounds":1}),
     ];
-    let mut decorated = vec![json!({"seq":0,"at":"2026-10-31T09:00:00.000Z","type":"model/selection","endpoint":"scripted","reasoningEffort":"high"})];
+    let mut decorated = vec![
+        json!({"seq":0,"at":"2026-10-31T09:00:00.000Z","type":"model/selection","endpoint":"scripted","reasoningEffort":"high"}),
+    ];
     decorated.extend(activity.iter().cloned());
     let baseline = project_ledger(&activity);
     let ledger = project_ledger(&decorated);
     let rows = project_rows(&ledger);
     assert_eq!(rows.iter().filter(|row| row.turn_start).count(), 2);
     assert_eq!(rows[0].record.label, "user", "turn one starts at row zero");
-    assert_eq!(ledger, baseline, "metadata changes no activity counters or records");
+    assert_eq!(
+        ledger, baseline,
+        "metadata changes no activity counters or records"
+    );
     assert_eq!(rows, project_rows(&baseline));
-    assert_eq!(heddle_web_trajectory::timeline::project_timeline(&ledger), heddle_web_trajectory::timeline::project_timeline(&baseline));
-    assert_eq!(heddle_web_trajectory::stats::project_session_stats(&decorated), heddle_web_trajectory::stats::project_session_stats(&activity));
+    assert_eq!(
+        heddle_web_trajectory::timeline::project_timeline(&ledger),
+        heddle_web_trajectory::timeline::project_timeline(&baseline)
+    );
+    assert_eq!(
+        heddle_web_trajectory::stats::project_session_stats(&decorated),
+        heddle_web_trajectory::stats::project_session_stats(&activity)
+    );
 }
 
 #[test]
 fn model_selection_exclusion_keeps_real_commands_and_unknown_events() {
     let mut activity = events();
-    activity.push(json!({"seq":17,"at":"2026-10-31T09:00:04.100Z","type":"custom/event","detail":"kept"}));
+    activity.push(
+        json!({"seq":17,"at":"2026-10-31T09:00:04.100Z","type":"custom/event","detail":"kept"}),
+    );
     let decorated: Vec<Value> = activity.iter().enumerate().flat_map(|(index, event)| {
         [json!({"seq":index*2,"at":"2026-10-31T09:00:00.000Z","type":"model/selection","endpoint":"scripted"}), event.clone()]
     }).collect();
     let baseline = project_ledger(&activity);
     let ledger = project_ledger(&decorated);
-    assert_eq!(ledger, baseline, "metadata before, within, between and after turns changes no activity");
+    assert_eq!(
+        ledger, baseline,
+        "metadata before, within, between and after turns changes no activity"
+    );
     let rows = project_rows(&ledger);
-    assert_eq!(rows[0].record.label, "command/run", "a legitimate leading command stays");
-    assert_eq!(rows.iter().filter(|row| row.loose && row.record.after_turn == Some(1)).map(|row| row.record.label.as_str()).collect::<Vec<_>>(), vec!["command/run", "compaction/start", "compaction/failed", "command/done"]);
-    assert!(rows.iter().any(|row| row.record.label == "custom/event" && row.record.text.contains("kept")));
+    assert_eq!(
+        rows[0].record.label, "command/run",
+        "a legitimate leading command stays"
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.loose && row.record.after_turn == Some(1))
+            .map(|row| row.record.label.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "command/run",
+            "compaction/start",
+            "compaction/failed",
+            "command/done"
+        ]
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.record.label == "custom/event" && row.record.text.contains("kept"))
+    );
 }
 
 #[test]
