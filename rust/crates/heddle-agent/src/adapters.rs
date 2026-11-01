@@ -396,6 +396,28 @@ impl SubagentStore for SessionSubagents {
             .map_err(port_error)?;
         Ok(event.seq)
     }
+
+    fn open(&self, id: &str) -> Option<SessionHandle> {
+        self.service.open(id)
+    }
+
+    fn close_interrupted(&self, session: &SessionHandle) -> Result<bool, PortError> {
+        // The store's own log, without the closers a read adds while no writer holds it: whether the turn is open
+        // is the question.
+        let store = self.service.store();
+        if store.writer_held(session) {
+            return Ok(false);
+        }
+        let events = store.read(session).map_err(port_error)?;
+        if heddle_session::interrupted_turn_closers(&events).is_empty() {
+            return Ok(false);
+        }
+        // A fresh write-open writes the closers (`SessionStore::claim`); letting go leaves the session as free
+        // as the process that died left it.
+        store.claim(session).map_err(port_error)?;
+        store.release(session);
+        Ok(true)
+    }
 }
 
 /// How the context service names a session, given the loop's handle.

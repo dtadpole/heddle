@@ -572,6 +572,15 @@ async function runWeb(args: Args): Promise<void> {
         process.stdout.write(`heddle web: recovered ${recovered.recovered} team(s) (${recovered.settled} settled, ${recovered.delivered} delivered${recovered.failed > 0 ? `, ${recovered.failed} failed` : ''})\n`)
       }
     }
+    /**
+     * And for background children: a child the previous process left mid-turn is closed and reported to its parent as
+     * interrupted, which the process that ran it can no longer do (#170). Only the server does this, for the same
+     * reason as the sweeps above; the parents' turns are not awaited here.
+     */
+    if (app.ctx.get('subagents') !== undefined) {
+      const reported = app.ctx.subagents.reportInterrupted(sweepHandles())
+      if (reported > 0) process.stdout.write(`heddle web: reported ${reported} interrupted subagent(s) to their parent(s)\n`)
+    }
     /** Reminders that came due are delivered by the server only, after the sweeps above (DSH's dsh-schedule). */
     if (app.ctx.get('schedule') !== undefined) app.ctx.schedule.startDelivery()
     process.stdout.write(`heddle web: ${server.url}\n`)

@@ -624,17 +624,32 @@ pub fn transcript_turns(events: &[Value]) -> Vec<ChatTurn> {
                 let message = event
                     .get("message")
                     .and_then(Value::as_str)
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or("unknown error");
-                let reason = format!("the turn failed: {message}");
-                match turns.last_mut() {
-                    Some(last) if last.kind == TurnKind::Assistant => {
-                        last.ended.get_or_insert_with(Vec::new).push(reason);
-                    }
-                    _ => {
-                        let mut turn = ChatTurn::new(TurnKind::Assistant, String::new());
-                        turn.ended = Some(vec![reason]);
-                        turns.push(turn);
+                    .filter(|message| !message.is_empty());
+                // Said once (#153). The loop has already ended this answer with `failed: <message>`
+                // (`record_unfinished`), and the route records the same message in `turn/failed`; both were drawn, as
+                // "Failed: X; the turn failed: X". Only the newest row is read, as before: a later turn whose failure
+                // left no answer row has its prompt last, so an earlier answer's identical failure cannot swallow it.
+                let said = message.is_some_and(|message| {
+                    turns.last().is_some_and(|last| {
+                        last.kind == TurnKind::Assistant
+                            && last.ended.as_ref().is_some_and(|ended| {
+                                ended
+                                    .iter()
+                                    .any(|reason| reason.strip_prefix("failed: ") == Some(message))
+                            })
+                    })
+                });
+                if !said {
+                    let reason = format!("the turn failed: {}", message.unwrap_or("unknown error"));
+                    match turns.last_mut() {
+                        Some(last) if last.kind == TurnKind::Assistant => {
+                            last.ended.get_or_insert_with(Vec::new).push(reason);
+                        }
+                        _ => {
+                            let mut turn = ChatTurn::new(TurnKind::Assistant, String::new());
+                            turn.ended = Some(vec![reason]);
+                            turns.push(turn);
+                        }
                     }
                 }
             }
@@ -791,6 +806,78 @@ mod tests {
         assert_eq!(
             alone[0].ended.as_deref(),
             Some(&["the turn failed: unknown error".to_owned()][..])
+        );
+    }
+
+    /// #153: the loop ends a failed answer with `failed: <message>` (`record_unfinished`, from the turn error's
+    /// `to_string()`), and the route records the same `to_string()` in `turn/failed`. Both were drawn: "Failed: X; the
+    /// turn failed: X". The verifier's failed-turn check (80-web-ui check-stream) judges the real loop and route
+    /// strings end to end on both builds.
+    #[test]
+    fn a_failure_the_loop_already_recorded_is_said_once() {
+        let message = "'claude' answered 400 — prompt is too long: 352406 tokens > 200000 maximum";
+        let prompt = |seq: u64| serde_json::json!({"seq": seq, "type": "message", "message": {"role": "user", "content": [{"type": "text", "text": "go"}]}});
+        let failed_answer = |seq: u64| {
+            vec![
+                serde_json::json!({"seq": seq, "type": "assistant/completed", "text": "", "finishReason": "error", "rounds": 1, "ended": [format!("failed: {message}")], "error": message}),
+                serde_json::json!({"seq": seq + 1, "type": "turn/completed", "rounds": 1, "error": message}),
+                serde_json::json!({"seq": seq + 2, "type": "turn/failed", "message": message}),
+            ]
+        };
+        let mut events = vec![prompt(0)];
+        events.extend(failed_answer(1));
+        let turns = transcript_turns(&events);
+        assert_eq!(
+            turns.last().and_then(|last| last.ended.as_deref()),
+            Some(&[format!("failed: {message}")][..]),
+            "the loop's own words, once"
+        );
+
+        // Two turns failing the same way are two failures, each said once.
+        events.push(prompt(4));
+        events.extend(failed_answer(5));
+        let notices: Vec<_> = transcript_turns(&events)
+            .into_iter()
+            .filter_map(|turn| turn.ended)
+            .collect();
+        assert_eq!(
+            notices,
+            vec![
+                vec![format!("failed: {message}")],
+                vec![format!("failed: {message}")]
+            ]
+        );
+
+        // A later turn whose failure left no answer row has its prompt last: the earlier answer's identical failure
+        // does not swallow it.
+        let mut early = vec![prompt(0)];
+        early.extend(failed_answer(1));
+        early.push(prompt(4));
+        early.push(serde_json::json!({"seq": 5, "type": "turn/failed", "message": message}));
+        let notices: Vec<_> = transcript_turns(&early)
+            .into_iter()
+            .filter_map(|turn| turn.ended)
+            .collect();
+        assert_eq!(
+            notices,
+            vec![
+                vec![format!("failed: {message}")],
+                vec![format!("the turn failed: {message}")]
+            ]
+        );
+
+        // A different message on the same answer is still added.
+        let mut other = vec![prompt(0)];
+        other.extend(failed_answer(1));
+        other.push(serde_json::json!({"seq": 4, "type": "turn/failed", "message": "the record could not be written"}));
+        assert_eq!(
+            transcript_turns(&other)
+                .last()
+                .and_then(|last| last.ended.clone()),
+            Some(vec![
+                format!("failed: {message}"),
+                "the turn failed: the record could not be written".to_owned()
+            ])
         );
     }
 
