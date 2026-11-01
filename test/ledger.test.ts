@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
-import { contextBreakdownWithFallback, laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
+import { contextBreakdownWithFallback, isReplacementCopy, laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
 
 /**
  * Unit tests for the Trajectory ledger.
@@ -690,4 +690,27 @@ test("a user record carries its images and files in content order, as DSH's insp
   assert.deepEqual(users, JSON.parse(readFileSync(new URL('attachments.expected.json', timelineFixture), 'utf8')))
   const plain = projectLedger([{ seq: 1, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } }])
   assert.equal('attachments' in (plain.turns[0]?.steps[0]?.records[0] ?? {}), false, 'a message without attachments carries no key')
+})
+
+test('a tool result pruned under context pressure keeps one row with the original, the same as the Rust projection (shared fixture)', () => {
+  /**
+   * #186: a pruned copy is written as a second `message` for the same call, marked `surfaceOp: { op: 'replace' }`. DSH keeps
+   * a replacement copy model-only (`isAppendSurfaceEvent`), and its trajectory keeps the call's first result. Both builds
+   * found the call already answered and drew the copy as an extra, unpaired "tool result" row.
+   */
+  const events = readFileSync(new URL('pruned-result.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+  const original = events.find((one) => one.seq === 5)?.message?.content?.[0]?.text
+  const rows = projectRows(projectLedger(events))
+  const tools = rows.filter((row) => row.kind === 'tool')
+  assert.deepEqual(
+    tools.map((row) => ({ label: row.record.label, result: row.record.result })),
+    [{ label: '→ read_file', result: original }],
+    'one row for the call, holding what the tool returned',
+  )
+  assert.ok(!rows.some((row) => `${row.record.text}${row.record.result ?? ''}`.includes('[pruned,')), 'and the cut copy is drawn nowhere')
+  assert.equal(isReplacementCopy({ type: 'message', surfaceOp: 'append' }), false, 'an append is not a replacement')
+  assert.equal(isReplacementCopy({ type: 'message' }), false, 'nor is an event without a marker')
 })

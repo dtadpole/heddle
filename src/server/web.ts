@@ -21,7 +21,7 @@ import { MAX_UPLOAD_BYTES, saveUpload, UPLOAD_NOT_REFERENCED, uploadDirectory, u
 import { rendererFor, renderSourceOffThread } from './code.ts'
 import { pickFolder } from './picker.ts'
 import { createDirectory, DirectoryError, listDirectory } from './directories.ts'
-import { contextBreakdownWithFallback, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
+import { contextBreakdownWithFallback, isReplacementCopy, projectLedger, projectRows, projectSessionStats, projectTimeline } from './ledger.ts'
 import { catalogOf } from './tool-catalog.ts'
 import { inspectTool } from './tool-inspector.ts'
 import { isHtmlDocument, NOT_AN_HTML_DOCUMENT, PREVIEW_CSP, rewriteResources } from './html.ts'
@@ -3825,6 +3825,13 @@ export function transcriptTurns(
       continue
     }
     if (event.type === 'message') {
+      /**
+       * A replacement copy is not a turn. It is a message that shadows part of the model's surface: today, a tool result
+       * cut down under context pressure (`src/context/prune.ts`). It is what the model is sent, not what a person reads,
+       * and the original it shadows is already on the call. DSH's chat keeps such a copy model-only (`isAppendSurfaceEvent`).
+       * Folded, it became a second, unpaired tool row (#186).
+       */
+      if (isReplacementCopy(event)) continue
       /** A message is a whole thing, not a delta, so whatever run was open has ended. */
       closeRuns()
       const message = event.message as

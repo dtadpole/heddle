@@ -5474,6 +5474,14 @@ function settleLiveToolCall(chunk) {
 }
 
 /**
+ * Whether a logged event replaced a span of the model's surface (`surfaceOp: { op: 'replace', … }`) instead of appending
+ * to it. The server's transcript and ledger folds read the marker the same way.
+ */
+function isReplacementCopy(event) {
+  return typeof event.surfaceOp === 'object' && event.surfaceOp !== null && event.surfaceOp.op === 'replace'
+}
+
+/**
  * Put a tool's result into the element of the call it answers.
  *
  * The live stream delivers the call and its result as two events, which is the transport's shape rather
@@ -8990,6 +8998,13 @@ function drawSessionEvent(payload) {
     }
     return
   }
+  /**
+   * A replacement copy is not drawn. It is a message that stands in for part of the model's surface: today, a tool result
+   * cut down under context pressure. It is what the model is sent from now on, not something a person reads; the original
+   * stays in the log and on its card. DSH's chat keeps such a copy model-only (`isAppendSurfaceEvent`). Drawn, it was
+   * appended to its call's full output, which then showed twice until a reload (#186).
+   */
+  if (event.type === 'message' && isReplacementCopy(event)) return
   if (event.type === 'assistant/chunk' && event.chunk.type === 'text-delta') {
     settleReasoning()
     add('assistant', event.chunk.text)
