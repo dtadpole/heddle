@@ -45,6 +45,35 @@ test('quoted resource attributes are rewritten, and relative CSS remains an expl
   assert.match(html, /@import "nested\.css"/, 'nor relative CSS imports')
 })
 
+test('source base is absent from the response before DOMPurify can parse it, without changing valid resources', () => {
+  const source = '<head><BaSe data-note="quoted > bracket" href="https://example.invalid/hostile/"><base href=//example.invalid/second/></head><body><link rel="stylesheet" href="theme.css"><img src="a.png"></body>'
+  assert.equal(
+    rewriteResources(source, '/docs', serve),
+    '<head></head><body><link rel="stylesheet" href="/api/raw?path=%2Fdocs%2Ftheme.css"><img src="/api/raw?path=%2Fdocs%2Fa.png"></body>',
+    'forbidding base only after detached browser parsing is too late to prevent a base-uri console violation',
+  )
+})
+
+test('base filtering preserves comments, escaped code, raw text and quoted attribute text', () => {
+  const source = '<!-- <base target="comment >"> --><pre><code>&lt;base href=example&gt;</code></pre><script>const sample = "<base target=script>";</script><style>p::after { content: "<base target=style>" }</style><textarea><base target=textarea></textarea><title><base target=title></title><div title="<base target=attribute>">base text</div><baseball>unchanged</baseball>'
+  assert.equal(rewriteResources(`${source}<base href="https://example.invalid/">`, '/docs', serve), source)
+})
+
+for (const tag of ['<BASE>', "<base\nhref = 'https://example.invalid/a>b'>", '<base href=https://example.invalid/>', '<base/href="https://example.invalid/">']) {
+  test(`base filtering recognizes an actual token: ${tag}`, () => {
+    assert.equal(rewriteResources(`before${tag}after`, '/docs', serve), 'beforeafter')
+  })
+}
+
+test('base filtering handles comment endings and disabled-scripting noscript without changing Unicode offsets', () => {
+  assert.equal(rewriteResources('İ雪<!--><base href="https://example.invalid/"><!-- hidden <base> --!><noscript><base href="https://example.invalid/"></noscript>', '/docs', serve), 'İ雪<!--><!-- hidden <base> --!><noscript></noscript>')
+  assert.equal(rewriteResources('<div title="a > <base>">ok</div><base title=unquoted" href=https://example.invalid/>end', '/docs', serve), '<div title="a > <base>">ok</div>end')
+})
+
+test('base filtering applies inside nested markup without removing neighbouring elements', () => {
+  assert.equal(rewriteResources('<template><base href="https://example.invalid/"><p>template</p></template><svg><base href="https://example.invalid/"></base><text>svg</text></svg>', '/docs', serve), '<template><p>template</p></template><svg></base><text>svg</text></svg>')
+})
+
 test('the allow-list keeps a reading pane and leaves out everything that acts', () => {
   for (const tag of ['p', 'h1', 'img', 'table', 'pre', 'style', 'link']) {
     assert.ok(ALLOWED_TAGS.includes(tag), `${tag} is allowed`)
