@@ -6339,6 +6339,12 @@ const trajectory = {
   viewport: null,
   /** The overview's one Tab stop, `{ id, key }` (turn, lane and ordinal), kept across a redraw of the same session. */
   barStop: null,
+  /**
+   * The overview's focus window and the gestures under way, kept across a redraw of the same session in the same mode:
+   * `{ id, actual, size, focus, drag, pan }`, where `size` is the domain's (`overviewDomainSize`), `focus` the window
+   * and `drag` the drag's start in its fractions, and `pan` a right-button drag. renderTimeline owns it.
+   */
+  overview: null,
 }
 
 /** DSH's kind vocabulary, which the table's tags speak. */
@@ -7177,6 +7183,29 @@ function focusWindowTime(from, to, items, durationActual, startsAtMs, totalMs) {
 }
 /* overview-focus:end */
 
+/* overview-keep:begin */
+/**
+ * What the overview keeps across a live redraw of the same session, in the domain's own units, as DSH keeps its range
+ * and viewport. The domain is recorded milliseconds in the actual mode and record slots in the equal mode (turn slots
+ * for an older server's ticks): `overviewDomainSize`. It starts at the session's first record whatever is added, so a
+ * running turn moves only its end, and a stretch `{ from, to }` of fractions drawn over a domain `scale` times the new
+ * one's size (old size over new) is the same records at `rescaleStretch`: each end times `scale`, kept inside the
+ * domain at its width. Null stays null. Pure, and fenced so test/page-overview-keep.test.ts judges it.
+ */
+function overviewDomainSize(durationActual, totalMs, records, spans) {
+  if (durationActual) return totalMs > 0 ? totalMs : 0
+  return records > 0 ? records : spans
+}
+
+function rescaleStretch(stretch, scale) {
+  if (stretch === null || stretch === undefined) return null
+  if (!(scale > 0) || scale === 1) return stretch
+  const span = Math.min(1, (stretch.to - stretch.from) * scale)
+  const from = Math.min(Math.max(stretch.from * scale, 0), 1 - span)
+  return { from, to: from + span }
+}
+/* overview-keep:end */
+
 /** The lane strip: Input / Model / Tools, with drag-to-focus like DSH's overview. */
 function renderTimeline(timeline_, data = {}) {
   /** A redraw (a live refetch, every 500 ms while a turn runs) keeps the keyboard where it was: on its bar, focused. */
@@ -7297,16 +7326,50 @@ function renderTimeline(timeline_, data = {}) {
    * DSH's: 20 ms of recorded time, or four records in the equal mode.
    */
   const minSpan = viewportMinSpan(trajectory.durationActual, total, records.length)
-  let focusDomain = null
+  /**
+   * A live refetch (500 ms after a running turn's events pause) draws the strip again, and its zoom, its focus window and
+   * a drag or pan under way keep their records, as DSH's viewport and range do. They were dropped, or the zoom was kept
+   * as fractions of a domain that had grown since, so it slid off what it showed (developer-ten's note on the overview's
+   * keys). The domain grows only at its end, so each is rescaled by the old size over the new (`rescaleStretch`).
+   */
+  const size = overviewDomainSize(trajectory.durationActual, total, records.length, spans.length)
+  const before = trajectory.overview
+  const state = { id: data.id, actual: trajectory.durationActual, size, focus: null, drag: null, pan: null }
+  if (before !== null && before.id === data.id && before.actual === state.actual && before.size > 0 && size > 0) {
+    const scale = before.size / size
+    state.focus = rescaleStretch(before.focus, scale)
+    state.drag = before.drag === null ? null : Math.min(before.drag * scale, 1)
+    if (before.pan !== null) {
+      const viewport = rescaleStretch(before.pan.viewport, scale)
+      state.pan = { ...before.pan, viewport, from: viewport?.from ?? 0 }
+    }
+    const viewport = rescaleStretch(trajectory.viewport, scale)
+    trajectory.viewport = viewport !== null && viewport.to - viewport.from >= 0.999 ? null : viewport
+  }
+  trajectory.overview = state
+  /**
+   * The window's stretch is the strip's domain: the timeline's clock in the actual mode, record slots in the equal one
+   * (`focusWindowTime`). It was read as the rows' first to last start in both, which lit the wrong rows in the default
+   * mode wherever time was not spread evenly (developer-ten's zoom N7). A drag under 1% of the view is no window
+   * (`isWindow`), so a kept stretch of some width is a window, however narrow the domain's growth has made it since; a
+   * stretch of none is where a drag began, kept while the drag is under way.
+   */
+  const slots = bars !== null ? placed : spans.map((span, index) => ({ x0: index * equal, x1: index * equal + equal * 0.9, start: span.start, last: span.end }))
+  const isWindow = (from, to) => to - from >= 0.01 * (trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from)
+  if (state.focus !== null && state.focus.from === state.focus.to && state.drag === null) state.focus = null
+  if (state.focus !== null && state.focus.from < state.focus.to) {
+    trajectory.focus = focusWindowTime(state.focus.from, state.focus.to, slots, trajectory.durationActual, startsAtMs, total)
+    timeline.dataset.window = 'true'
+  }
   const drawFocus = () => {
     const viewport = trajectory.viewport
     const span = viewport === null ? 1 : viewport.to - viewport.from
-    if (focusDomain === null) {
+    if (state.focus === null) {
       focusBox.style.display = 'none'
       return
     }
-    const left = (focusDomain.from - (viewport?.from ?? 0)) / span
-    const right = (focusDomain.to - (viewport?.from ?? 0)) / span
+    const left = (state.focus.from - (viewport?.from ?? 0)) / span
+    const right = (state.focus.to - (viewport?.from ?? 0)) / span
     if (right <= 0 || left >= 1) {
       focusBox.style.display = 'none'
       return
@@ -7407,28 +7470,20 @@ function renderTimeline(timeline_, data = {}) {
    * fractions, so a zoom or a pan redraws it where its time is. The right button is DSH's other gesture: a click clears
    * the window, and a drag pans a zoomed strip (dragging right shows earlier time). The wheel zooms about the pointer.
    */
-  let dragging = false
-  let startX = 0
-  let pan = null
+  /** The gestures under way live in `state`, so a redraw in the middle of one does not end it. */
   const fractionAt = (clientX) => {
     const bounds = timeline.getBoundingClientRect()
     return Math.min(Math.max((clientX - bounds.left) / Math.max(bounds.width, 1), 0), 1)
   }
   const setWindow = (from, to) => {
-    if (to - from < 0.01 * (trajectory.viewport === null ? 1 : trajectory.viewport.to - trajectory.viewport.from)) {
-      focusDomain = null
+    if (!isWindow(from, to)) {
+      state.focus = null
       trajectory.focus = null
     } else {
-      focusDomain = { from, to }
-      /**
-       * The window's stretch is the strip's domain: the timeline's clock in the actual mode, record slots in the equal
-       * one (`focusWindowTime`). It was read as the rows' first to last start in both, which lit the wrong rows in the
-       * default mode wherever time was not spread evenly (developer-ten's zoom N7).
-       */
-      const slots = bars !== null ? placed : spans.map((span, index) => ({ x0: index * equal, x1: index * equal + equal * 0.9, start: span.start, last: span.end }))
+      state.focus = { from, to }
       trajectory.focus = focusWindowTime(from, to, slots, trajectory.durationActual, startsAtMs, total)
     }
-    timeline.dataset.window = focusDomain === null ? 'false' : 'true'
+    timeline.dataset.window = state.focus === null ? 'false' : 'true'
     drawFocus()
     /** A focus window that reaches rows before the drawn window draws them first, so they can be lit or dimmed. */
     const focus = trajectory.focus
@@ -7456,25 +7511,25 @@ function renderTimeline(timeline_, data = {}) {
   }
   timeline.onpointerdown = (pointerEvent) => {
     if (pointerEvent.button === 2) {
-      pan = { x: pointerEvent.clientX, from: trajectory.viewport?.from ?? 0, viewport: trajectory.viewport, moved: false }
+      state.pan = { x: pointerEvent.clientX, from: trajectory.viewport?.from ?? 0, viewport: trajectory.viewport, moved: false }
       capture(pointerEvent)
       return
     }
     if (pointerEvent.button !== 0 || pointerEvent.target.closest('.tr-tick') !== null) return
-    dragging = true
-    startX = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    focusDomain = { from: startX, to: startX }
+    state.drag = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
+    state.focus = { from: state.drag, to: state.drag }
     drawFocus()
     capture(pointerEvent)
   }
   const endGestures = () => {
-    pan = null
-    dragging = false
+    state.pan = null
+    state.drag = null
   }
   timeline.onpointercancel = endGestures
   timeline.onlostpointercapture = endGestures
   timeline.onpointermove = (pointerEvent) => {
-    if (pan !== null && (pointerEvent.buttons & 2) === 0) pan = null
+    if (state.pan !== null && (pointerEvent.buttons & 2) === 0) state.pan = null
+    const pan = state.pan
     if (pan !== null) {
       if (Math.abs(pointerEvent.clientX - pan.x) >= 3) pan.moved = true
       if (pan.viewport === null) return
@@ -7483,21 +7538,23 @@ function renderTimeline(timeline_, data = {}) {
       applyViewport()
       return
     }
-    if (!dragging) return
+    if (state.drag === null) return
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    setWindow(Math.min(startX, x), Math.max(startX, x))
+    setWindow(Math.min(state.drag, x), Math.max(state.drag, x))
   }
   timeline.onpointerup = (pointerEvent) => {
+    const pan = state.pan
     if (pan !== null) {
       const moved = pan.moved || Math.abs(pointerEvent.clientX - pan.x) >= 3
-      pan = null
+      state.pan = null
       if (!moved) setWindow(0, 0)
       return
     }
-    if (!dragging) return
-    dragging = false
+    const start = state.drag
+    if (start === null) return
+    state.drag = null
     const x = viewportDomain(trajectory.viewport, fractionAt(pointerEvent.clientX))
-    setWindow(Math.min(startX, x), Math.max(startX, x))
+    setWindow(Math.min(start, x), Math.max(start, x))
   }
   /**
    * The keyboard, from the strip's one Tab stop: the arrows, Home and End move it among the bars, a zoomed strip panning
@@ -7511,7 +7568,7 @@ function renderTimeline(timeline_, data = {}) {
   wrapper.addEventListener('keydown', (keyEvent) => {
     if (keyEvent.altKey || keyEvent.ctrlKey || keyEvent.metaKey || keyEvent.isComposing) return
     if (keyEvent.key === 'Escape') {
-      if (focusDomain === null) return
+      if (state.focus === null) return
       keyEvent.preventDefault()
       setWindow(0, 0)
       return
