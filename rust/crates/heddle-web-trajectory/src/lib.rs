@@ -53,8 +53,8 @@ pub(crate) mod test_support;
 
 pub use inspector::{JsonHighlighter, ToolInspection, inspect_tool, render_payload};
 pub use ledger::{
-    Ledger, LedgerKind, LedgerRecord, LedgerStep, LedgerTokens, LedgerTurn, ToolState, UsageSource,
-    project_ledger,
+    AttachmentKind, Ledger, LedgerAttachment, LedgerKind, LedgerRecord, LedgerStep, LedgerTokens,
+    LedgerTurn, ToolState, UsageSource, ledger_attachments_of, project_ledger,
 };
 pub use log_download::{content_disposition, log_file_name, ndjson};
 pub use routes::{TrajectoryHost, ledger_response, router};
