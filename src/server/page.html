@@ -8572,19 +8572,6 @@ events.addEventListener('reset', () => {
   })()
 })
 /**
- * After the stream drops and reconnects, a steer claimed in between never reached `claimSteer`: the shown session's
- * view is read again and the dock reconciled from it (#31).
- */
-let eventsDropped = false
-events.addEventListener('error', () => {
-  eventsDropped = true
-})
-events.addEventListener('open', () => {
-  if (!eventsDropped) return
-  eventsDropped = false
-  void refreshSteers(composerKey)
-})
-/**
  * The list is redrawn shortly after activity, once per burst.
  *
  * The age and the order both come from the store's `updated`, so a message written anywhere — the composer here, another
@@ -8672,6 +8659,13 @@ function reacquireBaselines() {
         searchIndex = null
         await renderTree()
         await refreshSessions()
+        /**
+         * And the dock's steering rows (#31): a steer claimed while the page was away never reached `claimSteer`, so the
+         * shown session's view is read again and the rows reconciled from it. A replay usually brings the claim back on its
+         * own; this read is for a `reset` (a server restart, a cursor too old) and for a return online, where no replay
+         * comes (developer-ten's review of d642122d, R1).
+         */
+        await refreshSteers(composerKey)
       } while (baselineAgain)
     } catch (error) {
       setNote('could not read the workspaces: ' + (error && error.message))

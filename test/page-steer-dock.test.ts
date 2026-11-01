@@ -330,3 +330,61 @@ test('#31: once a newer view showed a steer gone, an older view that still lists
   dock.reconcile('X', { turns: [], pendingSteers: [{ steerId: 's1', text: 'claimed while the stream was down' }] }, older)
   assert.equal(dock.queue('X').length, 0, 'the older view answering last does not resurrect it')
 })
+
+test('a later ready re-reads the shown session’s steers, and so does a return online; the page’s own first ready does not (R1)', async () => {
+  /**
+   * developer-ten's review of d642122d (R1): the re-read rode the page's feed forwarding the EventSource's native `error`
+   * and `open`, which a silence timeout, a lock handover or a stream that survived an offline spell never fire. It now
+   * runs in the tree's baseline re-read (`reacquireBaselines`, `StreamBaseline`, #91), on every later `ready` and on a
+   * return online.
+   */
+  const begin = page.indexOf('/* stream-baseline:begin */')
+  const end = page.indexOf('/* stream-baseline:end */')
+  assert.ok(begin > 0 && end > begin, 'the page carries the baseline rule between its markers')
+  const followFrom = page.indexOf('let baselineFollow = StreamBaseline.initial()')
+  const followTo = page.indexOf('\n}', page.indexOf('function followConnection('))
+  assert.ok(followFrom > end && followTo > followFrom, 'the page follows its connection with the baseline rule')
+  const reads: string[] = []
+  const context = {
+    reads,
+    setTimeout,
+    clearTimeout,
+    fetch: async (url: string) => {
+      reads.push(url)
+      return { ok: true, json: async () => ({ pendingSteers: [] }) }
+    },
+  }
+  const follow = runInNewContext(
+    `
+    const QUEUE_KEY_NONE = '';
+    let composerKey = 'X';
+    let steerClock = 0, searchIndex = null, treeRefreshTimer = 0;
+    function reconcileSteers() {}
+    async function renderTree() {}
+    async function refreshSessions() {}
+    function setNote() {}
+    ${page.slice(begin, end)}
+    ${source('refreshSteers')}
+    ${page.slice(followFrom, followTo + 2)}
+    ({ followConnection, setKey(key) { composerKey = key } })
+  `,
+    context,
+  ) as { followConnection: (signal: string) => void; setKey: (key: string) => void }
+  const steerReads = () => reads.filter((url) => url === '/api/sessions/X').length
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+  follow.followConnection('ready')
+  await wait(20)
+  assert.equal(steerReads(), 0, 'the first ready is the page’s own load: its boot reads the view')
+  follow.followConnection('ready')
+  await wait(20)
+  assert.equal(steerReads(), 1, 'a later ready is a reconnect: the shown session’s steers are read again')
+  follow.followConnection('offline')
+  follow.followConnection('online')
+  await wait(700)
+  assert.equal(steerReads(), 2, 'a return online reads them again, for a stream that survived the cut')
+  follow.setKey('')
+  follow.followConnection('ready')
+  await wait(20)
+  assert.equal(reads.length, 2, 'with no session in the composer there is nothing to read')
+})
