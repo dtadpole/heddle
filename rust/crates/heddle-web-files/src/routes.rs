@@ -27,7 +27,7 @@
 //!
 //! | Method and path | Answers |
 //! |---|---|
-//! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text |
+//! | `GET /api/file?path=` | `503 {error}` workspace plugin not loaded · `400 {error}` no path · `400 {error: "<canonical> is not under any workspace root"}` · `200` pretty [`FileReading`] fields then [`Rendered`] fields · `404 {error}` not a file · `415 {error}` not text · `400 {error, code: "workspace-file/unreadable"}` text-read permission denied (basename only, like #106) · `500 {error, code: "workspace-file/read-failed"}` unexpected text-read I/O |
 //! | `GET /api/raw?path=` | `400 text "a path is required\n"` · `404 text "no such asset\n"` outside every root, plugin absent, or not a file · `200` the bytes, `content-type` from the inline table (else `application/octet-stream`), `content-length`, `content-disposition: inline` for an inline type, else `attachment; filename="<leaf>"`, or for a leaf beyond visible ASCII (or with `"` or `\`) `attachment; filename="<ASCII fallback>"; filename*=UTF-8''<percent-encoded leaf>` (`attachment_disposition`) · **every** answer, success or failure, also carries `content-security-policy: sandbox; default-src 'none'` and `x-content-type-options: nosniff` (`FILE_ANSWER_POLICY`, as DSH's file route) |
 //! | `GET /api/uploads/{leaf}?session=` | `404 text "no such asset\n"` for an empty leaf, `.`, `..`, a separator, or a path that leaves the canonical upload directory · `404 text "this upload is not referenced by this session\n"` when no session is named, it is unknown, or its log carries no message part with this leaf (DSH's `session/attachment`) · `200` the bytes, headers as `/api/raw` with the leaf as filename · every answer hardened as `/api/raw`'s |
 //! | `POST /api/uploads?name=` | body = the file's bytes · `413 text "the file is larger than this server accepts (50 MiB)\n"` · `400 text "an empty file has nothing to add\n"` · `200` compact [`SavedUpload`] |
@@ -57,7 +57,7 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 
 use crate::code::{Rendered, RendererName, render_source, renderer_for};
-use crate::host::{FileReading, FilesHost, WorkspaceAnswer};
+use crate::host::{FileReadError, FileReading, FilesHost, WorkspaceAnswer};
 use crate::picker::{CommandRunner, PickerOutcome, Platform, SystemRunner, pick_folder};
 use crate::uploads::{MAX_UPLOAD_BYTES, save_upload, upload_directory};
 
@@ -246,15 +246,33 @@ async fn file(State(files): State<FilesRoutes>, Query(params): Query<Params>) ->
                 ),
             )
         }
-        Err(error) => {
-            let message = error.to_string();
-            let status = if message.contains("is not a file") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::UNSUPPORTED_MEDIA_TYPE
-            };
-            json_error(status, &message)
+        Err(error) => file_read_error(error),
+    }
+}
+
+/// Scoped Heddle policy (#45), not a DSH HTTP status contract.
+fn file_read_error(error: FileReadError) -> Response {
+    let (status, code) = match &error {
+        FileReadError::Unreadable { .. } => {
+            (StatusCode::BAD_REQUEST, Some("workspace-file/unreadable"))
         }
+        FileReadError::ReadFailed => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Some("workspace-file/read-failed"),
+        ),
+        FileReadError::NotAFile(_) => (StatusCode::NOT_FOUND, None),
+        FileReadError::NotText(_) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, None),
+    };
+    if let Some(code) = code {
+        json(
+            status,
+            &format!(
+                "{}\n",
+                serde_json::json!({ "error": error.to_string(), "code": code })
+            ),
+        )
+    } else {
+        json_error(status, &error.to_string())
     }
 }
 
@@ -700,6 +718,42 @@ mod tests {
     use axum::http::{HeaderMap, Request as HttpRequest, StatusCode as Status};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn named_read_failures_have_scoped_status_and_no_host_details() {
+        for (error, status, code, message) in [
+            (
+                FileReadError::Unreadable {
+                    name: "denied.txt".into(),
+                },
+                Status::BAD_REQUEST,
+                "workspace-file/unreadable",
+                "cannot read \"denied.txt\": permission denied",
+            ),
+            (
+                FileReadError::ReadFailed,
+                Status::INTERNAL_SERVER_ERROR,
+                "workspace-file/read-failed",
+                "cannot read file: I/O error",
+            ),
+        ] {
+            let response = file_read_error(error);
+            assert_eq!(response.status(), status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({ "error": message, "code": code })
+            );
+        }
+        assert_eq!(
+            file_read_error(FileReadError::NotAFile("nonfile".into())).status(),
+            Status::NOT_FOUND
+        );
+        assert_eq!(
+            file_read_error(FileReadError::NotText("not text".into())).status(),
+            Status::UNSUPPORTED_MEDIA_TYPE
+        );
+    }
 
     /// A host over a real temporary tree: the routes read bytes and text through it, and nothing touches the
     /// operator's home.
@@ -1717,7 +1771,11 @@ mod tests {
     #[test]
     fn the_route_list_leaves_the_servers_own_paths_alone() {
         // developer-ten registers these in heddle-server; an overlap would panic in `Router::merge`.
-        for (method, path) in [("GET", "/api/html"), ("GET", "/vendor/purify.js")] {
+        for (method, path) in [
+            ("GET", "/api/html"),
+            ("GET", "/api/html/frame"),
+            ("GET", "/vendor/purify.js"),
+        ] {
             assert!(
                 !ROUTES.contains(&(method, path)),
                 "{method} {path} is the server's route, not this crate's"

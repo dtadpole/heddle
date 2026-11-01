@@ -10,8 +10,9 @@
 //!   runs user terminals with the user's own permissions.
 //! - **PTY through `script(1)`**: no native PTY and no `unsafe`. BSD takes `script -q /dev/null <cmd>`,
 //!   util-linux takes `script -qfec <cmd> /dev/null`. Resize is `stty -f` (BSD) or `stty -F` (Linux) on the
-//!   shell's own tty. Tokio hands the child a real pipe, which BSD `script` accepts for stdin, so this build
-//!   needs no `cat` in front of it.
+//!   shell's own tty. Tokio hands the child a real pipe, which BSD `script` accepts for stdin, but `script` runs
+//!   behind the TypeScript build's `cat` wrapper all the same, so a server that dies without closing its
+//!   terminals still ends them (#204; see [`terminal_argv`]).
 //! - **Replay is the raw output tail** (`replay_bytes`, DSH's 2 MiB), not a screen redrawn by a headless xterm.
 //! - **Reclaimed when unattended**: no stream attached and no input or output for `unattended_ms` (two hours).
 //! - **One default shell**: `$SHELL` when it is an absolute, executable path, else `/bin/sh`.
@@ -199,6 +200,37 @@ fn sh_quote(word: &OsString) -> String {
     format!("'{}'", word.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// The line the wrapper prints on stderr when the PTY ends, with the shell's exit status.
+const EXIT_MARK: &str = "heddle-terminal-exit:";
+
+/// The argv a terminal is spawned with, as the TypeScript build's `terminalArgv`: the PTY (see [`pty_argv`]) reads
+/// its input through `cat`.
+///
+/// - When the server's end of stdin closes without a close (the server was killed, crashed or ran out of memory),
+///   `cat` sees the end and the wrapper ends its own process group (#204). That ends `script`, and with the PTY
+///   gone the shell ends too. An end of input alone would not: BSD `script` passes it on as VEOF only while the tty
+///   is in canonical mode, and a shell waiting at its prompt keeps the tty raw, so `script` and the shell stayed
+///   under init. The signal is SIGTERM, not SIGHUP: a server started under `nohup` hands SIGHUP down ignored.
+/// - When `script` ends, the wrapper reports the exit status on stderr ([`EXIT_MARK`]) and ends its own process
+///   group, so `cat` does not outlive it. The wrapper itself then dies of that signal, so the status is read
+///   from the mark, not from the wrapper's own exit.
+///
+/// Both `kill ... 0` calls signal the wrapper's process group, so the wrapper must lead its own group
+/// (`process_group(0)`).
+pub fn terminal_argv(bsd: bool, confined: &[OsString]) -> Vec<OsString> {
+    let relay = format!(
+        "{{ cat; kill -TERM 0; }} | {{ \"$@\"; echo \"{EXIT_MARK}$?\" >&2; kill -TERM 0; }}"
+    );
+    let mut argv: Vec<OsString> = vec![
+        "/bin/sh".into(),
+        "-c".into(),
+        relay.into(),
+        "heddle-terminal".into(),
+    ];
+    argv.extend(pty_argv(bsd, confined));
+    argv
+}
+
 /// The PTY argv around the confined shell: BSD `script -q /dev/null <cmd>`, util-linux `script -qfec <cmd> /dev/null`.
 pub fn pty_argv(bsd: bool, confined: &[OsString]) -> Vec<OsString> {
     if bsd {
@@ -242,6 +274,10 @@ const HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 const SMALL_CHUNK: usize = 4096;
 
 async fn process_table() -> Vec<ProcessRow> {
+    #[cfg(test)]
+    if tests::empty_read() {
+        return Vec::new();
+    }
     let output = Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,tty="])
         .env("PATH", HELPER_PATH)
@@ -286,6 +322,18 @@ fn descendants_in(root: u32, table: &[ProcessRow]) -> Vec<ProcessRow> {
 
 async fn descendants(root: u32) -> Vec<ProcessRow> {
     descendants_in(root, &process_table().await)
+}
+
+/// The process table for a close. A read that failed or outlasted HELPER_TIMEOUT comes back empty, and the table is
+/// never truly empty (it lists at least `ps` and this server), so an empty one is read once more: swept from an empty
+/// table, a job that left the tree would outlive its terminal (#150).
+async fn process_table_for_close() -> Vec<ProcessRow> {
+    let table = process_table().await;
+    if table.is_empty() {
+        process_table().await
+    } else {
+        table
+    }
 }
 
 /// util-linux `script`, found in the system directories rather than through PATH.
@@ -405,6 +453,8 @@ struct State {
     tty: Option<String>,
     listeners: HashMap<u64, Listener>,
     stderr_line: String,
+    /// The shell's exit status from the wrapper's [`EXIT_MARK`] line, once it has printed one.
+    marked_exit: Option<i32>,
 }
 
 /// One stream's queue: its events, and the output bytes queued that the stream has not taken yet.
@@ -526,7 +576,8 @@ impl Terminal {
             .retain(|_, listener| listener.offer(&event, budget));
     }
 
-    /// A stderr line from `script` itself (its own failure, say) joins the output, as the TypeScript build does.
+    /// A stderr line from `script` itself (its own failure, say) joins the output, as the TypeScript build does. The
+    /// wrapper's [`EXIT_MARK`] line is the shell's exit status instead.
     fn stderr(&self, text: &str) {
         let lines = {
             let mut state = lock(&self.state);
@@ -534,7 +585,11 @@ impl Terminal {
             let mut lines = Vec::new();
             while let Some(newline) = state.stderr_line.find('\n') {
                 let line: String = state.stderr_line.drain(..=newline).collect();
-                lines.push(format!("{}\r\n", line.trim_end_matches('\n')));
+                let line = line.trim_end_matches('\n');
+                match line.strip_prefix(EXIT_MARK) {
+                    Some(code) => state.marked_exit = code.parse().ok(),
+                    None => lines.push(format!("{line}\r\n")),
+                }
             }
             lines
         };
@@ -660,15 +715,17 @@ impl Terminal {
             let _ = tokio::time::timeout(grace * 2, self.wait_done()).await;
             return;
         }
-        let known = lock(&self.state).tty.clone();
-        let tty = match known {
-            Some(tty) => Some(tty),
-            None => self.tty_path().await,
-        };
-        let table = process_table().await;
+        let table = process_table_for_close().await;
         // The tree, plus every process on this terminal's tty: a job started as `(cmd &)` or `nohup cmd &` leaves the
-        // tree for init but keeps the tty while the PTY is still this terminal's.
+        // tree for init but keeps the tty while the PTY is still this terminal's. A tty not learned yet is learned
+        // from this same table.
         let mut tree = descendants_in(leader, &table);
+        let known = lock(&self.state).tty.clone();
+        let tty = known.or_else(|| {
+            tree.iter()
+                .find(|row| row.has_tty())
+                .map(|row| format!("/dev/{}", row.tty))
+        });
         if let Some(tty) = &tty {
             let own = std::process::id();
             for row in &table {
@@ -687,7 +744,7 @@ impl Terminal {
         }
         signals::group(leader, true);
         let graceful = tokio::time::timeout(grace, self.wait_done()).await.is_ok();
-        let remaining = descendants(leader).await;
+        let remaining = descendants_in(leader, &process_table_for_close().await);
         if !graceful || !remaining.is_empty() || tree.iter().any(|row| signals::alive(row.pid)) {
             for row in tree.iter().chain(remaining.iter()) {
                 signals::kill(row.pid);
@@ -831,6 +888,7 @@ fn new_state(cols: u32, rows: u32) -> State {
         tty: None,
         listeners: HashMap::new(),
         stderr_line: String::new(),
+        marked_exit: None,
     }
 }
 
@@ -928,7 +986,7 @@ impl TerminalRegistry {
             .unwrap_or_else(|| default_shell(std::env::var("SHELL").ok().as_deref()));
         let confined =
             confine(&shell_argv(&shell, spec.cols, spec.rows)).map_err(CreateRefusal::Sandbox)?;
-        let argv = pty_argv(self.inner.bsd, &confined);
+        let argv = terminal_argv(self.inner.bsd, &confined);
         let mut command = Command::new(&argv[0]);
         command
             .args(&argv[1..])
@@ -974,14 +1032,16 @@ impl TerminalRegistry {
         let stderr = tokio::spawn(pump(child.stderr.take(), terminal.clone(), true));
         let watched = terminal.clone();
         tokio::spawn(async move {
-            let status = child.wait().await;
-            // The pipes close when `script` exits; a process that escaped with them open is not waited for.
+            let _ = child.wait().await;
+            // The pipes close when the wrapper's group ends; a process that escaped with them open is not waited for.
             let _ = tokio::time::timeout(Duration::from_secs(1), async {
                 let _ = stdout.await;
                 let _ = stderr.await;
             })
             .await;
-            watched.finish(status.ok().and_then(|status| status.code()));
+            // The wrapper dies of its own SIGTERM, so the status is the one its mark carried, as in TypeScript.
+            let code = lock(&watched.state).marked_exit;
+            watched.finish(code);
             let _ = done_tx.send(true);
         });
         // The tty is learned while the PTY is surely this terminal's, so a close can sweep jobs that left the tree.
@@ -1157,6 +1217,20 @@ impl TerminalRegistry {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// How many coming table reads on this thread come back empty, as a `ps` that outlasts HELPER_TIMEOUT does.
+        static EMPTY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Whether this table read stands in for a failed one, taking it from `EMPTY_READS`.
+    pub(super) fn empty_read() -> bool {
+        EMPTY_READS.with(|left| {
+            let failing = left.get();
+            left.set(failing.saturating_sub(1));
+            failing > 0
+        })
+    }
+
     #[test]
     fn a_character_split_across_reads_is_decoded_whole() {
         let bytes = "你好🙂".as_bytes();
@@ -1187,6 +1261,25 @@ mod tests {
         assert_eq!(linux[1], OsString::from("-qfec"));
         assert_eq!(linux[3], OsString::from("/dev/null"));
         assert!(linux[2].to_string_lossy().starts_with("'/bin/sh' '-c' "));
+    }
+
+    #[test]
+    fn the_pty_reads_through_a_relay_that_ends_its_group_when_the_server_end_closes() {
+        let shell = shell_argv("/bin/sh", 80, 24);
+        let argv = terminal_argv(true, &shell);
+        assert_eq!(
+            &argv[..2],
+            &["/bin/sh", "-c"].map(OsString::from),
+            "the wrapper, as the TypeScript build's"
+        );
+        let relay = argv[2].to_string_lossy();
+        assert!(
+            relay.starts_with("{ cat; kill -TERM 0; } | "),
+            "an end of input ends the group, by a signal nohup does not ignore: {relay}"
+        );
+        assert!(relay.contains(&format!("echo \"{EXIT_MARK}$?\" >&2; kill -TERM 0;")));
+        assert_eq!(argv[3], OsString::from("heddle-terminal"));
+        assert_eq!(&argv[4..], pty_argv(true, &shell).as_slice());
     }
 
     #[test]
@@ -1378,20 +1471,19 @@ mod tests {
             let _ = std::fs::remove_dir_all(cwd);
         }
 
-        #[tokio::test]
-        async fn a_job_that_left_the_tree_still_ends_with_its_terminal() {
-            let _turn = SERIAL.lock().await;
-            // developer-ten's review, E: `(sleep 300 &)` is reparented to init but keeps the PTY's tty.
-            let cwd = scratch("escaped");
-            let registry = TerminalRegistry::default();
-            let info = spawn(&registry, "a", &cwd);
-            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+        /// Start `(sleep 300 &)` in session "a"'s terminal `id` and answer its pid: the job is reparented to init
+        /// but keeps the PTY's tty.
+        async fn escaped_job(
+            registry: &TerminalRegistry,
+            id: &str,
+            events: &mut TerminalEvents,
+        ) -> u32 {
             let mut seen = String::new();
             tokio::time::sleep(Duration::from_millis(700)).await;
             registry
-                .input("a", &info.id, "(sleep 300 & echo ESC=$! )\n")
+                .input("a", id, "(sleep 300 & echo ESC=$! )\n")
                 .await;
-            until(&mut events, &mut seen, "ESC=").await;
+            until(events, &mut seen, "ESC=").await;
             let deadline = Instant::now() + Duration::from_secs(3);
             let mut job = None;
             while job.is_none() && Instant::now() < deadline {
@@ -1407,10 +1499,53 @@ mod tests {
             }
             let job = job.expect("the escaped job's pid");
             assert!(signals::alive(job));
+            job
+        }
+
+        #[tokio::test]
+        async fn a_job_that_left_the_tree_still_ends_with_its_terminal() {
+            let _turn = SERIAL.lock().await;
+            // developer-ten's review, E: `(sleep 300 &)` is reparented to init but keeps the PTY's tty.
+            let cwd = scratch("escaped");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+            let job = escaped_job(&registry, &info.id, &mut events).await;
             assert!(registry.close("a", &info.id).await);
             assert!(
                 ends_soon(job).await,
                 "the escaped job ended with its terminal"
+            );
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        #[tokio::test]
+        async fn a_close_whose_first_table_read_fails_still_ends_the_job_that_left_the_tree() {
+            let _turn = SERIAL.lock().await;
+            // #150: a `ps -A` that outlasts its 5 s timeout reads as an empty table. Swept from that table, a
+            // `(sleep 300 &)` (out of the tree, on the tty) would outlive its terminal. The table is never truly
+            // empty, so the close reads it again.
+            let cwd = scratch("empty-read");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+            let job = escaped_job(&registry, &info.id, &mut events).await;
+            // A resize answers Ok only once the tty is learned, so the failing read below is the close's own.
+            assert_eq!(
+                registry.resize("a", &info.id, 100.0, 30.0).await,
+                ResizeResult::Ok
+            );
+            EMPTY_READS.with(|left| left.set(1));
+            assert!(registry.close("a", &info.id).await);
+            let unread = EMPTY_READS.with(|left| left.replace(0));
+            let ended = ends_soon(job).await;
+            if !ended {
+                signals::kill(job);
+            }
+            assert_eq!(unread, 0, "the close read the process table");
+            assert!(
+                ended,
+                "the escaped job ended although the close's first table read came back empty"
             );
             let _ = std::fs::remove_dir_all(cwd);
         }
@@ -1539,6 +1674,145 @@ mod tests {
             assert_eq!(
                 registry.input("a", &info.id, "echo late\n").await,
                 InputResult::Exited
+            );
+            registry.close_all().await;
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        /// The last process id printed right after `key` (the echoed command line has `$$` there, not digits).
+        fn pid_after(seen: &str, key: &str) -> u32 {
+            seen.match_indices(key)
+                .filter_map(|(at, _)| {
+                    seen[at + key.len()..]
+                        .split(|c: char| !c.is_ascii_digit())
+                        .next()?
+                        .parse::<u32>()
+                        .ok()
+                })
+                .last()
+                .unwrap_or_else(|| panic!("no {key} in {seen:?}"))
+        }
+
+        /// A server that is killed, crashes or runs out of memory closes no terminal: its end of each wrapper's stdin
+        /// just closes. The shell waits at its prompt with the tty raw, where BSD `script` passes no VEOF on, so
+        /// before #204 `script` and the shell stayed under init.
+        #[tokio::test]
+        async fn a_server_end_that_closes_without_a_close_ends_the_shell_and_script() {
+            let _turn = SERIAL.lock().await;
+            let cwd = scratch("death");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let (_, mut events, _hold) = registry.attach("a", &info.id).expect("attached");
+            let mut seen = String::new();
+            registry
+                .input("a", &info.id, "echo \"SH=$$ PTY=$PPID $((40+2))\"\n")
+                .await;
+            until(&mut events, &mut seen, " 42\r").await;
+            let (shell, pty) = (pid_after(&seen, "SH="), pid_after(&seen, "PTY="));
+            assert!(signals::alive(shell) && signals::alive(pty));
+            let terminal = registry.find("a", &info.id).expect("held");
+            drop(terminal.stdin.lock().await.take());
+            let shell_ended = ends_soon(shell).await;
+            let pty_ended = ends_soon(pty).await;
+            for survivor in [shell, pty] {
+                if signals::alive(survivor) {
+                    signals::kill(survivor);
+                }
+            }
+            assert!(
+                shell_ended,
+                "the shell outlived the server's end of its input"
+            );
+            assert!(pty_ended, "script outlived the server's end of its input");
+            registry.close_all().await;
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        /// The same end of input for a terminal's argv started behind `nohup`, as a server started under `nohup`
+        /// hands SIGHUP down ignored: the wrapper's own signal must still end `script`, and the PTY's end the shell.
+        #[tokio::test]
+        async fn the_relay_ends_the_shell_and_script_under_nohup_too() {
+            let _turn = SERIAL.lock().await;
+            let cwd = scratch("nohup");
+            let mut command = Command::new("/usr/bin/nohup");
+            command
+                .args(terminal_argv(true, &shell_argv("/bin/sh", 80, 24)))
+                .current_dir(&cwd)
+                .env("TERM", "xterm-256color")
+                .env("SHELL", "/bin/sh")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .kill_on_drop(true);
+            let mut child = command.spawn().expect("the wrapper starts");
+            let mut stdin = child.stdin.take().expect("its stdin");
+            let mut stdout = child.stdout.take().expect("its stdout");
+            stdin
+                .write_all(b"echo \"SH=$$ PTY=$PPID $((40+2))\"\n")
+                .await
+                .expect("the line is written");
+            let mut seen = String::new();
+            let mut buffer = [0u8; 4096];
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !seen.contains(" 42\r") {
+                let left = deadline.saturating_duration_since(Instant::now());
+                match tokio::time::timeout(left, stdout.read(&mut buffer)).await {
+                    Ok(Ok(read)) if read > 0 => {
+                        seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                    }
+                    _ => break,
+                }
+            }
+            let (shell, pty) = (pid_after(&seen, "SH="), pid_after(&seen, "PTY="));
+            assert!(signals::alive(shell) && signals::alive(pty));
+            drop(stdin);
+            let shell_ended = ends_soon(shell).await;
+            let pty_ended = ends_soon(pty).await;
+            for survivor in [shell, pty] {
+                if signals::alive(survivor) {
+                    signals::kill(survivor);
+                }
+            }
+            assert!(
+                shell_ended,
+                "under nohup the shell outlived the end of its input"
+            );
+            assert!(
+                pty_ended,
+                "under nohup script outlived the end of its input"
+            );
+            drop(child);
+            let _ = std::fs::remove_dir_all(cwd);
+        }
+
+        /// The wrapper's `kill 0` reaches only its own group: it leads one, apart from the server's (#204).
+        #[tokio::test]
+        async fn the_wrapper_leads_its_own_process_group() {
+            let _turn = SERIAL.lock().await;
+            let cwd = scratch("group");
+            let registry = TerminalRegistry::default();
+            let info = spawn(&registry, "a", &cwd);
+            let leader = registry
+                .find("a", &info.id)
+                .and_then(|terminal| terminal.pid)
+                .expect("the wrapper's pid");
+            let group = |pid: u32| {
+                std::process::Command::new("ps")
+                    .args(["-o", "pgid=", "-p", &pid.to_string()])
+                    .output()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                    .unwrap_or_default()
+            };
+            assert_eq!(
+                group(leader),
+                leader.to_string(),
+                "the wrapper leads its group"
+            );
+            assert_ne!(
+                group(std::process::id()),
+                leader.to_string(),
+                "and the server is not in it"
             );
             registry.close_all().await;
             let _ = std::fs::remove_dir_all(cwd);

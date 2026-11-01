@@ -95,10 +95,9 @@ fn has_src_attribute(attributes: &str) -> bool {
 /// The page's Content-Security-Policy, sent with `page.html` only (the TypeScript `pagePolicy`, word for word).
 ///
 /// Defence in depth behind the sanitizer (live issues developer-two-6 and -7), approved by the coordinator as option
-/// (1): `script-src` is strict ('self' and the sha256 of each inline script of the page as served); images,
-/// stylesheets, fonts and media may also come over `https:` only because the HTML preview is a `srcdoc` frame, which
-/// inherits this policy, and a previewed document may load remote assets under its own policy (issue #50 would
-/// serve the preview at its own URL and drop them).
+/// (1): `script-src` is strict ('self' and the sha256 of each inline script of the page as served). Markdown
+/// images render in the main DOM and retain HTTPS; remote styles, fonts and media belong to the fixed HTML
+/// shell's separate response policy (#50), not this main page.
 pub fn page_policy(html: &str) -> String {
     page_policy_with_browser(html, false)
 }
@@ -117,10 +116,10 @@ pub fn page_policy_with_browser(html: &str, browser_enabled: bool) -> String {
     [
         "default-src 'self'",
         &script_src,
-        "style-src 'self' 'unsafe-inline' https:",
+        "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: blob: https:",
-        "font-src 'self' data: https:",
-        "media-src 'self' https:",
+        "font-src 'self' data:",
+        "media-src 'self'",
         if browser_enabled {
             "frame-src http: https:"
         } else {
@@ -464,15 +463,39 @@ mod browser_policy_tests {
     use super::*;
     #[test]
     fn only_browser_capability_changes_the_frame_directive() {
-        let strict = page_policy("<script>const x = 1</script>");
-        let enabled = page_policy_with_browser("<script>const x = 1</script>", true);
-        assert!(strict.contains("frame-src 'self'"));
+        use base64::Engine as _;
+        let html = "<script>const x = 1</script>";
+        let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(b"const x = 1"));
+        for browser_enabled in [false, true] {
+            let script_src = format!("script-src 'self' 'sha256-{hash}'");
+            let expected = [
+                "default-src 'self'",
+                &script_src,
+                "style-src 'self' 'unsafe-inline'",
+                "img-src 'self' data: blob: https:",
+                "font-src 'self' data:",
+                "media-src 'self'",
+                if browser_enabled {
+                    "frame-src http: https:"
+                } else {
+                    "frame-src 'self'"
+                },
+                "object-src 'none'",
+                "base-uri 'self'",
+                "frame-ancestors 'none'",
+                "form-action 'self'",
+            ]
+            .join("; ");
+            assert_eq!(page_policy_with_browser(html, browser_enabled), expected);
+            if !browser_enabled {
+                assert_eq!(page_policy(html), expected);
+            }
+        }
+        let preview = "default-src 'none'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https:; font-src 'self' https: data:; media-src 'self' https:; frame-src 'none'; script-src 'none'; form-action 'none'; base-uri 'none'";
+        assert_eq!(crate::preview::PREVIEW_CSP, preview);
         assert_eq!(
-            enabled,
-            strict.replace("frame-src 'self'", "frame-src http: https:")
-        );
-        assert!(
-            enabled.contains("object-src 'none'") && enabled.contains("frame-ancestors 'none'")
+            crate::preview::frame_policy(),
+            format!("{preview}; frame-ancestors 'self'; sandbox allow-same-origin")
         );
     }
 }

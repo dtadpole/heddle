@@ -91,6 +91,7 @@ pub const SERVER_CORE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/todo"),
     ("GET", "/api/team"),
     ("GET", "/api/html"),
+    ("GET", "/api/html/frame"),
     ("GET", "/vendor/purify.js"),
 ];
 
@@ -156,6 +157,7 @@ impl ModelHost for Host {
         EndpointListing {
             endpoints: vec![entry],
             default: Some("scripted".to_owned()),
+            ..EndpointListing::default()
         }
     }
 
