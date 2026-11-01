@@ -83,11 +83,11 @@ the default API test still judges the selected build.
 
 ## Footnote author literal HTTP regression
 
-[`check-footnote-literals.mjs`](check-footnote-literals.mjs) needs **no browser**. Authored against source
-`d7101503c26daa28df7f3402a8667abd19e06be0`, it complements the functional footnote check above with two
-small synthetic Markdown cases, with and without an actual note. Harmless literal NULs, the former
-marker's proper prefix, bare and numeric lookalikes, and an escaped colon remain author prose; in the
-note case each is immediately adjacent to an actual citation. The escaped-colon lookalike is created
+[`check-footnote-literals.mjs`](check-footnote-literals.mjs) needs **no browser**. It complements the
+functional footnote check above with two small synthetic Markdown cases, with and without an actual note.
+Harmless literal NULs, the former marker's proper prefix, bare and numeric lookalikes, and an escaped
+colon remain author prose; in the note case each is immediately adjacent to an actual citation.
+The escaped-colon lookalike is created
 by ordinary parsing, not recognized by a text postpass. It requires exact author paragraphs, ordinary
 prose emphasis, current plain `<sup>1</sup>` citations, one shared rendered note and one plain ↩ per
 citation. After excluding exact author paragraphs, no generated marker may leak; these anchor-free
@@ -106,11 +106,10 @@ refuses NUL-bearing files as nontext (415); this check does not relax file admis
 authentication remains in place. Startup, body bytes/time and child
 cleanup are bounded; only exact resolved self-allocated `mkdtemp` directories are removed after the
 child stops. It neither builds nor reads private/live inputs, contacts a model endpoint or needs a
-browser. Actual built-server checks passed **2/2 on TypeScript and 2/2 on Rust**, with no skips.
-TypeScript retained U+0000; Rust's unrelated control established U+FFFD normalization, which remained
-consistent across all marker paragraphs. Both retained the intentional file-reader 415 refusal for
-NUL-bearing files. These endpoint results complement the actual pre-fix TS renderer regressions;
-they do not claim exact NUL byte parity or a full parser/security verdict.
+browser. It requires rendered headings and ordinary prose rather than a source proxy or whole-document
+fallback, and verifies the NUL-bearing file's 415 refusal independently of JSON rendering. These checks
+complement the TypeScript renderer regressions; they do not establish a historical endpoint verdict,
+exact TypeScript/alternate-CLI NUL byte parity or a full parser/security verdict.
 
 ```bash
 node --test _verifiers_/88-file-preview/check-footnote-literals.mjs
