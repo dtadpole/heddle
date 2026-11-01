@@ -3017,6 +3017,13 @@
   .team-member[data-status='provisioning'] { border-color: #b7791f; }
   .team-member[data-status='failed'] { border-color: #d14343; }
   .team-member[data-role='lead'] { font-weight: 600; }
+  .team-member .team-act { font: inherit; font-size: 11px; padding: 0 .35rem; border: 1px solid var(--line); border-radius: 999px; background: none; color: inherit; cursor: pointer; }
+  .team-member .team-act:disabled { opacity: .45; cursor: default; }
+  .team-member .team-message { display: inline-flex; gap: .25rem; }
+  .team-member .team-message[hidden] { display: none; }
+  .team-member .team-message input { font: inherit; font-size: 11px; width: 14rem; }
+  #team-note { color: var(--text-3); }
+  #team-note[hidden] { display: none; }
   .team-task[data-status='completed'] { opacity: .6; }
   .team-task[data-status='deleted'] { opacity: .4; text-decoration: line-through; }
   #team-mail { opacity: .7; }
@@ -3587,6 +3594,7 @@
     <ul id="team-roster" aria-label="Team members"></ul>
     <ul id="team-tasks" aria-label="Shared tasks"></ul>
     <div id="team-mail" aria-live="polite"></div>
+    <div id="team-note" role="status" hidden></div>
   </div>
   <div id="log" data-view="chat" role="tabpanel" aria-labelledby="tab-chat"></div>
   <!--
@@ -25255,15 +25263,27 @@ async function refreshTeam() {
   teamShownFor = session
   document.getElementById('team-summary').textContent = teammates.length + ' teammate(s) \u00b7 ' + tasks.length + ' task(s)'
   const roster = document.getElementById('team-roster')
-  roster.replaceChildren()
+  /**
+   * Rows are kept by member id and updated in place, so a message being typed survives the 2 s refresh. A teammate's
+   * row carries DSH's two parent controls over a continuable child (inventory S134; `subagents/interruptByParent` and
+   * `subagents/prompt`, dsh-subagent lib/index.js:3187-3256): Stop interrupts its running turn, and Message sends it a
+   * person's follow-up, which runs as its next turn. A background delegate child is not on this roster: DSH says it
+   * cannot receive follow-up messages.
+   */
+  const wanted = new Set(body.members.map((member) => member.id))
+  for (const row of [...roster.children]) if (!wanted.has(row.dataset.memberId)) row.remove()
   for (const member of body.members) {
-    const item = document.createElement('li')
-    item.className = 'team-member'
+    let item = [...roster.children].find((row) => row.dataset.memberId === member.id)
+    if (item === undefined) {
+      item = teamMemberRow(member)
+      roster.append(item)
+    }
     item.dataset.status = member.status
     item.dataset.role = member.role
     item.dataset.name = member.name
-    item.textContent = member.name + ' \u00b7 ' + member.role + ' \u00b7 ' + member.status
-    roster.append(item)
+    item.querySelector('.team-label').textContent = member.name + ' \u00b7 ' + member.role + ' \u00b7 ' + member.status
+    const stop = item.querySelector('.team-stop')
+    if (stop !== null && stop.dataset.busy !== 'true') stop.disabled = member.status !== 'running'
   }
   const board = document.getElementById('team-tasks')
   board.replaceChildren()
@@ -25281,6 +25301,100 @@ async function refreshTeam() {
   const queued = body.messages.filter((message) => !body.delivered.includes(message.id)).length
   document.getElementById('team-mail').textContent = queued + ' queued \u00b7 ' + body.delivered.length + ' delivered'
 }
+/** One roster row; a teammate's row also gets Stop and Message (S134). */
+function teamMemberRow(member) {
+  const item = document.createElement('li')
+  item.className = 'team-member'
+  item.dataset.memberId = member.id
+  const label = document.createElement('span')
+  label.className = 'team-label'
+  item.append(label)
+  if (member.role !== 'teammate') return item
+  const stop = document.createElement('button')
+  stop.type = 'button'
+  stop.className = 'team-act team-stop'
+  stop.textContent = 'Stop'
+  stop.setAttribute('aria-label', 'Stop ' + member.name)
+  stop.addEventListener('click', () => void stopTeammate(item, stop))
+  const open = document.createElement('button')
+  open.type = 'button'
+  open.className = 'team-act team-open-message'
+  open.textContent = 'Message'
+  open.setAttribute('aria-label', 'Message ' + member.name)
+  const form = document.createElement('form')
+  form.className = 'team-message'
+  form.hidden = true
+  const input = document.createElement('input')
+  input.type = 'text'
+  input.setAttribute('aria-label', 'Message to ' + member.name)
+  input.placeholder = 'Message ' + member.name
+  const send = document.createElement('button')
+  send.type = 'submit'
+  send.className = 'team-act team-send'
+  send.textContent = 'Send'
+  form.append(input, send)
+  open.addEventListener('click', () => {
+    form.hidden = !form.hidden
+    if (!form.hidden) input.focus()
+  })
+  form.addEventListener('submit', (event) => {
+    event.preventDefault()
+    void messageTeammate(item, input, send)
+  })
+  item.append(stop, open, form)
+  return item
+}
+
+function teamNote(text) {
+  const note = document.getElementById('team-note')
+  if (note === null) return
+  note.textContent = text
+  note.hidden = text === ''
+}
+
+/** DSH's interruptByParent: cancel the child's running turn; an idle child is a no-op. */
+async function stopTeammate(item, button) {
+  const id = item.dataset.memberId
+  button.disabled = true
+  button.dataset.busy = 'true'
+  try {
+    const response = await fetch('/api/sessions/' + encodeURIComponent(id) + '/stop', { method: 'POST' })
+    teamNote(response.ok ? 'Asked ' + item.dataset.name + ' to stop.' : 'Could not stop ' + item.dataset.name + ' (' + response.status + ').')
+  } catch (error) {
+    teamNote('Could not stop ' + item.dataset.name + ': ' + ((error && error.message) || error))
+  } finally {
+    delete button.dataset.busy
+    void refreshTeam()
+  }
+}
+
+/** DSH's subagents.prompt: a person's follow-up becomes the child's next turn; the draft stays until it is accepted. */
+async function messageTeammate(item, input, button) {
+  const id = item.dataset.memberId
+  const text = input.value.trim()
+  if (text === '') return
+  button.disabled = true
+  try {
+    const response = await fetch('/api/turn', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: id, prompt: text, detach: true }),
+    })
+    if (response.ok) {
+      input.value = ''
+      teamNote('Sent to ' + item.dataset.name + '.')
+    } else {
+      const body = await response.json().catch(() => ({}))
+      teamNote('Could not message ' + item.dataset.name + ': ' + (body.error || response.status))
+    }
+  } catch (error) {
+    teamNote('Could not message ' + item.dataset.name + ': ' + ((error && error.message) || error))
+  } finally {
+    button.disabled = false
+    void refreshTeam()
+  }
+}
+
 setInterval(() => {
   void refreshTeam()
 }, 2000)
