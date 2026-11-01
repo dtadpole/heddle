@@ -70,7 +70,7 @@ function harness() {
   }
   const api = runInNewContext(`let fileFetches = 0; let cancelHtmlFrame = null; ${fn('showFile')} ${fn('showHtml')}; ({showFile})`, context) as { showFile(node: { path: string }): Promise<void> }
   const snapshot = () => JSON.stringify({ body, head, frame: imported, hidden: pane.hidden })
-  return { ...api, html, htmlStarted, purifier, purifierStarted, shellStarted, snapshot, body, get frame() { return frame }, get imported() { return imported }, set shellAutoLoad(value: boolean) { shellAutoLoad = value }, pane, children }
+  return { ...api, html, htmlStarted, purifier, purifierStarted, shellStarted, snapshot, body, get frame() { return frame }, get imported() { return imported }, get shellAutoLoad() { return shellAutoLoad }, set shellAutoLoad(value: boolean) { shellAutoLoad = value }, pane, children }
 }
 
 test('PNG uses authorized raw img with accessible loading, success and error states', async () => {
