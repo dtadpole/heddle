@@ -223,8 +223,10 @@ pub fn rewrite_resources(html: &str, base: &str, serve: &dyn Fn(&str) -> String)
 /// Compatibility preprocessing, not sanitisation: DOMPurify's detached parse can apply a source
 /// base before FORBID_TAGS removes it, violating the outer page's base-uri CSP. Scan source tokens
 /// without a DOM and drop only base start tags, preserving comments, attributes and raw/RCDATA text.
-/// DOMPurify, the iframe sandbox and unchanged CSP remain the security boundaries. The existing
-/// markdown allow-list scanner is destructive and cannot preserve the preview source.
+/// Escape a trailing DATA-state '<' at each removal boundary to avoid creating new markup while
+/// preserving rendered text, without output rescans or fixed-point loops. DOMPurify, the iframe sandbox
+/// and unchanged CSP remain the security boundaries; foreign-namespace tokenizer transitions (N2)
+/// are not modeled. The markdown allow-list scanner is destructive and cannot preserve the source.
 fn strip_source_base(html: &str) -> String {
     let bytes = html.as_bytes();
     let mut out = String::with_capacity(html.len());
@@ -290,7 +292,14 @@ fn strip_source_base(html: &str) -> String {
         if !raw.is_empty() {
             raw.clear();
         } else if !closing && name == "base" {
-            out.push_str(&html[kept..open]);
+            // A '<' before this DATA-state token was literal text; do not splice it into new markup.
+            // Empty slices after adjacent bases are already protected by the earlier removal.
+            if open > kept && bytes[open - 1] == b'<' {
+                out.push_str(&html[kept..open - 1]);
+                out.push_str("&lt;");
+            } else {
+                out.push_str(&html[kept..open]);
+            }
             kept = end;
         } else if !closing
             && matches!(
@@ -651,6 +660,62 @@ mod tests {
                 "beforeafter"
             );
         }
+    }
+
+    #[test]
+    fn base_removal_cannot_splice_data_text_into_a_new_base_or_comment() {
+        for (source, expected) in [
+            (
+                "<<base>base href=https://example.invalid/>x",
+                "&lt;base href=https://example.invalid/>x",
+            ),
+            (
+                "<<base>!-- hidden --><base href=https://example.invalid/>x",
+                "&lt;!-- hidden -->x",
+            ),
+            (
+                "<<base><base>base href=https://example.invalid/>x",
+                "&lt;base href=https://example.invalid/>x",
+            ),
+            (
+                "İ雪<<<base>base href=https://example.invalid/>x",
+                "İ雪<&lt;base href=https://example.invalid/>x",
+            ),
+            (
+                "<div title=\"<\">text</div><base>x",
+                "<div title=\"<\">text</div>x",
+            ),
+            ("<!-- < --><base>x", "<!-- < -->x"),
+            ("<textarea><</textarea><base>x", "<textarea><</textarea>x"),
+        ] {
+            assert_eq!(
+                rewrite_resources(source, "/w/docs", &serve),
+                expected,
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn many_base_removals_protect_each_splice_with_bounded_output_growth() {
+        let count = 4096;
+        let source = "<<base><base>base href=https://example.invalid/>x".repeat(count);
+        let expected = "&lt;base href=https://example.invalid/>x".repeat(count);
+        let output = rewrite_resources(&source, "/w/docs", &serve);
+        assert_eq!(output, expected);
+        assert!(output.len() <= source.len() + 3 * count);
+        assert_eq!(
+            rewrite_resources(
+                &format!(
+                    "<{}base href=https://example.invalid/>x",
+                    "<base>".repeat(count)
+                ),
+                "/w/docs",
+                &serve,
+            ),
+            "&lt;base href=https://example.invalid/>x",
+            "adjacent removals do not repeatedly escape a protected output boundary",
+        );
     }
 
     #[test]

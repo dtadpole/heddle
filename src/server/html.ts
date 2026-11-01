@@ -114,9 +114,12 @@ export function rewriteResources(html: string, base: string, serve: (path: strin
 /**
  * Compatibility preprocessing, not sanitisation: a source base can violate the outer page's base-uri policy
  * during DOMPurify's detached parse, before FORBID_TAGS removes it. Walk source tokens without a browser DOM,
- * dropping only base start tags. Preserve comments, attributes and raw/RCDATA text byte-for-byte. The existing
- * DOMPurify allow-list, iframe sandbox and CSP remain the security boundaries; this is not an HTML validator.
- * The markdown sanitizer's destructive allow-list scanner cannot preserve this document's source.
+ * dropping only base start tags. Preserve comments, attributes and raw/RCDATA text byte-for-byte; escape a
+ * trailing DATA-state '<' at a removal boundary so joining the kept text cannot create a new tag or comment.
+ * This preserves rendered text without rescanning output or running a fixed-point loop. The existing DOMPurify
+ * allow-list, iframe sandbox and CSP remain the security boundaries; this is not an HTML validator and does not
+ * model foreign-namespace tokenizer transitions (N2). The markdown sanitizer's destructive allow-list scanner
+ * cannot preserve this document's source.
  */
 function stripSourceBase(html: string): string {
   const out: string[] = []
@@ -160,7 +163,10 @@ function stripSourceBase(html: string): string {
     index = end
     if (raw) raw = ''
     else if (!closing && name === 'base') {
-      out.push(html.slice(kept, open))
+      // A '<' immediately before this DATA-state token was literal text. Removing the token must not
+      // join it to following text as fresh markup. Empty slices after adjacent bases are already protected.
+      if (open > kept && html[open - 1] === '<') out.push(html.slice(kept, open - 1), '&lt;')
+      else out.push(html.slice(kept, open))
       kept = end
     } else if (!closing && ['script', 'style', 'title', 'textarea', 'xmp', 'iframe', 'noembed', 'noframes'].includes(name)) raw = name
     else if (!closing && name === 'plaintext') break
