@@ -474,6 +474,16 @@ test('the page is served under a strict script policy that allows its own inline
     writeFileSync(join(server.work, 'notes.md'), '# Notes\n\nSome *text*, a list:\n\n- one\n- two\n\n```js\nconst a = 1\n```\n')
     writeFileSync(join(server.work, 'page.html'), '<!doctype html><html><head><style>h1 { color: teal }</style></head><body><h1>Preview</h1><p>static</p></body></html>')
     await fetch(new URL('/api/workspaces', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: server.work }) })
+    /**
+     * The page loaded with nothing registered, so a first visit opened no session and the composer asks for a workspace
+     * (#142). The workspace registered just now reaches the page as a `workspace/added` frame, and the tree's next read
+     * aims the composer at it, as it would for a person watching another client add it. Send only once it is aimed:
+     * clicked before that read, the page rightly answers "Choose a workspace first." and no turn starts.
+     */
+    assert.ok(
+      await browser.waitFor(`(() => { const field = document.querySelector('textarea'); return field !== null && field.placeholder !== 'Choose a workspace to start' })()`, 15_000),
+      'the workspace added after the load reaches the page and the composer is aimed at it',
+    )
     await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'say something'; field.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('send').click() })()`)
     assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("live content")', 20_000), 'a turn streams under the policy')
     /** Read before the reload: the listener installed on every new document starts its list again. */
