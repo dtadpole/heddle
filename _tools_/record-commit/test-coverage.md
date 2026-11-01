@@ -30,7 +30,8 @@ race, and finding the seat in a roster. A first park creates `records/<seat>` on
 second park appends and carries only its own log lines. A rerun pushes nothing new, and a branch main already contains
 is fast-forwarded. They also cover the seat taken from `$DSH_SESSION_ID`, no seat refused with nothing pushed, a
 rejection that is not protection never parked, and a branch moved mid-park rebuilt on. Eight mutants of the new
-code were each caught.
+code were each caught. One more test checks that a refusal shows the remote's reasons and the porcelain `!` line,
+not only git's last line.
 
 ## A dry run against the real record
 

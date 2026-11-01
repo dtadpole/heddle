@@ -43,7 +43,7 @@ node _tools_/record-commit/record-commit.mjs --repo ~/reflection \
 node --test _tools_/record-commit/_tests_/record/unit.test.mjs
 ```
 
-Last run 2026-11-01 13:12 PST, on main 6157062 with the protected-main park: 36 passed, 0 failed.
+Last run 2026-11-01 13:21 PST, on main 6157062 with the protected-main park and the refusal reasons: 37 passed, 0 failed.
 
 ## Read next
 

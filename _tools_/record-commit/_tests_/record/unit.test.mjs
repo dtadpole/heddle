@@ -19,6 +19,7 @@ import {
   messageWarnings,
   parkedContent,
   protectedDetail,
+  rejectionReasons,
   seatFromTeam,
   unionLines,
   verifyLanded,
@@ -699,6 +700,8 @@ test('a rejection that is not protection is still refused, never parked', (t) =>
   const r = park(w, ['_projects_/x/note.md'], ['--seat', 'dev-one'])
   assert.equal(r.status, REFUSED, r.output)
   assert.match(r.output, /push rejected: /)
+  assert.match(r.output, /^    remote: error: quota exceeded$/m, 'the remote\'s reason is shown, not only git\'s last line')
+  assert.match(r.output, /^    ! \S+ \[remote rejected\]/m)
   assert.doesNotMatch(r.output, /^parked on|is protected/m)
   assert.equal(recordsRefs(w), '')
 })
@@ -737,4 +740,11 @@ exit 0
   assert.equal(git(w.origin, ['show', `${sha}:_projects_/x/other.md`]), 'other run', 'the other run is kept')
   assert.equal(git(w.origin, ['show', `${sha}:_projects_/x/note.md`]), 'one\nmid-park')
   assert.equal(originRef(w, 'refs/heads/records/dev-one'), sha)
+})
+
+test('a refusal names the remote\'s reasons and the porcelain status, not only git\'s last line', () => {
+  const text = "!\tHEAD:refs/heads/main\t[remote rejected] (hook declined)\nDone\nremote: error: quota exceeded        \nremote: \nremote: Create a pull request for 'x' on GitHub by visiting:\nTo github.com:dtadpole/reflection.git\nerror: failed to push some refs to 'github.com:dtadpole/reflection.git'\n"
+  assert.deepEqual(rejectionReasons(text), ['! HEAD:refs/heads/main [remote rejected] (hook declined)', 'remote: error: quota exceeded'])
+  assert.deepEqual(rejectionReasons('error: failed to push some refs'), [])
+  assert.equal(rejectionReasons(Array.from({ length: 20 }, (_, i) => `remote: line ${i}`).join('\n')).length, 8)
 })

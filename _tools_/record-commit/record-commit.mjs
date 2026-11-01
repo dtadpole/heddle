@@ -96,6 +96,20 @@ export function isProtectedRejection(text) {
   return PROTECTED.test(String(text ?? ''))
 }
 
+// A refusal's reason is in the remote's lines and the porcelain '!' status, not in git's
+// last line ('error: failed to push some refs'), which was all a refused run once showed.
+export function rejectionReasons(text, limit = 8) {
+  const seen = new Set()
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!/^remote:\s*\S/.test(line) && !/^!\s/.test(line)) continue
+    if (/^remote:\s*(To |Create a pull request|https?:\/\/)/i.test(line)) continue
+    seen.add(line.replace(/\s+/g, ' '))
+    if (seen.size >= limit) break
+  }
+  return [...seen]
+}
+
 export function protectedDetail(text) {
   const line = String(text ?? '').split('\n').find((l) => PROTECTED.test(l)) ?? ''
   return line.replace(/^\s*(remote:\s*)?(error:\s*)?/i, '').trim()
@@ -539,6 +553,7 @@ function attempt({ config, report, rebuild = false }) {
       const detail = `${push.stdout ?? ''}${push.stderr ?? ''}`.trim().split('\n').filter(Boolean).at(-1) ?? ''
       if (remoteTip === builtOn) {
         report.push(`  push rejected: ${detail}`)
+        for (const line of rejectionReasons(pushText)) report.push(`    ${line}`)
         return { code: REFUSED, files: prepared, report }
       }
       const touched = git(tmp, ['diff', '--name-only', builtOn, remoteTip, '--', ...paths], { allowFailure: true })
