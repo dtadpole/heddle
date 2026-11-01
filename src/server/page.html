@@ -14138,22 +14138,34 @@ function composePending(id) {
   else pendingInteractions.set(id, kind)
   return true
 }
-/** A turn that ended waits on nobody: every source forgets the session. */
+/** A turn that ended waits on nobody: every source forgets the session, and a question read still in flight is void. */
 function clearPending(id) {
   approvalSessions.delete(id)
   questionKinds.delete(id)
   pendingInteractions.delete(id)
+  questionReads.set(id, (questionReads.get(id) ?? 0) + 1)
 }
-/** Re-read one session's open questions and recompose its pending interaction; a read that fails changes nothing. */
+/**
+ * Re-read one session's open questions and recompose its pending interaction. Reads coalesce per session: while one is
+ * in flight, further asks only mark it to run once more when it ends, so a busy server's question frames cost at most
+ * two reads at a time per session. A non-2xx answer (an archived or deleted session, no questions plugin) is "no wait",
+ * as the hover card reads it; a read that fails outright changes nothing.
+ */
 const questionReads = new Map()
+const questionReadsInFlight = new Set()
+const questionReadsAgain = new Set()
 async function refreshQuestionPending(id) {
   if (typeof id !== 'string' || id.length === 0) return
+  if (questionReadsInFlight.has(id)) {
+    questionReadsAgain.add(id)
+    return
+  }
+  questionReadsInFlight.add(id)
   const read = (questionReads.get(id) ?? 0) + 1
   questionReads.set(id, read)
   try {
     const response = await fetch('/api/questions?session=' + encodeURIComponent(id))
-    if (!response.ok) return
-    const body = await response.json()
+    const body = response.ok ? await response.json() : { requests: [] }
     if (questionReads.get(id) !== read) return
     const kind = HoverCards.pendingKind({ questions: Array.isArray(body?.requests) ? body.requests : [] })
     if (kind === undefined) questionKinds.delete(id)
@@ -14161,32 +14173,10 @@ async function refreshQuestionPending(id) {
     if (composePending(id)) paintRunningMarks()
   } catch {
     // the next question event or list read tries again
+  } finally {
+    questionReadsInFlight.delete(id)
+    if (questionReadsAgain.delete(id)) void refreshQuestionPending(id)
   }
-}
-
-/** Keep one session's completion reminder in step with a running edge; the panel's own session is never unread. */
-function noteCompletion(id, wasRunning, running) {
-  const unread = WorkspaceTree.completionUnread(unreadSessions.has(id), { wasRunning, running, viewing: id === (current ?? composerKey) })
-  if (unread) unreadSessions.add(id)
-  else unreadSessions.delete(id)
-}
-
-/** A session row's status; an archived row keeps its cell blank, as DSH's does (`client.js:2306`). */
-function sessionRowStatus(node) {
-  const id = node.session.id
-  if (node.archived) return WorkspaceTree.rowStatus()
-  /**
-   * DSH's row draws the primary status's dot and names every status for a screen reader (`SessionStatusDots`,
-   * `client.js:2118-2123`): here the one mark carries them all in its label, so a parent whose background subagent works
-   * says `1 subagent running` even while it is idle itself (issue #187).
-   */
-  const statuses = WorkspaceTree.rowStatuses({
-    pending: pendingInteractions.get(id),
-    running: runningSessions.has(id),
-    runningSubagents: WorkspaceTree.runningChildCount(childSessions, id, runningSessions),
-    completed: unreadSessions.has(id),
-  })
-  return { ...statuses[0], label: statuses.map((status) => status.label).join(', ') }
 }
 
 /** DSH's `StateDot` for a still state: a filled dot at 20% inset, warning for a pending interaction, done for unread. */
