@@ -17,6 +17,8 @@ test('the actual risk card contains native Tab cycles and returns focus without 
   const writes = []
   const source = readFileSync(new URL('../../src/server/page.html', import.meta.url), 'utf8')
   // Disable only startup session/default-workspace creation; the actual control, listeners and CSS run unchanged.
+  assert.equal(source.split('await restoreSelection()').length - 1, 1, 'startup restoreSelection fixture target occurs exactly once')
+  assert.equal(source.split('renderTree().then(() => initializeDefaultWorkspace())').length - 1, 1, 'startup initializeDefaultWorkspace fixture target occurs exactly once')
   const page = source
     .replace('await restoreSelection()', '/* fixture has a selected session instead of creating one */')
     .replace('renderTree().then(() => initializeDefaultWorkspace())', 'renderTree()')
