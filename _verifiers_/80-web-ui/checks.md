@@ -3,7 +3,7 @@ title: 80-web-ui — what decides it
 created: 2026-10-23T05:06:41Z
 modified: 2026-10-31T18:45:00Z
 level: L3
-version: 1.6.0
+version: 1.7.0
 description: The check files of 80-web-ui, what each decides, and what the part deliberately leaves to others.
 status: unverified
 grounded_in:
@@ -15,6 +15,21 @@ grounded_in:
 ## What decides it
 
 - [`check.mjs`](check.mjs) — the port, the page, the API and the live stream.
+- [`check-offline-turn-count.mjs`](check-offline-turn-count.mjs) — issue #116, authored contract rather than runtime
+  evidence: the actual built CLI selected by `HEDDLE_BIN` (TypeScript build otherwise), with its own home,
+  workspace, port-zero server and OpenAI-chat provider double declaring a 1,000,000-token window. A named session
+  starts with one accepted user turn and one counter. A real headless browser's DevTools `Network` offline setting,
+  followed by the real Send button, leaves **every observed counter paint** at `1 turns`, no matching user row,
+  no raw provider request carrying the draft, no new persisted user fact or model request, and real server stats
+  still one. After reconnect the recovered draft remains unsent and the count stays one. The #128 stream-open gate
+  may reject before POST; the check does not demand a POST or modify EventSource. A different, actually accepted
+  second prompt reaches the check's provider, which answers HTTP 400: the persisted user fact and `turn/failed`
+  record make this a legitimate counted turn, and both UI and server stats must read two. This is not a backend
+  counter waiver, a redefinition of turns, or a comparison with DSH's separate step count. No optional mocked
+  failed-stats GET is included; all asserted stats come from the actual private server. Startup, browser and body
+  together are bounded at 75 seconds inside a 90-second test, with separate bounded cleanup. The shared
+  `HEDDLE_VERIFY_UI=0` labelled browser skip applies without an environment assertion. **Not run by the author**;
+  the parent must build both artifacts and run the same verifier against each before claiming runtime proof.
 - [`check-session-id.mjs`](check-session-id.mjs) — Copy Session ID at DSH parity (row C20): the session row's menu
   ends with it, pressing it closes the menu and gives the clipboard the complete id with the Toast "Session ID
   copied", and a refused clipboard shows "Copy failed. Try again." instead.

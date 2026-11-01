@@ -8783,6 +8783,10 @@ function drawSessionEvent(payload) {
       })
     }
   } else if (event.type === 'message' && event.message.role === 'user') {
+    // Count the same persisted fact as both backend folds, not a local send attempt (#116).
+    // An admitted prompt still counts if its provider fails or its acknowledgment is lost.
+    liveTurns += 1
+    updateStatusBar()
     add('user', messageContentText(event.message.content), false, undefined, {
       time: new Date().toISOString(),
       attachments: contentAttachments(event.message.content, payload.session),
@@ -10038,8 +10042,6 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       throw new Error(NO_WORKSPACE_REFUSAL)
     }
   }
-  liveTurns += 1
-  updateStatusBar()
   /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
   await events.whenOpen(3000)
   const startedAt = performance.now()
@@ -10407,9 +10409,9 @@ let sessionStats = null
 let liveRounds = 0
 let liveUsage = undefined
 /**
- * A turn this page started that the fold does not count yet. The reference's turn count moves when a prompt
- * is sent, not when the transcript has finished drawing; the durable count on its own therefore lags a fresh
- * turn, and counting rendered rows instead lags the other way. The sum is the figure a person expects.
+ * Persisted user messages delivered since the durable fold was read. The same facts count in both backend
+ * folds; a local submission or admission acknowledgment alone is not a message (#116). The session listener
+ * filters other sessions and keeps events during history reads, whose cutoff excludes facts already folded.
  */
 let liveTurns = 0
 /**

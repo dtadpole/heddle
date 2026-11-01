@@ -40,6 +40,7 @@ interface Snapshot {
   rounds: number
   usage?: unknown
   turns: number
+  turnsText: string
   generationMs: number
   decodeTokens: number
   roundStartedAt: number | null
@@ -49,8 +50,13 @@ interface Snapshot {
   timeRows: string[][]
   usageRows: string[][]
 }
+type Admission = 'streamed' | 'detached' | 'offline' | 'refused' | 'stream-unavailable' | 'lost-ack'
 interface Harness {
   done(): Promise<void>
+  emitUser(session?: string, seq?: number): void
+  replay(upTo: number): void
+  admission(): { posts: number; accepted: number }
+  baseline(): void
   completed(): void
   refresh(): Promise<void>
   switchSession(): void
@@ -64,10 +70,10 @@ const folded = { turns: 1, steps: 3, usage: liveUsage, generationMs: 1000, decod
 const normalized = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve))
 
-function harness(): Harness {
+function harness(admission: Admission = 'streamed', outcome = 'done'): Harness {
   const reads: Read[] = []
   const paints: Snapshot[] = []
-  const names = ['runTurn', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'refreshSessionStats', 'updateStatusBar',
+  const names = ['runTurn', 'sendTurn', 'selectionForSeat', 'selectionForTurn', 'drawSessionEvent', 'drawKeptEvents', 'keptToDraw', 'refreshSessionStats', 'updateStatusBar',
     'addUsage', 'formatTokenCount', 'formatRate', 'formatCacheHit', 'formatDurationMs',
     'formatExactCount', 'formatWindow', 'statPanelRows']
   const h = runInNewContext(`
@@ -78,13 +84,18 @@ function harness(): Harness {
     let stopRequested = true;
     const stopButton = { disabled: true }, QUEUE_KEY_NONE = 'none', activeFolder = null;
     const runningSessions = new Set(['S']), runningSince = new Map([['S', 0]]), queues = new Map();
-    const sessionLoading = null, pendingInteractions = new Map();
+    let sessionLoading = null;
+    const pendingInteractions = new Map();
+    let posts = 0, accepted = 0;
+    const NOT_FORWARDED = new Set([502, 503, 504]), RETRY_DELAY_MS = 0;
+    const hideApproval = () => {}, drawTurnFailure = () => {};
+    const turnVerdicts = { wait: async () => ({ session: 'S', outcome, message: 'provider failed' }) };
     let sessionListener;
     const events = { addEventListener(name, listener) {
       if (name === 'session') sessionListener = listener;
     },
-    // #128: runTurn sends once the page follows the stream; here it always does.
-    whenOpen: async () => {} };
+    // #128: runTurn sends only once the page follows the stream.
+    whenOpen: async () => { if (admission === 'stream-unavailable') throw new Error('stream unavailable'); } };
     const endpointOptions = [], endpointDefault = null;
     let chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const heldSeats = new Map(), recordedSelections = new Set(), pendingSaves = new Set();
@@ -102,22 +113,38 @@ function harness(): Harness {
       add = noop, paintDock = noop, noteCompletion = noop, markBranchable = noop,
       attachEditedFiles = noop, attachTurnUsage = noop;
     const lastTurnRow = () => null;
+    const messageContentText = () => 'hello', contentAttachments = () => [];
+    function persistedUser(session = 'S', seq = 10) {
+      sessionListener({ data: JSON.stringify({ session, event: {
+        type: 'message', seq, message: { role: 'user', content: [{ type: 'text', text: 'hello' }] }
+      } }) });
+    }
     const renderSettledAnswers = async () => {}, renderTree = async () => {}, refreshSessions = async () => {};
-    const sendTurn = async () => {
+    const fetch = async (url) => {
+      if (url !== '/api/turn') return new Promise((resolve, reject) => queueRead({ url, resolve, reject }));
+      posts += 1;
+      if (admission === 'offline') throw new Error('offline fetch');
+      if (admission === 'refused') return { ok: false, status: 400, text: async () => 'refused before admission' };
+      persistedUser('S', 9 + posts);
+      if (admission === 'lost-ack') throw new Error('acknowledgment lost');
+      if (admission === 'detached') return {
+        ok: true, status: 202, headers: { get: () => 'application/json' },
+        json: async () => ({ session: 'S', turn: 'turn-fixture' })
+      };
       let delivered = false;
-      // A streamed answer (a server without #128's detach): runTurn reads its frames through the same verdict().
-      return { ok: true, headers: { get: (name) => (name === 'content-type' ? 'text/event-stream' : null) }, body: { getReader: () => ({ read: async () => {
+      // A server without detach streams the verdict; its prompt still arrives on the session feed.
+      return { ok: true, headers: { get: () => 'text/event-stream' }, body: { getReader: () => ({ read: async () => {
         if (delivered) return { done: true };
         delivered = true;
-        return { done: false, value: new TextEncoder().encode('event: done\\ndata: {"session":"S"}\\n\\n') };
+        return { done: false, value: new TextEncoder().encode('event: ' + outcome + '\\ndata: {"session":"S","message":"provider failed"}\\n\\n') };
       }})}};
     };
-    const fetch = (url) => new Promise((resolve, reject) => queueRead({ url, resolve, reject }));
     ${names.map(source).join('\n')}
     ${sessionListenerSource()}
     function snapshot() {
       return { current, stats: sessionStats, rounds: liveRounds, usage: liveUsage,
-        turns: liveTurns, generationMs: liveGenerationMs, decodeTokens: liveDecodeTokens,
+        turns: liveTurns, turnsText: statusBar.querySelector('[data-stat="turns"]').textContent,
+        generationMs: liveGenerationMs, decodeTokens: liveDecodeTokens,
         roundStartedAt: liveRoundStartedAt,
         steps: statusBar.querySelector('[data-stat="steps"]').textContent,
         total: statusBar.querySelector('[data-stat="total"]').textContent,
@@ -126,8 +153,19 @@ function harness(): Harness {
     }
     function renderStatPopover() { recordPaint(snapshot()); }
     updateStatusBar();
-    ({ done: () => runTurn('hello', 'S'),
-       completed: () => sessionListener({ data: JSON.stringify({ session: 'S', event: { type: 'turn/completed', seq: 11 } }) }),
+    ({ done: () => runTurn('hello', 'S', [], () => { accepted += 1; }),
+       emitUser: persistedUser,
+       replay: (upTo) => {
+         sessionLoading = { generation: 1, id: 'S', events: [] };
+         persistedUser();
+         drawKeptEvents(1, upTo);
+       },
+       admission: () => ({ posts, accepted }),
+       baseline: () => { sessionStats = { turns: 5 }; updateStatusBar(); },
+       completed: () => {
+         persistedUser();
+         sessionListener({ data: JSON.stringify({ session: 'S', event: { type: 'turn/completed', seq: 11 } }) });
+       },
        refresh: refreshSessionStats,
        switchSession: () => {
          current = 'T'; sessionStats = { turns: 9, steps: 10, usage: { inputTokens: 7, outputTokens: 2 } };
@@ -135,7 +173,7 @@ function harness(): Harness {
          liveGenerationMs = 200; liveDecodeTokens = 5; liveRoundStartedAt = 123;
          updateStatusBar();
        }, snapshot })
-  `, { initialUsage: { ...liveUsage }, TextEncoder, TextDecoder, performance: { now: () => 42 },
+  `, { admission, outcome, setTimeout, initialUsage: { ...liveUsage }, TextEncoder, TextDecoder, performance: { now: () => 42 },
     queueRead: (read: Read) => reads.push(read), recordPaint: (value: Snapshot) => paints.push(normalized(value)),
   }, { timeout: 1000 }) as Omit<Harness, 'reads' | 'paints'>
   return { ...h, snapshot: () => normalized(h.snapshot()), reads, paints }
@@ -150,6 +188,8 @@ function pendingRead(h: Harness): Read {
 }
 function assertLive(h: Harness): void {
   const at = h.snapshot()
+  assert.equal(at.turns, 1, 'the persisted user event stays counted until the durable fold is read')
+  assert.equal(at.turnsText, '1 turns', 'the dock keeps the legitimate turn during settlement')
   assert.equal(at.rounds, 3, 'live rounds survive until the durable fold is read')
   assert.deepEqual(at.usage, liveUsage, 'reported live usage survives until the durable fold is read')
   assert.equal(at.steps, '3 steps', 'the dock must not regress to zero steps')
@@ -161,9 +201,69 @@ function assertFolded(h: Harness): void {
   assert.deepEqual(at.stats, folded, 'the returned durable fold replaces the baseline')
   assert.deepEqual([at.rounds, at.usage, at.turns, at.generationMs, at.decodeTokens, at.roundStartedAt],
     [0, undefined, 0, 0, 0, null], 'all live counters reset together, only after a successful current-session read')
+  assert.equal(at.turnsText, '1 turns', 'folded turns are counted exactly once')
   assert.equal(at.steps, '3 steps', 'folded steps are counted exactly once')
   assert.equal(at.total, '200 tok', 'folded tokens are counted exactly once')
 }
+
+for (const admission of ['offline', 'refused', 'stream-unavailable'] as const) {
+  test(`turn admission: actual runTurn leaves five turns unchanged after ${admission}`, async () => {
+    const h = harness(admission)
+    h.baseline()
+    const before = h.snapshot()
+    for (let attempt = 0; attempt < 2; attempt += 1) await assert.rejects(h.done())
+    assert.deepEqual(h.snapshot(), before, 'a failed local send contributes no persisted user turn')
+    assert.equal(h.snapshot().turnsText, '5 turns')
+    assert.equal(h.admission().accepted, 0, 'a refused send never retires the queued echo')
+    assert.equal(h.admission().posts, admission === 'stream-unavailable' ? 0 : admission === 'offline' ? 4 : 2)
+    const refreshing = h.refresh()
+    pendingRead(h).reject(new Error('still offline'))
+    await refreshing
+    assert.deepEqual(h.snapshot(), before, 'a failed statistics read cannot hide a phantom increment')
+  })
+}
+
+for (const admission of ['streamed', 'detached'] as const) {
+  test(`turn admission: persisted ${admission} provider failure counts one legitimate turn`, async () => {
+    const h = harness(admission, 'error')
+    h.baseline()
+    await h.done()
+    assert.equal(h.admission().accepted, 1)
+    assert.equal(h.snapshot().turns, 1)
+    assert.equal(h.snapshot().turnsText, '6 turns', 'provider failure does not undo the persisted prompt')
+    const refreshing = h.refresh()
+    pendingRead(h).reject(new Error('statistics offline'))
+    await refreshing
+    assert.equal(h.snapshot().turnsText, '6 turns', 'failed statistics GET preserves the real turn')
+    const foldedRead = h.refresh()
+    h.reads[1]!.resolve({ ok: true, json: async () => ({ stats: { turns: 6 } }) })
+    await foldedRead
+    assert.equal(h.snapshot().turns, 0)
+    assert.equal(h.snapshot().turnsText, '6 turns', 'durable replacement counts the failed turn once')
+  })
+}
+
+test('turn admission: an observed persisted prompt counts even when its acknowledgment is lost', async () => {
+  const h = harness('lost-ack')
+  await assert.rejects(h.done(), /acknowledgment lost/)
+  assert.equal(h.admission().accepted, 0)
+  // sendTurn retains its existing retry policy: both attempts really persisted one prompt in this fixture.
+  assert.equal(h.admission().posts, 2)
+  assert.equal(h.snapshot().turns, 2, 'count persisted messages rather than successful acknowledgments')
+})
+
+test('turn admission: existing session filter and history cutoff count only new shown-session user facts', () => {
+  const h = harness()
+  h.baseline()
+  h.emitUser('T')
+  assert.equal(h.snapshot().turnsText, '5 turns', 'another session cannot change the shown dock')
+  h.replay(10)
+  assert.equal(h.snapshot().turnsText, '5 turns', 'the history baseline already includes the buffered event')
+  h.replay(9)
+  assert.equal(h.snapshot().turnsText, '6 turns', 'one buffered event beyond the baseline counts once')
+  h.emitUser('S', 11)
+  assert.equal(h.snapshot().turnsText, '7 turns', 'a new turn from another client follows the same persisted path')
+})
 
 for (const entry of ['done', 'completed'] as const) {
   test(`statistics settlement: actual ${entry} preserves live figures during deferred GET and replaces them atomically`, { timeout: 5000 }, async () => {
