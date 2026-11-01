@@ -7832,6 +7832,62 @@ function markRunning(id) {
   runningMarkedAt.set(id, ++runningTick)
 }
 
+/**
+ * The verdicts of this page's detached turns (#128), each the `turn` frame the server pushes when a turn ends.
+ *
+ * A verdict can be read before the `202` that names its turn — a fast turn ends while the answer is still on its way
+ * — so one that nobody waits for yet is kept, the newest few, until its turn asks. A verdict the stream never
+ * delivers (it reset past it, or the server restarted) does not leave the turn waiting for good: a sessions read
+ * issued after the turn was accepted that finds its session idle ends the wait as `lost` (`refreshSessions`).
+ */
+const turnVerdicts = (() => {
+  const waiting = new Map()
+  const early = new Map()
+  /** Turns ended as `lost` whose verdict may still come: it then runs the tail they skipped (developer-ten's review). */
+  const late = new Map()
+  return {
+    receive(data) {
+      if (data === null || typeof data !== 'object' || typeof data.turn !== 'string') return
+      const tail = late.get(data.turn)
+      if (tail !== undefined) {
+        late.delete(data.turn)
+        tail(data)
+        return
+      }
+      const waiter = waiting.get(data.turn)
+      if (waiter !== undefined) {
+        waiting.delete(data.turn)
+        waiter.resolve(data)
+        return
+      }
+      early.set(data.turn, data)
+      if (early.size > 64) early.delete(early.keys().next().value)
+    },
+    wait(turn, session) {
+      const arrived = early.get(turn)
+      if (arrived !== undefined) {
+        early.delete(turn)
+        return Promise.resolve(arrived)
+      }
+      /** Its own tick, so a sessions read issued before the turn was accepted cannot end it. */
+      return new Promise((resolve) => waiting.set(turn, { session, resolve, tick: ++runningTick }))
+    },
+    /** Run `tail` with the verdict of a turn ended as `lost`, if it still arrives; the newest few are kept. */
+    lateTail(turn, tail) {
+      late.set(turn, tail)
+      if (late.size > 64) late.delete(late.keys().next().value)
+    },
+    /** End every wait whose session a read issued at `readTick` found idle (`live` holds the running ones). */
+    endIdle(live, readTick) {
+      for (const [turn, waiter] of [...waiting]) {
+        if (waiter.tick > readTick || waiter.session === null || live.has(waiter.session)) continue
+        waiting.delete(turn)
+        waiter.resolve({ turn, session: waiter.session, outcome: 'lost' })
+      }
+    },
+  }
+})()
+
 async function refreshSessions() {
   /** The search index is a cache of this answer, so this is where it goes stale, and a read already in flight with it. */
   searchIndex = null
@@ -7904,6 +7960,8 @@ async function refreshSessions() {
       paintRunningMarks()
       refreshRunningStatus()
     }
+    /** A detached turn whose verdict the stream lost ends with the session it ran in (#128). */
+    turnVerdicts.endIdle(live, readTick)
     /**
      * A turn whose end this page never saw ends here, as the `turn/completed` handler would end it (#122): the open
      * chat settles, the composer offers Send again, and a message queued behind that turn is sent. Measured before
@@ -8009,27 +8067,97 @@ async function restoreSelection() {
  *   to 10 s, with `#connection-state` shown and `body[data-connection]` set to `connecting` until `ready`;
  * - two heartbeat intervals of silence count as a failure, so a stream a relay dropped without closing is noticed.
  * Listeners are registered once, on this object, and re-attached to every source it opens.
+ *
+ * **One stream per browser, not one per tab (#128).** A browser allows six connections per host, shared by every
+ * tab of it, and an `EventSource` holds one for as long as the page is open: measured, the sixth tab of one server
+ * never finished loading and every other tab stopped answering with it. (DSH carries its streams over one WebSocket
+ * per page, which the pool does not count.) So the tabs of one server share one stream: the tab holding the
+ * `heddle-events` Web Lock opens the source and relays every frame and its connection state over a
+ * `BroadcastChannel`, and the others deliver what it relays.
+ * - When that tab closes, the browser hands the lock to a waiting tab, which reconnects from the newest id it was
+ *   given, so the server replays the gap.
+ * - A tab a person brings to the front takes the lock over: a background tab may be throttled or frozen, and the
+ *   tab being read is the one whose stream must not stall. A tab that opens in front first waits for the leading
+ *   tab's newest id (its answer to `hello`), so it connects with that cursor and the server replays what was
+ *   written between the old source closing and the new one opening (developer-ten's review: without it, a turn
+ *   streaming in the old tab lost those frames).
+ * - The leading tab relays the server's heartbeat, and its own state on every connection attempt. A following tab
+ *   that hears nothing for three heartbeats while the stream is open (30 s while it is connecting) takes the lock
+ *   over: Chrome freezes background tabs, and a frozen one keeps its lock while relaying nothing (developer-ten).
+ * - A frame whose id is not newer than the last one delivered is dropped (`FeedOrder`), so a handover that replays
+ *   from an older id draws nothing twice.
+ * Where the platform offers no locks or channel (an insecure origin, or an opaque frame), the tab keeps a stream of
+ * its own, as before. `body[data-feed]` says which: `leader`, `follower` or `solo`.
  */
+/* feed-order:begin */
+const FeedOrder = {
+  /** Frames the server writes without an id of their own: an EventSource repeats the previous id for them. */
+  UNNUMBERED: new Set(['ready', 'heartbeat', 'reset']),
+  /** `<epoch>-<seq>` as `{ epoch, seq }`, or null for an id that is not one. */
+  parse(id) {
+    if (typeof id !== 'string') return null
+    const dash = id.lastIndexOf('-')
+    if (dash <= 0 || !/^\d+$/.test(id.slice(dash + 1))) return null
+    return { epoch: id.slice(0, dash), seq: Number(id.slice(dash + 1)) }
+  },
+  /** Whether a frame is new after `last` (the newest delivered `{ epoch, seq }`, or null): another epoch is a new stream. */
+  isNew(last, name, id) {
+    if (this.UNNUMBERED.has(name)) return true
+    const parsed = this.parse(id)
+    if (parsed === null || last === null || parsed.epoch !== last.epoch) return true
+    return parsed.seq > last.seq
+  },
+}
+/* feed-order:end */
 const events = (() => {
   const handlers = new Map()
   const banner = document.getElementById('connection-state')
+  const LOCK = 'heddle-events'
   let source = null
   let lastEventId = ''
+  /** The newest numbered frame delivered, `{ epoch, seq }`, so a replayed one is not delivered again. */
+  let lastDelivered = null
   let attempt = 0
   let heartbeatMs = 2000
   let retryTimer = 0
   let silenceTimer = 0
+  /** The relay between this server's tabs, or null while this tab keeps a stream of its own. */
+  let channel = null
+  /** Whether this tab owns the stream: always when solo, while it holds the lock when shared. */
+  let leading = false
+  /** Whether a queued (not stealing) lock request is still waiting, so a stepped-down tab queues only once. */
+  let candidate = false
+  /** A following tab's watch on the leading one: armed by every relayed message, it takes the lock when it fires. */
+  let watchdog = 0
+  /** A tab that opened in front takes the stream once the leading tab has told it where the stream stands. */
+  let frontOnJoin = false
+  function post(message) {
+    if (channel === null) return
+    try {
+      channel.postMessage(message)
+    } catch {
+      // a closed channel has nobody left to tell
+    }
+  }
+  /** Callers waiting for the stream to open: a turn is sent only once its events will reach this page. */
+  const openWaiters = new Set()
   function setState(state) {
     document.body.dataset.connection = state
     banner.hidden = state !== 'connecting'
+    if (leading) post({ kind: 'state', state, lastEventId })
+    if (state === 'open') for (const resolve of [...openWaiters]) resolve()
   }
   function heard() {
     clearTimeout(silenceTimer)
     silenceTimer = setTimeout(() => fail(), heartbeatMs * 2 + 500)
   }
   function deliver(name, message) {
-    if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
-    heard()
+    const id = typeof message.lastEventId === 'string' ? message.lastEventId : ''
+    if (leading) heard()
+    if (!FeedOrder.isNew(lastDelivered, name, id)) return
+    if (!FeedOrder.UNNUMBERED.has(name)) lastDelivered = FeedOrder.parse(id) ?? lastDelivered
+    if (id.length > 0) lastEventId = id
+    if (leading) post({ kind: 'frame', name, data: message.data, lastEventId: id })
     for (const handler of handlers.get(name) ?? []) {
       try {
         handler(message)
@@ -8045,8 +8173,11 @@ const events = (() => {
   }
   function connect() {
     clearTimeout(retryTimer)
+    if (!leading) return
     const es = new EventSource(lastEventId.length > 0 ? '/api/events?cursor=' + encodeURIComponent(lastEventId) : '/api/events')
     source = es
+    /** Each attempt tells the other tabs this one is still trying, so a server that is down does not look like a frozen tab. */
+    post({ kind: 'beat' })
     /** A connection that never says `ready` is as dead as one that went quiet. */
     heard()
     es.addEventListener('ready', (message) => {
@@ -8064,25 +8195,167 @@ const events = (() => {
       deliver('ready', message)
     })
     es.addEventListener('heartbeat', () => {
-      if (source === es) heard()
+      if (source !== es) return
+      heard()
+      post({ kind: 'beat' })
     })
     for (const name of handlers.keys()) if (name !== 'ready') attach(es, name)
     es.onerror = () => {
       if (source === es) fail()
     }
   }
-  function fail() {
+  function stop() {
     clearTimeout(silenceTimer)
+    clearTimeout(retryTimer)
     if (source !== null) source.close()
     source = null
+  }
+  function fail() {
+    stop()
+    if (!leading) return
     setState('connecting')
-    clearTimeout(retryTimer)
     const cap = Math.min(10_000, 500 * 2 ** attempt)
     attempt = Math.min(attempt + 1, 10)
     retryTimer = setTimeout(connect, cap / 2 + Math.random() * (cap / 2))
   }
-  connect()
+  /** This tab owns the stream until the lock is taken from it; the promise is the lock, held while the page lives. */
+  function lead() {
+    leading = true
+    /** A tab that leads has nothing left to wait for before taking the stream. */
+    frontOnJoin = false
+    clearTimeout(watchdog)
+    attempt = 0
+    document.body.dataset.feed = channel === null ? 'solo' : 'leader'
+    connect()
+    return new Promise(() => {})
+  }
+  /** Without locks or a channel, or when the browser refuses them here, the tab keeps its own stream. */
+  function solo() {
+    if (channel !== null) channel.close()
+    channel = null
+    if (!leading) lead()
+  }
+  /** The lock was taken over (a tab came to the front), or could not be had at all. */
+  function lost(error) {
+    if (error === null || typeof error !== 'object' || error.name !== 'AbortError') {
+      solo()
+      return
+    }
+    if (!leading || channel === null) return
+    leading = false
+    stop()
+    document.body.dataset.feed = 'follower'
+    watch()
+    stand()
+  }
+  /** Wait for the lock: granted at once to the first tab, and to a waiting one when the leading tab closes. */
+  function stand() {
+    if (candidate || channel === null) return
+    candidate = true
+    navigator.locks
+      .request(LOCK, () => {
+        candidate = false
+        return lead()
+      })
+      .catch((error) => {
+        candidate = false
+        lost(error)
+      })
+  }
+  /** Take the lock now, from whichever tab holds it: the tab a person is reading leads. */
+  function seize() {
+    if (leading || channel === null) return
+    navigator.locks.request(LOCK, { steal: true }, () => lead()).catch(lost)
+  }
+  /** Take the lock over when the leading tab goes quiet: three heartbeats while open, 30 s while it is connecting. */
+  function watch() {
+    clearTimeout(watchdog)
+    if (leading || channel === null) return
+    const quiet = document.body.dataset.connection === 'open' ? heartbeatMs * 3 + 1000 : 30_000
+    watchdog = setTimeout(() => {
+      if (!leading) seize()
+    }, quiet)
+  }
+  function relayed(message) {
+    if (message === null || typeof message !== 'object') return
+    if (message.kind === 'hello') {
+      if (leading) post({ kind: 'state', state: document.body.dataset.connection ?? null, lastEventId })
+      return
+    }
+    /** The leading tab reads its own source; what another tab still relays from before a handover is not news. */
+    if (leading) return
+    if (message.kind === 'state') {
+      if (typeof message.state === 'string') setState(message.state)
+      /** In order with the frames, so it is never older than what was delivered here; a handover starts from it. */
+      if (typeof message.lastEventId === 'string' && message.lastEventId.length > 0) lastEventId = message.lastEventId
+      if (frontOnJoin) {
+        frontOnJoin = false
+        if (document.visibilityState === 'visible') seize()
+      }
+    } else if (message.kind === 'frame' && typeof message.name === 'string') {
+      if (message.name === 'ready') {
+        try {
+          const data = JSON.parse(message.data)
+          if (Number.isFinite(data.heartbeatMs) && data.heartbeatMs > 0) heartbeatMs = data.heartbeatMs
+        } catch {
+          // a ready frame without data keeps the default interval
+        }
+      }
+      deliver(message.name, { data: message.data, lastEventId: typeof message.lastEventId === 'string' ? message.lastEventId : '' })
+    }
+    /** Anything from the leading tab shows it is alive; armed after its state, which sets how long to wait. */
+    watch()
+  }
+  function share() {
+    try {
+      if (typeof BroadcastChannel !== 'function' || typeof navigator.locks?.request !== 'function') return false
+      channel = new BroadcastChannel(LOCK)
+    } catch {
+      channel = null
+      return false
+    }
+    channel.onmessage = (event) => relayed(event.data)
+    document.body.dataset.feed = 'follower'
+    post({ kind: 'hello' })
+    watch()
+    /**
+     * Queued at once, which the first tab is granted at once. A tab that opens in front takes the stream from a leading
+     * tab only after its answer to `hello` gave it a cursor (`relayed`).
+     */
+    frontOnJoin = document.visibilityState === 'visible'
+    /** A leader answers `hello` in milliseconds; one that has not in 2 s is frozen or gone, so the front tab takes over. */
+    if (frontOnJoin) {
+      setTimeout(() => {
+        if (!frontOnJoin) return
+        frontOnJoin = false
+        if (document.visibilityState === 'visible') seize()
+      }, 2000)
+    }
+    stand()
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') seize()
+    })
+    return true
+  }
+  if (!share()) solo()
   return {
+    /**
+     * Resolve once the stream is open, or after `timeoutMs`. A page that sends as soon as it loads would otherwise
+     * post its turn before its stream is subscribed, and the turn's first events (the person's own message) would
+     * reach the server's log but never this page (measured in check-composer once the stream waited for its lock).
+     */
+    whenOpen(timeoutMs) {
+      if (document.body.dataset.connection === 'open') return Promise.resolve()
+      return new Promise((resolve) => {
+        const done = () => {
+          clearTimeout(timer)
+          openWaiters.delete(done)
+          resolve()
+        }
+        const timer = setTimeout(done, timeoutMs)
+        openWaiters.add(done)
+      })
+    },
     addEventListener(name, handler) {
       if (!handlers.has(name)) {
         handlers.set(name, [])
@@ -9587,6 +9860,14 @@ async function sendTurn(body) {
   }
 }
 
+events.addEventListener('turn', (message) => {
+  try {
+    turnVerdicts.receive(JSON.parse(message.data))
+  } catch {
+    // a frame that is not JSON is no verdict
+  }
+})
+
 async function runTurn(text, key, attachments = [], onAccepted) {
   const target = key === QUEUE_KEY_NONE ? null : key
   /**
@@ -9615,6 +9896,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   }
   liveTurns += 1
   updateStatusBar()
+  /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
+  await events.whenOpen(3000)
   const startedAt = performance.now()
   const response = await sendTurn({
     /**
@@ -9631,6 +9914,8 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     folder,
     ...(fresh ? { new: true } : {}),
     ...selectionForTurn(),
+    /** Answer at acceptance; the verdict comes on the stream (#128). A server without it streams, read below. */
+    detach: true,
   })
   if (!response.ok) {
     /**
@@ -9649,15 +9934,174 @@ async function runTurn(text, key, attachments = [], onAccepted) {
    * dock now rather than at the end of the turn (measured: a long turn kept the row in the dock for minutes).
    */
   onAccepted?.()
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
+  /**
+   * What one terminal frame means here, wherever it came from: the turn's own response, or a detached turn's verdict on
+   * the stream.
+   */
   /**
    * The session this turn created, once adopted. The turn stream repeats its `session` event with the events it
    * relays, and adopting on each one re-read the whole session (`fetchSessionAccess`) about five times a model round:
    * measured on TS, 52 full reads in one test's two messages. A turn creates at most one session, so it is adopted once.
    */
   let adopted = null
+  const verdict = async (name, payload) => {
+    if (name === 'session') {
+      /**
+       * A turn with no session starts one, and the panel follows it: the queue that was loose while the
+       * turn ran belongs to the session it created.
+       */
+      if (target === null && adopted === null) {
+        adopted = payload.session
+        /**
+         * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
+         * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
+         * the created session is opened as any open is, a new generation and a redraw from its own log, because only
+         * pointing `current` at it would leave the other session's history on screen with this turn's live events
+         * appended under it.
+         */
+        if (current !== null && current !== payload.session) void showSession(payload.session)
+        else {
+          current = payload.session
+          rememberCurrent()
+          chooseWorkspace(null)
+          adoptSession(payload.session)
+        }
+        /** The pending send belongs to the session it just created; the row follows it. */
+        if (directTurnPending > 0) directPendingKey = payload.session
+        /** The created session's mode record is what the chip must show; it did not exist a moment ago. */
+        void fetchSessionAccess(payload.session)
+        /** A Stop pressed before the session existed lands now. */
+        if (stopRequested) {
+          stopRequested = false
+          void stopTurn()
+        }
+      }
+    } else if (name === 'done') {
+      /** What the provider said the turn cost, and how long it took, if it said anything. */
+      stopRequested = false
+      stopButton.disabled = false
+      // Replace live figures only when the durable fold arrives; clearing first flashes an empty dock.
+      void refreshSessionStats()
+      /**
+       * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
+       *
+       * The turn's `done` comes on its own connection and can be handled before the answer's last deltas arrive on
+       * the event stream. A note appended then split the answer in two: the late text started a new row after the
+       * refusals (live-testing draft developer-five-9, seen on TS). With the answer as the newest row, each note goes
+       * just before it, so late text still lands in the answer. A turn with no answer row yet appends as before;
+       * its answer then follows the notes whole.
+       */
+      const answerRow = lastTurnRow()
+      for (const denial of payload.denials ?? []) {
+        add('denied', `${denial.tool}: ${denial.message}`)
+        const note = lastTurnRow()
+        if (answerRow !== null && answerRow.dataset.kind === 'assistant' && note !== null && note !== answerRow && note.dataset.kind === 'denied') answerRow.before(note)
+      }
+      /**
+       * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
+       * reason travels on the completed event, so a reload shows it again from the transcript.
+       */
+      if (Array.isArray(payload.ended) && payload.ended.length > 0) {
+        const last = lastTurnRow()
+        if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
+        else log.append(turnNotice(payload.ended))
+      }
+      /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
+      settleReasoning()
+      settleChat()
+      refreshRunningStatus()
+      void renderSettledAnswers()
+      /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
+      renderScheduleCards(true)
+
+      /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
+      void attachTurnUsage()
+      /** And DSH's ChangedFiles card, once per turn and only for a turn that edited something. */
+      void attachEditedFiles()
+      /**
+       * The turn may have created **this folder's** session, so both the tree and the list are
+       * re-read.
+       *
+       * The view-ring handler sat inside this branch until 2026-10-11, and it was a defect rather
+       * than a placement: every finished turn registered another identical listener, and the same
+       * registration appeared twice more at the end of the file. Measured: three handlers after one
+       * turn, one more per turn after that. It is registered once, below.
+       */
+      await renderTree()
+      await refreshSessions()
+    } else if (name === 'cancelled') {
+      stoppedQueues.add(queueOf(typeof payload.session === 'string' ? payload.session : key))
+      /**
+       * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
+       * sentence in the transcript for something the reader asked for.
+       */
+      stopRequested = false
+      stopButton.disabled = false
+      settleReasoning()
+      refreshRunningStatus()
+      /** A question the stopped turn was waiting on has no answer to give now. */
+      hideApproval()
+      settleChat()
+      if (current === null || payload.session === current) markStopped()
+      void renderSettledAnswers()
+      /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
+      void attachEditedFiles()
+      if (typeof payload.session === 'string') {
+        noteCompletion(payload.session, runningSessions.has(payload.session), false)
+        runningSessions.delete(payload.session)
+        runningSince.delete(payload.session)
+        pendingInteractions.delete(payload.session)
+        paintRunningMarks()
+      }
+      renderComposerState()
+    } else if (name === 'error') {
+      stopButton.disabled = false
+      hideApproval()
+      drawTurnFailure(payload.session, payload.message)
+      /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
+      if (typeof payload.session === 'string') {
+        noteCompletion(payload.session, runningSessions.has(payload.session), false)
+        runningSessions.delete(payload.session)
+        runningSince.delete(payload.session)
+        pendingInteractions.delete(payload.session)
+        paintRunningMarks()
+      }
+      renderComposerState()
+    } else if (name === 'lost') {
+      /**
+       * A detached turn whose verdict never arrived — the stream reset past it, or the server restarted — and that a
+       * sessions read found ended: that read already settled the rows and the running marks (#122), so only the
+       * composer's own Stop state is left to put back.
+       */
+      stopRequested = false
+      stopButton.disabled = false
+      renderComposerState()
+    }
+  }
+  /**
+   * Detached (#128): the server answered `202 {session, turn}` at acceptance and will say how the turn ended on the
+   * stream, so no connection stays open for the length of the turn. A browser allows six per host across all its tabs,
+   * and holding one per running turn stalled every other request of the page once five turns ran.
+   */
+  if ((response.headers.get('content-type') ?? '').includes('application/json')) {
+    const accepted = await response.json()
+    const session = typeof accepted.session === 'string' ? accepted.session : null
+    if (session !== null) await verdict('session', { session })
+    const turn = String(accepted.turn ?? '')
+    const ended = await turnVerdicts.wait(turn, session)
+    /**
+     * A turn ended as `lost` can still see its verdict: a sessions read can find the session idle a moment before the
+     * verdict lands (another turn's done re-reads the list). Its tail then runs when it does; repeating the settle
+     * steps is harmless.
+     */
+    if (ended.outcome === 'lost') turnVerdicts.lateTail(turn, (data) => void verdict(data.outcome, data))
+    await verdict(ended.outcome, ended)
+    return
+  }
+  /** A server that predates `detach` streams the turn as before, and its frames are read the old way. */
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
   /**
    * Blocks are separated by a **blank line** — two real newlines. Measured while writing this, and the reason
    * the literal is called out: it was written as `'\\n\\n'`, four characters rather than two, so the split
@@ -9669,138 +10113,20 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     const { value, done } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    for (const block of buffer.split('\n\n')) {
+    /**
+     * Only completed blocks are read; the unfinished tail waits for the next chunk (developer-ten's review of #128).
+     * The loop used to read the tail as well and keep it, so a chunk that split a `data:` line threw in JSON.parse
+     * and the turn read as failed, and a block read while partial was read again once whole.
+     */
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() ?? ''
+    for (const block of blocks) {
       if (!block.trim().startsWith('event:')) continue
       const name = /event: (.+)/.exec(block)?.[1]
       const data = /data: (.+)/.exec(block)?.[1]
       if (!data) continue
-      const payload = JSON.parse(data)
-      if (name === 'session') {
-        /**
-         * A turn with no session starts one, and the panel follows it: the queue that was loose while the
-         * turn ran belongs to the session it created.
-         */
-        if (target === null && adopted === null) {
-          adopted = payload.session
-          /**
-           * The panel may show another session by now (developer-ten's N1): a message sent from the blank composer during
-           * the boot waits on `firstTreeReady`, which resolves after `restoreSelection` opened the saved session. Then
-           * the created session is opened as any open is, a new generation and a redraw from its own log, because only
-           * pointing `current` at it would leave the other session's history on screen with this turn's live events
-           * appended under it.
-           */
-          if (current !== null && current !== payload.session) void showSession(payload.session)
-          else {
-            current = payload.session
-            rememberCurrent()
-            chooseWorkspace(null)
-            adoptSession(payload.session)
-          }
-          /** The pending send belongs to the session it just created; the row follows it. */
-          if (directTurnPending > 0) directPendingKey = payload.session
-          /** The created session's mode record is what the chip must show; it did not exist a moment ago. */
-          void fetchSessionAccess(payload.session)
-          /** A Stop pressed before the session existed lands now. */
-          if (stopRequested) {
-            stopRequested = false
-            void stopTurn()
-          }
-        }
-      } else if (name === 'done') {
-        /** What the provider said the turn cost, and how long it took, if it said anything. */
-        stopRequested = false
-        stopButton.disabled = false
-        // Replace live figures only when the durable fold arrives; clearing first flashes an empty dock.
-        void refreshSessionStats()
-        /**
-         * A refusal is part of what the turn did, so its note sits with the calls, before the answer.
-         *
-         * The turn's `done` comes on its own connection and can be handled before the answer's last deltas arrive on
-         * the event stream. A note appended then split the answer in two: the late text started a new row after the
-         * refusals (live-testing draft developer-five-9, seen on TS). With the answer as the newest row, each note goes
-         * just before it, so late text still lands in the answer. A turn with no answer row yet appends as before;
-         * its answer then follows the notes whole.
-         */
-        const answerRow = lastTurnRow()
-        for (const denial of payload.denials ?? []) {
-          add('denied', `${denial.tool}: ${denial.message}`)
-          const note = lastTurnRow()
-          if (answerRow !== null && answerRow.dataset.kind === 'assistant' && note !== null && note !== answerRow && note.dataset.kind === 'denied') answerRow.before(note)
-        }
-        /**
-         * A turn that stopped early says why. The live path reads the reason from the `done` payload; the same
-         * reason travels on the completed event, so a reload shows it again from the transcript.
-         */
-        if (Array.isArray(payload.ended) && payload.ended.length > 0) {
-          const last = lastTurnRow()
-          if (last !== null && last.dataset.kind === 'assistant') last.append(turnNotice(payload.ended))
-          else log.append(turnNotice(payload.ended))
-        }
-        /** The turn is over, so nothing in the transcript is still arriving — DSH's rows become settled. */
-        settleReasoning()
-        settleChat()
-        refreshRunningStatus()
-        void renderSettledAnswers()
-        /** The page's own turn ended here, so its created-reminder cards (DSH's turn tail) are drawn now. */
-        renderScheduleCards(true)
-
-        /** DSH's per-Turn usage row, from the durable fold that a reload draws it from. */
-        void attachTurnUsage()
-        /** And DSH's ChangedFiles card, once per turn and only for a turn that edited something. */
-        void attachEditedFiles()
-        /**
-         * The turn may have created **this folder's** session, so both the tree and the list are
-         * re-read.
-         *
-         * The view-ring handler sat inside this branch until 2026-10-11, and it was a defect rather
-         * than a placement: every finished turn registered another identical listener, and the same
-         * registration appeared twice more at the end of the file. Measured: three handlers after one
-         * turn, one more per turn after that. It is registered once, below.
-         */
-        await renderTree()
-        await refreshSessions()
-      } else if (name === 'cancelled') {
-        stoppedQueues.add(queueOf(typeof payload.session === 'string' ? payload.session : key))
-        /**
-         * A stopped turn is not an error: the rows settle and the action returns to Send, with no red
-         * sentence in the transcript for something the reader asked for.
-         */
-        stopRequested = false
-        stopButton.disabled = false
-        settleReasoning()
-        refreshRunningStatus()
-        /** A question the stopped turn was waiting on has no answer to give now. */
-        hideApproval()
-        settleChat()
-        if (current === null || payload.session === current) markStopped()
-        void renderSettledAnswers()
-        /** A stopped turn keeps what it already wrote, so its card is shown like a finished one's. */
-        void attachEditedFiles()
-        if (typeof payload.session === 'string') {
-          noteCompletion(payload.session, runningSessions.has(payload.session), false)
-          runningSessions.delete(payload.session)
-          runningSince.delete(payload.session)
-          pendingInteractions.delete(payload.session)
-          paintRunningMarks()
-        }
-        renderComposerState()
-      } else if (name === 'error') {
-        stopButton.disabled = false
-        hideApproval()
-        drawTurnFailure(payload.session, payload.message)
-        /** The turn ended without its own `turn/completed`, so the running state it set is cleared here. */
-        if (typeof payload.session === 'string') {
-          noteCompletion(payload.session, runningSessions.has(payload.session), false)
-          runningSessions.delete(payload.session)
-          runningSince.delete(payload.session)
-          pendingInteractions.delete(payload.session)
-          paintRunningMarks()
-        }
-        renderComposerState()
-      }
+      await verdict(name, JSON.parse(data))
     }
-    const lastBreak = buffer.lastIndexOf('\n\n')
-    if (lastBreak !== -1) buffer = buffer.slice(lastBreak + 2)
   }
 }
 
