@@ -48,9 +48,10 @@ export function toolProfile(home, label, tool) {
 }
 
 /**
- * Run one turn in a fresh isolated home whose model calls `tool` once with `args(home)`, after `layout(home)` shapes the
- * home. Return the tool results as text, the arguments the model sent, and what `inspect(home)` saw on disk afterwards,
- * before the home is removed.
+ * Run one turn in a fresh isolated home whose scripted model calls `tool` once with `args(home)`, after `layout(home)`
+ * shapes the home. Return the tool results as text, `scripted` (the arguments the scripted endpoint was configured to
+ * send; this is not parsed back from the transcript), and what `inspect(home)` saw on disk afterwards, before the home
+ * is removed.
  *
  * A refused call is a denial, which a `--turn` run reports with exit 1, so by default exit 0 or 1 is accepted and the
  * transcript is the verdict; `exits` narrows that for a check whose call must succeed.
@@ -59,8 +60,8 @@ export async function oneToolCall({ label, tool, args, layout = () => {}, inspec
   const home = isolatedHome(label)
   try {
     layout(home)
-    const sent = args(home)
-    const { config } = scriptedConfig({ home, steps: [{ toolCall: { name: tool, arguments: sent } }, { text: 'done' }] })
+    const scripted = args(home)
+    const { config } = scriptedConfig({ home, steps: [{ toolCall: { name: tool, arguments: scripted } }, { text: 'done' }] })
     const run = await runCli(['--profile', toolProfile(home, label, tool), '--sandbox-root', home, '--turn', `call ${tool}`], {
       env: { HOME: home, HEDDLE_HOME: join(home, '.heddle'), HEDDLE_CONFIG: config },
     })
@@ -69,7 +70,7 @@ export async function oneToolCall({ label, tool, args, layout = () => {}, inspec
     const results = readTranscript(join(home, 'sessions', session))
       .filter((event) => event.type === 'message' && event.message?.role === 'tool')
       .map((event) => (event.message.content ?? []).map((part) => part.text ?? '').join(''))
-    return { results, args: sent, disk: inspect(home) }
+    return { results, scripted, disk: inspect(home) }
   } finally {
     removeDir(home)
   }

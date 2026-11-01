@@ -15,7 +15,7 @@ import { oneToolCall } from './fs-tool-turn.mjs'
 
 /** Run one turn whose model lists `relative` under the scratch folder, given as an absolute path; return the tool results. */
 async function listResult(relative, layout = () => {}) {
-  const { results, args } = await oneToolCall({
+  const { results, scripted } = await oneToolCall({
     label: 'list-errors',
     tool: 'list_dir',
     layout: (home) => {
@@ -26,7 +26,7 @@ async function listResult(relative, layout = () => {}) {
     },
     args: (home) => ({ path: join(home, 'scratch', relative) }),
   })
-  return { results, path: args.path }
+  return { results, path: scripted.path }
 }
 
 test('a missing directory is FS_NOT_FOUND and names it, as DSH says it', async () => {

@@ -16,13 +16,13 @@ import { oneToolCall } from './fs-tool-turn.mjs'
 
 /** Run one turn whose model reads `relative` under the home, given as an absolute path; return the tool results. */
 async function readResult(relative, layout = () => {}) {
-  const { results, args } = await oneToolCall({
+  const { results, scripted } = await oneToolCall({
     label: 'read-errors',
     tool: 'read_file',
     layout,
     args: (home) => ({ path: join(home, relative) }),
   })
-  return { results, path: args.path }
+  return { results, path: scripted.path }
 }
 
 test('a missing file is FS_NOT_FOUND and names the file, as DSH says it', async () => {

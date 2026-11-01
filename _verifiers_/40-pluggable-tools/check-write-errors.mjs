@@ -16,7 +16,7 @@ import { oneToolCall } from './fs-tool-turn.mjs'
  * the tool results and what `inspect` saw on disk afterwards.
  */
 async function writeResult(relative, content, inspect) {
-  const { results, args, disk } = await oneToolCall({
+  const { results, scripted, disk } = await oneToolCall({
     label: 'write-errors',
     tool: 'write_file',
     layout: (home) => {
@@ -26,7 +26,7 @@ async function writeResult(relative, content, inspect) {
     args: (home) => ({ path: join(home, 'scratch', relative), content }),
     inspect: (home) => inspect(join(home, 'scratch')),
   })
-  return { results, path: args.path, disk }
+  return { results, path: scripted.path, disk }
 }
 
 test('a write aimed at a folder is FS_NOT_REGULAR_FILE, names it, and leaves the folder as it was', async () => {
