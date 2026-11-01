@@ -421,6 +421,18 @@ function bootState(layers: readonly NamedLayer[], target: SettingsTarget | undef
   return { target, boot: layers, before: '', after: '', managed: [], current: layers, base: layers.filter((layer) => target === undefined || layer.file !== target.path) }
 }
 
+/**
+ * The layers beneath what Settings wrote: the run's layers with the target's settings block taken out, which is what
+ * Reset restores a field to. Boot runs a row the block broke on these (#213); `undefined` when the target cannot be read.
+ */
+export function layersBeneathSettings(layers: readonly NamedLayer[], target: SettingsTarget, env: NodeJS.ProcessEnv = process.env): readonly NamedLayer[] | undefined {
+  try {
+    return readState(layers, target, env).base
+  } catch {
+    return undefined
+  }
+}
+
 function readState(layers: readonly NamedLayer[], target: SettingsTarget | undefined, env: NodeJS.ProcessEnv): State {
   if (target === undefined) return { target, boot: layers, before: '', after: '', managed: [], current: layers, base: layers }
   let text = ''

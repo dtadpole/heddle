@@ -1,5 +1,5 @@
 import { isSerializedSchema, normalizeProjection } from './form-projection.ts'
-import { compose, type NamedLayer } from './schema.ts'
+import { compose, type EntryRow, type NamedLayer } from './schema.ts'
 
 /**
  * Configuration validation, without starting anything.
@@ -24,6 +24,29 @@ export interface ValidationResult {
 
 /** Compose the layers and validate every row's config against its plugin's schema. */
 export async function validateRows(layers: readonly NamedLayer[], env: NodeJS.ProcessEnv = process.env): Promise<ValidationResult> {
+  const rows = compose(layers, env)
+  const problems: string[] = []
+  let checked = 0
+  for (const composed of rows) {
+    const judged = await judgeRow(composed.row, layers)
+    if (judged.checked) checked += 1
+    problems.push(...judged.problems)
+  }
+  return { rows: rows.length, checked, problems }
+}
+
+/** One row's judgement: whether a schema checked it, and every problem, each starting with the row's label. */
+export interface RowJudgement {
+  readonly checked: boolean
+  readonly problems: readonly string[]
+}
+
+/**
+ * Judge one composed row as `validateRows` judges every row: import its module, run its schema over its config, then
+ * the module's own rule (`configProblems`) when it exports one. A disabled row is not judged. Boot uses this to find a
+ * row a patch has broken before the row fails and takes its dependants down with it (#213).
+ */
+export async function judgeRow(row: EntryRow, layers: readonly NamedLayer[]): Promise<RowJudgement> {
   /**
    * Relative specifiers resolve against the first layer's directory, which is the same
    * anchor `boot` uses. Measured: importing them bare resolved against *this file's*
@@ -33,74 +56,59 @@ export async function validateRows(layers: readonly NamedLayer[], env: NodeJS.Pr
   const { pathToFileURL } = await import('node:url')
   const anchor = layers[0]?.file
   const baseUrl = anchor === undefined ? undefined : pathToFileURL(anchor.replace(/[^/]*$/, '')).href
-  const rows = compose(layers, env)
-  const problems: string[] = []
-  let checked = 0
+  const label = row.id ?? row.name
+  if (row.disabled === true) return { checked: false, problems: [] }
 
-  for (const composed of rows) {
-    const row = composed.row
-    const label = row.id ?? row.name
-    if (row.disabled === true) continue
-
-    const specifier =
-      baseUrl !== undefined && (row.name.startsWith('.') || row.name.startsWith('/'))
-        ? new URL(row.name, baseUrl).href
-        : row.name
-    let module: Record<string, unknown>
-    try {
-      module = (await import(specifier)) as Record<string, unknown>
-    } catch (error) {
-      problems.push(`${label}: cannot import '${row.name}' — ${(error as Error).message}`)
-      continue
-    }
-
-    const schema = findSchema(module)
-    if (schema === undefined) {
-      // No schema is not a problem: a plugin is allowed to take no config, and saying so
-      // would make this check fail on correct trees.
-      continue
-    }
-    /**
-     * A Schemastery schema is a **callable function**, measured: `typeof schema` is
-     * `'function'` and calling it validates and fills defaults. The first version looked
-     * for a `__call` marker, which Schemastery does not define, so every schema-carrying
-     * row was reported as "not a schema" — a check failing on correct input, which is the
-     * worst way for a check to be wrong.
-     */
-    if (typeof schema !== 'function') {
-      problems.push(`${label}: the plugin's Config export is not a schema`)
-      continue
-    }
-
-    checked += 1
-    let resolved: unknown
-    try {
-      resolved = (schema as (value: unknown) => unknown)(row.config ?? {})
-    } catch (error) {
-      problems.push(`${label}: ${(error as Error).message}`)
-      continue
-    }
-    /**
-     * Schemastery's default resolve **coerces** rather than rejecting — measured: a string
-     * where a number belongs becomes `NaN` in the resolved object with no error raised,
-     * and a missing required field is absent rather than refused. That is right for a
-     * running plugin, which may fill a field later, and wrong for this check, whose whole
-     * claim is that a bad value fails where it is written. So the resolved value is
-     * inspected for the two silent failures a coerced config produces.
-     */
-    const coerced = inspectRow(resolved, label)
-    for (const problem of coerced) problems.push(problem)
-    /**
-     * A rule the schema cannot spell, across fields (#212): the module's `configProblems(resolved)`, when it exports
-     * one, judges the resolved config as the component would when it runs, and each problem is the row's.
-     */
-    const rule = module.configProblems
-    if (coerced.length === 0 && typeof rule === 'function') {
-      for (const problem of (rule as (config: unknown) => readonly string[])(resolved)) problems.push(`${label}: ${problem}`)
-    }
+  const specifier =
+    baseUrl !== undefined && (row.name.startsWith('.') || row.name.startsWith('/'))
+      ? new URL(row.name, baseUrl).href
+      : row.name
+  let module: Record<string, unknown>
+  try {
+    module = (await import(specifier)) as Record<string, unknown>
+  } catch (error) {
+    return { checked: false, problems: [`${label}: cannot import '${row.name}' — ${(error as Error).message}`] }
   }
 
-  return { rows: rows.length, checked, problems }
+  const schema = findSchema(module)
+  if (schema === undefined) {
+    // No schema is not a problem: a plugin is allowed to take no config, and saying so
+    // would make this check fail on correct trees.
+    return { checked: false, problems: [] }
+  }
+  /**
+   * A Schemastery schema is a **callable function**, measured: `typeof schema` is
+   * `'function'` and calling it validates and fills defaults. The first version looked
+   * for a `__call` marker, which Schemastery does not define, so every schema-carrying
+   * row was reported as "not a schema" — a check failing on correct input, which is the
+   * worst way for a check to be wrong.
+   */
+  if (typeof schema !== 'function') return { checked: false, problems: [`${label}: the plugin's Config export is not a schema`] }
+
+  let resolved: unknown
+  try {
+    resolved = (schema as (value: unknown) => unknown)(row.config ?? {})
+  } catch (error) {
+    return { checked: true, problems: [`${label}: ${(error as Error).message}`] }
+  }
+  /**
+   * Schemastery's default resolve **coerces** rather than rejecting — measured: a string
+   * where a number belongs becomes `NaN` in the resolved object with no error raised,
+   * and a missing required field is absent rather than refused. That is right for a
+   * running plugin, which may fill a field later, and wrong for this check, whose whole
+   * claim is that a bad value fails where it is written. So the resolved value is
+   * inspected for the two silent failures a coerced config produces.
+   */
+  const problems = [...inspectRow(resolved, label)]
+  /**
+   * A rule the schema cannot spell, across fields (#212): the module's `configProblems(resolved)`, when it exports
+   * one, judges the resolved config as the component would when it runs, and each problem is the row's.
+   */
+  const rule = module.configProblems
+  if (problems.length === 0 && typeof rule === 'function') {
+    for (const problem of (rule as (config: unknown) => readonly string[])(resolved)) problems.push(`${label}: ${problem}`)
+  }
+  return { checked: true, problems }
 }
 
 /**
