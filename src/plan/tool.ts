@@ -33,9 +33,16 @@ export type PlanReviewAnswer =
   /** The person closed the review to answer in their own words; plan mode stays on. */
   | { readonly kind: 'dismissed' }
 
+/** The plan a review shows: its title, its markdown, and the `exit_plan_mode` call that presented it when known. */
+export interface PlanForReview {
+  readonly title: string
+  readonly markdown: string
+  readonly callId?: string
+}
+
 /** Where a plan is reviewed: the session's user-question channel. */
 export interface PlanReviewChannel {
-  review(session: SessionHandle, plan: { readonly title: string; readonly markdown: string }, signal?: AbortSignal): Promise<PlanReviewAnswer>
+  review(session: SessionHandle, plan: PlanForReview, signal?: AbortSignal): Promise<PlanReviewAnswer>
 }
 
 /** What the tool reads and changes. */
@@ -44,6 +51,47 @@ export interface PlanToolHost {
   leave(session: SessionHandle): void
   /** The review channel, looked up per call; `undefined` while none is loaded. */
   channel(): PlanReviewChannel | undefined
+  /** The id of the open `exit_plan_mode` call presenting `markdown` ({@link openPlanCallId}); absent in a host without a log. */
+  callId?(session: SessionHandle, markdown: string): string | undefined
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/** The `plan` argument of a call's JSON arguments, trimmed; `undefined` when it has none. */
+function planArgument(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return isRecord(parsed) && typeof parsed.plan === 'string' ? parsed.plan.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The id of the newest `exit_plan_mode` call in the log that has no answer yet and presents `markdown` (#231).
+ *
+ * The loop logs the assistant's `tool_calls` message before it runs the calls, and answers each call after, so while the
+ * review waits its call is the open one. DSH hands the tool its call id (`exec.callId`); heddle's tools are not given
+ * theirs, so the review reads it from the log. The plan text must match too, so a review is never linked to some other
+ * call. `undefined` when no such call is found; the review is still asked, only without the link.
+ */
+export function openPlanCallId(events: readonly Record<string, unknown>[], markdown: string): string | undefined {
+  const answered = new Set<string>()
+  for (const event of events) {
+    const message = event.type === 'message' && isRecord(event.message) ? event.message : undefined
+    if (message?.role === 'tool' && typeof message.toolCallId === 'string') answered.add(message.toolCallId)
+  }
+  for (let at = events.length - 1; at >= 0; at -= 1) {
+    const event = events[at] as Record<string, unknown>
+    const message = event.type === 'message' && isRecord(event.message) ? event.message : undefined
+    if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue
+    for (const part of [...message.content].reverse()) {
+      if (!isRecord(part) || part.type !== 'tool-call' || part.name !== EXIT_PLAN_MODE || typeof part.id !== 'string') continue
+      if (!answered.has(part.id) && planArgument(part.arguments) === markdown) return part.id
+    }
+  }
+  return undefined
 }
 
 /** The plan's first markdown heading (any level), as DSH reads its title. */
@@ -85,7 +133,9 @@ export function exitPlanModeTool(host: PlanToolHost): ToolDefinition {
       if (channel === undefined) {
         return refusal('PLAN_NO_REVIEW_CHANNEL', 'no user-questions channel is available to review the plan; ask the user to switch the session mode instead')
       }
-      const answer = await channel.review(session, { title: planTitle(plan) ?? 'Plan', markdown: plan.trim() }, context.signal)
+      const markdown = plan.trim()
+      const callId = host.callId?.(session, markdown)
+      const answer = await channel.review(session, { title: planTitle(plan) ?? 'Plan', markdown, ...(callId !== undefined ? { callId } : {}) }, context.signal)
       if (answer.kind === 'approve') {
         host.leave(session)
         return { output: 'Plan approved — plan mode exited; carry out the plan starting with your next step.', data: { approved: true } }

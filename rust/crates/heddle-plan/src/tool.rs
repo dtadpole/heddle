@@ -103,6 +103,8 @@ pub struct PlanForReview {
     pub title: String,
     /// The plan, trimmed.
     pub markdown: String,
+    /// The `exit_plan_mode` call that presented it, when the host found it ([`open_plan_call_id`], #231).
+    pub call_id: Option<String>,
 }
 
 /// Where a plan is reviewed: the session's user-question channel.
@@ -127,6 +129,54 @@ pub trait PlanToolHost: Send + Sync {
     fn leave(&self, session: &SessionHandle) -> Result<(), String>;
     /// The review channel, looked up per call; `None` while none is provided.
     fn channel(&self) -> Option<Arc<dyn PlanReviewChannel>>;
+    /// The id of the open `exit_plan_mode` call presenting `markdown` ([`open_plan_call_id`]); `None` in a host
+    /// without a log.
+    fn call_id(&self, _session: &SessionHandle, _markdown: &str) -> Option<String> {
+        None
+    }
+}
+
+/// The `plan` argument of a call's JSON arguments, trimmed; `None` when it has none.
+fn plan_argument(raw: &Value) -> Option<String> {
+    let parsed: Value = serde_json::from_str(raw.as_str()?).ok()?;
+    parsed
+        .get("plan")
+        .and_then(Value::as_str)
+        .map(|plan| text::trim(plan).to_owned())
+}
+
+/// The id of the newest `exit_plan_mode` call in the log that has no answer yet and presents `markdown` (#231).
+///
+/// The loop logs the assistant's `tool_calls` message before it runs the calls, and answers each call after, so while
+/// the review waits its call is the open one. DSH hands the tool its call id (`exec.callId`); heddle's tools are not
+/// given theirs, so the review reads it from the log. The plan text must match too, so a review is never linked to
+/// some other call. `None` when no such call is found; the review is still asked, only without the link. The
+/// TypeScript `openPlanCallId`.
+pub fn open_plan_call_id(events: &[Value], markdown: &str) -> Option<String> {
+    let message = |event: &Value| (event["type"] == "message").then(|| event["message"].clone());
+    let answered: std::collections::HashSet<String> = events
+        .iter()
+        .filter_map(message)
+        .filter(|message| message["role"] == "tool")
+        .filter_map(|message| message["toolCallId"].as_str().map(str::to_owned))
+        .collect();
+    events.iter().rev().filter_map(message).find_map(|message| {
+        if message["role"] != "assistant" {
+            return None;
+        }
+        message["content"]
+            .as_array()?
+            .iter()
+            .rev()
+            .find_map(|part| {
+                let id = part["id"].as_str()?;
+                let open = part["type"] == "tool-call"
+                    && part["name"] == EXIT_PLAN_MODE
+                    && !answered.contains(id)
+                    && plan_argument(&part["arguments"]).as_deref() == Some(markdown);
+                open.then(|| id.to_owned())
+            })
+    })
 }
 
 /// The plan's first markdown heading (any level), as DSH reads its title: `/^#{1,6}\s+(.+?)\s*$/` per line.
@@ -252,6 +302,7 @@ impl Tool for ExitPlanMode {
             let review = PlanForReview {
                 title: plan_title(plan).unwrap_or_else(|| "Plan".to_owned()),
                 markdown: trimmed.to_owned(),
+                call_id: self.host.call_id(&session, trimmed),
             };
             let answer = channel
                 .review(&session, review, context.cancel.clone())
@@ -486,7 +537,8 @@ mod tests {
             channel.shown.lock().unwrap()[0],
             PlanForReview {
                 title: "Plan".to_owned(),
-                markdown: "#\nTitle below".to_owned()
+                markdown: "#\nTitle below".to_owned(),
+                call_id: None,
             },
             "no line is a heading, so the title is Plan"
         );
@@ -511,7 +563,8 @@ mod tests {
             *yes.shown.lock().unwrap(),
             vec![PlanForReview {
                 title: "Ship the slash menu".to_owned(),
-                markdown: PLAN.to_owned()
+                markdown: PLAN.to_owned(),
+                call_id: None,
             }]
         );
         assert!(!plan_active(approved_session.events().as_slice()));
@@ -616,5 +669,41 @@ mod tests {
         assert_eq!(plan_title("#  \r"), Some(" ".to_owned()));
         assert_eq!(plan_title("# \r\r"), None);
         assert_eq!(plan_title("# \u{a0}Wide\u{3000}"), Some("Wide".to_owned()));
+    }
+
+    #[test]
+    fn the_review_links_to_the_open_exit_plan_mode_call_presenting_the_same_plan() {
+        let call = |id: &str, plan: &str| json!({ "type": "tool-call", "id": id, "name": "exit_plan_mode", "arguments": json!({ "plan": plan }).to_string() });
+        let assistant = |content: Vec<Value>| json!({ "type": "message", "message": { "role": "assistant", "content": content } });
+        let answer = |id: &str| json!({ "type": "message", "message": { "role": "tool", "toolCallId": id, "content": [{ "type": "text", "text": "x" }] } });
+        let mut events = vec![
+            assistant(vec![call("call_old", PLAN)]),
+            answer("call_old"),
+            assistant(vec![
+                json!({ "type": "text", "text": "Here it is." }),
+                json!({ "type": "tool-call", "id": "call_read", "name": "read", "arguments": "{}" }),
+                call("call_new", &format!("\n{PLAN}\n")),
+            ]),
+        ];
+        assert_eq!(
+            open_plan_call_id(&events, PLAN).as_deref(),
+            Some("call_new"),
+            "the unanswered call with the same plan, its argument trimmed"
+        );
+        assert_eq!(
+            open_plan_call_id(&events, "# Another plan"),
+            None,
+            "a different plan links to nothing"
+        );
+        events.push(answer("call_new"));
+        assert_eq!(
+            open_plan_call_id(&events, PLAN),
+            None,
+            "an answered call is not the open one"
+        );
+        let broken = assistant(vec![
+            json!({ "type": "tool-call", "id": "call_bad", "name": "exit_plan_mode", "arguments": "{not json" }),
+        ]);
+        assert_eq!(open_plan_call_id(&[broken], PLAN), None);
     }
 }

@@ -895,6 +895,7 @@ impl heddle_plan::QuestionAsker for PlanReviewAsker {
                     timeout.as_ref(),
                     options.cancel,
                     options.continuable,
+                    options.presentation.as_ref(),
                 )
                 .await
             {

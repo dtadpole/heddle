@@ -37,6 +37,19 @@ export interface QuestionOption {
   readonly description?: string
 }
 
+/**
+ * A presentation tag on a question (DSH's `intent`): how a client may draw it. The one kind is `plan-review`, whose
+ * `approve` names the option that approves.
+ *
+ * `callId` is a heddle extension: the id of the tool call that asked (`exit_plan_mode`'s), so a client can link the
+ * review to the plan the call carries. DSH links the call through the request instead.
+ */
+export interface QuestionIntent {
+  readonly kind: 'plan-review'
+  readonly approve: string
+  readonly callId?: string
+}
+
 /** One question in a batch. */
 export interface Question {
   readonly id: string
@@ -44,7 +57,18 @@ export interface Question {
   readonly header?: string
   readonly options?: readonly QuestionOption[]
   readonly multi_select?: boolean
+  /** Longer text a client shows beside the question (DSH's `detail`), such as a plan under review. */
+  readonly detail?: string
+  readonly intent?: QuestionIntent
 }
+
+/**
+ * What a service caller adds to its questions, by question id: `detail` and `intent`.
+ *
+ * Only a caller of {@link QuestionService.ask} can set these. The model's `ask_user_question` arguments go through
+ * {@link validateQuestions}, which keeps neither field, so a model cannot dress its question up as a plan review (#231).
+ */
+export type QuestionPresentation = Readonly<Record<string, { readonly detail?: string; readonly intent?: QuestionIntent }>>
 
 /** One answer: chosen labels, and free text that supplements a multi-select or replaces a single choice. */
 export interface Answer {
@@ -100,7 +124,10 @@ export interface AnswerOutcome {
   readonly message?: string
 }
 
-/** A refusal with a stable code: `INVALID_QUESTIONS`, `INVALID_ANSWERS`, `NOT_FOUND`, `SETTLED`, `CANCELLED`. */
+/**
+ * A refusal with a stable code: `INVALID_QUESTIONS`, `BAD_INTENT`, `INVALID_ANSWERS`, `NOT_FOUND`, `SETTLED`,
+ * `CANCELLED`.
+ */
 export class QuestionError extends Error {
   readonly code: string
   constructor(message: string, code: string) {
@@ -145,6 +172,41 @@ export function validateQuestions(raw: unknown): Question[] {
       ...(header !== undefined ? { header } : {}),
       ...(options !== undefined && options.length > 0 ? { options } : {}),
       ...(entry.multi_select === true ? { multi_select: true } : {}),
+    }
+  })
+}
+
+/**
+ * Merge a service caller's presentation into checked questions, per question id (#231).
+ *
+ * DSH's two `BAD_INTENT` refusals (dsh-user-questions `ask`): an intent whose `approve` names none of the question's
+ * options, and an intent with no `detail`. heddle also refuses an intent of another kind, a non-text `callId`, an empty
+ * `detail`, and an id that names no question in the batch. A question without an entry is returned as it was, so an
+ * ordinary batch is byte-identical.
+ */
+export function applyPresentation(questions: readonly Question[], presentation: QuestionPresentation | undefined): Question[] {
+  if (presentation === undefined) return [...questions]
+  const ids = new Set(questions.map((question) => question.id))
+  for (const id of Object.keys(presentation)) {
+    if (!ids.has(id)) throw new QuestionError(`the presentation names no question '${id}'`, 'BAD_INTENT')
+  }
+  return questions.map((question) => {
+    const entry = presentation[question.id]
+    if (entry === undefined) return question
+    const detail = entry.detail
+    if (detail !== undefined && text(detail) === undefined) throw new QuestionError(`question '${question.id}' detail must be non-empty text`, 'BAD_INTENT')
+    const intent = entry.intent
+    if (intent === undefined) return detail === undefined ? question : { ...question, detail }
+    if (intent.kind !== 'plan-review') throw new QuestionError(`question '${question.id}' intent kind must be 'plan-review'`, 'BAD_INTENT')
+    if (detail === undefined) throw new QuestionError(`question '${question.id}' has an intent but no detail`, 'BAD_INTENT')
+    if (!(question.options ?? []).some((option) => option.label === intent.approve)) {
+      throw new QuestionError(`question '${question.id}' intent approves '${String(intent.approve)}', which is not one of its options`, 'BAD_INTENT')
+    }
+    if (intent.callId !== undefined && text(intent.callId) === undefined) throw new QuestionError(`question '${question.id}' intent callId must be text`, 'BAD_INTENT')
+    return {
+      ...question,
+      detail,
+      intent: { kind: 'plan-review', approve: intent.approve, ...(intent.callId !== undefined ? { callId: intent.callId } : {}) },
     }
   })
 }
@@ -283,13 +345,21 @@ export class QuestionService extends Service {
    * `question/asked` event only when false, so every other request's event is unchanged. It is meant for untimed waits:
    * a timed wait that runs out writes `pending` and drops its waiter, so the request then reads as cancelled and refuses
    * an answer.
+   *
+   * `presentation` adds `detail` and `intent` to questions by id, after the batch is checked ({@link applyPresentation});
+   * the fields are written only on the questions it names (#231).
    */
   ask(
     handle: SessionHandle,
     rawQuestions: unknown,
-    options: { readonly timeout?: unknown; readonly signal?: AbortSignal; readonly continuable?: boolean } = {},
+    options: {
+      readonly timeout?: unknown
+      readonly signal?: AbortSignal
+      readonly continuable?: boolean
+      readonly presentation?: QuestionPresentation
+    } = {},
   ): Promise<AskOutcome> {
-    const questions = validateQuestions(rawQuestions)
+    const questions = applyPresentation(validateQuestions(rawQuestions), options.presentation)
     const seconds = this.waitSeconds(options.timeout)
     const timed = seconds !== null
     const id = `question-${randomUUID()}`

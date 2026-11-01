@@ -18,7 +18,8 @@ use tokio_util::sync::CancellationToken;
 use crate::log::QuestionLog;
 use crate::model::{
     Answer, DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, QUESTION_EVENT_VERSION, Question,
-    QuestionError, codes, validate_answers, validate_questions,
+    QuestionError, apply_presentation, codes, presentation_from_value, validate_answers,
+    validate_questions,
 };
 
 /// Why a request only its own turn could take reads as cancelled once that turn is gone without an answer (#228).
@@ -337,7 +338,8 @@ impl QuestionService {
         timeout: Option<&Value>,
         cancel: Option<CancellationToken>,
     ) -> Result<AskOutcome, QuestionError> {
-        self.ask_with(session, raw, timeout, cancel, true).await
+        self.ask_with(session, raw, timeout, cancel, true, None)
+            .await
     }
 
     /// [`Self::ask`], saying whether the request may outlive its turn (`ask`'s `continuable` in the TypeScript build).
@@ -348,6 +350,10 @@ impl QuestionService {
     /// review fails closed after a reload. It is written on `question/asked` only when false. It is meant for untimed
     /// waits: a timed wait that runs out writes `pending` and drops its waiter, so the request then reads as cancelled
     /// and refuses an answer.
+    ///
+    /// `presentation` adds `detail` and `intent` to questions by id after the batch is checked, in the TypeScript
+    /// shape `{ <question id>: { detail?, intent? } }` ([`presentation_from_value`], [`apply_presentation`]); the
+    /// fields are written only on the questions it names (#231).
     pub async fn ask_with(
         &self,
         session: &str,
@@ -355,8 +361,15 @@ impl QuestionService {
         timeout: Option<&Value>,
         cancel: Option<CancellationToken>,
         continuable: bool,
+        presentation: Option<&Value>,
     ) -> Result<AskOutcome, QuestionError> {
-        let questions = validate_questions(raw)?;
+        let questions = match presentation {
+            None => validate_questions(raw)?,
+            Some(presentation) => apply_presentation(
+                validate_questions(raw)?,
+                &presentation_from_value(presentation)?,
+            )?,
+        };
         let seconds = self.wait_seconds(timeout);
         if cancel.as_ref().is_some_and(CancellationToken::is_cancelled) {
             return Err(QuestionError::new(

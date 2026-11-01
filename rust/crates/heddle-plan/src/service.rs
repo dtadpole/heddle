@@ -21,7 +21,7 @@ use crate::mode::{
 };
 use crate::policy::with_plan_policy;
 use crate::routes::{self, PlanRouteHost};
-use crate::tool::{PlanReviewChannel, PlanToolHost, exit_plan_mode_tool};
+use crate::tool::{PlanReviewChannel, PlanToolHost, exit_plan_mode_tool, open_plan_call_id};
 
 /// The service's name, as the profile's row provides it.
 pub const NAME: &str = "plan";
@@ -211,6 +211,17 @@ impl PlanToolHost for PlanService {
 
     fn channel(&self) -> Option<Arc<dyn PlanReviewChannel>> {
         PlanService::channel(self)
+    }
+
+    /// The presenting call, read from the session's log (#231).
+    fn call_id(&self, session: &SessionHandle, markdown: &str) -> Option<String> {
+        PlanLog::read(self.store.as_ref(), session)
+            .ok()
+            .and_then(|events| {
+                let events: Vec<serde_json::Value> =
+                    events.iter().map(|event| event.to_value()).collect();
+                open_plan_call_id(&events, markdown)
+            })
     }
 }
 
@@ -487,10 +498,27 @@ mod tests {
 
         let channel = Arc::new(Approving(Mutex::new(Vec::new())));
         plan.provide_review_channel(channel.clone());
+        // The loop logs the assistant's call before it runs it; the review reads its id from there (#231).
+        fixture
+            .store
+            .append(
+                &fixture.handle,
+                heddle_session::NewEvent::new("message").field(
+                    "message",
+                    json!({ "role": "assistant", "content": [{ "type": "tool-call", "id": "call_ship", "name": "exit_plan_mode", "arguments": json!({ "plan": "# Ship it\n\nsteps" }).to_string() }] }),
+                ),
+                heddle_session::AppendOptions::default(),
+            )
+            .unwrap();
         let approved = call_tool().await.unwrap();
         assert_eq!(approved.error, None);
         assert!(!plan.active(&fixture.handle), "approval leaves plan mode");
         assert_eq!(channel.0.lock().unwrap()[0].title, "Ship it");
+        assert_eq!(
+            channel.0.lock().unwrap()[0].call_id.as_deref(),
+            Some("call_ship"),
+            "the review is linked to the call that presented the plan"
+        );
 
         plan.withdraw_review_channel();
         plan.set_mode(&fixture.handle, true).unwrap();

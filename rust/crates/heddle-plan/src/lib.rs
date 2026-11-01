@@ -57,7 +57,7 @@ pub use tool::{
     EXIT_DESCRIPTION, EXIT_PLAN_MODE, NO_REVIEW_CHANNEL_MESSAGE, PLAN_KEEP_PLANNING,
     PLAN_NO_HEADING, PLAN_NO_REVIEW_CHANNEL, PLAN_NO_SESSION, PLAN_NOT_ACTIVE, PLAN_REVIEW,
     PlanForReview, PlanReviewAnswer, PlanReviewChannel, PlanReviewOption, PlanReviewQuestion,
-    PlanToolHost, exit_plan_mode_spec, exit_plan_mode_tool, plan_title,
+    PlanToolHost, exit_plan_mode_spec, exit_plan_mode_tool, open_plan_call_id, plan_title,
 };
 
 /// Every `(method, path)` [`router`] mounts, in axum 0.8 path syntax.

@@ -6,7 +6,7 @@ import type { SessionHandle } from '../session/store.ts'
 import type { PlanRouteHost } from './http.ts'
 import { planActive, setPlanMode, type PlanLog } from './mode.ts'
 import { withPlanPolicy } from './policy.ts'
-import { PLAN_REVIEW, exitPlanModeTool, type PlanReviewChannel } from './tool.ts'
+import { PLAN_REVIEW, exitPlanModeTool, openPlanCallId, type PlanReviewChannel } from './tool.ts'
 
 export const name = 'plan'
 
@@ -87,6 +87,7 @@ export class PlanService extends Service {
           setPlanMode(this.log, handle, false, { narrate: false })
         },
         channel: () => reviewChannel(ctx),
+        callId: (handle, markdown) => openPlanCallId(this.log.read(handle) as readonly Record<string, unknown>[], markdown),
       }),
     )
   }
@@ -108,12 +109,19 @@ function reviewChannel(ctx: Context): PlanReviewChannel | undefined {
   return questions !== undefined && typeof questions.ask === 'function' ? questionsReviewChannel(questions) : undefined
 }
 
-/** The part of the question service the review uses: `ask(handle, questions, {timeout, signal, continuable})`. */
+/** The part of the question service the review uses: `ask(handle, questions, {timeout, signal, continuable, presentation})`. */
 export interface QuestionAsker {
   ask(
     handle: SessionHandle,
     questions: unknown,
-    options: { readonly timeout?: unknown; readonly signal?: AbortSignal; readonly continuable?: boolean },
+    options: {
+      readonly timeout?: unknown
+      readonly signal?: AbortSignal
+      readonly continuable?: boolean
+      readonly presentation?: Readonly<
+        Record<string, { readonly detail?: string; readonly intent?: { readonly kind: 'plan-review'; readonly approve: string; readonly callId?: string } }>
+      >
+    },
   ): Promise<
     | { readonly kind: 'answered'; readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[] }
     | { readonly kind: 'pending'; readonly callId: string }
@@ -121,7 +129,11 @@ export interface QuestionAsker {
 }
 
 /**
- * The plan review as one question to the person (DSH's `plan-review`), with the plan under the question.
+ * The plan review as one question to the person (DSH's `plan-review`).
+ *
+ * Asked as DSH asks it (#231): the question is the short "Approve this plan and leave plan mode?", the plan is the
+ * question's `detail`, and its `intent` is `plan-review` with Approve as the approving option and the presenting call's
+ * id. A client draws the plan as rendered Markdown from those, instead of raw text inside the question card.
  *
  * Approve approves; Keep planning, or anything typed, keeps planning with the typed words as the feedback; a skip is a
  * dismissal (plan mode stays on). The wait never runs out (`timeout: -1`), so a `pending` answer cannot happen; if it
@@ -142,14 +154,24 @@ export function questionsReviewChannel(questions: QuestionAsker): PlanReviewChan
           {
             id: PLAN_REVIEW.id,
             header: PLAN_REVIEW.header,
-            question: `${PLAN_REVIEW.question}\n\n${plan.markdown}`,
+            question: PLAN_REVIEW.question,
             options: [
               { label: PLAN_REVIEW.approve.label, description: PLAN_REVIEW.approve.description },
               { label: PLAN_REVIEW.keepPlanning.label, description: PLAN_REVIEW.keepPlanning.description },
             ],
           },
         ],
-        { timeout: -1, continuable: false, ...(signal !== undefined ? { signal } : {}) },
+        {
+          timeout: -1,
+          continuable: false,
+          presentation: {
+            [PLAN_REVIEW.id]: {
+              detail: plan.markdown,
+              intent: { kind: 'plan-review', approve: PLAN_REVIEW.approve.label, ...(plan.callId !== undefined ? { callId: plan.callId } : {}) },
+            },
+          },
+          ...(signal !== undefined ? { signal } : {}),
+        },
       )
       if (outcome.kind !== 'answered') return { kind: 'dismissed' }
       const answer = outcome.answers.find((entry) => entry.id === PLAN_REVIEW.id) ?? outcome.answers[0]

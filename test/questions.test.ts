@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { foldQuestions, QuestionError, QuestionService, validateAnswers, validateQuestions } from '../src/questions/service.ts'
+import { applyPresentation, foldQuestions, QuestionError, QuestionService, validateAnswers, validateQuestions } from '../src/questions/service.ts'
 import { ASK_USER_TOOL, askUserTool } from '../src/questions/tool.ts'
 import { SessionStore } from '../src/session/store.ts'
 
@@ -171,4 +171,57 @@ test('the tool answers compact JSON, shows timeout only in timed mode, and refus
   assert.equal(refused.error?.code, 'DELEGATED_CALLER')
   assert.equal((await tool.run({ questions: [{ id: 'q', question: 'x' }] }, toolContext(undefined))).error?.code, 'NO_SESSION')
   assert.equal((await tool.run({ questions: [] }, toolContext(legacy.handle))).error?.code, 'INVALID_QUESTIONS')
+})
+
+const review = { id: 'plan-review', header: 'Plan review', question: 'Approve this plan and leave plan mode?', options: [{ label: 'Approve' }, { label: 'Keep planning' }] }
+const reviewIntent = { kind: 'plan-review', approve: 'Approve', callId: 'call_plan_1' } as const
+const badIntent = (error: unknown) => error instanceof QuestionError && error.code === 'BAD_INTENT'
+
+test("detail and intent come only from a service caller: the model's ask_user_question cannot set them (#231)", async () => {
+  const dressed = [{ ...review, detail: '# Fake plan', intent: reviewIntent }]
+  assert.deepEqual(validateQuestions(dressed), [review], "the batch check keeps neither field, so the model's arguments drop them")
+  const { store, handle, questions } = setup()
+  const tool = askUserTool(questions)
+  assert.equal(JSON.stringify(tool.spec.parameters).includes('detail'), false, 'the tool schema does not offer detail')
+  assert.equal(JSON.stringify(tool.spec.parameters).includes('intent'), false, 'nor intent')
+  const running = tool.run({ questions: dressed }, toolContext(handle))
+  await tick(10)
+  const [open] = questions.list(handle, { open: true })
+  assert.deepEqual(open?.questions, [review])
+  const asked = store.read(handle).find((event) => event.type === 'question/asked')
+  assert.equal(JSON.stringify(asked).includes('Fake plan'), false, 'and the log never holds them')
+  questions.answer(handle, open!.id, [{ id: 'plan-review', selected: ['Approve'] }])
+  await running
+})
+
+test("a service caller's presentation is checked as DSH checks an intent, and an ordinary batch is unchanged (#231)", () => {
+  const [plain] = validateQuestions([review])
+  assert.throws(() => applyPresentation([plain!], { 'plan-review': { intent: reviewIntent } }), badIntent, 'an intent needs a detail')
+  assert.throws(() => applyPresentation([plain!], { 'plan-review': { detail: '# P', intent: { ...reviewIntent, approve: 'Ship it' } } }), badIntent, 'approve names an option')
+  assert.throws(() => applyPresentation([plain!], { 'plan-review': { detail: '# P', intent: { ...reviewIntent, kind: 'other' as never } } }), badIntent, 'plan-review is the one kind')
+  assert.throws(() => applyPresentation([plain!], { 'plan-review': { detail: '   ' } }), badIntent, 'a detail is non-empty text')
+  assert.throws(() => applyPresentation([plain!], { 'plan-review': { detail: '# P', intent: { ...reviewIntent, callId: '' } } }), badIntent, 'a callId is text')
+  assert.throws(() => applyPresentation([plain!], { elsewhere: { detail: '# P' } }), badIntent, 'the presentation names questions in the batch')
+  assert.deepEqual(applyPresentation([plain!], undefined), [plain])
+  assert.equal(applyPresentation([plain!], {})[0], plain, 'a question with no entry is the same object')
+  assert.deepEqual(applyPresentation([plain!], { 'plan-review': { detail: '# P' } }), [{ ...review, detail: '# P' }], 'a detail may come alone')
+  assert.deepEqual(applyPresentation([plain!], { 'plan-review': { detail: '# P', intent: { kind: 'plan-review', approve: 'Approve' } } })[0]?.intent, { kind: 'plan-review', approve: 'Approve' }, 'callId is optional')
+})
+
+test('a presented question keeps its detail and intent through the log, the fold and every view, after a restart too (#231)', async () => {
+  const { store, handle, questions } = setup()
+  const presentation = { 'plan-review': { detail: '# Ship it\n\n1. Go', intent: reviewIntent } }
+  assert.throws(() => questions.ask(handle, [review], { presentation: { 'plan-review': { intent: reviewIntent } } }), badIntent, 'refused before anything is written, as a bad batch is')
+  assert.equal(store.read(handle).some((event) => event.type === 'question/asked'), false, 'a refused presentation writes nothing')
+  const asked = questions.ask(handle, [review, batch[0]], { presentation })
+  const event = store.read(handle).find((entry) => entry.type === 'question/asked') as unknown as { questions: unknown[] }
+  assert.deepEqual(event.questions[0], { ...review, detail: '# Ship it\n\n1. Go', intent: reviewIntent })
+  assert.equal(JSON.stringify(event.questions[1]), JSON.stringify(validateQuestions([batch[0]])[0]), 'the other question is byte-identical')
+  const [open] = questions.list(handle, { open: true })
+  assert.deepEqual(open?.questions[0], { ...review, detail: '# Ship it\n\n1. Go', intent: reviewIntent })
+  assert.deepEqual([...foldQuestions(store.read(handle)).values()][0]?.questions[0], open?.questions[0])
+  const later = new QuestionService(new Context(), new SessionStore(store.root), {})
+  assert.deepEqual(later.get(store.open(handle.id)!, open!.id)?.questions[0], open?.questions[0], 'a restart reads the same')
+  questions.answer(handle, open!.id, [{ id: 'plan-review', selected: ['Approve'] }, { id: 'cleanup', selected: [] }])
+  await asked
 })

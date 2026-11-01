@@ -11,7 +11,7 @@ import { handlePlanRequest } from '../src/plan/http.ts'
 import { PLAN_EVENT, PLAN_OFF_NOTICE, PLAN_ON_NOTICE, planActive, setPlanMode, type PlanLog } from '../src/plan/mode.ts'
 import { PLAN_POLICY_SECTION, withPlanPolicy } from '../src/plan/policy.ts'
 import { applyPlanPolicy, planCommand, questionsReviewChannel, type QuestionAsker } from '../src/plan/service.ts'
-import { EXIT_DESCRIPTION, EXIT_PLAN_MODE, PLAN_REVIEW, exitPlanModeTool, planTitle, type PlanReviewAnswer, type PlanReviewChannel } from '../src/plan/tool.ts'
+import { EXIT_DESCRIPTION, EXIT_PLAN_MODE, PLAN_REVIEW, exitPlanModeTool, openPlanCallId, planTitle, type PlanReviewAnswer, type PlanReviewChannel } from '../src/plan/tool.ts'
 import { foldSurface, SessionStore } from '../src/session/store.ts'
 
 /**
@@ -140,7 +140,7 @@ test('/plan enters, /plan off leaves, and words after /plan go to the model as a
 
 /** A channel that answers what it is told and records what it was shown. */
 function channel(answer: PlanReviewAnswer) {
-  const shown: { title: string; markdown: string }[] = []
+  const shown: { title: string; markdown: string; callId?: string }[] = []
   const reviewer: PlanReviewChannel = {
     review: async (_session, plan) => {
       shown.push(plan)
@@ -218,6 +218,43 @@ test('an approved plan leaves plan mode; keeping on planning and dismissing do n
   assert.equal(planActive(kept.log.read(kept.handle)), true)
 })
 
+test("the review links to the open exit_plan_mode call presenting the same plan, read from the log (#231)", () => {
+  const call = (id: string, plan: string) => ({ type: 'tool-call', id, name: 'exit_plan_mode', arguments: JSON.stringify({ plan }) })
+  const assistant = (...content: unknown[]) => ({ type: 'message', message: { role: 'assistant', content } })
+  const answer = (id: string) => ({ type: 'message', message: { role: 'tool', toolCallId: id, content: [{ type: 'text', text: 'x' }] } })
+  const events = [
+    assistant(call('call_old', PLAN)),
+    answer('call_old'),
+    assistant({ type: 'text', text: 'Here it is.' }, { type: 'tool-call', id: 'call_read', name: 'read', arguments: '{}' }, call('call_new', `\n${PLAN}\n`)),
+  ]
+  assert.equal(openPlanCallId(events, PLAN), 'call_new', 'the unanswered call with the same plan, its argument trimmed')
+  assert.equal(openPlanCallId(events, '# Another plan'), undefined, 'a different plan links to nothing')
+  assert.equal(openPlanCallId([...events, answer('call_new')], PLAN), undefined, 'an answered call is not the open one')
+  assert.equal(openPlanCallId([assistant({ type: 'tool-call', id: 'call_bad', name: 'exit_plan_mode', arguments: '{not json' })], PLAN), undefined)
+})
+
+test("exit_plan_mode hands its host's call id to the review", async () => {
+  const context = { cwd: root, mode: 'workspace-write' as const, log: () => undefined }
+  const { handle, log } = session()
+  setPlanMode(log, handle, true)
+  const yes = channel({ kind: 'approve' })
+  const seen: string[] = []
+  const definition = exitPlanModeTool({
+    active: (target) => planActive(log.read(target)),
+    leave: (target) => {
+      setPlanMode(log, target, false, { narrate: false })
+    },
+    channel: () => yes.reviewer,
+    callId: (_target, markdown) => {
+      seen.push(markdown)
+      return 'call_42'
+    },
+  })
+  await definition.run({ plan: `\n${PLAN}\n` }, { ...context, session: handle })
+  assert.deepEqual(seen, [PLAN], 'the host is asked with the trimmed plan')
+  assert.deepEqual(yes.shown, [{ title: 'Ship the slash menu', markdown: PLAN, callId: 'call_42' }])
+})
+
 test("a plan's title is its first heading at any level", () => {
   assert.equal(planTitle('intro\n## Phase one  \n# Later'), 'Phase one')
   assert.equal(planTitle('no heading'), undefined)
@@ -255,11 +292,12 @@ test("the review over the question service asks DSH's plan-review question and r
   const asked: unknown[] = []
   const asker = (answer: Awaited<ReturnType<QuestionAsker['ask']>>): QuestionAsker => ({
     ask: async (_session, questions, options) => {
-      asked.push({ questions, timeout: options.timeout, continuable: options.continuable })
+      asked.push({ questions, timeout: options.timeout, continuable: options.continuable, presentation: options.presentation })
       return answer
     },
   })
-  const review = (answer: Awaited<ReturnType<QuestionAsker['ask']>>) => questionsReviewChannel(asker(answer)).review(handle, { title: 'Ship it', markdown: '# Ship it\n\n1. Go' })
+  const review = (answer: Awaited<ReturnType<QuestionAsker['ask']>>) =>
+    questionsReviewChannel(asker(answer)).review(handle, { title: 'Ship it', markdown: '# Ship it\n\n1. Go', callId: 'call_plan_1' })
 
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Approve'] }] }), { kind: 'approve' })
   assert.deepEqual(asked[0], {
@@ -267,7 +305,7 @@ test("the review over the question service asks DSH's plan-review question and r
       {
         id: 'plan-review',
         header: 'Plan review',
-        question: 'Approve this plan and leave plan mode?\n\n# Ship it\n\n1. Go',
+        question: 'Approve this plan and leave plan mode?',
         options: [
           { label: 'Approve', description: 'Leave plan mode; the plan is carried out from the next step.' },
           { label: 'Keep planning', description: 'Stay in plan mode; feedback goes back to the model.' },
@@ -276,7 +314,14 @@ test("the review over the question service asks DSH's plan-review question and r
     ],
     timeout: -1,
     continuable: false,
-  }, 'only the turn that asked the review can take its answer (#228)')
+    presentation: { 'plan-review': { detail: '# Ship it\n\n1. Go', intent: { kind: 'plan-review', approve: 'Approve', callId: 'call_plan_1' } } },
+  }, "only the turn that asked the review can take its answer (#228); the plan is the question's detail, as DSH asks it (#231)")
+  await questionsReviewChannel(asker({ kind: 'answered', answers: [] })).review(handle, { title: 'Ship it', markdown: '# Ship it' })
+  assert.deepEqual(
+    (asked.at(-1) as { presentation: unknown }).presentation,
+    { 'plan-review': { detail: '# Ship it', intent: { kind: 'plan-review', approve: 'Approve' } } },
+    'with no call found, the review is asked without the link',
+  )
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Keep planning'] }] }), { kind: 'keep-planning', feedback: '' })
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: [], custom: ' split it ' }] }), { kind: 'keep-planning', feedback: 'split it' })
   assert.deepEqual(await review({ kind: 'answered', answers: [{ id: 'plan-review', selected: ['Approve'], custom: 'but rename it' }] }), { kind: 'keep-planning', feedback: 'but rename it' }, 'typed words are feedback, never approval')

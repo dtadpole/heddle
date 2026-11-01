@@ -14,7 +14,8 @@ pub mod tool;
 pub use http::{HttpAnswer, get_questions, is_question_id, post_question};
 pub use log::{LogError, QuestionLog};
 pub use model::{
-    Answer, Question, QuestionError, QuestionOption, codes, validate_answers, validate_questions,
+    Answer, Presentation, Question, QuestionError, QuestionIntent, QuestionOption,
+    apply_presentation, codes, presentation_from_value, validate_answers, validate_questions,
 };
 pub use service::{
     AnswerOutcome, AskOutcome, INTERRUPTED_REASON, Mode, QuestionConfig, QuestionService,
@@ -293,7 +294,11 @@ mod tests {
         let asking = tokio::spawn({
             let before = Arc::clone(&before);
             let session = fixture.session.clone();
-            async move { before.ask_with(&session, &one(), None, None, false).await }
+            async move {
+                before
+                    .ask_with(&session, &one(), None, None, false, None)
+                    .await
+            }
         });
         let waiting = first_open(&before, &fixture.session).await;
         assert_eq!(
@@ -543,5 +548,210 @@ mod tests {
             late.body
                 .contains("\"message\": \"{\\\"kind\\\":\\\"answer_to_pending_question\\\"")
         );
+    }
+
+    fn review() -> Value {
+        json!([{ "id": "plan-review", "header": "Plan review", "question": "Approve this plan and leave plan mode?", "options": [{ "label": "Approve" }, { "label": "Keep planning" }] }])
+    }
+
+    fn review_intent() -> Value {
+        json!({ "kind": "plan-review", "approve": "Approve", "callId": "call_plan_1" })
+    }
+
+    fn presented(presentation: Value) -> Result<Vec<Question>, QuestionError> {
+        apply_presentation(
+            validate_questions(&review())?,
+            &presentation_from_value(&presentation)?,
+        )
+    }
+
+    #[tokio::test]
+    async fn detail_and_intent_come_only_from_a_service_caller_not_the_models_ask_user_question() {
+        let mut dressed = review();
+        dressed[0]["detail"] = json!("# Fake plan");
+        dressed[0]["intent"] = review_intent();
+        assert_eq!(
+            serde_json::to_value(validate_questions(&dressed).unwrap()).unwrap(),
+            review(),
+            "the batch check keeps neither field, so the model's arguments drop them"
+        );
+        let fixture = fixture("dressed");
+        let questions = service(&fixture, Mode::Legacy, 120);
+        let tool = AskUserTool::new(Arc::clone(&questions));
+        let schema = tool.spec().parameters.to_string();
+        assert!(!schema.contains("detail") && !schema.contains("intent"));
+        let handle = fixture.store.open(&fixture.session).unwrap();
+        let context = ToolRunContext::new(
+            ToolContext::new(fixture.root.clone()).with_session(handle.clone()),
+            SandboxMode::WorkspaceWrite,
+        );
+        let running = tokio::spawn({
+            let args = json!({ "questions": dressed }).as_object().unwrap().clone();
+            async move { tool.run(args, context).await }
+        });
+        let open = first_open(&questions, &fixture.session).await;
+        assert_eq!(open["questions"], review());
+        let log = fixture.store.read(&handle).unwrap();
+        assert!(
+            log.iter()
+                .all(|event| !event.to_value().to_string().contains("Fake plan")),
+            "and the log never holds them"
+        );
+        questions
+            .answer(
+                &fixture.session,
+                open["id"].as_str().unwrap(),
+                &json!([{ "id": "plan-review", "selected": ["Approve"] }]),
+            )
+            .unwrap();
+        running.await.unwrap().unwrap();
+    }
+
+    #[test]
+    fn a_service_callers_presentation_is_checked_as_dsh_checks_an_intent() {
+        let bad = |presentation: Value, why: &str| {
+            assert_eq!(
+                presented(presentation).unwrap_err().code,
+                codes::BAD_INTENT,
+                "{why}"
+            );
+        };
+        bad(
+            json!({ "plan-review": { "intent": review_intent() } }),
+            "an intent needs a detail",
+        );
+        let mut other = review_intent();
+        other["approve"] = json!("Ship it");
+        bad(
+            json!({ "plan-review": { "detail": "# P", "intent": other } }),
+            "approve names an option",
+        );
+        let mut other = review_intent();
+        other["kind"] = json!("other");
+        bad(
+            json!({ "plan-review": { "detail": "# P", "intent": other } }),
+            "plan-review is the one kind",
+        );
+        bad(
+            json!({ "plan-review": { "detail": "   " } }),
+            "a detail is non-empty text",
+        );
+        bad(
+            json!({ "plan-review": { "detail": 7 } }),
+            "a detail is text",
+        );
+        let mut other = review_intent();
+        other["callId"] = json!("");
+        bad(
+            json!({ "plan-review": { "detail": "# P", "intent": other } }),
+            "a callId is text",
+        );
+        bad(
+            json!({ "plan-review": { "detail": "# P", "intent": { "kind": "plan-review" } } }),
+            "an intent names its approving option",
+        );
+        bad(
+            json!({ "elsewhere": { "detail": "# P" } }),
+            "the presentation names questions in the batch",
+        );
+        bad(json!([]), "a presentation is an object");
+        let plain = validate_questions(&review()).unwrap();
+        assert_eq!(presented(json!({})).unwrap(), plain);
+        assert_eq!(
+            serde_json::to_value(presented(json!({ "plan-review": { "detail": "# P" } })).unwrap())
+                .unwrap()[0]["detail"],
+            "# P",
+            "a detail may come alone"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                presented(json!({ "plan-review": { "detail": "# P", "intent": { "kind": "plan-review", "approve": "Approve" } } }))
+                    .unwrap()
+            )
+            .unwrap()[0]["intent"],
+            json!({ "kind": "plan-review", "approve": "Approve" }),
+            "callId is optional"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_presented_question_keeps_its_detail_and_intent_through_the_log_the_fold_and_every_view()
+     {
+        let fixture = fixture("presented");
+        let questions = service(&fixture, Mode::Legacy, 120);
+        let presentation =
+            json!({ "plan-review": { "detail": "# Ship it\n\n1. Go", "intent": review_intent() } });
+        let refused = questions
+            .ask_with(
+                &fixture.session,
+                &review(),
+                None,
+                None,
+                true,
+                Some(&json!({ "plan-review": { "intent": review_intent() } })),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, codes::BAD_INTENT);
+        assert!(
+            question_events(&fixture).is_empty(),
+            "a refused presentation writes nothing"
+        );
+        let mut batch = review();
+        batch
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "id": "q", "question": "Ready?", "options": [{ "label": "Go" }] }));
+        let asking = tokio::spawn({
+            let questions = Arc::clone(&questions);
+            let session = fixture.session.clone();
+            async move {
+                questions
+                    .ask_with(&session, &batch, None, None, true, Some(&presentation))
+                    .await
+            }
+        });
+        let open = first_open(&questions, &fixture.session).await;
+        let mut expected = review()[0].clone();
+        expected["detail"] = json!("# Ship it\n\n1. Go");
+        expected["intent"] = review_intent();
+        assert_eq!(open["questions"][0], expected);
+        assert_eq!(
+            open["questions"][0].to_string(),
+            r##"{"id":"plan-review","question":"Approve this plan and leave plan mode?","header":"Plan review","options":[{"label":"Approve"},{"label":"Keep planning"}],"detail":"# Ship it\n\n1. Go","intent":{"kind":"plan-review","approve":"Approve","callId":"call_plan_1"}}"##,
+            "the TypeScript build's key order"
+        );
+        assert_eq!(
+            open["questions"][1],
+            one()[0],
+            "the other question is byte-identical"
+        );
+        let handle = fixture.store.open(&fixture.session).unwrap();
+        let events: Vec<Value> = fixture
+            .store
+            .read(&handle)
+            .unwrap()
+            .iter()
+            .map(|event| event.to_value())
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&fold_questions(&events)[0].questions).unwrap()[0],
+            expected
+        );
+        let later = service(&fixture, Mode::Legacy, 120);
+        let id = open["id"].as_str().unwrap().to_owned();
+        assert_eq!(
+            Value::Object(later.get(&fixture.session, &id).unwrap().unwrap())["questions"][0],
+            expected,
+            "a restart reads the same"
+        );
+        questions
+            .answer(
+                &fixture.session,
+                &id,
+                &json!([{ "id": "plan-review", "selected": ["Approve"] }, { "id": "q", "selected": [] }]),
+            )
+            .unwrap();
+        asking.await.unwrap().unwrap();
     }
 }

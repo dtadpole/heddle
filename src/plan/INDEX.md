@@ -45,9 +45,15 @@ that turn's next model call — DSH's "applies from the next step", without a pe
 `exit_plan_mode {plan}` refuses outside plan mode, without a `#` heading, and when no review channel is loaded
 ("no user-questions channel is available to review the plan; ask the user to switch the session mode instead"). The
 channel is the user-question service (developer-eleven's `questions`, agreed 2026-10-29): `questionsReviewChannel`
-asks its public `ask` DSH's one `plan-review` question with the plan under it and no time limit. Approve approves;
-Keep planning or typed words keep planning with the words as feedback; a skip dismisses (plan mode stays). The
-question service is not on main yet; until it is, the tool refuses as above.
+asks its public `ask` DSH's one `plan-review` question with no time limit. Approve approves; Keep planning or typed
+words keep planning with the words as feedback; a skip dismisses (plan mode stays). Until the question service is
+loaded, the tool refuses as above.
+
+The question is asked as DSH asks it (#231): the short "Approve this plan and leave plan mode?", with the plan as the
+question's `detail` and an `intent` of `plan-review` (Approve approves; `callId` names the presenting call). Both ride
+the question service's `presentation` option, so the model's own `ask_user_question` cannot set them. heddle's tools
+are not handed their call id, so `openPlanCallId` reads it from the log: the newest unanswered `exit_plan_mode` call
+whose `plan` is the one under review. The page draws the plan from these as rendered Markdown.
 
 The review is asked `continuable: false`, so only the turn that asked it can take the answer (#228). A review left
 open by a crash reads as cancelled (`interrupted`) after the restart and an Approve is refused, as DSH's "after a

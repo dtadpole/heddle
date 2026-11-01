@@ -43,9 +43,9 @@ request's own; no tool is removed or blocked, so `exit_plan_mode` is in the cata
 |---|---|
 | `plan_active`, `set_plan_mode` → `PlanChange`, `set_plan_mode_with` (the exit tool's unnarrated leave), `PlanLog`, `PlanSessions`, `PLAN_EVENT`, `PLAN_ON_NOTICE`, `PLAN_OFF_NOTICE`, `PLAN_NOTICE_ORIGIN` | the fold and the change (`mode.rs`) |
 | `PLAN_POLICY_SECTION`, `with_plan_policy`, `with_policy_section` | the section and its placement (`policy.rs`) |
-| `exit_plan_mode_tool`, `exit_plan_mode_spec`, `PlanToolHost`, `PlanReviewChannel`, `PlanReviewAnswer`, `PlanForReview`, `PLAN_REVIEW`, `plan_title` | the tool (`tool.rs`) |
+| `exit_plan_mode_tool`, `exit_plan_mode_spec`, `PlanToolHost`, `PlanReviewChannel`, `PlanReviewAnswer`, `PlanForReview`, `PLAN_REVIEW`, `plan_title`, `open_plan_call_id` | the tool (`tool.rs`); `open_plan_call_id` reads the presenting call's id from the log (#231) |
 | `plan_command`, `apply_plan_policy`, `PlanPolicyHook`, `PlanService` | the command, the request rewrite, the hook and the service the binary holds (`service.rs`) |
-| `questions_review_channel`, `QuestionAsker`, `QuestionOutcome`, `QuestionAnswer`, `AskOptions` | the review over a question service: one `plan-review` question with the plan under it, no time limit, not continuable past its turn (#228); Approve approves, Keep planning or typed words keep planning, a skip or a `pending` dismisses (`review.rs`) |
+| `questions_review_channel`, `QuestionAsker`, `QuestionOutcome`, `QuestionAnswer`, `AskOptions` | the review over a question service: one `plan-review` question with the plan as its `detail` and a `plan-review` `intent` naming the presenting call (`review_presentation`, #231), no time limit, not continuable past its turn (#228); Approve approves, Keep planning or typed words keep planning, a skip or a `pending` dismisses (`review.rs`) |
 | `router`, `PlanRouteHost`, `PLAN_ROUTE`, `ROUTES` | the route (`routes.rs`) |
 
 ## What it needs from other crates

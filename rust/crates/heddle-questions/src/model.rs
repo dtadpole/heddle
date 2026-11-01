@@ -41,6 +41,43 @@ pub struct Question {
     /// Present (and `true`) only for a multi-select question.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_select: Option<bool>,
+    /// Longer text a client shows beside the question (DSH's `detail`), such as a plan under review. Set only by a
+    /// service caller ([`apply_presentation`]), never from the model's arguments (#231).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// How a client may draw the question (DSH's `intent`); set only by a service caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<QuestionIntent>,
+}
+
+/// A presentation tag on a question (DSH's `intent`). The one kind is `plan-review`, whose `approve` names the
+/// option that approves.
+///
+/// `call_id` (`callId`) is a heddle extension: the id of the tool call that asked (`exit_plan_mode`'s), so a client
+/// can link the review to the plan the call carries. DSH links the call through the request instead.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionIntent {
+    /// Always `plan-review`.
+    pub kind: String,
+    /// The label of the approving option.
+    pub approve: String,
+    /// The asking tool call's id, when known.
+    #[serde(rename = "callId", default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+}
+
+impl QuestionIntent {
+    /// The one kind there is.
+    pub const PLAN_REVIEW: &'static str = "plan-review";
+}
+
+/// What a service caller adds to one question: `detail` and `intent` (the TypeScript `QuestionPresentation` entry).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Presentation {
+    /// The question's detail.
+    pub detail: Option<String>,
+    /// The question's intent.
+    pub intent: Option<QuestionIntent>,
 }
 
 impl Question {
@@ -65,6 +102,8 @@ pub struct Answer {
 pub mod codes {
     /// The batch is not one the tool can ask.
     pub const INVALID_QUESTIONS: &str = "INVALID_QUESTIONS";
+    /// A service caller's presentation does not fit its question (DSH's `BAD_INTENT`).
+    pub const BAD_INTENT: &str = "BAD_INTENT";
     /// The answer batch does not fit its questions.
     pub const INVALID_ANSWERS: &str = "INVALID_ANSWERS";
     /// No such request in the session.
@@ -181,9 +220,125 @@ pub fn validate_questions(raw: &Value) -> Result<Vec<Question>, QuestionError> {
             header: text(entry.get("header")),
             options: options.filter(|options| !options.is_empty()),
             multi_select: (entry.get("multi_select") == Some(&Value::Bool(true))).then_some(true),
+            detail: None,
+            intent: None,
         });
     }
     Ok(questions)
+}
+
+fn bad_intent(message: String) -> QuestionError {
+    QuestionError::new(codes::BAD_INTENT, message)
+}
+
+/// Read a presentation in the TypeScript shape, `{ <question id>: { detail?, intent? } }`, as a service caller
+/// passes it. A field of the wrong type is refused `BAD_INTENT`; the checks against the questions are
+/// [`apply_presentation`]'s.
+pub fn presentation_from_value(raw: &Value) -> Result<Vec<(String, Presentation)>, QuestionError> {
+    let Some(entries) = raw.as_object() else {
+        return Err(bad_intent(
+            "a presentation is an object keyed by question id".into(),
+        ));
+    };
+    let mut presentation = Vec::with_capacity(entries.len());
+    for (id, entry) in entries {
+        let Some(entry) = entry.as_object() else {
+            return Err(bad_intent(format!(
+                "the presentation of question '{id}' is not an object"
+            )));
+        };
+        let detail = match entry.get("detail") {
+            None => None,
+            Some(Value::String(detail)) => Some(detail.clone()),
+            Some(_) => {
+                return Err(bad_intent(format!(
+                    "question '{id}' detail must be non-empty text"
+                )));
+            }
+        };
+        let intent = match entry.get("intent") {
+            None => None,
+            Some(intent) => Some(
+                serde_json::from_value::<QuestionIntent>(intent.clone()).map_err(|_| {
+                    bad_intent(format!(
+                        "question '{id}' intent must be {{ kind, approve, callId? }} text"
+                    ))
+                })?,
+            ),
+        };
+        presentation.push((id.clone(), Presentation { detail, intent }));
+    }
+    Ok(presentation)
+}
+
+/// Merge a service caller's presentation into checked questions, per question id (#231).
+///
+/// DSH's two `BAD_INTENT` refusals (dsh-user-questions `ask`): an intent whose `approve` names none of the
+/// question's options, and an intent with no `detail`. heddle also refuses an intent of another kind, an empty
+/// `call_id`, an empty `detail`, and an id that names no question in the batch. A question without an entry is
+/// returned as it was, so an ordinary batch is byte-identical. The TypeScript `applyPresentation`.
+pub fn apply_presentation(
+    questions: Vec<Question>,
+    presentation: &[(String, Presentation)],
+) -> Result<Vec<Question>, QuestionError> {
+    for (id, _) in presentation {
+        if !questions.iter().any(|question| &question.id == id) {
+            return Err(bad_intent(format!(
+                "the presentation names no question '{id}'"
+            )));
+        }
+    }
+    questions
+        .into_iter()
+        .map(|mut question| {
+            let Some((_, entry)) = presentation.iter().find(|(id, _)| id == &question.id) else {
+                return Ok(question);
+            };
+            let id = question.id.clone();
+            if let Some(detail) = &entry.detail
+                && detail.trim().is_empty()
+            {
+                return Err(bad_intent(format!(
+                    "question '{id}' detail must be non-empty text"
+                )));
+            }
+            if let Some(intent) = &entry.intent {
+                if intent.kind != QuestionIntent::PLAN_REVIEW {
+                    return Err(bad_intent(format!(
+                        "question '{id}' intent kind must be 'plan-review'"
+                    )));
+                }
+                if entry.detail.is_none() {
+                    return Err(bad_intent(format!(
+                        "question '{id}' has an intent but no detail"
+                    )));
+                }
+                let approves = question
+                    .options
+                    .iter()
+                    .flatten()
+                    .any(|option| option.label == intent.approve);
+                if !approves {
+                    return Err(bad_intent(format!(
+                        "question '{id}' intent approves '{}', which is not one of its options",
+                        intent.approve
+                    )));
+                }
+                if intent
+                    .call_id
+                    .as_deref()
+                    .is_some_and(|call| call.trim().is_empty())
+                {
+                    return Err(bad_intent(format!(
+                        "question '{id}' intent callId must be text"
+                    )));
+                }
+            }
+            question.detail = entry.detail.clone();
+            question.intent = entry.intent.clone();
+            Ok(question)
+        })
+        .collect()
 }
 
 /// Check an answer batch against its questions: one item per question, labels from that question's options, at
