@@ -614,6 +614,18 @@ impl heddle_web_composer::status::StatusHost for Composer {
 }
 
 impl heddle_web_composer::model_switcher::ModelHost for Composer {
+    fn subagent_owned(&self, id: &str) -> bool {
+        self.sessions
+            .meta(id)
+            .and_then(|meta| {
+                meta.as_map()
+                    .get("origin")
+                    .and_then(Value::as_str)
+                    .map(|origin| origin == "subagent")
+            })
+            .unwrap_or(false)
+    }
+
     fn describe_endpoints(&self) -> heddle_web_composer::model_switcher::EndpointListing {
         let nominated = self.nominated.clone().or_else(|| self.models.nominated());
         // The default selection rides along, so a composer opening a fresh session shows and sends it (A104).
