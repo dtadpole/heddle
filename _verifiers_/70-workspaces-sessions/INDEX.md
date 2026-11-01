@@ -45,6 +45,10 @@ Another judges DSH's refusal to archive a session with running work (R-developer
 running work is refused with the work named, and stop: true stops it and archives` — the `409` names the turn in
 progress, or the running subagent of an idle parent, and `stop: true` stops it and archives.
 
+Since 1 Nov `check-failed-fragment.mjs` judges a turn whose provider stream broke mid-answer (#173): the turn fails and
+the page still draws the partial with its failure line, while the next turn's request, a fork's first request and a
+`/compact` summary request carry the cut turn's prompt and not its fragment.
+
 ## Where it stands, 2026-10-11
 
 **22 checks, all passing — verdict `0`.** The tree group was written **before** the mechanism it judges,
