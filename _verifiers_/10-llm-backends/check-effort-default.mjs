@@ -126,8 +126,11 @@ test('a turn that names no effort runs at the model\'s declared default, recorde
     assert.equal(records[0].reasoningEffortDefault, true, 'marked as the model default, not a person\'s choice')
     const all = await call(server, 'GET', '/api/sessions')
     const namedSession = (Array.isArray(all.body) ? all.body : []).map((meta) => meta.id).filter((id) => id !== firstSession)
+    assert.equal(namedSession.length, 2, 'the named and the no-default turns each started a session')
     for (const id of namedSession) {
-      for (const record of await modelRequests(server, id)) {
+      const own = await modelRequests(server, id)
+      assert.ok(own.length >= 1, `session ${id} recorded its request`)
+      for (const record of own) {
         assert.equal(record.reasoningEffortDefault, undefined, `a named level or no level is not marked as a default (${JSON.stringify(record).slice(0, 160)})`)
       }
     }
