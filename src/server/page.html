@@ -7825,23 +7825,58 @@ let sessionFolder = null
  * late was appended under the newer session too. So every step after an await first checks that this is still the
  * latest open (`showGeneration`).
  */
+/* page-lifecycle:begin */
 /**
- * Whether this page is being left (a reload, a link): set at `beforeunload` and `pagehide`, before the navigation stops the
- * page's requests, and cleared at `pageshow` or after a while (a navigation that turned into a download leaves the page
- * where it was). A history read that fails then failed because the page is leaving, and failHistory writes no empty
- * selection for it. A property of the page's global, so the functions the unit tests lift read it unbound.
+ * The page's own leaving, for failHistory's write of the empty selection (#56; the union of first-visit-2 and 4b2a0552).
+ *
+ * A navigation (a reload, a link) stops the page's requests, and a history read rejects while the old page still runs.
+ * Writing the empty selection then emptied the saved selection of a session that could be read, and the next load
+ * restored nothing (check-chat-view's resize test, reloading twice in quick succession). So the write waits:
+ * - `beforeunload` and `pagehide` mark the page as leaving, with **one** expiry timer, replaced on each, so an earlier
+ *   timer never ends a newer leaving (developer-twelve's 10a6);
+ * - a failure's write that comes while the page is leaving is kept as pending, `{ id, generation }`, not dropped;
+ * - when the page turns out to stay, at `pageshow` or when the expiry fires (a canceled navigation, one that became a
+ *   download), the pending write is done if that same failure still shows: nothing current, the same unavailable
+ *   session, the same open generation (developer-twelve's 9a04). A page that really unloads runs neither, and writes
+ *   nothing.
+ * A page that is not leaving writes at once.
  */
-for (const name of ['beforeunload', 'pagehide']) {
-  window.addEventListener(name, () => {
-    globalThis.heddlePageLeaving = true
-    setTimeout(() => {
-      globalThis.heddlePageLeaving = false
-    }, 10_000)
-  })
-}
-window.addEventListener('pageshow', () => {
-  globalThis.heddlePageLeaving = false
-})
+const LEAVING_EXPIRY_MS = 10_000
+const pageLifecycle = (() => {
+  let leaving = false
+  let expiry = null
+  let pending = null
+  const stillShown = (failure) => current === null && unavailableSession === failure.id && showGeneration === failure.generation
+  const resume = () => {
+    leaving = false
+    if (expiry !== null) clearTimeout(expiry)
+    expiry = null
+    const failure = pending
+    pending = null
+    if (failure !== null && stillShown(failure)) rememberCurrent()
+  }
+  return {
+    leave() {
+      leaving = true
+      if (expiry !== null) clearTimeout(expiry)
+      expiry = setTimeout(resume, LEAVING_EXPIRY_MS)
+    },
+    resume,
+    /** failHistory's write of the empty selection for the failure of `id` in open `generation`. */
+    clearFailedSelection(id, generation) {
+      const failure = { id, generation }
+      if (leaving) {
+        pending = failure
+        return
+      }
+      if (stillShown(failure)) rememberCurrent()
+    },
+  }
+})()
+window.addEventListener('beforeunload', () => pageLifecycle.leave())
+window.addEventListener('pagehide', () => pageLifecycle.leave())
+window.addEventListener('pageshow', () => pageLifecycle.resume())
+/* page-lifecycle:end */
 
 async function showSession(id) {
   const generation = ++showGeneration
@@ -7953,16 +7988,12 @@ async function showSession(id) {
     applySessionAccess(null)
     /**
      * And it is not kept as the session to reopen either: DSH's `clearMain` empties its saved selection too. Nothing open
-     * to lock. It is written a task later, while this failure still shows: a page being navigated away (a reload, a
-     * link) stops its requests, and the read rejects while the old page still runs, so an immediate write emptied the
-     * selection of a session that could be read, and the next load restored nothing (check-chat-view's resize test,
-     * reloading twice in quick succession). The old page runs no later task, so only a failure on a page that stays is
-     * written.
+     * to lock. It is written a task later, while this failure still shows, and never while the page is leaving
+     * (`pageLifecycle`): a page being navigated away stops its requests, and the read rejects while the old page still
+     * runs, so an immediate write emptied the selection of a session that could be read, and the next load restored
+     * nothing (check-chat-view's resize test). A page that stays writes it, at once or when it turns out to stay.
      */
-    setTimeout(() => {
-      if (globalThis.heddlePageLeaving === true) return
-      if (unavailableSession === id && current === null) rememberCurrent()
-    }, 0)
+    setTimeout(() => pageLifecycle.clearFailedSelection(id, generation), 0)
     paintComposerAccess()
     renderComposerState()
     selectedPath = null

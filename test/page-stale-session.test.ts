@@ -61,7 +61,14 @@ test('a session that cannot be loaded shows the failure line, is not kept, and l
   assert.match(show, /failHistory\(response\.status, response\.statusText, failure\)/, 'HTTP refusals use the shared failure state')
   assert.match(show, /failHistory\(0, '', \{ error: error && error\.message \}\)/, 'transport and JSON failures use the shared failure state')
   assert.match(refused, /log\.append\(note\)[\s\S]*paintEmptyState\(\)/, 'into the conversation before the empty state is judged, so the line wins over it')
-  assert.match(refused, /rememberCurrent\(\)/, 'the saved selection is emptied, so a reload does not reopen it (restoreSelection)')
+  /**
+   * The saved selection is emptied, so a reload does not reopen it (restoreSelection): written a task later through the
+   * page's lifecycle, which holds it while the page is leaving and writes it once the page stays (pageLifecycle; the
+   * behaviour is judged in page-history-failure).
+   */
+  assert.match(refused, /setTimeout\(\(\) => pageLifecycle\.clearFailedSelection\(id, generation\), 0\)/, 'the saved selection is emptied, so a reload does not reopen it (restoreSelection)')
+  const life = page.slice(page.indexOf('/* page-lifecycle:begin */'), page.indexOf('/* page-lifecycle:end */'))
+  assert.match(life, /clearFailedSelection\(id, generation\) \{[\s\S]*?if \(stillShown\(failure\)\) rememberCurrent\(\)/, 'and the lifecycle writes it with rememberCurrent')
   assert.match(refused, /selectedPath = null[\s\S]*await renderTree\(\)[\s\S]*markSelection\(\)/, 'the tree is read again and the selection dropped')
   assert.match(refused, /return false/, 'and the caller is told the session did not open')
   assert.match(show, /if \(unavailableSession !== null\) \{\n\s+unavailableSession = null/, 'opening any session clears the state')
