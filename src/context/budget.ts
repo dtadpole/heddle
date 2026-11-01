@@ -13,6 +13,8 @@
  *   instead of looping a summariser that cannot make progress.
  */
 
+import { retainNotBelow } from '../config/budget-words.ts'
+
 /** Compact when the estimate reaches this fraction of the window. DSH's default. */
 export const THRESHOLD_RATIO = 0.8
 /** Keep this fraction of the window as recent history, uncompacted. DSH's default. */
@@ -85,7 +87,8 @@ export function resolveBudget(input: {
     )
   }
 
-  const override = input.policies?.find((entry) => entry.endpoint === input.endpoint)
+  const overrideAt = input.policies?.findIndex((entry) => entry.endpoint === input.endpoint) ?? -1
+  const override = overrideAt >= 0 ? input.policies?.[overrideAt] : undefined
   const configured = input.configPolicy ?? {}
   const policy: BudgetPolicy = {
     ...configured,
@@ -98,10 +101,23 @@ export function resolveBudget(input: {
   const thresholdTokens = policy.thresholdTokens ?? Math.floor(window * (policy.thresholdRatio ?? THRESHOLD_RATIO))
   const retainTokens = policy.retainTokens ?? Math.floor(window * (policy.retainRatio ?? RETAIN_RATIO))
   if (retainTokens >= thresholdTokens) {
-    throw new BudgetError(
-      `retainTokens (${retainTokens}) is not below thresholdTokens (${thresholdTokens}): the retained tail is at least the trigger, so compaction could never make progress`,
-      'RETAIN_NOT_BELOW_THRESHOLD',
-    )
+    /**
+     * Named by what was written (#212): the setting each side came from, and the window it was taken of, in the words a
+     * Save of the same values is refused with (src/config/budget-words.ts); a policy's own field is named under its index.
+     */
+    const ownField = override !== undefined && (['thresholdRatio', 'retainRatio', 'thresholdTokens', 'retainTokens'] as const).some((field) => override[field] !== undefined)
+    const sentence = retainNotBelow({
+      prefix: ownField ? `policies[${overrideAt}].` : '',
+      windowName: input.endpointWindow !== undefined ? `endpoint '${input.endpoint}' window` : 'contextWindow',
+      window,
+      thresholdTokens: policy.thresholdTokens,
+      retainTokens: policy.retainTokens,
+      thresholdRatio: policy.thresholdRatio ?? THRESHOLD_RATIO,
+      retainRatio: policy.retainRatio ?? RETAIN_RATIO,
+      threshold: thresholdTokens,
+      retain: retainTokens,
+    })
+    throw new BudgetError(`${sentence}: the retained tail would be at least the trigger, so compaction could never make progress`, 'RETAIN_NOT_BELOW_THRESHOLD')
   }
 
   return {
