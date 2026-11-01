@@ -122,7 +122,14 @@ test('a document the renderer cannot finish in its budget comes back as its own 
     assert.ok(html.startsWith('<pre class="unrendered"><code>') && html.endsWith('</code></pre>'), `the fallback is the text as a block, the one a document past the parse budget gets\nsaw: ${html.slice(0, 80)}`)
     assert.ok(html.includes(`x${last} &lt;b&gt;&amp;`), 'escaped, and nothing of it lost')
     assert.ok(!html.includes('<b>'), 'no tag of the document survives')
-    /** The renderer is usable again after a document that exhausted it. */
+    /**
+     * The renderer is usable again after a document that exhausted it: the same instance, on the worker that replaced
+     * the expired one. The 30 ms budget was only there to make the long document exhaust it; left at 30 ms, the short
+     * document's own wall clock (a fresh worker's start, the scheduler of a machine running a whole suite) could spend
+     * it too and answer the fallback, which says nothing about recovery. So the instance's budget is widened to the
+     * server's 3 s for this one render, the same seam the constructor sets, read when the next job starts.
+     */
+    ;(renderer as unknown as { budgetMs: number }).budgetMs = markdown.MARKDOWN_RENDER_BUDGET_MS
     assert.equal(await renderer.render('**bold**'), '<p><strong>bold</strong></p>\n')
   } finally {
     await renderer.close()
