@@ -66,6 +66,8 @@ interface Page {
   rounds(): number
   current(): string | null
   turn(): Promise<void>
+  /** The seqs whose answers were offered the Branch action. */
+  branchable(): number[]
 }
 
 function harness(): Page {
@@ -98,7 +100,9 @@ function harness(): Page {
     const pumped = []
     const scheduleTreeRefresh = () => { trees += 1 }, scheduleGoalRefresh = noop, scheduleTodoRefresh = noop, paintRunningMarks = noop
     const noteCompletion = () => { completions += 1 }
-    const renderComposerState = noop, refreshRunningStatus = noop, drawTurnFailure = noop, clearMain = noop, markBranchable = noop
+    const renderComposerState = noop, refreshRunningStatus = noop, drawTurnFailure = noop, clearMain = noop
+    const branchable = []
+    const markBranchable = (seq) => { branchable.push(seq) }
     const renderScheduleCards = noop, updateStatusBar = noop, selectionForTurn = () => ({}), rememberCurrent = noop, rememberWorkspace = noop
     const chooseWorkspace = noop, adoptLooseQueue = noop, settleReasoning = noop, hideApproval = noop, markStopped = noop
     const growComposer = noop, updateSendDisabled = noop, paintEmptyState = noop, add = noop
@@ -161,6 +165,7 @@ function harness(): Page {
       rounds: () => liveRounds,
       current: () => current,
       turn: () => running,
+      branchable: () => [...branchable],
     })
     `,
     { MINE, THEIRS, JSON, Promise, TextEncoder, TextDecoder, performance, Error, Array, Object, String, Number, Set, Map, setTimeout },
@@ -248,4 +253,19 @@ test('when the boot opened another session before the turn named its own, the he
   await settle()
   assert.equal(page.current(), MINE, 'the created session is opened')
   assert.deepEqual(Array.from(page.drawn()), [], 'and nothing held is drawn over the redraw from its own log')
+})
+
+test('a fast first turn that completes while still held offers its answer\'s Branch action on adoption (developer-ten\'s N1 on #142)', async () => {
+  const page = harness()
+  page.send(true)
+  await settle()
+  /** The whole turn reaches the stream before the 202 names its session: the 202 answers at the first record or the end. */
+  page.stream(MINE, { type: 'message', text: 'mine', seq: 1 })
+  page.stream(MINE, { type: 'assistant/chunk', text: 'answer', seq: 2 })
+  page.stream(MINE, { type: 'turn/completed', seq: 3 })
+  assert.deepEqual(Array.from(page.branchable()), [], 'nothing is offered while held')
+  page.named()
+  await settle()
+  assert.deepEqual(Array.from(page.drawn()), ['mine:message:mine', 'mine:assistant/chunk:answer', 'mine:turn/completed'], 'the held turn is drawn once, in order')
+  assert.deepEqual(Array.from(page.branchable()), [3], 'and its completion offers the answer\'s Branch action, as the listener does for a live one')
 })

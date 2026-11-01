@@ -32,9 +32,9 @@ grounded_in:
   transcript carries it as the stop reason (DSH parity phase B, developer-ten; R-developer-six-2).
 - [`check-blank-page-stream.mjs`](check-blank-page-stream.mjs) — a page with nothing open follows no other session's
   turn (#142, developer-ten's finding on first-visit-2): two pages on one server, B fresh with no session while A sends
-  a message whose answer is held open; B's conversation stays empty and its dock hidden throughout, while B's tree marks
-  A's session running and then not (only the drawing half is held); then B's own first message shows its own turn
-  only, in a session of its own.
+  a message whose answer the provider double streams and holds open until the check releases it; sampled every 100 ms,
+  B's conversation stays empty and its dock hidden, while B's tree marks A's session running and, once released, not
+  (only the drawing half is held); then B's own first message shows its own turn only, in a session of its own.
 - [`check-chat-view.mjs`](check-chat-view.mjs) — the chat's shape: a tool call and its result folded into
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
