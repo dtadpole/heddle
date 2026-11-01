@@ -463,6 +463,8 @@ impl<S: ContextStore + 'static> ContextPort for Context<S> {
                 summarizer: None,
                 // An ordinary round: the trigger and the retained tail apply.
                 force: false,
+                // The turn's stop token reaches the summary call (#154).
+                cancel: options.cancel.as_ref(),
             };
             self.service
                 .prepare(&handle, &prepared)
@@ -533,6 +535,7 @@ impl<S: ContextStore + 'static> TurnHooks for ContextRecovery<S> {
                 endpoint: &payload.endpoint,
                 model: payload.model.as_deref(),
                 tools: &payload.tools,
+                cancel: payload.cancel.as_ref(),
             };
             match self.service.recover_overflow(&handle, &request).await {
                 Ok(heddle_context::RecoveryDecision::Retry) => Some(RequestErrorAction::Retry),
@@ -924,6 +927,7 @@ pub(crate) mod tests {
             model: None,
             tools: Vec::new(),
             system: None,
+            cancel: None,
         }
     }
 
@@ -1098,6 +1102,7 @@ pub(crate) mod tests {
             model: None,
             cwd: std::env::temp_dir(),
             tools: Vec::new(),
+            cancel: None,
         }
     }
 

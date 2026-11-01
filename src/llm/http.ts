@@ -147,6 +147,14 @@ function destination(
 
 /** Send one request and resolve with its response, buffered or streamed. */
 export async function wire(request: WireRequest): Promise<WireResponse> {
+  /**
+   * A signal that has already fired sends nothing (#154). The listener below only hears a later abort, so a summary
+   * asked for after its turn's Stop went out in full and landed: a compaction whose turn was stopped while its
+   * `compaction/start` was being written.
+   */
+  if (request.signal?.aborted === true) {
+    throw new ModelError(`the request to '${request.endpoint}' was not sent — aborted`, { endpoint: request.endpoint, code: 'ABORTED' })
+  }
   const target = new URL(request.url)
   const body = request.body === undefined ? undefined : Buffer.from(JSON.stringify(request.body), 'utf8')
   const streaming = request.stream === true

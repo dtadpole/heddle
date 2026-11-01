@@ -418,6 +418,7 @@ impl CompactionHost for ServiceCompaction {
                         system: None,
                         summarizer: None,
                         force: true,
+                        cancel: None,
                     },
                 )
                 .await
