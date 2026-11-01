@@ -84,8 +84,14 @@ interface ContextLike {
   measure(handle: SessionHandle): { readonly totalTokens: number; readonly nodes: readonly unknown[] }
   prepare(
     handle: SessionHandle,
-    options: { readonly cwd: string; readonly endpoint: string; readonly model?: string; readonly force?: boolean },
+    options: { readonly cwd: string; readonly endpoint: string; readonly model?: string; readonly force?: boolean; readonly signal?: AbortSignal },
   ): Promise<{ readonly compacted: boolean }>
+}
+
+/** The live-turn registry's surface `/compact` uses (`src/agent/turns.ts`). */
+interface TurnsLike {
+  isRunning(sessionId: string): boolean
+  begin(sessionId: string): { readonly signal: AbortSignal; settle(): void }
 }
 
 /**
@@ -100,12 +106,20 @@ async function compactNow(ctx: Context, handle: SessionHandle): Promise<Compacti
    * (dsh-compaction-basic compactSurfaceRegion and compactNow). A compaction under a running turn would replace the
    * history that turn is still writing, its own prompt included (#133).
    */
-  const turns = ctx.get('turns') as { isRunning(sessionId: string): boolean } | undefined
+  const turns = ctx.get('turns') as TurnsLike | undefined
   if (turns?.isRunning(handle.id) === true || compacting.has(handle.id)) return { compacted: false, busy: true }
   compacting.add(handle.id)
+  /**
+   * The compaction holds the session the way a turn does (#140). A turn sent while it runs is queued (the registry's
+   * `enqueue` waits until the session is idle) instead of starting beside it, as DSH's `runMaintenance` latch holds a
+   * prompt until its compaction ends. The session reads as running meanwhile, and its Stop reaches the summary call
+   * through the registration's signal (#154).
+   */
+  const live = turns?.begin(handle.id)
   try {
-    return await compactIdle(ctx, handle)
+    return await compactIdle(ctx, handle, live?.signal)
   } finally {
+    live?.settle()
     compacting.delete(handle.id)
   }
 }
@@ -113,7 +127,7 @@ async function compactNow(ctx: Context, handle: SessionHandle): Promise<Compacti
 /** Sessions with a manual compaction in flight in this process. */
 const compacting = new Set<string>()
 
-async function compactIdle(ctx: Context, handle: SessionHandle): Promise<CompactionOutcome> {
+async function compactIdle(ctx: Context, handle: SessionHandle, signal?: AbortSignal): Promise<CompactionOutcome> {
   const context = ctx.get('context') as ContextLike | undefined
   if (context === undefined) throw new Error('Compaction is unavailable because the context service is not loaded.')
   const meta = ctx.session.list().find((entry) => entry.id === handle.id)
@@ -127,8 +141,10 @@ async function compactIdle(ctx: Context, handle: SessionHandle): Promise<Compact
     endpoint,
     ...(meta?.model !== undefined ? { model: meta.model } : {}),
     force: true,
+    ...(signal !== undefined ? { signal } : {}),
   })
   if (!report.compacted) {
+    if (signal?.aborted === true) return { compacted: false, cancelled: true }
     /** A summary the engine refused is recorded as `compaction/failed {refused: true}`; DSH reports it as an error (#132). */
     const refusal = ctx.session.store
       .read(handle)

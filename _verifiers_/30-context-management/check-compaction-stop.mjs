@@ -325,3 +325,40 @@ test('a turn whose server is killed during its automatic summary reads as interr
   }
 })
 
+test('a turn sent while /compact runs waits for it, and starts once the compaction has ended (#140)', async (context) => {
+  if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
+  /**
+   * Live #140 on both builds: a turn sent while /compact ran started at once, beside it, and the summary was written
+   * after the turn. DSH holds the prompt until its compaction ends (`runMaintenance`).
+   */
+  const double = await holdingDouble()
+  try {
+    await withHome('compaction-hold', double, async (start, log) => {
+      const server = await start()
+      const session = await firstTurn(server)
+
+      double.state.hold = true
+      const compact = request(server, `/api/sessions/${encodeURIComponent(session)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/compact' }) })
+      assert.ok(await until(() => double.state.summaryAt !== null, 20_000), `/compact asked for its summary\n${secondTurn(log(session)).types.join(' ')}`)
+
+      const callsBefore = double.state.turnCalls.length
+      const turn = await postTurn(server, { session, prompt: 'sent while the compaction runs' })
+      await new Promise((resolve) => setTimeout(resolve, 1500))
+      assert.equal(double.state.turnCalls.length, callsBefore, 'the turn did not start beside the compaction')
+
+      double.release()
+      const answered = await compact
+      const said = await answered.text()
+      assert.equal(answered.status, 200, `/compact answered (${said})`)
+      assert.match(said, /Compacted/, `and compacted (${said})`)
+      const text = await turn.done
+      assert.match(text, /answered/, `the held turn ran once the compaction ended\n${text.slice(-300)}`)
+      const types = log(session).map((event) => event.type)
+      const end = types.indexOf('compaction/end')
+      const lastRequest = types.lastIndexOf('model/request')
+      assert.ok(end >= 0 && lastRequest > end, `the turn's model request came after the compaction's end\n${types.join(' ')}`)
+    })
+  } finally {
+    await double.close()
+  }
+})
