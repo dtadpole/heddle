@@ -1292,6 +1292,37 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
   const script = join(h.home, 'script.json')
   const serverArgs = ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--session-root', root]
   const env = { ...h.env, HOME: h.home }
+  /**
+   * The safety guard (integrator-one, 2026-11-01): the filler below writes until the disk refuses it, so it must only ever
+   * write into the small image. Before it, the mount must be another filesystem than the home it sits in and at most
+   * 64 MiB in all; the filler stops at 32 MiB written whatever the disk says, and the check fails if the disk was not
+   * full by then.
+   */
+  const SMALL_DISK_BYTES = 64 * 1024 * 1024
+  const FILLER_CAP_BYTES = 32 * 1024 * 1024
+  const assertSmallDisk = (when) => {
+    assert.notEqual(fs.statSync(mount).dev, fs.statSync(h.home).dev, `${when}: the mount is the attached image, not a folder of the home's own disk`)
+    const disk = fs.statfsSync(mount)
+    assert.ok(disk.blocks * disk.bsize < SMALL_DISK_BYTES, `${when}: the mount is the small image (${disk.blocks * disk.bsize} bytes in all)`)
+  }
+  /**
+   * An image a killed run of this check left attached is detached first: one whose path is this check's own
+   * (home-full-disk-<pid>-…/small.dmg under the scratch root) and whose pid is no longer a process, so a run of this check
+   * in another checkout at the same time keeps its image.
+   */
+  const info = spawnSync('hdiutil', ['info'], { encoding: 'utf8' })
+  for (const section of String(info.stdout ?? '').split(/^=+$/m)) {
+    const owner = /^image-path\s*:\s*.*\/home-full-disk-(\d+)-[^/]+\/small\.dmg\s*$/m.exec(section)?.[1]
+    const device = /^(\/dev\/disk\d+)\b/m.exec(section)?.[1]
+    if (owner === undefined || device === undefined) continue
+    let alive = true
+    try {
+      process.kill(Number(owner), 0)
+    } catch (error) {
+      alive = error.code !== 'ESRCH'
+    }
+    if (!alive) spawnSync('hdiutil', ['detach', '-force', device], { encoding: 'utf8' })
+  }
   let live
   let attached = false
   try {
@@ -1299,8 +1330,9 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
     assert.equal(made.status, 0, `the disk image was created\n${made.stdout}${made.stderr}`)
     fs.mkdirSync(mount, { recursive: true })
     const mounted = spawnSync('hdiutil', ['attach', '-nobrowse', '-mountpoint', mount, image], { encoding: 'utf8' })
+    attached = mounted.status === 0
     assert.equal(mounted.status, 0, `the disk image was attached\n${mounted.stdout}${mounted.stderr}`)
-    attached = true
+    assertSmallDisk('after the attach')
 
     const connect = async () => {
       live = await startServer(serverArgs, env)
@@ -1351,17 +1383,24 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
       assert.ok(done.status === 200 && done.frames.some((frame) => frame.event === 'done'), `${label} answered\n${done.text.slice(0, 2000)}`)
     }
 
-    /** The disk is filled: the filler grows until the disk refuses it, in ever smaller writes. */
+    /**
+     * The disk is filled: the filler grows until the disk refuses it, in ever smaller writes, and never past the cap. A
+     * write the disk takes only in part is followed by one it refuses.
+     */
+    assertSmallDisk('before the filler')
     const filler = join(mount, 'filler')
+    let written = 0
+    let full = false
     const fd = fs.openSync(filler, 'w')
     try {
       for (const size of [1 << 20, 1 << 16, 1 << 12, 1 << 9]) {
         const chunk = Buffer.alloc(size, 0x5a)
-        for (;;) {
+        while (written + size <= FILLER_CAP_BYTES) {
           try {
-            if (fs.writeSync(fd, chunk) < size) break
+            written += fs.writeSync(fd, chunk)
           } catch (error) {
             if (error.code !== 'ENOSPC') throw error
+            full = true
             break
           }
         }
@@ -1369,6 +1408,7 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
     } finally {
       fs.closeSync(fd)
     }
+    assert.ok(full, `the filler reached ENOSPC within its ${FILLER_CAP_BYTES}-byte cap (wrote ${written} bytes)`)
     const free = fs.statfsSync(mount)
     assert.ok(free.bavail * free.bsize < 64 * 1024, `the disk is full: ${free.bavail * free.bsize} bytes free`)
 
