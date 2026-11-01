@@ -1976,6 +1976,22 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       respond(response, 400, 'application/json', `${JSON.stringify({ error: 'not a session id' })}\n`)
       return
     }
+    /**
+     * A subagent's session (a teammate's included) takes its model and effort from its delegation, not from a person
+     * on its own page (issue #175): DSH's model command is unavailable for an addressed subagent session ("model
+     * selection is unavailable for addressed subagent sessions", dsh-client-ui-model-selection), and its server's
+     * selectModel resolves the agent first, which answers `session/agent-busy` for a session subagent routing owns.
+     */
+    const owner = ctx.session.list().find((entry) => entry.id === id)
+    if (owner?.origin === 'subagent') {
+      respond(
+        response,
+        409,
+        'application/json',
+        `${JSON.stringify({ error: `session "${id}" is owned by subagent routing`, code: 'session/agent-busy', reason: 'model selection is unavailable for addressed subagent sessions' })}\n`,
+      )
+      return
+    }
     const body = await readJson(request, response)
     if (body === null) return
     const endpoint = typeof body.endpoint === 'string' ? body.endpoint.trim() : ''
@@ -2982,9 +2998,14 @@ export function unknownTurnSession(
    * first would make the switch a per-request illusion.
    */
   const record = ctx.session.list().find((entry) => entry.id === handle.id)
+  /**
+   * A subagent's session (a teammate's) runs on its delegation's selection, never on one a page sends with a turn
+   * (issue #175): a teammate's composer still carries the page's seat, and recording it would re-route the child.
+   */
+  const delegated = record?.origin === 'subagent'
   const nominated = ctx.model.defaultEndpoint()
   const endpoint = resolveTurnEndpoint({
-    ...(requested !== undefined ? { requested } : {}),
+    ...(requested !== undefined && !delegated ? { requested } : {}),
     ...(record?.endpoint !== undefined ? { recorded: record.endpoint } : {}),
     ...(state.defaultEndpoint !== undefined ? { serverDefault: state.defaultEndpoint } : {}),
     ...(nominated !== undefined ? { serviceDefault: nominated } : {}),
@@ -3016,11 +3037,11 @@ export function unknownTurnSession(
    * writes through (`/api/sessions/<id>/model`) refuses such a level instead of filtering, because that is the
    * point where a person can be told.
    */
-  const sameEndpoint = requested === undefined || requested === record?.endpoint
-  const runModel = model ?? (sameEndpoint ? record?.model : undefined)
+  const sameEndpoint = delegated || requested === undefined || requested === record?.endpoint
+  const runModel = (delegated ? undefined : model) ?? (sameEndpoint ? record?.model : undefined)
   const runEndpoint = ctx.model.endpoint(endpoint)
   const wantedEffort = resolveTurnEffort({
-    ...(requestedEffort !== undefined ? { requested: requestedEffort } : {}),
+    ...(requestedEffort !== undefined && !delegated ? { requested: requestedEffort } : {}),
     ...(sameEndpoint && record?.reasoningEffort !== undefined ? { recorded: record.reasoningEffort } : {}),
   })
   const runEffort =
