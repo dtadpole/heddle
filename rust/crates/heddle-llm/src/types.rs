@@ -174,6 +174,10 @@ pub struct GenerateRequest {
     /// The reasoning level to ask for, as an **id** the model declares; the adapter sends that level's wire value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    /// Set by [`crate::ModelService::resolve`] when `reasoning_effort` is the model's declared default because the
+    /// request named none (#157), as DSH's `prepareCall` records `adapterDefaults: { reasoningEffort: true }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_default: Option<bool>,
     /// Ask the transport to stream; adapters that must stream ignore `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
