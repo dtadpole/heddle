@@ -3608,11 +3608,6 @@ mod tests {
         put(
             &store,
             &source,
-            json!({"type": "goal/change", "version": 1, "operation": "create"}),
-        );
-        put(
-            &store,
-            &source,
             json!({"type": "team/member", "version": 1, "teamId": source.id}),
         );
         put(
@@ -3636,9 +3631,9 @@ mod tests {
             "the seqs run on without a hole"
         );
         assert!(
-            !child.iter().any(|event| event.kind == "goal/change"
-                || event.kind.starts_with("team/")
-                || event.kind == "transcript/repaired"),
+            !child
+                .iter()
+                .any(|event| event.kind.starts_with("team/") || event.kind == "transcript/repaired"),
             "none of the source's own records came along"
         );
         let by_seq: HashMap<u64, &Arc<SessionEvent>> =

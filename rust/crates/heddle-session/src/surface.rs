@@ -368,17 +368,15 @@ pub fn inherits_answer<E: Borrow<SessionEvent> + Clone>(
 /// Whether a fork inherits an event of this type.
 ///
 /// DSH's seed is the source's exact event prefix (`buildForkSeed`, dsh-session/lib/types/fork.js:18-27), and a
-/// child here inherits the same, except four kinds that belong to the **source** and that no fold here can tell
+/// child here inherits the same, except three kinds that belong to the **source** and that no fold here can tell
 /// apart as inherited (DSH hands every projection `inheritedEventCount`, dsh-session/lib/index.js:1418-1426):
-/// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file),
-/// `goal/change` (an active goal is armed whenever a process folds it, so an inherited one would run rounds in
-/// the branch, where DSH disarms it) and `team/*` (the journal names the source as its Lead, and the team fold
-/// refuses a foreign one). The TypeScript twin is `inheritedByFork` in `src/session/store.ts`.
+/// `session/created` (the child writes its own), `transcript/repaired` (bytes cut from the source's file) and
+/// `team/*` (the journal names the source as its Lead, and the team fold refuses a foreign one). A `goal/change` is
+/// inherited (issue #166): the branch keeps the goal, as DSH's does, and heddle-goal's fold reads an inherited
+/// active goal as disarmed, from the seed's older times. The TypeScript twin is `inheritedByFork` in
+/// `src/session/store.ts`.
 pub fn inherited_by_fork(kind: &str) -> bool {
-    kind != "session/created"
-        && kind != "transcript/repaired"
-        && kind != "goal/change"
-        && !kind.starts_with("team/")
+    kind != "session/created" && kind != "transcript/repaired" && !kind.starts_with("team/")
 }
 
 /// The fields of a recorded event that name one other event by its seq (a compaction's own bookkeeping).
@@ -905,7 +903,7 @@ mod tests {
     /// fork's log with the same bytes.
     const SEED_SOURCE: [&str; 12] = [
         r#"{"seq":0,"at":"t0","type":"session/created","cwd":"/w"}"#,
-        r#"{"seq":1,"at":"t1","type":"goal/change","version":1}"#,
+        r#"{"seq":1,"at":"t1","type":"transcript/repaired","droppedBytes":3}"#,
         r#"{"seq":2,"at":"t2","type":"message","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
         r#"{"seq":3,"at":"t3","type":"assistant/chunk","chunk":{"type":"text-delta","text":"a"}}"#,
         r#"{"seq":4,"at":"t4","type":"assistant/chunk","chunk":{"type":"done","finishReason":"stop"}}"#,
@@ -932,7 +930,7 @@ mod tests {
 
     #[test]
     fn a_fork_seed_renumbers_every_seq_after_an_event_it_leaves_behind() {
-        // #52, #55: the seed is the source's own log. A `goal/change` stays behind, so every later event moves
+        // #52, #55: the seed is the source's own log. A `transcript/repaired` stays behind, so every later event moves
         // down one, and so does every field that names a seq: the surface range, its sources, the records.
         let source: Vec<SessionEvent> = SEED_SOURCE
             .iter()
@@ -968,7 +966,10 @@ mod tests {
         assert!(!inherited_by_fork("session/created"));
         assert!(!inherited_by_fork("team/member"));
         assert!(!inherited_by_fork("transcript/repaired"));
-        assert!(!inherited_by_fork("goal/change"));
+        assert!(
+            inherited_by_fork("goal/change"),
+            "a goal comes along (#166)"
+        );
         assert!(inherited_by_fork("permission/mode"));
     }
 
