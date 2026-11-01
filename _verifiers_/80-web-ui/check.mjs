@@ -461,6 +461,16 @@ test('the page is served under a strict script policy that allows its own inline
     await browser.send('Page.addScriptToEvaluateOnNewDocument', {
       source: "window.__csp = []; document.addEventListener('securitypolicyviolation', (event) => window.__csp.push(event.violatedDirective + ' ' + (event.blockedURI || 'inline')))",
     })
+    /**
+     * The workspace the turn runs in is registered before the page loads. Since #142 a first visit opens no session: the
+     * composer is aimed at the one registered workspace once the boot's tree read lands, and Send is disabled while it
+     * is aimless. Registered after the load, the click raced that read (and the workspace/added push behind it) and was
+     * lost on a disabled button whenever the boot read came first, as it mostly does on Rust.
+     */
+    mkdirSync(server.work, { recursive: true })
+    writeFileSync(join(server.work, 'notes.md'), '# Notes\n\nSome *text*, a list:\n\n- one\n- two\n\n```js\nconst a = 1\n```\n')
+    writeFileSync(join(server.work, 'page.html'), '<!doctype html><html><head><style>h1 { color: teal }</style></head><body><h1>Preview</h1><p>static</p></body></html>')
+    await fetch(new URL('/api/workspaces', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: server.work }) })
     await browser.goto(server.url)
     assert.ok(await browser.waitFor('document.getElementById("model-trigger") !== null', 20_000), 'the page runs under the policy')
     assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'and loading it breaks no directive')
@@ -470,22 +480,12 @@ test('the page is served under a strict script policy that allows its own inline
      * change that adds an inline script, a handler or an eval fails here instead of being blocked silently. A turn
      * streams, then a markdown file and an HTML preview open from the tree.
      */
-    mkdirSync(server.work, { recursive: true })
-    writeFileSync(join(server.work, 'notes.md'), '# Notes\n\nSome *text*, a list:\n\n- one\n- two\n\n```js\nconst a = 1\n```\n')
-    writeFileSync(join(server.work, 'page.html'), '<!doctype html><html><head><style>h1 { color: teal }</style></head><body><h1>Preview</h1><p>static</p></body></html>')
-    await fetch(new URL('/api/workspaces', server.url), { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ path: server.work }) })
-    /**
-     * The page loaded with nothing registered, so a first visit opened no session and the composer asks for a workspace
-     * (#142). The workspace registered just now reaches the page as a `workspace/added` frame, and the tree's next read
-     * aims the composer at it, as it would for a person watching another client add it. Send only once it is aimed:
-     * clicked before that read, the page rightly answers "Choose a workspace first." and no turn starts.
-     */
-    assert.ok(
-      await browser.waitFor(`(() => { const field = document.querySelector('textarea'); return field !== null && field.placeholder !== 'Choose a workspace to start' })()`, 15_000),
-      'the workspace added after the load reaches the page and the composer is aimed at it',
-    )
-    await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'say something'; field.dispatchEvent(new Event('input', { bubbles: true })); document.getElementById('send').click() })()`)
-    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("live content")', 20_000), 'a turn streams under the policy')
+    assert.ok(await browser.waitFor('document.querySelector("#tree .row") !== null', 15_000), 'the boot read drew the workspace, so the composer is aimed at it')
+    await browser.evaluate(`(() => { const field = document.querySelector('textarea'); field.value = 'say something'; field.dispatchEvent(new Event('input', { bubbles: true })); return true })()`)
+    const composerState = () => browser.evaluate(`JSON.stringify({ placeholder: document.querySelector('textarea')?.placeholder ?? null, sendDisabled: document.getElementById('send')?.disabled ?? null, note: document.getElementById('tree-note')?.textContent ?? null, log: (document.getElementById('log')?.innerText ?? '').slice(-300) })`)
+    assert.ok(await browser.waitFor('document.getElementById("send").disabled === false', 15_000), `Send is live with a draft in an aimed composer\nsaw: ${await composerState()}`)
+    await browser.evaluate(`(() => { document.getElementById('send').click(); return true })()`)
+    assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("live content")', 20_000), `a turn streams under the policy\nsaw: ${await composerState()}`)
     /** Read before the reload: the listener installed on every new document starts its list again. */
     assert.deepEqual(JSON.parse(await browser.evaluate('JSON.stringify(window.__csp ?? null)')), [], 'and the turn breaks no directive')
     await browser.goto(server.url)
