@@ -54,7 +54,9 @@ derivation from DSH's code is in the file's header and in [`../../SESSION_ACTION
 
 Everything built on top of it — the meter, the pruner, the compaction, `heddle context` — reads
 `deriveMessages()` rather than filtering the log, and [`../context/INDEX.md`](../context/INDEX.md) is
-where that happens.
+where that happens. The derivation leaves out a run with no `done` whose turn closed with
+`finishReason: 'error'`, a broken stream's fragment, so neither the next request nor a fork nor a summary reads
+it as the model's answer; a stopped run keeps what streamed, and the page still draws both (#173).
 
 Two things about how it is stored are worth knowing before reading the code.
 

@@ -420,6 +420,16 @@ export function foldSurface(events: readonly SessionEvent[]): SurfaceState {
  * adapter keeps separate text blocks apart with a newline, so a part per delta handed the model its own earlier answer
  * broken at every point where the stream split it (live-testing draft developer-five-2). The log itself still holds
  * one event per chunk; only the derivation coalesces. The Rust twin is `derive_message` in heddle-session `surface.rs`.
+ *
+ * **A run its turn closed as failed derives to nothing** (#173). A stream that broke mid-answer (a cut connection, a
+ * timeout, a provider error frame) leaves a run with no `done`, and the turn that threw closes it with an
+ * `assistant/completed` whose `finishReason` is `'error'` (`recordUnfinished` in src/agent/loop.ts). Derived as it
+ * stood, that fragment reached the next request as the model's own earlier answer, cut mid-word, and a fork or a
+ * summary carried it on. DSH settles a failed stream as `assistant/attempt`, which takes no place on the surface, and
+ * only a stream that a Stop cut with content as an `assistant/message` marked `interrupted` (dsh-agent-loop, the step's
+ * stream `catch` and its `finish.kind === 'error'` branch). So a stopped turn (`'aborted'`) keeps what streamed here
+ * too. Only the model's view changes: the log still holds the chunks, and the page's transcript draws the fragment with
+ * its failure line, as DSH's live stream shows it to the person.
  */
 export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: number): Message | null {
   const event = bySeq.get(seq)
@@ -444,6 +454,8 @@ export function deriveMessage(bySeq: ReadonlyMap<number, SessionEvent>, seq: num
       // A message held for the step boundary, an inbox splice or any other note written while the model streamed is
       // not part of its step (#30): the step runs to its `done`, or to a new request or the turn's end.
       if (endsStep(next.type)) break
+      // A run with no `done` whose turn closed as failed: a broken stream's fragment, which the model never answered.
+      if (next.type === 'assistant/completed' && next.finishReason === 'error') return null
       continue
     }
     const chunk = next.chunk as Chunk | undefined

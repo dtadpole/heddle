@@ -211,12 +211,19 @@ export class CompactionEngine {
     const nodes = this.store.surface(handle).nodes
     if (nodes.length === 0) return null
 
-    if (measurement.nodes.length !== nodes.length || nodes.some((seq, index) => measurement.nodes[index]?.seq !== seq)) {
+    const bySeq = indexBySeq(this.store.read(handle))
+    /**
+     * The measurement prices the nodes that derive a message (`ContextService.measure`). A node that derives none — a
+     * run that streamed only its `done`, or one its failed turn left out of the model's view (#173) — stands on the
+     * surface at no price, so the two are compared over the nodes that derive one. Compared over every node, such a node
+     * made every later compaction throw this error and the turn fail with it.
+     */
+    const priceable = nodes.filter((seq) => deriveMessage(bySeq, seq) !== null)
+    if (measurement.nodes.length !== priceable.length || priceable.some((seq, index) => measurement.nodes[index]?.seq !== seq)) {
       throw new Error('compaction: the measurement is of a different surface than the one on disk')
     }
     const priced = new Map(measurement.nodes.map((node) => [node.seq, node.tokens]))
 
-    const bySeq = indexBySeq(this.store.read(handle))
     const headSeq = nodes[0]
     const head = headSeq === undefined ? null : deriveMessage(bySeq, headSeq)
     const firstIdx = head?.role === 'system' ? 1 : 0

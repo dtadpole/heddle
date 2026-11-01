@@ -224,11 +224,21 @@ impl CompactionEngine {
         if nodes.is_empty() {
             return Ok(None);
         }
-        if measurement.nodes.len() != nodes.len()
+        let surface = store.derive_surface(session)?;
+        // The measurement prices the nodes that derive a message (`ContextService::measure`). A node that
+        // derives none — a run that streamed only its `done`, or one its failed turn left out of the model's
+        // view (#173) — stands on the surface at no price, so the two are compared over the nodes that derive
+        // one. Compared over every node, such a node made every later compaction fail with this error.
+        let priceable: Vec<u64> = surface
+            .iter()
+            .filter(|node| node.message.is_some())
+            .map(|node| node.seq)
+            .collect();
+        if measurement.nodes.len() != priceable.len()
             || measurement
                 .nodes
                 .iter()
-                .zip(&nodes)
+                .zip(&priceable)
                 .any(|(node, seq)| node.seq != *seq)
         {
             return Err(ContextError::SurfaceMismatch);
@@ -238,7 +248,6 @@ impl CompactionEngine {
             .iter()
             .map(|node| (node.seq, node.tokens))
             .collect();
-        let surface = store.derive_surface(session)?;
         let first_index = usize::from(
             surface
                 .first()
@@ -746,6 +755,43 @@ mod tests {
             session,
             vec![system, user, assistant, tool, user2, assistant2],
         )
+    }
+
+    /// A node that derives no message (a run that streamed only its `done`; since #173 also a run its failed
+    /// turn left out of the model's view) is not priced by the measurement. The plan compared the measurement
+    /// with every node, so such a node made every later compaction fail with `SurfaceMismatch`.
+    #[test]
+    fn a_node_that_derives_no_message_stands_at_no_price_and_the_plan_still_cuts() {
+        let store = MemoryStore::new();
+        let session = store.open("s");
+        store.message(&session, text_message(Role::System, "be brief"));
+        let first = store.message(&session, text_message(Role::User, &"u".repeat(1500)));
+        store.assistant_chunk(
+            &session,
+            serde_json::json!({"type": "done", "finishReason": "stop"}),
+        );
+        let silent = store.surface(&session).expect("the surface folds").nodes[2];
+        store.message(&session, text_message(Role::User, &"q".repeat(1500)));
+        store.message(&session, text_message(Role::Assistant, &"a".repeat(1500)));
+        store.message(&session, text_message(Role::User, "and now?"));
+        assert_eq!(
+            store
+                .derive_node(&session, silent)
+                .expect("the node derives"),
+            None,
+            "the fixture holds a node that derives nothing"
+        );
+
+        let measurement = measure(&store, &session);
+        let plan = CompactionEngine::default()
+            .plan(&store, &session, &budget(900), &measurement, None)
+            .expect("a measurement of the same surface is not a mismatch")
+            .expect("the session is over its trigger, so there is a span");
+        assert_eq!(plan.from_seq, first, "the span starts after the prompt");
+        assert!(
+            plan.shadowed_seqs.contains(&silent),
+            "and takes the silent node with it, at no price"
+        );
     }
 
     #[test]
