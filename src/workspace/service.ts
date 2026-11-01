@@ -1,11 +1,11 @@
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import Schema from '@deepseek-ai/schemastery'
 
-import { canonicalPath, depthOf, isUnder } from '../paths.ts'
+import { canonicalPath, canonicalPathThroughAncestors, depthOf, isUnder } from '../paths.ts'
 import type { SessionMeta } from '../session/store.ts'
 
 /**
@@ -329,12 +329,40 @@ export class WorkspaceService extends Service {
     return { removed: record, ownedSessions: owned.length, ...(parent !== undefined ? { adoptedBy: parent.title } : {}) }
   }
 
-  /** One workspace by id or by path. */
+  /**
+   * One workspace by id or by path.
+   *
+   * A path whose folder is gone is matched through the real path of its deepest existing ancestor as well (#141): the
+   * record was stored canonical while the folder existed, and a spelling through a link (`/tmp/x/w` for
+   * `/private/tmp/x/w`) no longer resolves once it is deleted or moved, which made the routes answer "no workspace".
+   */
   find(idOrPath: string): WorkspaceRecord | undefined {
     const shape = this.read()
     if (shape.workspaces[idOrPath] !== undefined) return shape.workspaces[idOrPath]
     const canonical = canonicalPath(idOrPath)
-    return Object.values(shape.workspaces).find((record) => record.path === canonical)
+    const found = Object.values(shape.workspaces).find((record) => record.path === canonical)
+    if (found !== undefined) return found
+    const located = canonicalPathThroughAncestors(idOrPath)
+    return located === canonical ? undefined : Object.values(shape.workspaces).find((record) => record.path === located)
+  }
+
+  /**
+   * Whether a folder is gone, for the tree route (#141): `undefined` when it exists; otherwise where it was — its
+   * canonical spelling through its deepest existing ancestor — and the root that owns that place, if any.
+   *
+   * DSH's file tree answers a directory that is not there with `workspace-file/not-found` (dsh-api-workspace-files
+   * lib/index.js:568), and its tree says "That directory is gone" rather than listing it empty
+   * (dsh-client-ui-sidebar-files lib/client.js:485). The place is judged where its existing part lands, so a missing
+   * folder behind a link out of every root is outside, as an existing one is.
+   */
+  missingFolder(path: string): { readonly path: string; readonly owner: WorkspaceRecord | undefined } | undefined {
+    const located = canonicalPathThroughAncestors(path)
+    try {
+      statSync(located)
+      return undefined
+    } catch {
+      return { path: located, owner: this.owner(located) }
+    }
   }
 
   /**
@@ -377,6 +405,16 @@ export class WorkspaceService extends Service {
    * workspace's siblings, as DSH's does. Answers the complete order, as DSH's does.
    */
   insertBefore(idOrPath: string, beforeIdOrPath?: string): readonly string[] {
+    return this.reorder(idOrPath, beforeIdOrPath).workspaceIds
+  }
+
+  /**
+   * {@link insertBefore}, saying whether anything moved — what the route needs to announce a move to every open page
+   * and to stay quiet about one that changes nothing (#136). DSH's `insertBefore` returns before it writes when the
+   * workspace is its own anchor or the order would not change (dsh-workspace lib/index.js:484, :492), so no change
+   * reaches its clients then; a committed order is registry state every client follows.
+   */
+  reorder(idOrPath: string, beforeIdOrPath?: string): { readonly workspaceIds: readonly string[]; readonly moved: boolean } {
     const shape = this.read()
     const listed = (key: string): string => {
       const record = this.find(key)
@@ -385,15 +423,15 @@ export class WorkspaceService extends Service {
     }
     const id = listed(idOrPath)
     const before = beforeIdOrPath === undefined ? undefined : listed(beforeIdOrPath)
-    if (before === id) return shape.workspaceIds
+    if (before === id) return { workspaceIds: shape.workspaceIds, moved: false }
     const without = shape.workspaceIds.filter((each) => each !== id)
     const at = before === undefined ? without.length : without.indexOf(before)
     const workspaceIds = [...without.slice(0, at), id, ...without.slice(at)]
     if (workspaceIds.length === shape.workspaceIds.length && workspaceIds.every((each, index) => each === shape.workspaceIds[index])) {
-      return shape.workspaceIds
+      return { workspaceIds: shape.workspaceIds, moved: false }
     }
     this.write({ ...shape, workspaceIds })
-    return workspaceIds
+    return { workspaceIds, moved: true }
   }
 
   /**
@@ -425,9 +463,16 @@ export class WorkspaceService extends Service {
     })
   }
 
-  /** Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See {@link workspaceViews}. */
+  /**
+   * Every workspace with its parent and its sessions — what `GET /api/workspaces` answers. See {@link workspaceViews}.
+   *
+   * Each carries its folder's `status`, read now: DSH's `Workspace.status()`, `'ok'` when the path is a directory and
+   * `'missing-dir'` otherwise, uncached and never changing the record, because the folder may only be away for a while
+   * (dsh-workspace lib/index.js:154-160, lib/types/types.d.ts:131-136). A workspace whose folder was deleted or moved
+   * stays listed, as DSH keeps it, and the page tells it apart (#141).
+   */
   views(all: readonly SessionMeta[]): WorkspaceView[] {
-    return workspaceViews(this.list(), all)
+    return workspaceViews(this.list(), all).map((view) => ({ ...view, status: folderStatus(view.path) }))
   }
 
   /**
@@ -479,6 +524,23 @@ export interface WorkspaceView {
   readonly createdAt: string
   readonly updatedAt: string
   readonly sessionIds: readonly string[]
+  /**
+   * Whether the folder is there — DSH's `Workspace.status()`. Set by {@link WorkspaceService.views}, which reads the disk;
+   * the pure {@link workspaceViews} leaves it out.
+   */
+  readonly status?: FolderStatus
+}
+
+/** DSH's `Workspace.status()` vocabulary (dsh-workspace lib/types/types.d.ts:136). */
+export type FolderStatus = 'ok' | 'missing-dir'
+
+/** Whether `path` is a directory now, as DSH's `status()` stats it: anything else, or nothing, is `missing-dir`. */
+export function folderStatus(path: string): FolderStatus {
+  try {
+    return statSync(path).isDirectory() ? 'ok' : 'missing-dir'
+  } catch {
+    return 'missing-dir'
+  }
 }
 
 /**
