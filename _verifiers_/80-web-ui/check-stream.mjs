@@ -725,7 +725,13 @@ test('a failed turn reaches every client and the log, not only the client that s
     assert.ok(log.split('\n').some((line) => line.includes('"type":"turn/failed"')), 'the log records the failed turn')
     const read = await api(server, cookie, 'GET', `/api/sessions/${encodeURIComponent(session)}`)
     const ended = (read.json?.turns ?? []).flatMap((entry) => entry.ended ?? [])
-    assert.ok(ended.some((reason) => /the turn failed: .*502/.test(reason)), `the transcript carries it as the stop reason (${JSON.stringify(ended)})`)
+    /**
+     * Once (#153): the loop ends the answer with `failed: X` and the route records the same X in `turn/failed`. Both
+     * were drawn, as "Failed: X; the turn failed: X", on both builds.
+     */
+    const failures = ended.filter((reason) => /502/.test(reason))
+    assert.equal(failures.length, 1, `the transcript carries it as the stop reason, once (${JSON.stringify(ended)})`)
+    assert.match(failures[0], /^(?:the turn )?failed: .*502/, 'naming the failure')
     watcher.close()
   } finally {
     await server.close()
