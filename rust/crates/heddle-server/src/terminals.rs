@@ -266,7 +266,14 @@ pub fn signal_reset_argv(perl: Option<&Path>) -> Vec<OsString> {
 
 /// [`SIGNAL_RESET_PERL`] when it is there: without it the PTY starts with what the server inherited, as before.
 fn signal_reset_program() -> Option<&'static Path> {
-    Some(Path::new(SIGNAL_RESET_PERL)).filter(|path| path.is_file())
+    runnable_reset_program(Path::new(SIGNAL_RESET_PERL))
+}
+
+/// `perl` when it can run: a regular file with an execute bit, as the TypeScript build asks `accessSync(X_OK)`. A
+/// `perl` that is there but not executable would end every terminal at once (exit 126), where the reset should
+/// fall back to starting the PTY as before (developer-ten's review of #210).
+fn runnable_reset_program(perl: &Path) -> Option<&Path> {
+    Some(perl).filter(|path| is_executable(path))
 }
 
 /// The PTY argv around the confined shell: BSD `script -q /dev/null <cmd>`, util-linux `script -qfec <cmd> /dev/null`.
@@ -1321,6 +1328,29 @@ mod tests {
             assert_eq!(&argv[4..8], &reset[..], "between the relay and the PTY");
             assert_eq!(argv[8], OsString::from("/usr/bin/script"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_perl_that_is_there_but_not_executable_is_not_used_for_the_reset() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("heddle-reset-perl-{}", new_terminal_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let perl = root.join("perl");
+        assert_eq!(runnable_reset_program(&perl), None, "missing");
+        std::fs::write(&perl, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&perl, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let unexecutable = runnable_reset_program(&perl).map(Path::to_path_buf);
+        std::fs::set_permissions(&perl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = runnable_reset_program(&perl).map(Path::to_path_buf);
+        let folder = runnable_reset_program(&root).map(Path::to_path_buf);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            unexecutable, None,
+            "there, mode 0644: TypeScript's X_OK refuses it"
+        );
+        assert_eq!(executable, Some(perl), "there, mode 0755");
+        assert_eq!(folder, None, "a folder is not a program");
     }
 
     #[test]
