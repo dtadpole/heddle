@@ -107,7 +107,10 @@ grounded_in:
   next search (#58); and a folder the server may not read (`chmod 000`) opening to DSH's one line *Read failed: cannot
   list "locked": permission denied* with no rows, never *nothing inside*, a readable sibling still listing its file,
   and a workspace whose own folder it may not read keeping its session and its *Files* heading over the same line
-  (#106). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  (#106); and a reload into a session in a nested workspace opening its ancestor and its own workspace, only the
+  latter saved open, while a fold the person made of the ancestor, and then of the session's own workspace, each
+  survive a reload, tinted, with the row hidden (C33, DSH's groupExpansion). The page opens no session on its own, so a
+  check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
@@ -120,6 +123,9 @@ grounded_in:
   card opening at once in the warm list with its title, home-abbreviated folder and creation time; both copyable;
   none for Ungrouped; the card closing when the pointer leaves the list. And no tree row's title or description
   names a `_sessions_` definition folder or the home directory: the session row's tooltip is its display title (#109).
+  And a session card's statuses in DSH's words and order (C22): *Waiting for answer* for a question that really waits,
+  *Plan awaiting review* for a plan review, *1 subagent running* on a parent whose child's turn is held running, and
+  *Completed* for a turn that ended unseen, each state confirmed through the API before its card is read.
 - [`check-workspace-drag.mjs`](check-workspace-drag.mjs) — reordering workspaces by drag (DSH's
   `workspace/insertBefore`, C37): a workspace header dragged onto a sibling's section lands before or after it with
   the drop line drawn, the host stores the order (`GET /api/workspaces`) and a reload keeps it, while a nested
