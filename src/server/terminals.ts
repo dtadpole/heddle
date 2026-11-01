@@ -151,11 +151,14 @@ export function shellArgv(shell: string, cols: number, rows: number): readonly s
   return ['/bin/sh', '-c', 'stty cols "$1" rows "$2" 2>/dev/null; SHELL=$3; export SHELL; exec "$3" -i', 'heddle-terminal-shell', String(cols), String(rows), shell]
 }
 
-interface ProcessRow {
+export interface ProcessRow {
   readonly pid: number
   readonly ppid: number
   readonly tty: string
 }
+
+/** Reads the whole process table; a read that failed or timed out answers an empty table. */
+export type ProcessTableReader = () => Promise<readonly ProcessRow[]>
 
 /**
  * Every process on the machine, from one `ps -A`.
@@ -164,7 +167,7 @@ interface ProcessRow {
  * unprompted on every new terminal, so a synchronous call there would stall every request and stream on the server
  * (developer-ten's review of #85). The 5 s timeout still bounds one call; a failed call reads as an empty table.
  */
-function processTable(): Promise<readonly ProcessRow[]> {
+export function processTable(): Promise<readonly ProcessRow[]> {
   return new Promise((resolve) => {
     execFile('ps', ['-A', '-o', 'pid=,ppid=,tty='], { encoding: 'utf8', timeout: 5000, env: HELPER_ENV }, (error, out) => {
       if (error !== null) {
@@ -238,12 +241,14 @@ class Terminal {
   private readonly child: ChildProcess
   private readonly limits: TerminalLimits
   private readonly platform: string
+  private readonly readTable: ProcessTableReader
 
   constructor(
     owner: { readonly session: string; readonly shell: string; readonly cwd: string; readonly mode: string; readonly cols: number; readonly rows: number },
     child: ChildProcess,
     limits: TerminalLimits,
     platform: string,
+    readTable: ProcessTableReader,
   ) {
     this.session = owner.session
     this.shell = owner.shell
@@ -254,6 +259,7 @@ class Terminal {
     this.child = child
     this.limits = limits
     this.platform = platform
+    this.readTable = readTable
     const out = new StringDecoder('utf8')
     const err = new StringDecoder('utf8')
     child.stdout?.on('data', (chunk: Buffer) => this.push(out.write(chunk)))
@@ -352,11 +358,13 @@ class Terminal {
     // A terminal that ended on its own is not swept: once its PTY is gone the tty name can be reused by another
     // terminal, and DSH, too, leaves a shell's nohup jobs running after the shell exits by itself.
     if (leader === undefined || this.exited) return this.done
-    const tty = await this.learnTty()
-    const table = await processTable()
+    const table = await this.tableForClose()
     // The tree, plus every process on this terminal's tty: a job started as `(cmd &)` or `nohup cmd &` leaves the
-    // tree for init but keeps the tty while the PTY is still this terminal's.
+    // tree for init but keeps the tty while the PTY is still this terminal's. A tty not learned yet is learned from
+    // this same table.
     const tree = [...descendants(leader, table)]
+    const learned = tree.find(hasTty)
+    const tty = this.tty ?? (learned === undefined ? undefined : `/dev/${learned.tty}`)
     if (tty !== undefined) {
       for (const row of table) if (`/dev/${row.tty}` === tty && row.pid !== process.pid && !tree.some((seen) => seen.pid === row.pid)) tree.push(row)
     }
@@ -367,7 +375,7 @@ class Terminal {
     }
     signal(-leader, 'SIGTERM')
     const graceful = await Promise.race([this.done.then(() => true), delay(this.limits.disposeGraceMs).then(() => false)])
-    const left = descendants(leader, await processTable())
+    const left = descendants(leader, await this.tableForClose())
     if (!graceful || left.length > 0 || tree.some((row) => alive(row.pid))) {
       for (const row of [...tree, ...left]) signal(row.pid, 'SIGKILL')
       for (const group of groups) signal(-group, 'SIGKILL')
@@ -375,12 +383,22 @@ class Terminal {
     await Promise.race([this.done, delay(this.limits.disposeGraceMs * 2)])
   }
 
+  /**
+   * The process table for a close. A read that failed or outlasted its 5 s timeout answers an empty table, and the
+   * table is never truly empty (it lists at least `ps` and this server), so an empty one is read once more: swept
+   * from an empty table, a job that left the tree would outlive its terminal (#150).
+   */
+  private async tableForClose(): Promise<readonly ProcessRow[]> {
+    const table = await this.readTable()
+    return table.length > 0 ? table : this.readTable()
+  }
+
   /** The PTY's device, learned once from the first descendant that has a tty. */
   private async learnTty(): Promise<string | undefined> {
     if (this.tty !== undefined) return this.tty
     const leader = this.child.pid
     if (leader === undefined) return undefined
-    const row = descendants(leader, await processTable()).find(hasTty)
+    const row = descendants(leader, await this.readTable()).find(hasTty)
     if (row === undefined) return undefined
     this.tty ??= `/dev/${row.tty}`
     return this.tty
@@ -455,14 +473,17 @@ function alive(pid: number): boolean {
 export class TerminalRegistry {
   readonly limits: TerminalLimits
   private readonly platform: string
+  private readonly readTable: ProcessTableReader
   private readonly sessions = new Map<string, Map<string, Terminal>>()
   private readonly timer: NodeJS.Timeout
   /** Set by `closeAll`: a server that is stopping starts no terminal, so none outlives the shutdown. */
   private closed = false
 
-  constructor(options: { readonly limits?: Partial<TerminalLimits>; readonly platform?: string; readonly pollMs?: number } = {}) {
+  /** `processTable` stands in for `ps -A` (a test's failing read); the server always takes the default. */
+  constructor(options: { readonly limits?: Partial<TerminalLimits>; readonly platform?: string; readonly pollMs?: number; readonly processTable?: ProcessTableReader } = {}) {
     this.limits = { ...TERMINAL_LIMITS, ...options.limits }
     this.platform = options.platform ?? process.platform
+    this.readTable = options.processTable ?? processTable
     this.timer = setInterval(() => void this.reclaim(), options.pollMs ?? 30_000)
     this.timer.unref()
   }
@@ -489,7 +510,7 @@ export class TerminalRegistry {
       detached: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
-    const terminal = new Terminal({ session: spec.session, shell, cwd: spec.cwd, mode: spec.mode, cols: spec.cols, rows: spec.rows }, child, this.limits, this.platform)
+    const terminal = new Terminal({ session: spec.session, shell, cwd: spec.cwd, mode: spec.mode, cols: spec.cols, rows: spec.rows }, child, this.limits, this.platform, this.readTable)
     owned.set(terminal.id, terminal)
     this.sessions.set(spec.session, owned)
     return terminal.info()
