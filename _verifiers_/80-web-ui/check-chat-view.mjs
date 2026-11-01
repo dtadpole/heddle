@@ -795,15 +795,22 @@ test('the column resizes like DSH: two grips, its default rule, a line that foll
     const cookie = await cookieFor(server.url)
     await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
     const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
+    /**
+     * `api()` answers `{ status, body }`, so the session id is in the body. Read off the answer itself it was always
+     * undefined, the turn went out with no session and ran in whichever session the folder rule picked, and the page
+     * then opened the made session, which never got the turn (#142's union made that visible).
+     */
+    const session = opened.body.session?.id ?? opened.body.id
+    assert.equal(typeof session, 'string', `a session is made in the folder (${opened.status})`)
     const turn = await fetch(new URL('/api/turn', server.url), {
       method: 'POST',
       headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: 'a question', folder: server.work, session: opened.session?.id ?? opened.id }),
+      body: JSON.stringify({ prompt: 'a question', folder: server.work, session }),
     })
     assert.equal(turn.status, 200, `the turn ran (${turn.status})`)
     await turn.text()
 
-    await browser.gotoSession(server.url, opened.body.session?.id ?? opened.body.id)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelectorAll(".column-grip").length === 2', 20_000)
 
     const grips = JSON.parse(
@@ -987,7 +994,9 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
     const cookie = await cookieFor(server.url)
     await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: server.work }) })
     const opened = await api(server.url, cookie, '/api/folders/session', { method: 'POST', body: JSON.stringify({ folder: server.work }) })
-    const session = opened.session?.id ?? opened.id
+    /** The id is in `api()`'s body (see the resize test): the turns go to the made session, which the page then opens. */
+    const session = opened.body.session?.id ?? opened.body.id
+    assert.equal(typeof session, 'string', `a session is made in the folder (${opened.status})`)
     for (let turn = 0; turn < 8; turn += 1) {
       const response = await fetch(new URL('/api/turn', server.url), {
         method: 'POST',
@@ -998,7 +1007,7 @@ test('the conversation minimap follows the reference: rows, a bright window, a h
       await response.text()
     }
 
-    await browser.gotoSession(server.url, opened.body.session?.id ?? opened.body.id)
+    await browser.gotoSession(server.url, session)
     await browser.waitFor('document.querySelectorAll("#log > .turn").length >= 24', 25_000)
     await browser.waitFor('document.getElementById("minimap") !== null && !document.getElementById("minimap").hidden', 10_000)
     await browser.waitFor('document.querySelectorAll("#minimap .mm-row").length > 0', 10_000)
