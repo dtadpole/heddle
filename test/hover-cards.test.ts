@@ -13,7 +13,7 @@ import { test } from 'node:test'
  * `page.html` between two markers and is loaded here.
  */
 
-const page = readFileSync(join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
+const page = readFileSync(process.env.HEDDLE_TEST_PAGE ?? join(import.meta.dirname, '..', 'src', 'server', 'page.html'), 'utf8')
 const begin = page.indexOf('/* hover-card:begin */')
 const end = page.indexOf('/* hover-card:end */')
 
@@ -53,6 +53,7 @@ interface Cards {
   timeAgo: (stamp: unknown, now: number) => string
   createdLabel: (stamp: unknown) => string
   abbreviateHome: (path: string, home: unknown) => string
+  pendingKind: (facts: { approval?: boolean; questions?: unknown[] }) => string | undefined
   sessionCard: (facts: Record<string, unknown>, now: number) => SessionCard
   workspaceCard: (workspace: Record<string, unknown> | null, home: string) => WorkspaceCard | null
   clockLabel: (time: string) => string
@@ -98,7 +99,7 @@ test("a session card's time is DSH's floored compact distance with ago, and bare
 
 test('a session card: the full title, time, status, and the stored title as what a click copies', () => {
   const cards = load()
-  const facts = { label: 'a very long session title the row clips', title: 'a very long session title the row clips', blank: false, stamp: ago(5 * MIN), running: false, pendingApproval: false, archived: false }
+  const facts = { label: 'a very long session title the row clips', title: 'a very long session title the row clips', blank: false, stamp: ago(5 * MIN), running: false, archived: false }
   assert.deepEqual(cards.sessionCard(facts, NOW), {
     kind: 'session',
     title: 'a very long session title the row clips',
@@ -109,10 +110,53 @@ test('a session card: the full title, time, status, and the stored title as what
   })
   assert.deepEqual(cards.sessionCard({ ...facts, running: true }, NOW).statuses, [{ state: 'ongoing', label: 'Running' }])
   assert.deepEqual(
-    cards.sessionCard({ ...facts, running: true, pendingApproval: true }, NOW).statuses,
+    cards.sessionCard({ ...facts, running: true, pending: 'approval' }, NOW).statuses,
     [{ state: 'warning', label: 'Waiting for approval' }],
     'a pending interaction is the primary status, over a running turn',
   )
+})
+
+/**
+ * C22: DSH's `sessionStatuses` whole (dsh-client-ui-workspace `client.js:2068-2117`, words at `:4970-4980`): a pending
+ * interaction of any of its three kinds, then running, each followed by the running-subagent count; the count alone; an
+ * unread completion; else idle. Before, the card read only an approval and a running turn.
+ */
+test('a session card says every DSH status: plan review, question, approval, running, subagents, Completed, Idle', () => {
+  const cards = load()
+  const statuses = (facts: Record<string, unknown>) => cards.sessionCard({ label: 's', title: 's', stamp: ago(MIN), ...facts }, NOW).statuses
+  assert.deepEqual(statuses({ pending: 'plan-review', running: true }), [{ state: 'warning', label: 'Plan awaiting review' }])
+  assert.deepEqual(statuses({ pending: 'question', running: true }), [{ state: 'warning', label: 'Waiting for answer' }])
+  assert.deepEqual(statuses({ pending: 'approval' }), [{ state: 'warning', label: 'Waiting for approval' }])
+  assert.deepEqual(
+    statuses({ pending: 'question', running: true, runningSubagents: 2, completed: true }),
+    [{ state: 'warning', label: 'Waiting for answer' }, { state: 'ongoing', label: '2 subagents running' }],
+    'a wait is primary and the subagent count follows it',
+  )
+  assert.deepEqual(statuses({ running: true, runningSubagents: 1 }), [{ state: 'ongoing', label: 'Running' }, { state: 'ongoing', label: '1 subagent running' }], 'so does a running turn')
+  assert.deepEqual(statuses({ runningSubagents: 3, completed: true }), [{ state: 'ongoing', label: '3 subagents running' }], 'running children outrank an unread completion')
+  assert.deepEqual(statuses({ completed: true }), [{ state: 'done', label: 'Completed' }], 'an unread completion is Completed')
+  assert.deepEqual(statuses({ running: true, completed: true }), [{ state: 'ongoing', label: 'Running' }], 'live activity outranks a completion reminder')
+  assert.deepEqual(statuses({ runningSubagents: 0 }), [{ state: 'idle', label: 'Idle' }])
+  assert.deepEqual(statuses({ pending: 'toString' }), [{ state: 'idle', label: 'Idle' }], 'an unknown kind is no interaction')
+  assert.deepEqual(statuses({ archived: true, completed: true }), [], 'an archived card drops Completed as it drops Idle')
+  assert.deepEqual(statuses({ archived: true, runningSubagents: 1 }), [{ state: 'ongoing', label: '1 subagent running' }], 'and keeps live activity')
+})
+
+test("a session awaits DSH's highest-precedence interaction: a plan review, then a question, then an approval", () => {
+  const cards = load()
+  assert.equal(typeof cards.pendingKind, 'function', 'the block classifies a wait')
+  const review = { state: 'waiting', questions: [{ id: 'plan-review', header: 'Plan review', question: 'Approve this plan and leave plan mode?', options: [{ label: 'Approve' }, { label: 'Keep planning' }] }] }
+  const asked = { state: 'continued', questions: [{ id: 'color', question: 'Which colour?', options: [{ label: 'Blue' }, { label: 'Red' }] }] }
+  assert.equal(cards.pendingKind({ approval: true, questions: [asked, review] }), 'plan-review', 'a plan review outranks a question and an approval (precedence 2)')
+  assert.equal(cards.pendingKind({ approval: true, questions: [asked] }), 'question', 'a question outranks an approval (precedence 1 over 0)')
+  assert.equal(cards.pendingKind({ approval: true, questions: [] }), 'approval')
+  assert.equal(cards.pendingKind({ approval: false, questions: [{ ...asked, state: 'pending' }] }), 'question', 'a timed wait that ran out is still answerable, so still awaited')
+  assert.equal(cards.pendingKind({ approval: false, questions: [{ ...asked, state: 'answered' }, { ...review, state: 'cancelled' }] }), undefined, 'a settled request awaits nobody')
+  assert.equal(cards.pendingKind({}), undefined)
+  /** DSH's `planReviewOf` shape: one single-choice question, at most two options, one of them the approve label. */
+  assert.equal(cards.pendingKind({ questions: [{ ...review, questions: [...review.questions, asked.questions[0]] }] }), 'question', 'a batch with more than the review is an ordinary question')
+  assert.equal(cards.pendingKind({ questions: [{ ...review, questions: [{ ...review.questions[0], multi_select: true }] }] }), 'question', 'so is a multi-select one')
+  assert.equal(cards.pendingKind({ questions: [{ ...review, questions: [{ ...review.questions[0], options: [{ label: 'Keep planning' }] }] }] }), 'question', 'and one without Approve')
 })
 
 test('a blank session card has no time and copies nothing; an untitled one copies nothing either', () => {

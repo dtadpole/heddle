@@ -1635,6 +1635,8 @@
   .hover-card .hover-dot { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; color: #adb2b8; }
   .hover-card .hover-dot:not([data-state='ongoing'])::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .hover-card .hover-dot[data-state='warning'] { color: #f5a623; }
+  /** An unread completion's dot: DSH's `StateDot` done state (`--dsw-alias-state-success-primary`), in the row's done colour. */
+  .hover-card .hover-dot[data-state='done'] { color: #2fa36b; }
   .hover-card .hover-dot .spinner-motion { transform-origin: center; animation: heddle-spin 1.5s linear infinite; }
   .hover-card .hover-dot circle { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
   .hover-card .hover-dot .spinner-track { opacity: .25; }
@@ -17096,6 +17098,23 @@ const WorkspaceTree = (() => {
   }
 
   /**
+   * How many of one session's subagent children are running: DSH's `runningChildCount` (`lib/client.js:1056-1058`), which
+   * a session's hover card reads as `{n} subagent(s) running` (C22). `sessions` gives the lineage (each child names its
+   * `parentSession`, and only `origin: 'subagent'` is a child, as in `parentsRunning`); `running` is the page's live set
+   * (`runningSessions`, which every list read reconciles and the stream keeps), DSH's live status. A list's own `running`
+   * flag is not read: the lineage may come from an older read than the live set, and a child that has since stopped
+   * would still count.
+   */
+  function runningChildCount(sessions, parentId, running = new Set()) {
+    let count = 0
+    for (const meta of Array.isArray(sessions) ? sessions : []) {
+      if (meta === null || typeof meta !== 'object' || meta.origin !== 'subagent' || meta.parentSession !== parentId) continue
+      if (running.has(meta.id)) count += 1
+    }
+    return count
+  }
+
+  /**
    * The rows a group draws at a watermark, DSH's `watermarkRows` (`lib/client.js:2807-2819`): every placeholder, plus the
    * first `watermark` conversations, in list order. `hidden` is how many are left out — the number the overflow control
    * names — and `conversations` how many non-blank rows there are, which `nextWatermark` and `overflow` count against.
@@ -17329,6 +17348,7 @@ const WorkspaceTree = (() => {
     shownCount,
     raisedWatermark,
     parentsRunning,
+    runningChildCount,
     watermarkRows,
     nextWatermark,
     overflow,
@@ -18502,23 +18522,62 @@ const HoverCards = (() => {
     return text
   }
 
+  /** DSH's status words for a pending interaction (`en` locale, dsh-client-ui-workspace `lib/client.js:4974-4976`). */
+  const PENDING_LABEL = { approval: 'Waiting for approval', 'plan-review': 'Plan awaiting review', question: 'Waiting for answer' }
+  /** The question requests still answerable (`GET /api/questions` lists these by default; `answered`/`cancelled` are final). */
+  const OPEN_QUESTION = new Set(['waiting', 'pending', 'continued'])
+
   /**
-   * `sessionStatuses` over what this page knows of any session: a pending approval first, then a running turn, else idle.
-   * DSH also draws plan-review and question waits, a running-subagent count and an unread `Completed`; the page tracks
-   * none of those for other sessions, so the card does not claim them. An archived card drops idle, as DSH's does.
+   * Whether a request is the plan review: heddle's one `plan-review` question (src/plan/tool.ts `PLAN_REVIEW`, asked
+   * through the question service by src/plan/service.ts and rust heddle-plan review.rs), checked the way DSH's
+   * `planReviewOf` checks its own (dsh-client-ui-user-questions `lib/client.js:42-61`): one question, single choice, at
+   * most two options, one of them `Approve`. DSH reads the mark from the question's `intent`; heddle's has none, so the id.
+   */
+  function isPlanReview(request) {
+    const batch = Array.isArray(request?.questions) ? request.questions : []
+    if (batch.length !== 1) return false
+    const [question] = batch
+    const options = Array.isArray(question?.options) ? question.options : []
+    return question?.id === 'plan-review' && question.multi_select !== true && options.length <= 2 && options.some((option) => option?.label === 'Approve')
+  }
+
+  /**
+   * The interaction a session awaits, as DSH's runtime picks one when several are pending: the highest precedence wins —
+   * plan review 2, question 1, approval 0 (`publishPendingInteractions`, dsh-client-ui-session `lib/client.js:933-947`; the
+   * domains register at dsh-client-ui-user-questions `lib/client.js:1905` and dsh-client-ui-approval `lib/client.js:343`).
+   * `approval` says whether `/api/approvals` holds one of the session's; `questions` is the session's requests from
+   * `/api/questions?session=`. `undefined` when it awaits nothing.
+   */
+  function pendingKind({ approval = false, questions = [] } = {}) {
+    const open = (Array.isArray(questions) ? questions : []).filter((request) => request !== null && typeof request === 'object' && OPEN_QUESTION.has(request.state))
+    if (open.some(isPlanReview)) return 'plan-review'
+    if (open.length > 0) return 'question'
+    return approval === true ? 'approval' : undefined
+  }
+
+  /**
+   * DSH's `sessionStatuses` (dsh-client-ui-workspace `lib/client.js:2068-2117`, words at `:4970-4980`): a pending
+   * interaction first, then a running turn, each followed by the running-subagent count; the count alone; an unread
+   * completion; else idle. `facts` carries `pending` (`pendingKind`), `running`, `runningSubagents` (DSH's
+   * `runningChildCount`), `completed` (DSH's `completionUnread`) and `archived`; an archived card drops idle and done, as
+   * DSH's `SessionHoverContent` does (`:2142`).
    */
   function sessionStatuses(facts) {
+    const count = Number.isInteger(facts.runningSubagents) && facts.runningSubagents > 0 ? facts.runningSubagents : 0
+    const subagents = count === 0 ? [] : [{ state: 'ongoing', label: `${count} ${count === 1 ? 'subagent' : 'subagents'} running` }]
     let statuses
-    if (facts.pendingApproval === true) statuses = [{ state: 'warning', label: 'Waiting for approval' }]
-    else if (facts.running === true) statuses = [{ state: 'ongoing', label: 'Running' }]
+    if (Object.hasOwn(PENDING_LABEL, String(facts.pending))) statuses = [{ state: 'warning', label: PENDING_LABEL[facts.pending] }, ...subagents]
+    else if (facts.running === true) statuses = [{ state: 'ongoing', label: 'Running' }, ...subagents]
+    else if (subagents.length > 0) statuses = subagents
+    else if (facts.completed === true) statuses = [{ state: 'done', label: 'Completed' }]
     else statuses = [{ state: 'idle', label: 'Idle' }]
     return facts.archived === true ? statuses.filter((status) => status.state !== 'idle' && status.state !== 'done') : statuses
   }
 
   /**
-   * A session row's card. `facts` is `{label, title, blank, stamp, running, pendingApproval, archived}`: `label` is what the
-   * row reads (the card shows it unclipped), `title` the stored title, which is what a click copies — nothing for a blank
-   * or untitled row, as DSH's `copyText`.
+   * A session row's card. `facts` is `{label, title, blank, stamp, pending, running, runningSubagents, completed, archived}`:
+   * `label` is what the row reads (the card shows it unclipped), `title` the stored title, which is what a click copies —
+   * nothing for a blank or untitled row, as DSH's `copyText`; the rest are `sessionStatuses`'.
    */
   function sessionCard(facts, now) {
     const blank = facts.blank === true
@@ -18663,7 +18722,7 @@ const HoverCards = (() => {
     return { left: row.right + GAP, top }
   }
 
-  return { OPEN_DELAY_MS, CLOSE_DELAY_MS, COPIED_MS, GAP, TASK_LIMIT, relativeTime, timeAgo, createdLabel, abbreviateHome, sessionStatuses, sessionCard, workspaceCard, clockLabel, zoneLabel, frequencyLabel, absoluteLabel, relativeLabel, orderTasks, sessionTasks, place }
+  return { OPEN_DELAY_MS, CLOSE_DELAY_MS, COPIED_MS, GAP, TASK_LIMIT, relativeTime, timeAgo, createdLabel, abbreviateHome, isPlanReview, pendingKind, sessionStatuses, sessionCard, workspaceCard, clockLabel, zoneLabel, frequencyLabel, absoluteLabel, relativeLabel, orderTasks, sessionTasks, place }
 })()
 /* hover-card:end */
 
@@ -18672,11 +18731,13 @@ const HoverCards = (() => {
  * delegated from the tree so every redraw's rows have it without a hook in the row builders.
  *
  * It reads only what the page already has or already asks the server for: the drawn row's node (in `In one list`, the
- * listing that list was drawn from), `runningSessions`, the host home from the event stream's `ready` frame,
- * `GET /api/approvals`, and `GET /api/schedule/catalog` — read once, and again after each `event: schedule` (DSH's
- * `schedule/changed`). Both servers serve all of them; a profile without the schedule plugin answers 503, which is a card
- * with no task section. A row the card covers loses its native `title`, because DSH's rows have none and two tooltips
- * would stack.
+ * listing that list was drawn from), `runningSessions`, `unreadSessions` (DSH's `completionUnread`), the subagent
+ * children the session lists name (`listedMetas`, else the tree's `childSessions`), the host home from the event stream's
+ * `ready` frame, `GET /api/approvals` and the hovered session's `GET /api/questions?session=` on every dwell (C22: DSH's
+ * plan-review and question waits), and `GET /api/schedule/catalog` — read once, and again after each `event: schedule`
+ * (DSH's `schedule/changed`). Both servers serve all of them; a profile without the schedule plugin answers 503, which is
+ * a card with no task section, and one without the questions plugin answers 503, which is a card with no question wait. A
+ * row the card covers loses its native `title`, because DSH's rows have none and two tooltips would stack.
  */
 const rowHoverCard = (() => {
   let home = ''
@@ -18685,6 +18746,8 @@ const rowHoverCard = (() => {
   let catalogGeneration = 0
   let approvals = []
   let approvalsRead = null
+  /** Each hovered session's question requests, as its last dwell read them (`sessionId → requests`). */
+  const questions = new Map()
   /** The row under the pointer, the key of the row whose card shows (a redraw replaces row elements), and the timers. */
   let pointerRow = null
   let shownKey = null
@@ -18719,8 +18782,24 @@ const rowHoverCard = (() => {
     if (shownKey !== null) void refresh().then(redraw)
   })
 
-  /** Approvals on every dwell (they come and go), the catalog once per change; both resolve, never throw. */
-  function refresh() {
+  /**
+   * One session's question requests, on every dwell over its row: the list route is per session, so the card reads the one
+   * it is about. An answer that is not 2xx (no questions plugin, a session gone) is no wait; one that never came keeps
+   * what the last dwell read. Resolves, never throws.
+   */
+  function readQuestions(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return Promise.resolve()
+    return fetch('/api/questions?session=' + encodeURIComponent(sessionId))
+      .then((response) => (response.ok ? response.json() : { session: sessionId, requests: [] }))
+      .then((body) => {
+        if (body?.session === sessionId) questions.set(sessionId, Array.isArray(body.requests) ? body.requests : [])
+      })
+      .catch(() => {})
+  }
+
+  /** Approvals and the hovered session's questions on every dwell (they come and go), the catalog once per change; all resolve, never throw. */
+  function refresh(sessionId) {
+    const asked = readQuestions(sessionId)
     if (approvalsRead === null) {
       approvalsRead = fetch('/api/approvals')
         .then((response) => (response.ok ? response.json() : { requests: [] }))
@@ -18744,7 +18823,7 @@ const rowHoverCard = (() => {
           if (generation === catalogGeneration) catalogRead = null
         })
     }
-    return Promise.all([approvalsRead, catalogRead ?? Promise.resolve()])
+    return Promise.all([approvalsRead, catalogRead ?? Promise.resolve(), asked])
   }
 
   /** The carded row an event target is in — a session or workspace row of the tree or the flat list — else `null`. */
@@ -18782,14 +18861,18 @@ const rowHoverCard = (() => {
     const session = drawn ?? (searchIndex?.sessions ?? []).find((meta) => meta?.id === li.dataset.sessionId)
     if (session === null || session === undefined || typeof session.id !== 'string') return null
     const title = typeof session.title === 'string' ? session.title : ''
+    /** Every listed session, a subagent's child included: the last list read, else the tree's children. */
+    const lineage = listedMetas.size > 0 ? [...listedMetas.values()] : childSessions
     const model = HoverCards.sessionCard(
       {
         label: drawn !== null ? label : WorkspaceTree.sessionLabel(session),
         title,
         blank: (session.turns ?? 0) === 0 && title.trim() === '',
         stamp: session.updated ?? session.created,
+        pending: HoverCards.pendingKind({ approval: approvals.some((request) => request?.session === session.id), questions: questions.get(session.id) ?? [] }),
         running: runningSessions.has(session.id),
-        pendingApproval: approvals.some((request) => request?.session === session.id),
+        runningSubagents: WorkspaceTree.runningChildCount(lineage, session.id, runningSessions),
+        completed: unreadSessions.has(session.id),
         archived: entry?.node?.archived === true || session.archived === true || li.dataset.archived === 'true',
       },
       now,
@@ -18940,7 +19023,8 @@ const rowHoverCard = (() => {
       return
     }
     clearTimeout(openTimer)
-    const ready = refresh()
+    const li = row.parentElement
+    const ready = refresh(li.dataset.kind === 'session' ? li.dataset.sessionId : undefined)
     if (warm) {
       show(row)
       void ready.then(() => {
