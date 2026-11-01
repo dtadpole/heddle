@@ -1364,6 +1364,8 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
     }
     /** About 30 KB of text that compresses poorly, as J183's long prompts: a frame far larger than a block's slack. */
     const long = (label) => `${label} ${randomBytes(22_000).toString('base64')}`
+    /** About 80 KB of the same, whose frame (about 60 KB) is larger than the room t5 is given. */
+    const longer = (label) => `${label} ${randomBytes(60_000).toString('base64')}`
     const view = async (id) => {
       const response = await fetch(new URL(`/api/sessions/${id}`, live.url), { headers: { cookie } })
       assert.equal(response.status, 200, 'the session is served')
@@ -1424,6 +1426,27 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
     assert.equal(afterFailure.torn, false, `the failed append left no partial frame behind (${readFileSync(log).length - afterFailure.readableBytes} stray bytes)`)
     assert.ok(!usersOf(await view(id)).some((text) => text.startsWith('t4')), 'and the view does not show t4, which is not on disk')
 
+    /**
+     * t5, developer-four's case on aac6797b: a short prompt the disk still takes, and an answer it does not. A few blocks
+     * are given back, so the prompt and the model request land and the answer's frame, far larger, is refused part-way,
+     * mid-turn. The stream must end in the same error frame (Rust's closed after the model request with none), the answer
+     * that was not saved is not sent as if it were, and the prompt stays on disk with its turn ended.
+     */
+    const kept = fs.statSync(filler).size
+    fs.truncateSync(filler, Math.max(0, Math.floor(kept / 4096) * 4096 - 16 * 1024))
+    const room = fs.statfsSync(mount)
+    assert.ok(room.bavail * room.bsize >= 8 * 1024 && room.bavail * room.bsize < 40 * 1024, `t5 has a few blocks of room: ${room.bavail * room.bsize} bytes`)
+    const t5 = await turn({ session: id, prompt: 't5 a short prompt' }, longer('answer-five'))
+    assert.equal(t5.status, 200, `the turn route answered t5\n${t5.text.slice(0, 2000)}`)
+    const t5Failed = t5.frames.find((frame) => frame.event === 'error')
+    assert.ok(t5Failed !== undefined, `t5's stream ends in an error frame when its answer cannot be saved\n${t5.text.slice(0, 3000)}`)
+    assert.equal(t5Failed.data?.message, 'the session could not be saved: no space left on device', 't5\'s frame says why, in words')
+    assert.equal(t5Failed.data?.session, id)
+    assert.ok(!t5.frames.some((frame) => frame.event === 'done'), 't5 is not reported as done')
+    assert.ok(!t5.text.includes('answer-five'), 'the answer that was not saved is not sent as a saved event')
+    assert.equal(decodeTranscript(readFileSync(log)).torn, false, 'the answer\'s partial frame was cut away')
+    assert.ok(usersOf(await view(id)).some((text) => text.startsWith('t5')), 't5\'s prompt is on disk, and the view shows it')
+
     /** Space comes back; t6 answers, lands right after the whole frames, and outlives a restart. */
     fs.unlinkSync(filler)
     const t6 = await turn({ session: id, prompt: 't6 after the space came back' }, 'answer six')
@@ -1440,7 +1463,7 @@ test('a full disk fails the turn in words and leaves no torn frame, and a turn a
     const users = usersOf(restarted)
     assert.deepEqual(
       users.map((text) => text.slice(0, 2)),
-      ['t1', 't2', 't3', 't6'],
+      ['t1', 't2', 't3', 't5', 't6'],
       `after the restart every turn on disk is there, t6 included\nsaw: ${users.join(' | ')}`,
     )
     assert.ok(restarted.some((row) => row.kind === 'assistant' && row.text === 'answer six'), 'and t6 keeps its answer')

@@ -5159,23 +5159,60 @@ mod tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// A runner that writes the prompt into a real store as the agent loop does first, and fails the turn with the
-    /// store's error as `heddle`'s `Turns` maps a turn error (`ServiceError::new(error.to_string())`).
-    struct SavingTurns(heddle_session::SessionService);
+    /// A runner that writes into a real store what the agent loop writes, and fails the turn with the store's error as
+    /// `heddle`'s `Turns` maps a turn error (`ServiceError::new(error.to_string())`). With `mid_turn`, the prompt and the
+    /// model request land and the log then refuses every write (`0o444`), so the answer's first chunk is the append that
+    /// fails, after two events went out on the stream: developer-four's t4 on aac6797b.
+    #[cfg(unix)]
+    struct SavingTurns {
+        service: heddle_session::SessionService,
+        mid_turn: bool,
+    }
 
+    #[cfg(unix)]
     impl TurnRunner for SavingTurns {
         fn run_turn(
             &self,
             request: TurnRequest,
         ) -> BoxFuture<'static, Result<TurnOutcome, ServiceError>> {
-            let service = self.0.clone();
+            use std::os::unix::fs::PermissionsExt;
+            let service = self.service.clone();
+            let mid_turn = self.mid_turn;
             Box::pin(async move {
+                let failed =
+                    |error: heddle_session::SessionError| ServiceError::new(error.to_string());
                 let handle = service
                     .open(&request.session)
                     .expect("the session the route opened");
                 service
                     .user(&handle, &request.prompt, None)
-                    .map_err(|error| ServiceError::new(error.to_string()))?;
+                    .map_err(failed)?;
+                if mid_turn {
+                    service
+                        .store()
+                        .model_request(
+                            &handle,
+                            &heddle_session::ModelRequestRecord {
+                                endpoint: "double".into(),
+                                ..heddle_session::ModelRequestRecord::default()
+                            },
+                        )
+                        .map_err(failed)?;
+                    std::fs::set_permissions(
+                        &handle.transcript,
+                        std::fs::Permissions::from_mode(0o444),
+                    )
+                    .unwrap();
+                    service
+                        .store()
+                        .assistant_chunk(
+                            &handle,
+                            &heddle_session::Chunk::TextDelta {
+                                text: "an answer the disk refuses".into(),
+                            },
+                        )
+                        .map_err(failed)?;
+                }
                 Ok(TurnOutcome::default())
             })
         }
@@ -5189,21 +5226,47 @@ mod tests {
         // included. The store now answers `the session could not be saved: <reason>`, in words, and the route carries
         // that sentence on the stream and in a detached turn's verdict. The disk here is a log this user may not
         // write, the one failure a test can cause for real: `permission denied`.
+        unsaved_turn_fails_in_words(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_whose_answer_cannot_be_saved_mid_turn_ends_its_stream_and_verdict_in_words() {
+        // developer-four on aac6797b (J183's t4 with a short prompt): the prompt and the model request were saved and
+        // sent, the answer's first chunk was the append the disk refused, and the stream was reported to close with no
+        // error frame. Here the same order through the real store and the real route: two session frames, then the
+        // error frame with the words, and no chunk sent as if it were saved; the detached verdict carries the words too.
+        unsaved_turn_fails_in_words(true).await;
+    }
+
+    /// The route over a real store whose log refuses a write, at the prompt or mid-turn ([`SavingTurns`]).
+    #[cfg(unix)]
+    async fn unsaved_turn_fails_in_words(mid_turn: bool) {
         use crate::adapters::StoreSessions;
         use std::os::unix::fs::PermissionsExt;
         let scratch = std::env::temp_dir().join(format!(
-            "heddle-server-turn-unsaved-{}-{}",
+            "heddle-server-turn-unsaved-{}-{}-{mid_turn}",
             std::process::id(),
             token::now_ms()
         ));
         std::fs::create_dir_all(scratch.join("ws")).unwrap();
         let scratch = std::fs::canonicalize(&scratch).unwrap();
+        // The boot's listener: every saved event is published on the server's hub, as heddle's session row wires it.
+        let hub = Arc::new(std::sync::OnceLock::<EventHub>::new());
+        let published = Arc::clone(&hub);
         let inner = heddle_session::SessionService::new(
             &heddle_session::SessionConfig {
                 root: Some(scratch.join("sessions").to_string_lossy().into_owned()),
             },
             &heddle_config::Env::default(),
-            None,
+            Some(Arc::new(
+                move |handle: &heddle_session::SessionHandle,
+                      event: &heddle_session::SessionEvent| {
+                    if let Some(hub) = published.get() {
+                        crate::adapters::session_event_listener(hub.clone())(handle, event);
+                    }
+                },
+            )),
         );
         let handle = inner
             .start(heddle_session::StartOptions {
@@ -5211,34 +5274,46 @@ mod tests {
                 ..heddle_session::StartOptions::default()
             })
             .unwrap();
-        std::fs::set_permissions(&handle.transcript, std::fs::Permissions::from_mode(0o444))
+        let writable = |yes: bool| {
+            std::fs::set_permissions(
+                &handle.transcript,
+                std::fs::Permissions::from_mode(if yes { 0o644 } else { 0o444 }),
+            )
             .unwrap();
-        if std::fs::OpenOptions::new()
+        };
+        writable(false);
+        let binds = std::fs::OpenOptions::new()
             .append(true)
             .open(&handle.transcript)
-            .is_ok()
-        {
+            .is_err();
+        // Mid-turn, the runner takes the write away after the model request; otherwise the prompt is refused.
+        writable(mid_turn);
+        if !binds {
             // Running as a user permissions do not bind (root): no failure to judge.
+            writable(true);
             std::fs::remove_dir_all(&scratch).ok();
             return;
         }
         let harness = Harness::new(
             Arc::new(StoreSessions::new(inner.clone())),
             Arc::new(Models),
-            Arc::new(SavingTurns(inner.clone())),
+            Arc::new(SavingTurns {
+                service: inner.clone(),
+                mid_turn,
+            }),
             Arc::new(Sandbox),
             scratch.clone(),
         );
-        let (router, state) = ServerBuilder::new(
+        let builder = ServerBuilder::new(
             harness,
             ServerOptions {
                 token: Some("test-token".into()),
                 secret_path: Some(temp_secret("turn-unsaved")),
                 ..ServerOptions::default()
             },
-        )
-        .into_router(3082)
-        .expect("the test router");
+        );
+        let _ = hub.set(builder.events());
+        let (router, state) = builder.into_router(3082).expect("the test router");
         let mut pushed = state.events().subscribe();
         let (_, headers, _) = call(&router, Method::GET, "/?token=test-token", None).await;
         let cookie = headers["set-cookie"].split(';').next().unwrap().to_owned();
@@ -5248,20 +5323,44 @@ mod tests {
         let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
         let text = body_text(&bytes);
         assert_eq!(status, StatusCode::OK, "{text}");
-        let error = text
+        let frames: Vec<(String, Value)> = text
             .split("\n\n")
-            .find(|block| block.starts_with("event: error"))
-            .and_then(|block| block.lines().find_map(|line| line.strip_prefix("data: ")))
-            .map(|data| serde_json::from_str::<Value>(data).unwrap())
-            .unwrap_or_else(|| panic!("the stream ends in an error frame\n{text}"));
+            .filter_map(|block| {
+                let name = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("event: "))?;
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                Some((name.to_owned(), serde_json::from_str::<Value>(data).ok()?))
+            })
+            .collect();
+        let kinds: Vec<&str> = frames
+            .iter()
+            .map(|(name, data)| {
+                if name == "session" {
+                    data["event"]["type"].as_str().unwrap_or("")
+                } else {
+                    name.as_str()
+                }
+            })
+            .collect();
+        let expected: &[&str] = if mid_turn {
+            &["message", "model/request", "error"]
+        } else {
+            &["error"]
+        };
+        assert_eq!(
+            kinds, expected,
+            "what was saved, then the error frame, and nothing unsaved\n{text}"
+        );
+        let error = &frames.last().expect("a frame").1;
         assert_eq!(error["message"], json!(WORDS), "in words\n{text}");
         assert_eq!(error["session"], json!(handle.id));
-        assert!(!text.contains("event: done"), "{text}");
         assert!(
             !text.contains(scratch.to_string_lossy().as_ref()),
             "and without the store's path on disk\n{text}"
         );
 
+        writable(mid_turn);
         let body = json!({"session": handle.id, "prompt": "t5", "detach": true});
         let (status, bytes) = post_json(&router, "/api/turn", &cookie, &body.to_string()).await;
         assert_eq!(status, StatusCode::ACCEPTED, "{}", body_text(&bytes));
@@ -5269,6 +5368,7 @@ mod tests {
             .as_str()
             .expect("the turn id")
             .to_owned();
+        let mut seen = Vec::new();
         let verdict = loop {
             let (event, data, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), next_pushed(&mut pushed))
@@ -5277,6 +5377,9 @@ mod tests {
             if event == "turn" && data["turn"] == json!(turn) {
                 break data;
             }
+            if event == "session" {
+                seen.push(data["event"]["type"].as_str().unwrap_or("").to_owned());
+            }
         };
         assert_eq!(verdict["outcome"], json!("error"));
         assert_eq!(
@@ -5284,8 +5387,13 @@ mod tests {
             json!(WORDS),
             "the detached verdict carries the same sentence"
         );
-        std::fs::set_permissions(&handle.transcript, std::fs::Permissions::from_mode(0o644))
-            .unwrap();
+        if mid_turn {
+            assert!(
+                seen.ends_with(&["message".to_owned(), "model/request".to_owned()]),
+                "the verdict follows the events that were saved: {seen:?}"
+            );
+        }
+        writable(true);
         std::fs::remove_dir_all(&scratch).ok();
     }
 
