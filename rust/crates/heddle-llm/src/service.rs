@@ -331,7 +331,12 @@ impl ModelService {
     /// send something other than what was recorded. `NO_ENDPOINT` when the request names no configured endpoint.
     pub fn resolve(&self, request: &GenerateRequest) -> Result<GenerateRequest, ModelError> {
         self.adapter_for(&request.endpoint)?;
-        self.request_through_hooks(request)
+        let effective = self.request_through_hooks(request)?;
+        let answering = self.adapter_for(&effective.endpoint).ok();
+        Ok(with_default_effort(
+            answering.as_deref().map(|adapter| adapter.endpoint()),
+            effective,
+        ))
     }
 
     /// Call one endpoint and stream the answer (`stream`): [`ModelService::resolve`], then
@@ -563,6 +568,39 @@ pub fn last_assistant_text(messages: &[Message]) -> String {
         .find(|message| message.role == crate::types::Role::Assistant)
         .map(|message| text_of(&message.content))
         .unwrap_or_default()
+}
+
+/// A request that names no reasoning effort runs at its model's declared default (#157), as DSH's `resolveCallWithInfo`
+/// resolves `requested ?? reasoning.defaultEffort`, and says so with `reasoning_effort_default`. Applied after the
+/// `model/request` hook, so a selection policy that names a level wins, and on the endpoint that will answer. A model
+/// that declares levels but no default keeps sending nothing: that is the provider's own default.
+pub fn with_default_effort(
+    endpoint: Option<&EndpointConfig>,
+    request: GenerateRequest,
+) -> GenerateRequest {
+    let Some(endpoint) = endpoint else {
+        return request;
+    };
+    if request
+        .reasoning_effort
+        .as_deref()
+        .is_some_and(|effort| !effort.is_empty())
+    {
+        return request;
+    }
+    let model = request.model.as_deref().filter(|model| !model.is_empty());
+    match endpoint
+        .reasoning_levels_for(model)
+        .and_then(|levels| levels.default)
+        .filter(|fallback| !fallback.is_empty())
+    {
+        Some(fallback) => GenerateRequest {
+            reasoning_effort: Some(fallback),
+            reasoning_effort_default: Some(true),
+            ..request
+        },
+        None => request,
+    }
 }
 
 #[cfg(test)]
