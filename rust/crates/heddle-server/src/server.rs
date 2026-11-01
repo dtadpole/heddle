@@ -5308,7 +5308,12 @@ mod tests {
             harness,
             ServerOptions {
                 token: Some("test-token".into()),
-                secret_path: Some(temp_secret("turn-unsaved")),
+                // One secret folder per case: the two cases run in parallel in one process.
+                secret_path: Some(temp_secret(if mid_turn {
+                    "turn-unsaved-mid"
+                } else {
+                    "turn-unsaved"
+                })),
                 ..ServerOptions::default()
             },
         );
@@ -5352,6 +5357,8 @@ mod tests {
             kinds, expected,
             "what was saved, then the error frame, and nothing unsaved\n{text}"
         );
+        // The frame parser above drops a block whose data is not JSON, so a malformed `done` would pass unseen there.
+        assert!(!text.contains("event: done"), "{text}");
         let error = &frames.last().expect("a frame").1;
         assert_eq!(error["message"], json!(WORDS), "in words\n{text}");
         assert_eq!(error["session"], json!(handle.id));
