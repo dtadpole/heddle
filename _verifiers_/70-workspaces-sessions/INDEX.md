@@ -45,6 +45,11 @@ Another judges DSH's refusal to archive a session with running work (R-developer
 running work is refused with the work named, and stop: true stops it and archives` — the `409` names the turn in
 progress, or the running subagent of an idle parent, and `stop: true` stops it and archives.
 
+Since 1 Nov `check-compact-restart.mjs` judges a `/compact` cut by a restart (#206): the server is killed while the
+summary is held, and after the restart the first read already draws the row as "Compaction cancelled." without writing,
+the next turn's write-open appends a stopped `compaction/failed` and the `command/done` before its prompt, a second
+restart appends nothing more, and a new `/compact` still compacts.
+
 ## Where it stands, 2026-10-11
 
 **22 checks, all passing — verdict `0`.** The tree group was written **before** the mechanism it judges,

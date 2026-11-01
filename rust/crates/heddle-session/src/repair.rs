@@ -61,7 +61,27 @@ impl CloserCause {
             }
         }
     }
+
+    /// The answer a command left running is given (#206).
+    pub fn command_text(self) -> &'static str {
+        match self {
+            CloserCause::Interrupted => "The process exited before this command finished.",
+        }
+    }
+
+    /// The reason a compaction a command left open is closed with (#206).
+    pub fn compaction_text(self) -> &'static str {
+        match self {
+            CloserCause::Interrupted => "the process exited before the compaction finished",
+        }
+    }
 }
+
+/// What a command whose compaction was cut answers: DSH's words for a cancelled `/compact`
+/// (dsh-command-compact `cancelled`), the same `COMPACT_CANCELLED` the Stop route answers with
+/// (`heddle-commands` `builtins.rs`). The session crate does not depend on the commands crate, so the words
+/// are restated here and a test there holds the two equal.
+pub const COMPACTION_CANCELLED: &str = "Compaction cancelled.";
 
 /// The answer an interrupted call is given: the request-time repair's words (`heddle-context` `pairing.rs`).
 pub const INTERRUPTED_RESULT: &str =
@@ -86,11 +106,23 @@ fn text_of(message: &Value) -> String {
 /// a turn's automatic compaction, its pre-step. A `compaction/start` after a prompt that has had no turn end opens
 /// the turn too (#154): a process killed while that summary ran left the prompt unanswered with nothing saying why,
 /// and DSH, which appends `turn/start` before the pre-step, closes such a turn as interrupted. A `/compact` on its
-/// own has no prompt after the last turn end and stays as it was. The span needs no closer: a compaction is log-only
-/// until its replacement note, so a `compaction/start` with no end leaves the surface unchanged. A call is open
-/// from its `tool-call` chunk until a tool message names it; a turn end forgets the calls it leaves, as DSH's
-/// recovery does at its boundaries, so an old turn is never reopened.
+/// own has no prompt after the last turn end and opens no turn (its command is closed below). The span needs no
+/// closer as a turn's: a compaction is log-only until its replacement note, so a `compaction/start` with no end
+/// leaves the surface unchanged. A call is open from its `tool-call` chunk until a tool message names it; a turn
+/// end forgets the calls it leaves, as DSH's recovery does at its boundaries, so an old turn is never reopened.
+///
+/// **A command left running is closed too** (#206): a `command/run` with no `command/done` is a row the page
+/// draws as Running… for good. Each such command gets a `command/done` of kind `error`, after the turn's closers
+/// when there are any, in the order the commands ran. A command that left its compaction open (a
+/// `compaction/start` after its `command/run`, with no `compaction/end` or `compaction/failed` since) is a
+/// `/compact` cut mid-summary: its span is closed first with a `compaction/failed` marked `stopped`, the record a
+/// Stop writes, and the command answers "Compaction cancelled.", as DSH settles a cancelled `/compact`. Any other
+/// command answers the generic words. Such a compaction is the command's, not a turn's pre-step, so it does not
+/// open a turn. A command a closer has answered is no longer open, so a second restart writes nothing more.
 pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Vec<SessionEvent> {
+    // Commands run with no `command/done` yet, in run order, each with the compaction span it left open, if any:
+    // `(fromSeq, throughSeq)` as the log holds them.
+    let mut commands: Vec<(String, Option<(Option<Value>, Option<Value>)>)> = Vec::new();
     let mut open = false;
     // Unanswered call ids in the order the model asked for them, with a JavaScript `Map`'s semantics: a call
     // asked for again keeps its place, and an answered one is removed.
@@ -149,9 +181,33 @@ pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Ve
                     _ => {}
                 }
             }
+            "command/run" => {
+                // A JavaScript `Map`'s `set`: a run named again keeps its place and starts afresh.
+                if let Some(id) = event.get("commandId").and_then(Value::as_str) {
+                    match commands.iter_mut().find(|(command, _)| command == id) {
+                        Some((_, span)) => *span = None,
+                        None => commands.push((id.to_string(), None)),
+                    }
+                }
+            }
+            "command/done" => {
+                if let Some(id) = event.get("commandId").and_then(Value::as_str) {
+                    commands.retain(|(command, _)| command != id);
+                }
+            }
             "compaction/start" => {
-                if prompted {
+                if let Some((_, span)) = commands.last_mut() {
+                    *span = Some((
+                        event.get("fromSeq").cloned(),
+                        event.get("throughSeq").cloned(),
+                    ));
+                } else if prompted {
                     open = true;
+                }
+            }
+            "compaction/end" | "compaction/failed" => {
+                for (_, span) in &mut commands {
+                    *span = None;
                 }
             }
             "message" => {
@@ -177,14 +233,14 @@ pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Ve
     let Some(last) = events.last() else {
         return Vec::new();
     };
-    if !open {
+    if !open && commands.is_empty() {
         return Vec::new();
     }
 
     let at = last.at.clone();
     let mut seq = events.len() as u64;
     let rounds = requests.saturating_sub(retries);
-    let mut closers = Vec::with_capacity(pending.len() + 2);
+    let mut closers = Vec::with_capacity(pending.len() + 2 + 2 * commands.len());
     let mut push = |kind: &str, fields: Value| {
         let Value::Object(fields) = fields else {
             unreachable!("a closer's fields are an object");
@@ -197,33 +253,60 @@ pub fn open_turn_closers(events: &[Arc<SessionEvent>], cause: CloserCause) -> Ve
         });
         seq += 1;
     };
-    for call in &pending {
+    if open {
+        for call in &pending {
+            push(
+                "message",
+                json!({"message": {
+                    "role": "tool",
+                    "toolCallId": call,
+                    "content": [{"type": "text", "text": cause.result_text()}],
+                }}),
+            );
+        }
+        let mut completed = Map::new();
+        completed.insert("text".to_string(), Value::String(text));
+        completed.insert("reasoning".to_string(), Value::String(reasoning));
+        if let Some(reason) = finish_reason {
+            completed.insert("finishReason".to_string(), Value::String(reason));
+        }
+        completed.insert("rounds".to_string(), Value::from(rounds));
+        completed.insert(
+            "denials".to_string(),
+            Value::from(errors + pending.len() as u64),
+        );
+        completed.insert("ended".to_string(), json!([cause.ended_text()]));
+        push("assistant/completed", Value::Object(completed));
         push(
-            "message",
-            json!({"message": {
-                "role": "tool",
-                "toolCallId": call,
-                "content": [{"type": "text", "text": cause.result_text()}],
-            }}),
+            "turn/completed",
+            json!({"rounds": rounds, "reason": {"kind": cause.kind()}}),
         );
     }
-    let mut completed = Map::new();
-    completed.insert("text".to_string(), Value::String(text));
-    completed.insert("reasoning".to_string(), Value::String(reasoning));
-    if let Some(reason) = finish_reason {
-        completed.insert("finishReason".to_string(), Value::String(reason));
+    for (command, span) in commands {
+        let text = match span {
+            Some((from_seq, through_seq)) => {
+                let mut failed = Map::new();
+                if let Some(from_seq) = from_seq {
+                    failed.insert("fromSeq".to_string(), from_seq);
+                }
+                if let Some(through_seq) = through_seq {
+                    failed.insert("throughSeq".to_string(), through_seq);
+                }
+                failed.insert("stopped".to_string(), Value::Bool(true));
+                failed.insert(
+                    "reason".to_string(),
+                    Value::String(cause.compaction_text().to_string()),
+                );
+                push("compaction/failed", Value::Object(failed));
+                COMPACTION_CANCELLED
+            }
+            None => cause.command_text(),
+        };
+        push(
+            "command/done",
+            json!({"commandId": command, "kind": "error", "text": text}),
+        );
     }
-    completed.insert("rounds".to_string(), Value::from(rounds));
-    completed.insert(
-        "denials".to_string(),
-        Value::from(errors + pending.len() as u64),
-    );
-    completed.insert("ended".to_string(), json!([cause.ended_text()]));
-    push("assistant/completed", Value::Object(completed));
-    push(
-        "turn/completed",
-        json!({"rounds": rounds, "reason": {"kind": cause.kind()}}),
-    );
     closers
 }
 
@@ -507,5 +590,171 @@ mod tests {
         compact.event("compaction/end");
         assert!(interrupted_turn_closers(&compact.0).is_empty());
         assert!(interrupted_turn_closers(&balanced().0).is_empty());
+    }
+
+    /// #206: a server killed while `/compact` waited on its summary left `command/run` and `compaction/start`
+    /// with no closer and no `command/done`, so the page drew the row as Running… for good. The lines are the
+    /// ones `test/session-turn-closers.test.ts` pins for the TypeScript build.
+    #[test]
+    fn a_command_left_running_is_answered_and_a_cut_compact_closes_its_span_as_cancelled() {
+        let balanced = || {
+            let mut log = Log::new();
+            log.event("session/created")
+                .user("hi")
+                .event("model/request")
+                .chunk(json!({"type": "text-delta", "text": "hello"}), 0)
+                .push("assistant/completed", json!({"text": "hello"}), 0)
+                .push("turn/completed", json!({"rounds": 1}), 0);
+            log
+        };
+        let run = |log: &mut Log, id: &str, name: &str| {
+            log.push(
+                "command/run",
+                json!({"commandId": id, "name": name, "source": {"kind": "user"}}),
+                0,
+            );
+        };
+        let shape = |log: &Log| -> Vec<(String, Option<String>)> {
+            interrupted_turn_closers(&log.0)
+                .into_iter()
+                .map(|event| {
+                    let id = event
+                        .get("commandId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    (event.kind, id)
+                })
+                .collect()
+        };
+
+        let mut cut = balanced();
+        run(&mut cut, "cmd-1", "compact");
+        cut.push(
+            "compaction/start",
+            json!({"fromSeq": 1, "throughSeq": 4, "shadowedSeqs": [1, 2, 3, 4]}),
+            5,
+        );
+        let closers = interrupted_turn_closers(&cut.0);
+        assert_eq!(
+            lines(&closers),
+            vec![
+                r#"{"seq":8,"at":"2026-10-30T10:05:00.000Z","type":"compaction/failed","fromSeq":1,"throughSeq":4,"stopped":true,"reason":"the process exited before the compaction finished"}"#,
+                r#"{"seq":9,"at":"2026-10-30T10:05:00.000Z","type":"command/done","commandId":"cmd-1","kind":"error","text":"Compaction cancelled."}"#,
+            ]
+        );
+        // A log already closed is not closed again, so a second restart writes nothing.
+        let mut closed = cut.0.clone();
+        closed.extend(closers.into_iter().map(Arc::new));
+        assert!(interrupted_turn_closers(&closed).is_empty());
+
+        // Any other command left running answers the generic words.
+        let mut goal = balanced();
+        run(&mut goal, "cmd-1", "goal");
+        assert_eq!(
+            lines(&interrupted_turn_closers(&goal.0)),
+            vec![
+                r#"{"seq":7,"at":"2026-10-30T10:00:00.000Z","type":"command/done","commandId":"cmd-1","kind":"error","text":"The process exited before this command finished."}"#,
+            ]
+        );
+
+        // A /compact killed after its compaction landed is answered, and its span is not closed twice; nor is a
+        // span a refusal already closed.
+        let mut landed = balanced();
+        run(&mut landed, "cmd-1", "compact");
+        landed
+            .event("compaction/start")
+            .event("compaction/summary")
+            .push("context/note", json!({"origin": "compaction"}), 0)
+            .event("compaction/end")
+            .event("compaction/measured");
+        let answered = interrupted_turn_closers(&landed.0);
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].kind, "command/done");
+        assert_eq!(
+            answered[0].get("text"),
+            Some(&json!("The process exited before this command finished."))
+        );
+        let mut refused = balanced();
+        run(&mut refused, "cmd-1", "compact");
+        refused.event("compaction/start").push(
+            "compaction/failed",
+            json!({"refused": true, "reason": "no"}),
+            0,
+        );
+        assert_eq!(
+            shape(&refused),
+            vec![("command/done".to_string(), Some("cmd-1".to_string()))]
+        );
+
+        // A command that settled needs nothing.
+        let mut finished = balanced();
+        run(&mut finished, "cmd-1", "compact");
+        finished
+            .event("compaction/start")
+            .event("compaction/end")
+            .push(
+                "command/done",
+                json!({"commandId": "cmd-1", "kind": "success", "text": "Compacted 2 history items (~10 tokens)."}),
+                0,
+            );
+        assert!(interrupted_turn_closers(&finished.0).is_empty());
+
+        // Each open command is answered in the order it ran, and the open span is the latest command's.
+        let mut two = balanced();
+        run(&mut two, "cmd-1", "goal");
+        run(&mut two, "cmd-2", "compact");
+        two.push(
+            "compaction/start",
+            json!({"fromSeq": 1, "throughSeq": 4}),
+            0,
+        );
+        assert_eq!(
+            shape(&two),
+            vec![
+                ("command/done".to_string(), Some("cmd-1".to_string())),
+                ("compaction/failed".to_string(), None),
+                ("command/done".to_string(), Some("cmd-2".to_string())),
+            ]
+        );
+
+        // A compaction inside a command is the command's, not a turn's pre-step (#154), even after a prompt
+        // nobody answered: no turn is closed for it.
+        let mut after_prompt = balanced();
+        after_prompt.user("a prompt nobody answered");
+        run(&mut after_prompt, "cmd-1", "compact");
+        after_prompt.push(
+            "compaction/start",
+            json!({"fromSeq": 1, "throughSeq": 4}),
+            0,
+        );
+        assert_eq!(
+            shape(&after_prompt)
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .collect::<Vec<_>>(),
+            vec!["compaction/failed", "command/done"]
+        );
+
+        // A turn and a command both left open: the turn is closed first, then the command, with seqs
+        // continuing the log and every closer at the last real event's time.
+        let mut both = balanced();
+        run(&mut both, "cmd-1", "goal");
+        both.user("go")
+            .event("model/request")
+            .chunk(json!({"type": "text-delta", "text": "half"}), 9);
+        let closers = interrupted_turn_closers(&both.0);
+        assert_eq!(
+            closers
+                .iter()
+                .map(|event| event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["assistant/completed", "turn/completed", "command/done"]
+        );
+        let n = both.0.len() as u64;
+        assert_eq!(
+            closers.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![n, n + 1, n + 2]
+        );
+        assert!(closers.iter().all(|event| event.at == at(9)));
     }
 }

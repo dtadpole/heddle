@@ -97,7 +97,9 @@ attach for writing, the first process to take the session's writer lock appends 
 else: an `error (INTERRUPTED)` result for each open call, then `assistant/completed` and `turn/completed`
 with `reason: { kind: 'interrupted' }`. A session no live writer holds reads with the same closers added and
 nothing written (`SessionService.events`, DSH's cold read), so the view is right from the first read after a
-restart. A turn running in this process holds the lock already and is never closed.
+restart. A turn running in this process holds the lock already and is never closed. A command left running
+is closed the same way (#206): a `command/done` of kind `error`, and for a `/compact` cut mid-summary a stopped
+`compaction/failed` first and the words "Compaction cancelled.", so its row no longer reads Running… for good.
 
 This is a source folder rather than a type folder: it carries code, not instances of a
 registered content type. Its entry point exists so that a reader who opens it learns

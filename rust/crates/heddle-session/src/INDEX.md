@@ -27,7 +27,7 @@ The sources of the crate, with unit tests in `#[cfg(test)]` modules beside the c
 | [`surface.rs`](surface.rs) | the surface fold and message derivation | `store.ts` free functions |
 | [`store.rs`](store.rs) | `SessionStore` | `store.ts` `SessionStore` |
 | [`mode.rs`](mode.rs) | the `permission/mode` fold | `mode.ts` |
-| [`repair.rs`](repair.rs) | the closers of a turn its writer never finished (DSH's `openTurnClosers`): appended at the first write-open after a restart, shown by a read while no writer holds the session (issue #5) | `repair.ts` |
+| [`repair.rs`](repair.rs) | the closers of a turn, and of a command, its writer never finished (DSH's `openTurnClosers`; #206 for a command): appended at the first write-open after a restart, shown by a read while no writer holds the session (issue #5) | `repair.ts` |
 | [`inbox.rs`](inbox.rs) | the pending-input inbox: DSH's `agent/inbox/spliced` fold, `queue_steer`, `claim_next_step` (R-developer-two-5) | `inbox.ts` |
 | [`definition.rs`](definition.rs) | `_sessions_/<name>/{session.json, INDEX.md}` | `definition.ts` |
 | [`title_text.rs`](title_text.rs) | DSH's title cleaning: `clean_session_title`, applied to every title the store and a definition write | `title-text.ts` |
