@@ -575,11 +575,14 @@ test('a tree redraw gives the keyboard its place back: the same row and the same
    */
   const render = pageFunction('async function renderTree() {')
   assert.match(render, /^async function renderTree\(\) \{\s*\/\*\*[^]*?\*\/\s*let focus = treeFocus\(\)/, 'renderTree reads the keyboard\'s place before it reads anything else')
-  /** And again just before the rows are replaced: focus may have moved while the two reads were in flight (developer-ten). */
-  assert.match(render, /focus = treeFocus\(\)\s*heldTreeFocus = focus\s*treeList\.replaceChildren\(/, 'reads it again and holds it while it replaces the rows')
+  /**
+   * And again just before the rows are replaced: focus may have moved while the reads were in flight (developer-ten). Since
+   * #143 the new rows are drawn off the page and put in at once, keeping every row that stays (`placeTree`).
+   */
+  assert.match(render, /focus = treeFocus\(\)\s*heldTreeFocus = focus\s*placeTree\(treeList, built\)/, 'reads it again and holds it while it puts the new rows in')
   assert.match(render, /markSelection\(\)\s*restoreTreeFocus\(focus, true\)\s*$/, 'and gives it back once the rows are drawn')
   const flat = pageFunction('async function renderFlatList() {')
-  assert.match(flat, /const focus = treeFocus\(\)\s*heldTreeFocus = focus\s*treeList\.replaceChildren\(\)/, 'the flat list does the same')
+  assert.match(flat, /const focus = treeFocus\(\)\s*heldTreeFocus = focus\s*rowIndex\.clear\(\)/, 'the flat list does the same, once its index is read (#143)')
   assert.match(flat, /restoreTreeFocus\(focus, true\)\s*$/)
   const rows = pageFunction('function paintSessionRows(list, group, depth) {')
   assert.match(rows, /^function paintSessionRows\(list, group, depth\) \{\s*const focus = treeFocus\(\)/, 'so does a group\'s session rows')

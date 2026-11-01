@@ -73,6 +73,8 @@ async function draw(sessions: object[]): Promise<Drawn> {
     const treeList = new Element('ul')
     const rowIndex = new Map()
     let heldTreeFocus = null
+    /** Which tree drawing is the newest (#143); the list draws only for the newest. */
+    let treeGeneration = 0
     let shownOrders = {}
     let current = null
     const archiveMode = 'show'

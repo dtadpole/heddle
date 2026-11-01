@@ -13370,6 +13370,14 @@ const EXPANDED_KEY = 'heddle.tree.expanded.v1'
 
 /** Where each drawn node is, so a remembered path can be opened without walking the DOM by label. */
 const rowIndex = new Map()
+/**
+ * Each row element's own entry (`{ node, li, icon }`, the value `rowIndex` keeps for its path). A redraw builds its rows
+ * off the page and keeps a live row the new drawing draws the same (#143), so the entry goes with the element: `rowIndex`
+ * is made again from the rows on the page once the drawing is in.
+ */
+const rowEntries = new WeakMap()
+/** The rows whose level a person's (or a reveal's) `toggle` is still reading: a redraw gives such a row its own complete level. */
+const levelsLoading = new WeakSet()
 
 /**
  * Paint the running marks from the set the stream fills.
@@ -14582,15 +14590,18 @@ let selectedPath = null
  * `aria-selected` is DSH's attribute for a chosen tree item — its session rows carry `aria-selected` and this UI used
  * `aria-current` on the row instead, which is the attribute for "the current item in a set" on a link or a page, and
  * not what a treeitem means. The stylesheet reads the attribute, so the style and the ARIA name cannot disagree.
+ *
+ * `root` is the list marked: the tree on the page, or a redraw's new tree before it goes in (#143), so the open session's
+ * row arrives marked and the page never shows the tree with no row selected.
  */
-function markSelection() {
+function markSelection(root = treeList) {
   /** DSH's `containsCurrent`: a group whose subtree holds the open session tints its folder, folded or not. */
   for (const entry of rowIndex.values()) {
     if (entry.node.group === undefined) continue
     if (WorkspaceTree.containsSession(entry.node.group, current)) entry.li.dataset.containsCurrent = 'true'
     else delete entry.li.dataset.containsCurrent
   }
-  for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
+  for (const li of root.querySelectorAll('li[role="treeitem"]')) {
     if (!li.hasAttribute('aria-selected')) continue
     /**
      * A tree row is chosen by path (a session row's path is `session:<id>`, so a file shown in the panel takes the mark
@@ -18329,14 +18340,20 @@ function wireSessionDrag(items, key, rows, order) {
     const meta = rows.find((each) => each.id === li.dataset.sessionId)
     const row = li.querySelector(':scope > .row')
     if (meta === undefined || row === null) continue
+    /**
+     * What a drag over this row reads, kept on the item and read when the drag happens: a redraw that keeps the row's
+     * element hands it the new drawing's account, rows and order (#143), as DSH's keyed row is rendered with fresh props.
+     */
+    li.sessionDrag = { key, rows, order, meta }
     const half = (event) => {
       const box = row.getBoundingClientRect()
       return event.clientY < box.top + box.height / 2 ? 'before' : 'after'
     }
-    const accepts = () => sessionDragging !== null && sessionDragging.key === key && WorkspaceTree.leads(meta) === sessionDragging.pinned
+    const accepts = () => sessionDragging !== null && sessionDragging.key === li.sessionDrag.key && WorkspaceTree.leads(li.sessionDrag.meta) === sessionDragging.pinned
     if (WorkspaceTree.draggable(meta)) {
       row.draggable = true
       row.addEventListener('dragstart', (event) => {
+        const { key, meta } = li.sessionDrag
         event.dataTransfer.effectAllowed = 'move'
         event.dataTransfer.setData('text/plain', meta.id)
         sessionDragging = { key, id: meta.id, pinned: WorkspaceTree.leads(meta) }
@@ -18359,6 +18376,7 @@ function wireSessionDrag(items, key, rows, order) {
       const drag = sessionDragging
       sessionDragging = null
       clearDropMarks()
+      const { key, rows, order, meta } = li.sessionDrag
       const next = WorkspaceTree.dragOrder(order, rows, drag, { id: meta.id, half: half(event) })
       if (next === undefined) return
       rememberOrder(WorkspaceTree.withSessionOrder(orderState, key, next, { ...(await liveOrders()), [key]: order }))
@@ -18559,11 +18577,15 @@ function paintSessionRows(list, group, depth) {
     label.className = 'label'
     label.textContent = WorkspaceTree.overflowLabel(mode, drawn.hidden)
     row.append(spacer, label)
-    /** DSH's button is the same element after the toggle, so it keeps focus; the redraw gives it back here (`treeFocus`). */
-    row.onclick = () => {
+    /**
+     * DSH's button is the same element after the toggle, so it keeps focus; the redraw gives it back here (`treeFocus`).
+     * The list redrawn is the one the pressed button is in: a tree redraw that keeps a row puts this handler on the button
+     * it kept, in the list on the page, not the one this was drawn in (#143).
+     */
+    row.onclick = (event) => {
       if (mode === 'more') watermarks.set(group.key, WorkspaceTree.nextWatermark(total, shown))
       else watermarks.delete(group.key)
-      paintSessionRows(list, group, depth)
+      paintSessionRows(event?.currentTarget?.parentElement?.parentElement ?? list, group, depth)
       markSelection()
     }
     li.append(row)
@@ -19088,7 +19110,9 @@ function nodeRow(node, depth = 0) {
   }
 
   li.append(row)
-  rowIndex.set(node.path, { node, li, icon })
+  const entry = { node, li, icon }
+  rowIndex.set(node.path, entry)
+  rowEntries.set(li, entry)
   return li
 }
 
@@ -19951,8 +19975,13 @@ async function reopenChildGroups(node) {
   }
 }
 
-/** Draw a node's children, fetching them when they were not part of the answer that drew the node. */
-async function loadChildren(node, li) {
+/**
+ * Draw a node's children, fetching them when they were not part of the answer that drew the node.
+ *
+ * `offPage` is a redraw's tree drawn off the page (#143): its levels are not on the page while they are read, the drawing
+ * opens a level's child groups itself, all at once, and it marks the selection before the tree goes in.
+ */
+async function loadChildren(node, li, offPage = false) {
   const group = document.createElement('ul')
   group.setAttribute('role', 'group')
   li.append(group)
@@ -19982,8 +20011,8 @@ async function loadChildren(node, li) {
         setNote('could not read ' + node.label + ': ' + (error && error.message))
       }
     }
-    /** The group may have been closed (or the tree redrawn) while its folders were being read. */
-    if (!group.isConnected) return
+    /** The group may have been closed (or the tree redrawn) while its folders were being read; off the page it is not on it yet. */
+    if (!offPage && !group.isConnected) return
     /** A workspace folder the server may not read keeps its `Files` heading, over the one line that says why (#106). */
     if (files.length > 0 || failed !== null) {
       const heading = document.createElement('li')
@@ -20001,6 +20030,8 @@ async function loadChildren(node, li) {
       empty.textContent = 'nothing inside'
       group.append(empty)
     }
+    /** Off the page the redraw opens the child groups itself, alongside this read, and marks the tree before the swap (#143). */
+    if (offPage) return
     markSelection()
     await reopenChildGroups(node)
     return
@@ -20062,7 +20093,7 @@ async function loadChildren(node, li) {
     empty.textContent = 'nothing inside'
     group.append(empty)
   }
-  markSelection()
+  if (!offPage) markSelection()
 }
 
 /**
@@ -20072,19 +20103,10 @@ async function loadChildren(node, li) {
  */
 async function toggle(node, li, remember = true) {
   const open = li.dataset.open === 'true'
-  const entry = rowIndex.get(node.path)
-  /**
-   * The signs of one state: the **folder glyph on the left**, and the list item's own `aria-expanded` — which is
-   * what tells a screen reader, and is why removing the `+` / `−` box lost no accessibility: the state was
-   * always on the row as well as on the control.
-   */
-  const paint = (isOpen) => {
-    li.dataset.open = isOpen ? 'true' : 'false'
-    if (li.hasAttribute('aria-expanded')) li.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
-    if (entry !== undefined && entry.icon !== undefined) entry.icon.replaceChildren(kindIcon(node.kind, isOpen))
-  }
+  /** The row's own entry: while a redraw is drawn off the page, `rowIndex` names that drawing's row for the path (#143). */
+  const entry = rowEntries.get(li) ?? rowIndex.get(node.path)
   if (open) {
-    paint(false)
+    paintDisclosure(node, li, entry?.icon, false)
     li.querySelector('ul[role=group]')?.remove()
     if (node.group !== undefined) resetWatermarks(node.group)
     expanded.delete(node.path)
@@ -20092,13 +20114,29 @@ async function toggle(node, li, remember = true) {
     rememberExpanded()
     return
   }
-  paint(true)
+  paintDisclosure(node, li, entry?.icon, true)
   if (remember) {
     expanded.add(node.path)
     rememberExpanded()
   }
-  await loadChildren(node, li)
+  levelsLoading.add(li)
+  try {
+    await loadChildren(node, li)
+  } finally {
+    levelsLoading.delete(li)
+  }
   applySearch()
+}
+
+/**
+ * The signs of one state: the **folder glyph on the left**, and the list item's own `aria-expanded` — which is what tells
+ * a screen reader, and is why removing the `+` / `−` box lost no accessibility: the state was always on the row as well as
+ * on the control. One painter for `toggle` and for a redraw opening rows off the page (#143).
+ */
+function paintDisclosure(node, li, icon, isOpen) {
+  li.dataset.open = isOpen ? 'true' : 'false'
+  if (li.hasAttribute('aria-expanded')) li.setAttribute('aria-expanded', isOpen ? 'true' : 'false')
+  if (icon !== undefined && icon !== null) icon.replaceChildren(kindIcon(node.kind, isOpen))
 }
 
 /**
@@ -20582,12 +20620,19 @@ document.getElementById('session-search').addEventListener('keydown', (event) =>
  * could not complete would be worse than a list that does not offer it.
  */
 async function renderFlatList() {
+  /**
+   * The rows on screen stay while the index is read and are replaced in one step once it is in (#143): the list was
+   * emptied first, so for a read's round trip it showed no row and no selection. A drawing a newer one overtook draws
+   * nothing (`treeGeneration`, which `renderTree` counts).
+   */
+  const generation = treeGeneration
+  const index = await loadSearchIndex()
+  if (generation !== treeGeneration) return
   const focus = treeFocus()
   heldTreeFocus = focus
-  treeList.replaceChildren()
   rowIndex.clear()
-  const index = await loadSearchIndex()
   if (index === null) {
+    treeList.replaceChildren()
     setNote('could not read the sessions')
     /**
      * The redraw still ends as a drawn list's does: the new conversation's place repainted, and the keyboard place it
@@ -20679,12 +20724,39 @@ async function renderFlatList() {
   restoreTreeFocus(focus, true)
 }
 
+/**
+ * Which drawing of the tree is the newest (#143). Every `renderTree` call counts one; a drawing a newer one overtook (its
+ * reads answered later, or it was still reading its levels) draws nothing, and its caller waits for the newest to land
+ * (`newestTreeDrawn`), so the step it takes next reads the tree on the page. `treeLanded` is the newest one that finished.
+ */
+let treeGeneration = 0
+let treeLanded = 0
+let treeWaiters = []
+
+/** Resolves once the newest drawing has landed: at once when it already has. */
+function newestTreeDrawn() {
+  if (treeLanded === treeGeneration) return Promise.resolve()
+  return new Promise((resolve) => treeWaiters.push(resolve))
+}
+
+/**
+ * A drawing ends: the newest lets the callers of the drawings it overtook go on, and an overtaken one answers with the
+ * newest's landing, which is what its caller then waits for.
+ */
+function treeDrawn(generation) {
+  if (generation !== treeGeneration) return newestTreeDrawn()
+  treeLanded = generation
+  for (const resolve of treeWaiters.splice(0)) resolve()
+  return undefined
+}
+
 async function renderTree() {
   /** The redraw replaces every row; the keyboard's place in the tree is given back once it is drawn (#92). */
   let focus = treeFocus()
+  const generation = ++treeGeneration
   if (groupingMode === 'list') {
     await renderFlatList()
-    return
+    return treeDrawn(generation)
   }
   /**
    * The workspace tree (G2): DSH's workspace browser drawn from two answers — `/api/workspaces` (each workspace with its
@@ -20695,28 +20767,31 @@ async function renderTree() {
   let sessions
   try {
     const [workspaceResponse, sessionResponse] = await Promise.all([fetch('/api/workspaces'), fetch('/api/sessions')])
+    /** A newer drawing started while these were read: what they answered is older than what it draws (#143). */
+    if (generation !== treeGeneration) return treeDrawn(generation)
     if (workspaceResponse.status === 503) {
       workspaceRoutes = 'absent'
       treeList.replaceChildren()
       rowIndex.clear()
       setNote('this profile does not load the workspace plugin')
       paintConversationTarget()
-      return
+      return treeDrawn(generation)
     }
     if (!workspaceResponse.ok) {
       workspaceRoutes = 'absent'
       /** A server older than the route still lists every session, so the page says so and shows them flat. */
       await renderFlatList()
-      setNote('this server predates the workspace tree, so sessions are listed in one column')
-      return
+      if (generation === treeGeneration) setNote('this server predates the workspace tree, so sessions are listed in one column')
+      return treeDrawn(generation)
     }
     workspaceRoutes = 'served'
     workspaces = (await workspaceResponse.json()).workspaces ?? []
     sessions = sessionResponse.ok ? await sessionResponse.json() : []
   } catch (error) {
-    setNote('could not read the workspaces: ' + (error && error.message))
-    return
+    if (generation === treeGeneration) setNote('could not read the workspaces: ' + (error && error.message))
+    return treeDrawn(generation)
   }
+  if (generation !== treeGeneration) return treeDrawn(generation)
   /** The whole answer, before the archive filter draws from it: New session's lookup reads this one (#119). */
   if (Array.isArray(workspaces)) {
     knownWorkspaces = workspaces
@@ -20749,20 +20824,26 @@ async function renderTree() {
     rememberExpanded()
   }
   /**
-   * Read again now, after the two reads above: the keyboard may have moved to another row, or out of the tree, while they
-   * were in flight, and the place given back is where it is when the rows are replaced.
+   * The new tree is drawn **off the page**, in a list of its own, with every group that will be open already opened, and
+   * goes in at once (#143). It used to replace the rows with every group folded, then open each remembered one after
+   * another, a `/api/tree` read apiece, and mark the selection last: for 40 ms to over a second, several times a turn (a
+   * refresh follows every message, answer and turn end, any session's), the open workspaces' sessions and the selected row
+   * were gone and the rows below moved up under the pointer, so a click aimed at a session landed on another row. DSH's
+   * tree is a keyed React list: its expansion is state (`groupExpansion`, dsh-client-ui-workspace `lib/client.js:1270`,
+   * `:1284-1286`), the open groups are derived from it on every render (`:3061-3068`), each group carries its sessions when
+   * open (`deriveGroups`, `:1091-1112`; `:3161` renders an open group's children), and its rows are keyed by `group.key`
+   * and `node.id` (`:3328`, `:3307`), with `aria-selected` from the open session (`:2257`, `:2278`); so a refresh updates
+   * rows in place and no row leaves.
    */
-  focus = treeFocus()
-  heldTreeFocus = focus
-  treeList.replaceChildren(...treeGroups.map((group) => groupRow(group)))
+  const built = document.createElement('ul')
+  built.append(...treeGroups.map((group) => groupRow(group)))
   /**
    * An empty tree says why (#107): under `Archived only` DSH's "No archived sessions yet" with its way back, else heddle's
    * no-roots note. It used to print the no-roots note whenever no group was drawn, which `Archived only` also causes with
-   * a workspace registered.
+   * a workspace registered. The placeholder goes in once the empty tree has.
    */
   const empty = WorkspaceTree.emptyList(archiveMode, groupingMode, treeGroups.length)
-  if (empty !== null) paintEmptyList(empty)
-  else {
+  if (empty === null) {
     /**
      * The note names the place as the tree does (#134's P3: it printed the folder's last segment, `default-workspace`,
      * under a row reading *Default workspace*). With no session open it is where the first message will start one, so a
@@ -20783,25 +20864,216 @@ async function renderTree() {
     expanded.add(ownGroup)
     rememberExpanded()
   }
-  const opening = new Set([...expanded, ...WorkspaceTree.openGroups(treeGroups, { expanded, collapsed })])
+  const opening = treeOpening()
   /**
-   * A reload comes back to the shape a person left: remembered groups and folders are opened again shallowest first, so
-   * a deeper one is drawn by the time its turn comes, and each level is re-read rather than remembered. A group under a
-   * folded one is not drawn, so it waits for its parent.
+   * A reload comes back to the shape a person left: remembered groups and folders are opened again, each level re-read
+   * rather than remembered — every group at once, a nested one as soon as its parent has drawn it, a folder once the read
+   * that lists it is in (`openOffPage`). A group under a folded one is not drawn, so it stays closed with its parent.
    */
-  for (const path of [...opening].sort((left, right) => left.split('/').length - right.split('/').length)) {
-    const entry = rowIndex.get(path)
-    // A file is never in `expanded`; skipping it keeps a stray key from asking for a disclosure it has.
-    if (entry === undefined || entry.node.kind === 'file' || entry.li.dataset.open === 'true') continue
-    await toggle(entry.node, entry.li, false)
-  }
+  const drawing = openOffPage(built, opening)
+  /** The watermarks the open groups' sessions were just drawn with: Show more pressed while the levels are read moves one. */
+  const marks = watermarkState()
+  const opened = await drawing
+  if (generation !== treeGeneration) return treeDrawn(generation)
+  /**
+   * A group opened or folded while the levels were read — by a person, a reveal, or a session opened from elsewhere — and
+   * the drawing would undo it: the tree is drawn again from the shape as it is now, and the page keeps the person's act
+   * until then.
+   */
+  if (!sameMembers(opening, treeOpening())) return renderTree()
+  if (watermarkState() !== marks) repaintSessionRowsOffPage(built)
+  /** The selection is marked in the new tree, so the open session's row goes in selected (#143). */
   if (selectedPath === null) syncSelectionToSession()
+  markSelection(built)
+  /**
+   * Read again now, after the reads above: the keyboard may have moved to another row, or out of the tree, while they
+   * were in flight, and the place given back is where it is when the rows are replaced.
+   */
+  focus = treeFocus()
+  heldTreeFocus = focus
+  placeTree(treeList, built)
+  if (empty !== null) paintEmptyList(empty)
+  indexDrawnRows()
+  /** A standing search follows the redraw, as each `toggle` that reopened a group used to make it. */
+  if (opened > 0) applySearch()
+  treeDrawn(generation)
   /** The rows just drawn are what the new conversation's place is read from (#134). */
   paintConversationTarget()
-  /** The schedule marks go on the drawn rows first; giving the keyboard its place back is the redraw's last act (#92). */
-  paintScheduleMarks()
+  /**
+   * The status and schedule marks go on the drawn rows first — a kept row's too, since a state may have changed while the
+   * levels were read; giving the keyboard its place back is the redraw's last act (#92).
+   */
+  paintRunningMarks()
   markSelection()
   restoreTreeFocus(focus, true)
+}
+
+/** The rows a drawing opens (C33): every saved open one, and the groups DSH's defaults open (`WorkspaceTree.openGroups`). */
+function treeOpening() {
+  return new Set([...expanded, ...WorkspaceTree.openGroups(treeGroups, { expanded, collapsed })])
+}
+
+function sameMembers(left, right) {
+  return left.size === right.size && [...left].every((key) => right.has(key))
+}
+
+/** The watermarks as a comparable string; `Infinity` (every session shown) kept apart from a missing mark. */
+function watermarkState() {
+  return JSON.stringify([...watermarks].map(([key, mark]) => [key, Number.isFinite(mark) ? mark : 'all']))
+}
+
+/**
+ * Open, in a tree drawn off the page, every row `opening` names, each one's level read at the same time as the others'
+ * (#143). A group draws its child groups and sessions before its folder read (`loadChildren`), so those child groups open
+ * alongside that read; a remembered folder opens once the read that lists it is in. Resolves with how many rows it opened.
+ */
+async function openOffPage(list, opening) {
+  const reads = []
+  for (const li of [...list.children]) {
+    const entry = rowEntries.get(li)
+    // A file is never in `expanded`; skipping it keeps a stray key from asking for a disclosure it has.
+    if (entry === undefined || entry.li !== li || entry.node.kind === 'file' || li.dataset.open === 'true' || !opening.has(entry.node.path)) continue
+    reads.push(openRowOffPage(entry, opening))
+  }
+  let opened = 0
+  for (const count of await Promise.all(reads)) opened += count
+  return opened
+}
+
+async function openRowOffPage(entry, opening) {
+  const { node, li, icon } = entry
+  paintDisclosure(node, li, icon, true)
+  const reading = loadChildren(node, li, true)
+  const level = li.querySelector(':scope > ul[role="group"]')
+  const nested = level === null ? Promise.resolve(0) : openOffPage(level, opening)
+  await reading
+  const folders = level === null ? Promise.resolve(0) : openOffPage(level, opening)
+  const [groups, more] = await Promise.all([nested, folders])
+  return 1 + groups + more
+}
+
+/** Draw the open groups' session rows of a tree drawn off the page again, from the watermarks as they are now. */
+function repaintSessionRowsOffPage(list) {
+  for (const li of [...list.children]) {
+    const entry = rowEntries.get(li)
+    if (entry === undefined || li.dataset.open !== 'true') continue
+    const level = li.querySelector(':scope > ul[role="group"]')
+    if (level === null) continue
+    if (entry.node.group !== undefined) paintSessionRows(level, entry.node.group, Number(li.style.getPropertyValue('--tree-depth') || '0') + 1)
+    repaintSessionRowsOffPage(level)
+  }
+}
+
+/**
+ * What a tree item is matched by between the tree on the page and a new drawing: a row by its key (`data-row-key`, a
+ * session by its id and anything else by its path, DSH's `session:` and `workspace:` keys), a group's Show more by its
+ * place, and a heading or a level's line by what it says.
+ */
+function treeItemKey(item) {
+  if (item.dataset?.rowKey !== undefined) return 'row:' + item.dataset.rowKey
+  if (item.dataset?.slot === 'more') return 'more'
+  return 'static:' + treeItemSignature(item)
+}
+
+/**
+ * Attributes a row's drawing does not decide: what the selection, a drag, the hover card (it takes a row's tooltip) or an
+ * open menu (`aria-expanded` on its `…`) put there afterwards. A row's open state is `data-open`.
+ */
+const TREE_VOLATILE_ATTRIBUTES = new Set(['aria-selected', 'data-contains-current', 'data-drop', 'data-workspace-drop', 'title', 'aria-expanded', 'data-scrolled', 'data-clipped', 'data-trailing'])
+
+/**
+ * A tree item as drawn, its sublist aside: tag, attributes and text, without what is painted after the drawing (the status
+ * and schedule marks, the age, whose stamp moves with every message and whose words follow the clock and a pending
+ * question) or set by a person since (a menu opened and placed). Two items with one signature draw the same row; a kept
+ * row takes the new age (`adoptTreeItem`).
+ */
+function treeItemSignature(item) {
+  const parts = []
+  const walk = (node) => {
+    const classes = String(node.className?.baseVal ?? node.className ?? '')
+    if (/(^|\s)(status-dot|schedule-mark)(\s|$)/.test(classes)) return
+    const menu = /(^|\s)menu(\s|$)/.test(classes)
+    const attributes = [...node.attributes]
+      .filter((attribute) => !TREE_VOLATILE_ATTRIBUTES.has(attribute.name) && !(menu && (attribute.name === 'hidden' || attribute.name === 'style')) && !(/(^|\s)age(\s|$)/.test(classes) && (attribute.name === 'aria-hidden' || attribute.name === 'data-stamp')))
+      .map((attribute) => attribute.name + '=' + attribute.value)
+      .sort()
+    parts.push('<' + node.tagName + ' ' + attributes.join(' ') + '>')
+    const children = [...node.children].filter((child) => !(node === item && child.tagName === 'UL'))
+    if (children.length > 0) for (const child of children) walk(child)
+    else if (!/(^|\s)age(\s|$)/.test(classes)) parts.push(node.textContent)
+    parts.push('</>')
+  }
+  walk(item)
+  return parts.join('')
+}
+
+/**
+ * Put a tree drawn off the page into the list on the page (#143), keeping every item the page already shows that the new
+ * drawing draws the same: its element stays, in place, with its focus, its open menu and its hover card. A kept row takes
+ * the new drawing's facts (`adoptTreeItem`) and its level is matched the same way; a row that changed, and a new one, go in
+ * as drawn. The list then holds the new drawing's items in its order, moved as little as `placeKeyed` can.
+ */
+function placeTree(live, fresh) {
+  const shown = new Map()
+  for (const item of [...live.children]) {
+    const key = treeItemKey(item)
+    if (!shown.has(key)) shown.set(key, item)
+  }
+  const wanted = []
+  for (const item of [...fresh.children]) {
+    const key = treeItemKey(item)
+    const kept = shown.get(key)
+    if (kept !== undefined && treeItemSignature(kept) === treeItemSignature(item)) {
+      shown.delete(key)
+      adoptTreeItem(kept, item)
+      wanted.push(kept)
+    } else wanted.push(item)
+  }
+  placeKeyed(live, wanted)
+}
+
+/**
+ * A kept item takes what the new drawing drew for it: the node its handlers read is brought to the new facts in place (a
+ * group's sessions, a session's stamps), its drag reads the new order, its age the new words, a Show more its new handler,
+ * and its level is matched in turn. A level a person's `toggle` is still reading is given the new drawing's whole level.
+ */
+function adoptTreeItem(kept, fresh) {
+  const was = rowEntries.get(kept)
+  const now = rowEntries.get(fresh)
+  if (was !== undefined && now !== undefined && was.node !== now.node) {
+    for (const name of Object.keys(was.node)) if (!Object.hasOwn(now.node, name)) delete was.node[name]
+    Object.assign(was.node, now.node)
+  }
+  if (fresh.sessionDrag !== undefined) kept.sessionDrag = fresh.sessionDrag
+  if (kept.dataset.slot === 'more') {
+    const button = kept.querySelector(':scope > button')
+    const next = fresh.querySelector(':scope > button')
+    if (button !== null && next !== null) button.onclick = next.onclick
+  }
+  /** The new stamp, and its words unless a pending question's words stand there; `paintRunningMarks` repaints those after. */
+  const age = kept.querySelector(':scope > .row > .row-right > .age')
+  const freshAge = fresh.querySelector(':scope > .row > .row-right > .age')
+  if (age !== null && freshAge !== null) {
+    if (freshAge.dataset.stamp !== undefined && age.dataset.stamp !== freshAge.dataset.stamp) age.dataset.stamp = freshAge.dataset.stamp
+    const words = freshAge.dataset.trailing === 'true' ? relativeAge(age.dataset.stamp) : freshAge.textContent
+    if (age.dataset.trailing !== 'true' && age.textContent !== words) age.textContent = words
+  }
+  const level = kept.querySelector(':scope > ul[role="group"]')
+  const freshLevel = fresh.querySelector(':scope > ul[role="group"]')
+  if (freshLevel === null) level?.remove()
+  else if (level === null || levelsLoading.has(kept)) {
+    level?.remove()
+    kept.append(freshLevel)
+  } else placeTree(level, freshLevel)
+}
+
+/** `rowIndex` again, from the rows now on the page: a kept row with its own entry, a new one with the drawing's. */
+function indexDrawnRows() {
+  rowIndex.clear()
+  for (const li of treeList.querySelectorAll('li[role="treeitem"]')) {
+    const entry = rowEntries.get(li)
+    if (entry !== undefined) rowIndex.set(entry.node.path, entry)
+  }
 }
 
 /**

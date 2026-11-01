@@ -115,21 +115,72 @@ function load(storage: Record<string, string>, current: string | null, grouping 
     const expanded = readExpanded()
     ${collapsedMemory()}
     const rowIndex = new Map()
+    const rowEntries = new WeakMap()
+    const levelsLoading = new WeakSet()
+    const watermarks = new Map()
+    let treeGeneration = 0
+    let treeLanded = 0
+    let treeWaiters = []
+    /**
+     * As much of an element as the tree's drawing touches here: a row, the list of a level, and the tree itself. Since
+     * #143 a redraw draws its rows off the page and puts them in at once, so the stand-in has children and a parent.
+     */
+    class Item {
+      constructor(tag) {
+        this.tagName = tag.toUpperCase()
+        this.dataset = {}
+        this.attributes = {}
+        this.childList = []
+        this.parentElement = null
+        this.isConnected = true
+      }
+      get children() { return [...this.childList] }
+      setAttribute(name, value) { this.attributes[name] = String(value) }
+      getAttribute(name) { return name in this.attributes ? this.attributes[name] : null }
+      hasAttribute(name) { return name in this.attributes }
+      append(...nodes) { for (const node of nodes) { node.remove(); node.parentElement = this; this.childList.push(node) } }
+      replaceChildren(...nodes) { for (const child of this.children) child.remove(); this.append(...nodes) }
+      remove() { if (this.parentElement !== null) this.parentElement.childList.splice(this.parentElement.childList.indexOf(this), 1); this.parentElement = null }
+      querySelector(selector) {
+        if (selector !== ':scope > ul[role="group"]' && selector !== 'ul[role=group]') throw new Error('unexpected selector ' + selector)
+        return this.childList.find((child) => child.tagName === 'UL') ?? null
+      }
+      querySelectorAll(selector) {
+        if (selector !== 'li[role="treeitem"]') throw new Error('unexpected selector ' + selector)
+        const rows = []
+        const walk = (node) => { for (const child of node.childList) { if (child.tagName === 'LI' && child.getAttribute('role') === 'treeitem') rows.push(child); walk(child) } }
+        walk(this)
+        return rows
+      }
+    }
+    const document = { createElement: (tag) => new Item(tag) }
     /** A group's row: open or not, and the node the page's toggle reads. */
     function groupRow(group) {
       const node = group.workspace === null
         ? { kind: 'ungrouped', path: '#ungrouped', group }
         : { kind: 'workspace', path: group.path, group }
-      const li = { dataset: { open: 'false' }, isConnected: true, hasAttribute: () => false, setAttribute() {}, querySelector: () => null }
-      rowIndex.set(node.path, { node, li })
+      const li = new Item('li')
+      li.setAttribute('role', 'treeitem')
+      li.dataset.open = 'false'
+      const entry = { node, li }
+      rowIndex.set(node.path, entry)
+      rowEntries.set(li, entry)
       return li
     }
-    /** Opening a group draws its child groups and then reopens them, as the page's loadChildren does. */
-    async function loadChildren(node) {
-      for (const child of node.group.children) groupRow(child)
-      if (typeof reopenChildGroups === 'function') await reopenChildGroups(node)
+    /**
+     * Opening a group draws its child groups and then reopens them, as the page's loadChildren does; a redraw off the page
+     * opens them itself, all at once (#143).
+     */
+    async function loadChildren(node, li, offPage = false) {
+      const level = new Item('ul')
+      li.append(level)
+      for (const child of node.group.children) level.append(groupRow(child))
+      if (!offPage && typeof reopenChildGroups === 'function') await reopenChildGroups(node)
     }
-    const treeList = { replaceChildren() {} }
+    const treeList = new Item('ul')
+    /** The new rows go in as drawn; which row keeps its element is test/page-tree-steady.test.ts's. */
+    const placeTree = (live, fresh) => live.replaceChildren(...fresh.children)
+    const paintRunningMarks = () => {}
     const fetch = async (url) => {
       if (url === '/api/workspaces') return { ok: true, status: 200, json: async () => ({ workspaces: WORKSPACES }) }
       if (url === '/api/sessions') return { ok: true, status: 200, json: async () => SESSIONS }
@@ -152,7 +203,9 @@ function load(storage: Record<string, string>, current: string | null, grouping 
     const applySearch = () => {}
     ${source('rememberExpanded')}
     ${source('toggle')}
+    ${optional('paintDisclosure')}
     ${source('renderTree')}
+    ${['newestTreeDrawn', 'treeDrawn', 'treeOpening', 'sameMembers', 'watermarkState', 'openOffPage', 'openRowOffPage', 'repaintSessionRowsOffPage', 'indexDrawnRows'].map(optional).join('\n')}
     ${optional('openCurrentGroup')}
     ${optional('reopenChildGroups')}
     const list = (key) => (key in stored ? JSON.parse(stored[key]).sort() : null)
@@ -185,6 +238,8 @@ function load(storage: Record<string, string>, current: string | null, grouping 
       Promise,
       Map,
       Set,
+      WeakMap,
+      WeakSet,
       Array,
       Object,
       String,
