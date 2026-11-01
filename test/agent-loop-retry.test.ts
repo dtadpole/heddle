@@ -78,8 +78,8 @@ async function turn(replies: readonly Reply[], retryPolicy?: unknown) {
     { name: 'flaky', kind: 'openai-chat', baseUrl: double.baseUrl, model: 'm', ...(retryPolicy !== undefined ? { retryPolicy } : {}) } as never,
   ])
   const outcome = await runTurn(ctx, { session, endpoint: 'flaky', prompt: 'hello', maxRounds: 2 }).then(
-    (result) => ({ result }),
-    (error: unknown) => ({ error: error as Error & { code?: string } }),
+    (result) => ({ result, error: undefined }),
+    (error: unknown) => ({ result: undefined, error: error as Error & { code?: string } }),
   )
   const events = sessions.store.read(session)
   const answers = sessions.store
