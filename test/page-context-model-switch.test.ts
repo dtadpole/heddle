@@ -58,6 +58,7 @@ interface Harness {
   reload(window?: number): Promise<void>
   open(): void
   reads: { url: string; resolve(value: unknown): void }[]
+  ready(): Promise<void>
 }
 function harness(open = true): Harness {
   const cells = new Map<string, Element>()
@@ -67,6 +68,23 @@ function harness(open = true): Harness {
   } })
   const popover = new Element()
   const reads: Harness['reads'] = []
+  const waiters: (() => void)[] = []
+  const ready = () => reads.length > 0 ? Promise.resolve() : new Promise<void>((resolve) => waiters.push(resolve))
+  // Bind the representation consumed by the selected real renderer, not a replacement renderer.
+  const liveTurnMap = /\bliveTurns\s*\.\s*get\s*\(/.test(source('updateStatusBar'))
+  const selectionBindings: Record<string, string> = {
+    selectionSeq: 'let selectionSeq = 0;',
+    latestSelection: 'const latestSelection = new Map();',
+    serverSeats: 'const serverSeats = new Map();',
+    heldSeats: 'const heldSeats = new Map();',
+    recordedSelections: 'const recordedSelections = new Set();',
+    pendingSaves: 'const pendingSaves = new Set();',
+    saveChain: 'let saveChain = Promise.resolve();',
+  }
+  const recordSource = source('recordSelection')
+  const recordBindings = Object.entries(selectionBindings)
+    .filter(([name]) => new RegExp(`\\b${name}\\b`).test(recordSource))
+    .map(([, binding]) => binding).join('\n')
   const names = ['configuredEndpoint', 'modelsOf', 'modelEntryOf', 'levelsOf', 'selectedModelId',
     'windowFor', 'modelTitle', 'effectiveEffort', 'modelMissingFrom', 'currentEndpointName',
     'renderModelSeat', 'recordSelection', 'chooseModel', 'applySessionModel', 'loadEndpoints',
@@ -81,8 +99,11 @@ function harness(open = true): Harness {
       { name: 'other', models: [{ id: 'other-model', contextWindow: 400000 }] }
     ];
     const sessionStats = { turns: 1, steps: 1, lastPromptTokens: 50000 };
-    const liveTurns = 0, liveRounds = 0, liveGenerationMs = 0, liveDecodeTokens = 0;
+    const liveTurns = ${liveTurnMap ? 'new Map()' : '0'};
+    const liveRounds = 0, liveGenerationMs = 0, liveDecodeTokens = 0;
     const liveUsage = undefined;
+    let defaultSelection = { model: null, effort: null };
+    ${recordBindings}
     let modelPending = false, statPopoverKind = initiallyOpen ? 'context' : null;
     const modelLabel = new Element(), modelEffort = new Element(), modelTrigger = new Element(),
       modelSpinner = new Element(), modelMenu = new Element();
@@ -107,6 +128,7 @@ function harness(open = true): Harness {
     ({ snapshot, choose: chooseModel, apply: applySessionModel,
       reload: async (window) => {
         const task = loadEndpoints();
+        await ready();
         const read = takeRead();
         read.resolve({ ok: true, json: async () => ({ default: 'fixture', endpoints: [
           { name: 'fixture', models: [{ id: chosenModel, ...(window === undefined ? {} : { contextWindow: window }) }] }
@@ -114,9 +136,12 @@ function harness(open = true): Harness {
         await task;
       }, open: () => { statPopoverKind = 'context'; renderStatPopover(); } })
   `, { Element, statusBar, popover, initiallyOpen: open,
-    queueRead: (read: Harness['reads'][number]) => reads.push(read), takeRead: () => reads.shift(),
-  }, { timeout: 1000 }) as Omit<Harness, 'reads'>
-  return { ...h, reads }
+    queueRead: (read: Harness['reads'][number]) => {
+      reads.push(read)
+      for (const notify of waiters.splice(0)) notify()
+    }, takeRead: () => reads.shift(), ready,
+  }, { timeout: 1000 }) as Omit<Harness, 'reads' | 'ready'>
+  return { ...h, reads, ready }
 }
 function assertReading(h: Harness, percent: string, figure: string) {
   const at = h.snapshot()
@@ -128,35 +153,36 @@ function assertReading(h: Harness, percent: string, figure: string) {
   const circumference = 2 * Math.PI * 5.5
   assert.equal(at.ring, `${(fraction * circumference).toFixed(2)} ${circumference.toFixed(2)}`, 'the ring follows the same percentage')
 }
-function acceptSelection(h: Harness) {
+async function acceptSelection(h: Harness) {
+  await h.ready()
   const read = h.reads.shift()
   assert.ok(read)
   assert.equal(read.url, '/api/sessions/session/model', 'selection POST is the only request; no turn or stats GET')
   read.resolve({ ok: true, json: async () => ({}) })
 }
 
-test('actual chooseModel refreshes dock and already-open context popover before selection POST settles, without a turn', async () => {
+test('actual chooseModel refreshes dock and already-open context popover before selection POST settles, without a turn', { timeout: 10000 }, async () => {
   const h = harness()
   assertReading(h, '50%', '~50K / 100K')
   const pending = h.choose('fixture', 'large')
   assert.equal(h.snapshot().label, 'large')
   assertReading(h, '25%', '~50K / 200K')
-  acceptSelection(h)
+  await acceptSelection(h)
   await pending
   assertReading(h, '25%', '~50K / 200K')
 })
 
-test('opening actual context popover after switching cannot show new percent beside old dock percent', async () => {
+test('opening actual context popover after switching cannot show new percent beside old dock percent', { timeout: 10000 }, async () => {
   const h = harness(false)
   const pending = h.choose('fixture', 'large')
-  acceptSelection(h)
+  await acceptSelection(h)
   await pending
   h.open()
   assert.equal(h.snapshot().headline, '25%', 'newly opened actual popover already reads the new model on the old page')
   assertReading(h, '25%', '~50K / 200K')
 })
 
-test('recorded endpoint/model changes and catalogue window refreshes repaint the same dock', async () => {
+test('recorded endpoint/model changes and catalogue window refreshes repaint the same dock', { timeout: 10000 }, async () => {
   const h = harness()
   h.apply('other', 'other-model')
   assertReading(h, '13%', '~50K / 400K')
@@ -167,10 +193,10 @@ test('recorded endpoint/model changes and catalogue window refreshes repaint the
   assert.equal(h.reads.length, 0)
 })
 
-test('switching to an unreported window blanks the percentage rather than keeping an old reading', async () => {
+test('switching to an unreported window blanks the percentage rather than keeping an old reading', { timeout: 10000 }, async () => {
   const h = harness()
   const pending = h.choose('fixture', 'unknown')
-  acceptSelection(h)
+  await acceptSelection(h)
   await pending
   assert.equal(h.snapshot().pill, '')
   assert.equal(h.snapshot().hidden, true)
