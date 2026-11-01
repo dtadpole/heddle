@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 
 import { contextBreakdownWithFallback, laneOf, previewOf, projectLedger, projectRows, projectSessionStats, projectTimeline, type LedgerEvent } from '../src/server/ledger.ts'
@@ -586,4 +587,107 @@ test('the context panel prefers the recorded sections and falls back to the curr
   })
   assert.deepEqual(contextBreakdownWithFallback(undefined, { systemTokens: 0, toolsTokens: 0, messageTokens: 0 }), {}, 'a surface with nothing in it measures nothing to show')
   assert.deepEqual(contextBreakdownWithFallback(undefined, undefined), {})
+})
+
+/** The shared timeline fixture: the same events the Rust crate's test reads, and the records both builds must produce. */
+const timelineFixture = new URL('../rust/crates/heddle-web-trajectory/tests/fixtures/', import.meta.url)
+const timelineEvents = (): LedgerEvent[] =>
+  readFileSync(new URL('timeline-records.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+
+test('an answer is measured from its step request, so its TTFT is the wait for the first token (#124)', () => {
+  /**
+   * DSH measures an answer from its step's start: TTFT = first token - step start. Both ledgers opened the answer at its
+   * first chunk and measured TTFT from that same chunk, so every answer read TTFT 0 ms.
+   */
+  const answers = projectLedger(timelineEvents())
+    .turns.flatMap((turn) => turn.steps.flatMap((step) => step.records))
+    .filter((record) => record.kind === 'assistant')
+  const settled = answers.find((record) => record.inFlight !== true)
+  assert.deepEqual(
+    { startedAt: settled?.startedAt, ttftMs: settled?.ttftMs, durationMs: settled?.durationMs },
+    { startedAt: '2026-10-31T09:00:01.000Z', ttftMs: 300, durationMs: 1200 },
+    'the answer starts at its request; TTFT is the 300 ms before its first token, and it lasts until it completed',
+  )
+  const running = answers.find((record) => record.inFlight === true)
+  assert.deepEqual(
+    { startedAt: running?.startedAt, ttftMs: running?.ttftMs, durationMs: running?.durationMs },
+    { startedAt: '2026-10-31T09:00:03.400Z', ttftMs: 300, durationMs: undefined },
+    'a running answer keeps its first chunk as its start, so the axis reaches the stream, and knows its TTFT already',
+  )
+})
+
+test('the timeline carries one record per timed record, the same as the Rust projection (shared fixture)', () => {
+  const expected = JSON.parse(readFileSync(new URL('timeline-records.expected.json', timelineFixture), 'utf8'))
+  assert.deepEqual(projectTimeline(projectLedger(timelineEvents())).records, expected)
+})
+
+test('a record carries the TTFT split only when its TTFT lies within its duration', () => {
+  const at = '2026-10-31T09:00:00.000Z'
+  const record = (ttftMs: number | undefined, durationMs: number) =>
+    ({ kind: 'assistant', label: 'assistant', text: 'x', startedAt: at, durationMs, ...(ttftMs !== undefined ? { ttftMs } : {}) }) as never
+  const records = projectTimeline({
+    turns: [{ index: 1, steps: [{ startedAt: at, records: [record(500, 200), record(100, 400), record(undefined, 300)] }] }],
+    loose: [],
+  } as never).records ?? []
+  const split = records.map((entry) => [entry.ttftMs, entry.decodingMs])
+  assert.deepEqual(split, [[undefined, undefined], [100, 300], [undefined, undefined]], 'a TTFT past its duration, or none, is one plain bar')
+})
+
+
+/** The shared Between turns fixture: the same events the Rust crate's `between_turns.rs` reads, and the rows both builds place. */
+const betweenEvents = (): LedgerEvent[] =>
+  readFileSync(new URL('between-turns.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+
+test('a record between turns sits where it happened, in its own section, the same as the Rust projection (shared fixture)', () => {
+  /**
+   * DSH: "A standalone compaction request appears chronologically in its own `Between turns` section." Both builds listed
+   * every loose record after the last turn, with no section head, so a /compact between turns 1 and 2 read as if it had
+   * run after turn 2.
+   */
+  const expected = JSON.parse(readFileSync(new URL('between-turns.expected.json', timelineFixture), 'utf8'))
+  const placed = projectRows(projectLedger(betweenEvents())).map((row) => ({
+    turn: row.turn,
+    ...(row.step !== undefined ? { step: row.step } : {}),
+    loose: row.loose,
+    turnStart: row.turnStart,
+    stepStart: row.stepStart,
+    label: row.record.label,
+    ...(row.record.afterTurn !== undefined ? { afterTurn: row.record.afterTurn } : {}),
+  }))
+  assert.deepEqual(placed, expected)
+})
+
+test('only a loose record names the turn it follows, and a hand-built one without it follows the last turn', () => {
+  const ledger = projectLedger(betweenEvents())
+  assert.ok(
+    ledger.turns.flatMap((turn) => turn.steps.flatMap((step) => step.records)).every((record) => record.afterTurn === undefined),
+    'a record inside a turn needs no placement',
+  )
+  const rows = projectRows({ ...ledger, loose: [...ledger.loose, { kind: 'system', label: 'note', text: 'kept' }] })
+  const last = rows.at(-1)
+  assert.deepEqual([last?.loose, last?.turnStart, last?.record.label], [true, false, 'note'], 'it joins the section after the last turn, not dropped')
+})
+
+test("a user record carries its images and files in content order, as DSH's inspector lists them (shared fixture)", () => {
+  /**
+   * S151: DSH's trajectory inspector lists a user message's attachments after its text (image thumbnail or file icon,
+   * name, size, type), and its row counts them. The ledger dropped every non-text part. Repeats are kept, an unnamed image
+   * is named by its stored file, a zero-byte file keeps its size, and a part with no stored path is skipped.
+   */
+  const events = readFileSync(new URL('attachments.jsonl', timelineFixture), 'utf8')
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as LedgerEvent)
+  const users = projectRows(projectLedger(events))
+    .filter((row) => row.kind === 'user')
+    .map((row) => ({ text: row.record.text, attachments: row.record.attachments }))
+  assert.deepEqual(users, JSON.parse(readFileSync(new URL('attachments.expected.json', timelineFixture), 'utf8')))
+  const plain = projectLedger([{ seq: 1, type: 'message', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } }])
+  assert.equal('attachments' in (plain.turns[0]?.steps[0]?.records[0] ?? {}), false, 'a message without attachments carries no key')
 })

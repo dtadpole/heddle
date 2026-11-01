@@ -27,7 +27,11 @@ export interface LedgerEvent {
   readonly seq?: number
   readonly at?: string
   readonly type: string
-  readonly message?: { readonly role?: string; readonly content?: readonly { readonly type?: string; readonly text?: string }[]; readonly toolCallId?: string }
+  readonly message?: {
+    readonly role?: string
+    readonly content?: readonly { readonly type?: string; readonly text?: string; readonly name?: string; readonly path?: string; readonly mimeType?: string; readonly bytes?: number }[]
+    readonly toolCallId?: string
+  }
   readonly chunk?: { readonly type?: string; readonly id?: string; readonly name?: string; readonly arguments?: string; readonly text?: string; readonly finishReason?: string; readonly usage?: TokenUsage }
   readonly text?: string
   readonly reasoning?: string
@@ -98,6 +102,49 @@ export interface LedgerRecord {
   readonly state?: 'running' | 'ok' | 'error'
   /** Which note wrote a context row: the system prompt, the instruction baseline, or another note. */
   readonly origin?: string
+  /**
+   * On a record outside every turn (`Ledger.loose`): the index of the turn it follows, `0` when it came before the
+   * first. A slash command, a goal change or a standalone compaction between two turns is placed by it, so the table
+   * draws it in its own Between turns section where it happened, as DSH does, not after the last turn.
+   */
+  readonly afterTurn?: number
+  /**
+   * On a user record: the images and files the message carried, in their content order (repeats kept), as DSH's
+   * inspector lists them after the text. Absent when it carried none. `url` is this server's read-only upload address;
+   * the page adds its session, as the chat's attachment cards do.
+   */
+  readonly attachments?: readonly LedgerAttachment[]
+}
+
+/** One image or file a user message carried (S151): what the trajectory's row counts and its inspector lists. */
+export interface LedgerAttachment {
+  readonly kind: 'image' | 'file'
+  readonly name: string
+  readonly mimeType?: string
+  readonly bytes: number
+  readonly url: string
+}
+
+/**
+ * The attachments of a message's content: its image and file parts, in order, each named by its recorded name (else its
+ * stored file's name) and served at `/api/uploads/<stored name>`, the address the chat's cards use. A part with no
+ * stored path is skipped: there is nothing to show.
+ */
+export function ledgerAttachmentsOf(content: NonNullable<LedgerEvent['message']>['content']): LedgerAttachment[] {
+  const attachments: LedgerAttachment[] = []
+  for (const part of content ?? []) {
+    if (part.type !== 'image' && part.type !== 'file') continue
+    const leaf = typeof part.path === 'string' ? (part.path.split('/').pop() ?? '') : ''
+    if (leaf === '') continue
+    attachments.push({
+      kind: part.type,
+      name: typeof part.name === 'string' && part.name !== '' ? part.name : leaf,
+      ...(typeof part.mimeType === 'string' && part.mimeType !== '' ? { mimeType: part.mimeType } : {}),
+      bytes: typeof part.bytes === 'number' && Number.isFinite(part.bytes) && part.bytes >= 0 ? part.bytes : 0,
+      url: `/api/uploads/${encodeURIComponent(leaf)}`,
+    })
+  }
+  return attachments
 }
 
 /** A step: one model request and everything it produced. */
@@ -122,7 +169,10 @@ export interface LedgerTurn {
 /** The whole ledger, plus the totals a header shows. */
 export interface Ledger {
   readonly turns: readonly LedgerTurn[]
-  /** Records that belong to no turn — a session that recorded events before the first prompt. */
+  /**
+   * Records that belong to no turn: events recorded before the first prompt or between two turns (a slash command, a
+   * goal change, a standalone compaction). Each carries `afterTurn`, the turn it follows.
+   */
   readonly loose: readonly LedgerRecord[]
   readonly tokens: {
     readonly input?: number
@@ -324,7 +374,10 @@ export interface LedgerRow {
   readonly turnStart: boolean
   /** True on a step's first row. */
   readonly stepStart: boolean
-  /** True for a record that belongs to no turn: a session that logged before its first prompt. */
+  /**
+   * True for a record that belongs to no turn: logged before the first prompt or between two turns. Such a row has turn
+   * `0`, and the first row of each run of them is a `turnStart`, the head of its Between turns section.
+   */
   readonly loose: boolean
   /**
    * The one line the table shows for the row, decided here rather than in the page.
@@ -369,6 +422,25 @@ export function previewOf(record: LedgerRecord): string {
  */
 export function projectRows(ledger: Ledger): readonly LedgerRow[] {
   const rows: LedgerRow[] = []
+  /**
+   * Records that belong to no turn sit where they happened, in a section of their own (DSH's `Between turns`): before
+   * the first turn, or after the turn their `afterTurn` names. They say so rather than inventing a turn number. A
+   * record without `afterTurn` (a ledger built by hand) follows the last turn, and a run whose turn is missing still
+   * comes last, so no record is dropped.
+   */
+  const lastTurn = ledger.turns.at(-1)?.index ?? 0
+  const between = new Map<number, LedgerRecord[]>()
+  for (const record of ledger.loose) {
+    const after = record.afterTurn ?? lastTurn
+    between.set(after, [...(between.get(after) ?? []), record])
+  }
+  const section = (after: number): void => {
+    ;(between.get(after) ?? []).forEach((record, index) => {
+      rows.push({ turn: 0, kind: record.kind, record, turnStart: index === 0, stepStart: false, loose: true, preview: previewOf(record) })
+    })
+    between.delete(after)
+  }
+  section(0)
   for (const turn of ledger.turns) {
     for (const step of turn.steps) {
       step.records.forEach((record, index) => {
@@ -384,14 +456,9 @@ export function projectRows(ledger: Ledger): readonly LedgerRow[] {
         })
       })
     }
+    section(turn.index)
   }
-  /**
-   * Records that belong to no turn come last, and say so rather than inventing a turn number: a session
-   * that recorded context before its first prompt has no turn to belong to.
-   */
-  for (const record of ledger.loose) {
-    rows.push({ turn: 0, kind: record.kind, record, turnStart: false, stepStart: false, loose: true, preview: previewOf(record) })
-  }
+  for (const after of [...between.keys()].sort((left, right) => left - right)) section(after)
   return rows
 }
 
@@ -410,6 +477,11 @@ interface PendingAssistant {
   reasoning: string[]
   startedAt?: string
   firstTokenAt?: string
+  /**
+   * The step's request, when this is the step's first answer (#124). DSH measures an answer from its step's start: the
+   * record spans the wait for the first token, and TTFT is that wait. A later answer in the same step keeps its own start.
+   */
+  requestAt?: string
   inputTokens?: number
   outputTokens?: number
   cacheReadTokens?: number
@@ -436,6 +508,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
    */
   let prologue: LedgerRecord[] = []
   let step: { startedAt?: string; endedAt?: string; model?: string; records: LedgerRecord[] } | null = null
+  /** How many answers the current step has opened; only its first is measured from the step's request (#124). */
+  let answersInStep = 0
   let pending: PendingAssistant | null = null
 
   const tokens = {
@@ -508,11 +582,11 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     turn = null
   }
 
-  /** Where a record goes: the open step, or the turn's prologue. */
+  /** Where a record goes: the open step, or the turn's prologue, or the loose records, marked with the turn they follow. */
   const put = (record: LedgerRecord): void => {
     if (step !== null) step.records.push(record)
     else if (turn !== null) prologue.push(record)
-    else loose.push(record)
+    else loose.push({ ...record, afterTurn: turns.at(-1)?.index ?? 0 })
   }
 
   /**
@@ -539,7 +613,13 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     if (pending === null) return
     const text = pending.parts.join('')
     const reasoning = pending.reasoning.join('')
-    const ttft = between(pending.startedAt, pending.firstTokenAt)
+    /**
+     * A settled answer spans its step's request to its completion (#124; before, both ends of TTFT were the first chunk,
+     * so it read 0). A running answer keeps its first chunk as its start, the newest point it knows, so the axis still
+     * reaches the stream; it has no duration, so it carries no split, only the TTFT it already knows.
+     */
+    const answerStart = settled ? (pending.requestAt ?? pending.startedAt) : pending.startedAt
+    const ttft = pending.requestAt !== undefined ? between(pending.requestAt, pending.firstTokenAt) : undefined
     if (reasoning.length > 0) {
       put({ kind: 'reasoning', label: 'reasoning', text: reasoning, ...(pending.startedAt !== undefined ? { startedAt: pending.startedAt } : {}) })
     }
@@ -548,8 +628,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
         kind: 'assistant',
         label: 'assistant',
         text,
-        ...(pending.startedAt !== undefined ? { startedAt: pending.startedAt } : {}),
-        ...(settled && at !== undefined && between(pending.startedAt, at) !== undefined ? { durationMs: between(pending.startedAt, at) } : {}),
+        ...(answerStart !== undefined ? { startedAt: answerStart } : {}),
+        ...(settled && at !== undefined && between(answerStart, at) !== undefined ? { durationMs: between(answerStart, at) } : {}),
         ...(!settled ? { inFlight: true } : {}),
         ...(ttft !== undefined ? { ttftMs: ttft } : {}),
         /**
@@ -580,7 +660,8 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
         settleAssistant(event.at, true)
         closeTurn(event.at)
         turn = { index: turns.length + 1, startedAt: event.at, steps: [] }
-        prologue = [{ kind: 'user', label: 'user', text, ...(event.at !== undefined ? { startedAt: event.at } : {}) }]
+        const attachments = ledgerAttachmentsOf(event.message?.content)
+        prologue = [{ kind: 'user', label: 'user', text, ...(event.at !== undefined ? { startedAt: event.at } : {}), ...(attachments.length > 0 ? { attachments } : {}) }]
         continue
       }
       if (role === 'tool') {
@@ -628,6 +709,7 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
       /** The prompt waits for this step, which is the one it belongs to. */
       closeStep(event.at, true)
       step = { startedAt: event.at, records: [], ...(event.model !== undefined ? { model: event.model } : {}) }
+      answersInStep = 0
       if (event.estimatedTokens !== undefined) {
         tokens.estimated = (tokens.estimated ?? 0) + event.estimatedTokens
         put({
@@ -653,7 +735,11 @@ export function projectLedger(events: readonly LedgerEvent[]): Ledger {
     if (event.type === 'assistant/chunk') {
       const chunk = event.chunk
       if (chunk === undefined) continue
-      pending ??= { parts: [], reasoning: [], ...(event.at !== undefined ? { startedAt: event.at } : {}), sawProviderUsage: false }
+      if (pending === null) {
+        const requestAt = answersInStep === 0 ? step?.startedAt : undefined
+        answersInStep += 1
+        pending = { parts: [], reasoning: [], ...(event.at !== undefined ? { startedAt: event.at } : {}), ...(requestAt !== undefined ? { requestAt } : {}), sawProviderUsage: false }
+      }
       /** The first token of the stream, which is what TTFT measures from the step start to. */
       pending.firstTokenAt ??= event.at
       if (chunk.type === 'text-delta' && chunk.text !== undefined) pending.parts.push(chunk.text)
@@ -853,8 +939,27 @@ export interface TimelineSpan {
   readonly running: boolean
 }
 
+/**
+ * One timed record on the overview, as DSH's overview draws it: a bar in its lane, positioned by its own start and end
+ * (fractions of the domain, like a span's). An assistant record whose time-to-first-token is known and within its
+ * duration also carries the split DSH draws inside the bar (TTFT, then decoding); any other record is one plain bar.
+ * A running record ends where it started, on the same clock as its turn's span, so a bar never ends past its span.
+ */
+export interface TimelineRecord {
+  readonly turn: number
+  readonly lane: LedgerLane
+  readonly kind: LedgerKind
+  readonly start: number
+  readonly end: number
+  readonly running: boolean
+  readonly ttftMs?: number
+  readonly decodingMs?: number
+}
+
 export interface Timeline {
   readonly spans: readonly TimelineSpan[]
+  /** Every timed record, ordered by start then turn; the spans above stay the per-turn summary. */
+  readonly records?: readonly TimelineRecord[]
   /** From the earliest recorded start to the latest recorded end, in milliseconds. `0` when nothing is timed. */
   readonly durationMs: number
   readonly startsAt?: string
@@ -863,7 +968,7 @@ export interface Timeline {
 
 /** Project a ledger onto a time axis. */
 export function projectTimeline(ledger: Ledger): Timeline {
-  const timed: { turn: number; start: number; end: number; kind: LedgerKind; running: boolean }[] = []
+  const timed: { turn: number; start: number; end: number; kind: LedgerKind; running: boolean; durationMs?: number; ttftMs?: number }[] = []
 
   for (const turn of ledger.turns) {
     for (const step of turn.steps) {
@@ -873,7 +978,15 @@ export function projectTimeline(ledger: Ledger): Timeline {
         if (Number.isNaN(start)) continue
         /** A finished record ends after its duration; a running one ends where the events end. */
         const end = record.durationMs !== undefined ? start + record.durationMs : start
-        timed.push({ turn: turn.index, start, end, kind: record.kind, running: record.inFlight === true })
+        timed.push({
+          turn: turn.index,
+          start,
+          end,
+          kind: record.kind,
+          running: record.inFlight === true,
+          ...(record.durationMs !== undefined ? { durationMs: record.durationMs } : {}),
+          ...(record.ttftMs !== undefined ? { ttftMs: record.ttftMs } : {}),
+        })
       }
     }
   }
@@ -939,8 +1052,31 @@ export function projectTimeline(ledger: Ledger): Timeline {
     })
   }
 
+  /**
+   * One bar per timed record (DSH's overview). The TTFT split rides only on a record whose time-to-first-token is known
+   * and lies within its duration; anything else would draw a split the record cannot support.
+   */
+  const records: TimelineRecord[] = timed
+    .map((entry) => {
+      const split =
+        entry.ttftMs !== undefined && entry.durationMs !== undefined && entry.ttftMs >= 0 && entry.ttftMs <= entry.durationMs
+          ? { ttftMs: entry.ttftMs, decodingMs: entry.durationMs - entry.ttftMs }
+          : {}
+      return {
+        turn: entry.turn,
+        lane: laneOf(entry.kind),
+        kind: entry.kind,
+        start: (entry.start - domainStart) / durationMs,
+        end: (entry.end - domainStart) / durationMs,
+        running: entry.running,
+        ...split,
+      }
+    })
+    .sort((left, right) => left.start - right.start || left.turn - right.turn)
+
   return {
     spans,
+    records,
     durationMs,
     startsAt: new Date(domainStart).toISOString(),
     endsAt: new Date(domainEnd).toISOString(),

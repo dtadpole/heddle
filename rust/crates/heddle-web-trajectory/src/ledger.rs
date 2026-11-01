@@ -104,6 +104,80 @@ pub struct LedgerRecord {
     /// Which note wrote a context row: `system-prompt`, `instructions`, `runtime-context`, ….
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// On a record outside every turn (`Ledger::loose`): the index of the turn it follows, `0` before the first. The
+    /// table draws it where it happened, in its own Between turns section, as DSH does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_turn: Option<u32>,
+    /// On a user record: the images and files the message carried, in content order (repeats kept), as DSH's inspector
+    /// lists them after the text. Empty, and not serialised, when it carried none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<LedgerAttachment>,
+}
+
+/// What an attachment is: an image the page can preview, or another file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentKind {
+    Image,
+    File,
+}
+
+/// One image or file a user message carried (S151), served at `/api/uploads/<stored name>` as the chat's cards are.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerAttachment {
+    pub kind: AttachmentKind,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub bytes: u64,
+    pub url: String,
+}
+
+/// The attachments of a message's content, as the TypeScript `ledgerAttachmentsOf`: its image and file parts in order,
+/// each named by its recorded name (else its stored file's name); a part with no stored path is skipped.
+pub fn ledger_attachments_of(event: &Value) -> Vec<LedgerAttachment> {
+    let Some(parts) = event
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            let kind = match part.get("type").and_then(Value::as_str) {
+                Some("image") => AttachmentKind::Image,
+                Some("file") => AttachmentKind::File,
+                _ => return None,
+            };
+            let leaf = part
+                .get("path")
+                .and_then(Value::as_str)
+                .and_then(|path| path.rsplit('/').next())
+                .filter(|leaf| !leaf.is_empty())?;
+            let name = part
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(leaf);
+            Some(LedgerAttachment {
+                kind,
+                name: name.to_owned(),
+                mime_type: part
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .filter(|mime| !mime.is_empty())
+                    .map(str::to_owned),
+                bytes: part.get("bytes").and_then(Value::as_u64).unwrap_or(0),
+                url: format!(
+                    "/api/uploads/{}",
+                    heddle_web_composer::js::encode_uri_component(leaf)
+                ),
+            })
+        })
+        .collect()
 }
 
 fn is_false(value: &bool) -> bool {
@@ -129,6 +203,8 @@ impl LedgerRecord {
             result: None,
             state: None,
             origin: None,
+            after_turn: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -197,7 +273,8 @@ pub struct LedgerTokens {
 #[serde(rename_all = "camelCase")]
 pub struct Ledger {
     pub turns: Vec<LedgerTurn>,
-    /// Records that belong to no turn — events recorded before the first prompt.
+    /// Records that belong to no turn: events recorded before the first prompt or between two turns (a slash command,
+    /// a goal change, a standalone compaction). Each carries `after_turn`, the turn it follows.
     pub loose: Vec<LedgerRecord>,
     pub tokens: LedgerTokens,
     /// How many records the ledger holds, loose ones included.
@@ -261,6 +338,9 @@ struct PendingAssistant {
     reasoning: Vec<String>,
     started_at: Option<String>,
     first_token_at: Option<String>,
+    /// The step's request, when this is the step's first answer (#124): DSH measures an answer from its step's
+    /// start, so the record spans the wait for the first token and TTFT is that wait. Mirrors `requestAt` in ledger.ts.
+    request_at: Option<String>,
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     cache_read_tokens: Option<u64>,
@@ -275,6 +355,7 @@ impl PendingAssistant {
             reasoning: Vec::new(),
             started_at: started_at.map(str::to_owned),
             first_token_at: None,
+            request_at: None,
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,
@@ -318,6 +399,8 @@ struct Projector {
     prologue: Vec<LedgerRecord>,
     step: Option<StepBuf>,
     pending: Option<PendingAssistant>,
+    /// How many answers the current step has opened; only its first is measured from the step's request (#124).
+    answers_in_step: u32,
     input: Option<u64>,
     output: Option<u64>,
     cache_read: Option<u64>,
@@ -334,6 +417,7 @@ impl Projector {
             prologue: Vec::new(),
             step: None,
             pending: None,
+            answers_in_step: 0,
             input: None,
             output: None,
             cache_read: None,
@@ -342,13 +426,15 @@ impl Projector {
         }
     }
 
-    /// Where a record goes: the open step, or the turn's prologue, or the loose records.
-    fn put(&mut self, record: LedgerRecord) {
+    /// Where a record goes: the open step, or the turn's prologue, or the loose records, marked with the turn they
+    /// follow.
+    fn put(&mut self, mut record: LedgerRecord) {
         if let Some(step) = self.step.as_mut() {
             step.records.push(record);
         } else if self.turn.is_some() {
             self.prologue.push(record);
         } else {
+            record.after_turn = Some(self.turns.last().map_or(0, |turn| turn.index));
             self.loose.push(record);
         }
     }
@@ -481,10 +567,21 @@ impl Projector {
         };
         let text = pending.parts.concat();
         let reasoning = pending.reasoning.concat();
-        let ttft = between(
-            pending.started_at.as_deref(),
-            pending.first_token_at.as_deref(),
-        );
+        // A settled answer spans its step's request to its completion (#124; before, both ends of TTFT were the first
+        // chunk, so it read 0). A running answer keeps its first chunk as its start, the newest point it knows, so the
+        // axis still reaches the stream; it has no duration, so it carries no split, only the TTFT it already knows.
+        let answer_start = if settled {
+            pending
+                .request_at
+                .as_deref()
+                .or(pending.started_at.as_deref())
+        } else {
+            pending.started_at.as_deref()
+        };
+        let ttft = match pending.request_at.as_deref() {
+            Some(request_at) => between(Some(request_at), pending.first_token_at.as_deref()),
+            None => None,
+        };
         if !reasoning.is_empty() {
             self.put(LedgerRecord::started(
                 LedgerKind::Reasoning,
@@ -495,14 +592,10 @@ impl Projector {
         }
         let has_usage = pending.input_tokens.is_some() || pending.output_tokens.is_some();
         if !text.is_empty() || has_usage {
-            let mut record = LedgerRecord::started(
-                LedgerKind::Assistant,
-                "assistant",
-                text,
-                pending.started_at.as_deref(),
-            );
+            let mut record =
+                LedgerRecord::started(LedgerKind::Assistant, "assistant", text, answer_start);
             if settled {
-                record.duration_ms = between(pending.started_at.as_deref(), at);
+                record.duration_ms = between(answer_start, at);
             }
             record.in_flight = !settled;
             record.ttft_ms = ttft;
@@ -562,12 +655,10 @@ impl Projector {
                     rounds: None,
                     steps: Vec::new(),
                 });
-                self.prologue = vec![LedgerRecord::started(
-                    LedgerKind::User,
-                    "user",
-                    message_text(event),
-                    at,
-                )];
+                let mut prompt =
+                    LedgerRecord::started(LedgerKind::User, "user", message_text(event), at);
+                prompt.attachments = ledger_attachments_of(event);
+                self.prologue = vec![prompt];
             }
             Some("tool") => {
                 let text = message_text(event);
@@ -628,6 +719,7 @@ impl Projector {
                 .map(str::to_owned),
             records: Vec::new(),
         });
+        self.answers_in_step = 0;
         let Some(estimated) = event.get("estimatedTokens").and_then(Value::as_u64) else {
             return;
         };
@@ -665,7 +757,12 @@ impl Projector {
             return;
         };
         if self.pending.is_none() {
-            self.pending = Some(PendingAssistant::new(at));
+            let mut pending = PendingAssistant::new(at);
+            if self.answers_in_step == 0 {
+                pending.request_at = self.step.as_ref().and_then(|step| step.started_at.clone());
+            }
+            self.answers_in_step += 1;
+            self.pending = Some(pending);
         }
         let pending = self
             .pending

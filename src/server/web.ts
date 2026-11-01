@@ -223,6 +223,13 @@ export async function startWebServer(ctx: Context, options: WebServerOptions = {
     }
   })
 
+  /**
+   * A session's title was written, so every page retitles it (#33). DSH records each title change and every view of the
+   * session follows (inventory-shell S16). That covers a person's rename, the first message's fallback and the title
+   * model's answer, so the push comes from the store's one rename path, not from the rename route alone.
+   */
+  ctx.on('session/renamed', ({ session, title }) => push({ log, subscribers }, 'sessions', { type: 'session/renamed', session, title }))
+
   // A committed reminder write, so the page's reminder views refresh (DSH's `schedule/changed`).
   ctx.on('schedule/changed', () => {
     // Through the stream's log, so the frame is numbered and replayed to a page that reconnects, as the Rust hub's
@@ -985,6 +992,21 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     const wanted = url.searchParams.get('path')
+    /**
+     * A folder that is gone (#141) is judged before it is read: under a root it is `404` with DSH's
+     * `workspace-file/not-found` and its sentence (dsh-api-workspace-files lib/index.js:568), so the page says the folder
+     * is gone instead of listing it empty; outside every root it is the `400` below. It is placed through the real path
+     * of what still exists, so the spelling a person typed (`/tmp/x/w` for `/private/tmp/x/w`) is the same folder.
+     */
+    const missing = wanted !== null && wanted.length > 0 ? workspaces.missingFolder(wanted) : undefined
+    if (missing !== undefined) {
+      if (missing.owner === undefined) {
+        respond(response, 400, 'application/json', `${JSON.stringify({ error: `${missing.path} is not under any workspace root` })}\n`)
+      } else {
+        respond(response, 404, 'application/json', `${JSON.stringify({ error: `no entry at "${missing.path}"`, code: 'workspace-file/not-found' })}\n`)
+      }
+      return
+    }
     if (wanted !== null && wanted.length > 0 && workspaces.owner(wanted) === undefined) {
       respond(response, 400, 'application/json', `${JSON.stringify({ error: `${canonicalPath(wanted)} is not under any workspace root` })}\n`)
       return
@@ -1593,7 +1615,13 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
       return
     }
     try {
-      const workspaceIds = workspaces.insertBefore(body.workspaceId, typeof before === 'string' ? before : undefined)
+      const { workspaceIds, moved } = workspaces.reorder(body.workspaceId, typeof before === 'string' ? before : undefined)
+      /**
+       * Every open page follows the host's order (#136): a move is pushed as a `workspace` frame, as an added, renamed or
+       * removed workspace is, and a page redraws its tree from it. A move that changes nothing is not announced, as
+       * DSH's registry writes nothing then (dsh-workspace lib/index.js:484, :492).
+       */
+      if (moved) push(state, 'workspace', { type: 'workspace/reordered', workspaceIds })
       respond(response, 200, 'application/json', `${JSON.stringify({ workspaceIds }, null, 2)}\n`)
     } catch (error) {
       const missing = (error as { code?: unknown; workspaceId?: unknown }).code === 'workspace/not-found'
@@ -1861,7 +1889,7 @@ async function handle(ctx: Context, request: IncomingMessage, response: ServerRe
     }
     /** Written after the store accepted it, so a folder that is not this session's never causes a write. */
     if (folder !== undefined) updateSessionDefinition(folder, { title: body.title })
-    push(state, 'sessions', { type: 'session/renamed', session: id, title: meta.title ?? body.title })
+    /** The store's rename announced it, and `session/renamed` pushed it to every page (#33). */
     respond(response, 200, 'application/json', `${JSON.stringify(meta, null, 2)}\n`)
     return
   }
