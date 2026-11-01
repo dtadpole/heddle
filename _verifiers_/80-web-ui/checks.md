@@ -50,9 +50,10 @@ grounded_in:
 - [`check-approval-keys.mjs`](check-approval-keys.mjs) — the approval card from the keyboard, with the browser's own
   key events, at DSH parity (`ApprovalFlow`, #158): Escape in the card rejects, even with Allow once focused; Enter on
   its focusable body (role group, *Approval details*) allows once and a second press posts nothing more; Enter on a
-  focused Reject is the button's own and rejects; Escape in the composer, two of them included, and Shift+Escape or
-  Shift+Enter answer nothing and stop nothing; and the keyboard reference lists *Allow once* (Enter) and *Reject* (Esc)
-  in an *Approval area* group after *Message input*.
+  focused Reject is the button's own and rejects; each answer hands the keyboard back to the composer, as DSH's
+  composer takes it again, and a held Enter that reaches the composer sends nothing (DSH's composer keymap); Escape in
+  the composer, two of them included, and Shift+Escape or Shift+Enter answer nothing and stop nothing; and the keyboard
+  reference lists *Allow once* (Enter) and *Reject* (Esc) in an *Approval area* group after *Message input*.
 - [`check-access.mjs`](check-access.mjs) — the access-mode chip as a control: its reference anatomy (shield,
   label, chevron), the menu with a checked current entry, the pending state of a change, the full-access risk
   gate, a reload coming back to the session's mode, and the server refusing an unconfirmed escalation.

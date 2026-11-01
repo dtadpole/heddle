@@ -190,4 +190,18 @@ fn the_approval_card_answers_from_the_keyboard() {
     assert!(PAGE_SOURCE.contains("{ label: 'Allow once', alias: '', keys: 'Enter' }"));
     assert!(PAGE_SOURCE.contains("{ label: 'Reject', alias: '', keys: 'Esc' }"));
     assert!(PAGE_SOURCE.contains("rows.push({ group: 'Approval area'"));
+    assert!(
+        PAGE_SOURCE.contains("hideApproval(keyboardWasInCard)"),
+        "an answer that lands closes the card knowing where the keyboard was"
+    );
+    assert!(
+        PAGE_SOURCE.contains(
+            "if (keyboardWasInCard && keyboardLeftFree && !composer.hidden && !field.disabled) field.focus({ preventScroll: true })"
+        ),
+        "the closed card hands the keyboard to the composer"
+    );
+    assert!(
+        PAGE_SOURCE.contains("  if (keyEvent.repeat) return\n  submitDraft("),
+        "a held Enter sends once"
+    );
 }

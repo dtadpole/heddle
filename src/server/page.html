@@ -9844,6 +9844,12 @@ field.addEventListener('keydown', (keyEvent) => {
   if (keyEvent.isComposing || keyEvent.keyCode === 229) return
   if (keyEvent.shiftKey) return
   keyEvent.preventDefault()
+  /**
+   * A held Enter sends once, as DSH's composer keymap (`if (event?.repeat === true) return true`): its repeats are
+   * taken and send nothing, so an Enter held on the approval card cannot carry on into the composer and send the draft
+   * once the card hands the keyboard back (#158).
+   */
+  if (keyEvent.repeat) return
   submitDraft(keyEvent.ctrlKey || keyEvent.metaKey ? 'accelerated' : 'enter')
 })
 
@@ -20358,9 +20364,17 @@ function showApproval(request) {
   approvalCard.hidden = false
   document.getElementById('approval-note').hidden = true
 }
-function hideApproval() {
+/**
+ * Close the card. The keyboard goes back to the composer when the card held it, as DSH's composer takes the focus
+ * again when the approval's takeover of its slot ends; otherwise it would fall to the page and the next keys would go
+ * nowhere. A focus moved elsewhere in the meantime (a search, a dialog) stays where it is (#158).
+ */
+function hideApproval(keyboardWasInCard = approvalCard.contains(document.activeElement)) {
   approvalCard.hidden = true
   approvalPending = null
+  const active = document.activeElement
+  const keyboardLeftFree = active === null || active === document.body || approvalCard.contains(active)
+  if (keyboardWasInCard && keyboardLeftFree && !composer.hidden && !field.disabled) field.focus({ preventScroll: true })
 }
 /**
  * Answer a waiting question.
@@ -20376,6 +20390,8 @@ async function answerApproval(outcome) {
   const reject = document.getElementById('approval-reject')
   /** One answer at a time: the buttons are off while one is in flight, and a key must not post a second (#158). */
   if (pending === null || allow.disabled) return
+  /** Read before the buttons go off: a focused button that is disabled hands the focus to the page. */
+  const keyboardWasInCard = approvalCard.contains(document.activeElement)
   allow.disabled = true
   reject.disabled = true
   const note = document.getElementById('approval-note')
@@ -20387,7 +20403,7 @@ async function answerApproval(outcome) {
     })
     const body = await response.json().catch(() => ({}))
     if (response.ok && body.answered === true) {
-      hideApproval()
+      hideApproval(keyboardWasInCard)
       void refreshApprovals(false)
       return
     }

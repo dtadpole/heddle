@@ -16,6 +16,10 @@ import { fixtureDir, heddleCommand, isolatedHome, removeDir, repoRoot, scriptedC
  * "Approval area" group. Live testing found the card took no key at all: Escape on its focused Reject button left the
  * question waiting on every page.
  *
+ * When the card closes it hands the keyboard back to the composer, as DSH's composer takes the focus again when the
+ * approval's takeover of its slot ends, and the composer takes a held Enter's repeats without sending, as DSH's keymap
+ * does, so an Enter still held from the card cannot send the draft.
+ *
  * The keys go through the protocol's `Input.dispatchKeyEvent`, so the page receives them as it would from a keyboard,
  * Enter's keypress (a button's native activation) included. Every answer the page posts is recorded, so a key that
  * answers twice, or answers the wrong way, is seen as such.
@@ -111,7 +115,7 @@ const settle = (ms = 400) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const CARD_SHOWN = 'document.getElementById("approval-card").hidden === false'
 
-test('the approval card answers from the keyboard: Escape rejects, Enter on its body allows once, a button keeps its Enter', async (t) => {
+test('the approval card answers from the keyboard: Escape rejects, Enter on its body allows once, a button keeps its Enter, and the keyboard returns to the composer', async (t) => {
   if (!skipUnless(t, browserAvailable(), `needs ${CAPABILITY} and a browser`)) return
   const server = await startServer('main')
   const browser = await openBrowser({ width: 1280, height: 900 })
@@ -151,6 +155,14 @@ test('the approval card answers from the keyboard: Escape rejects, Enter on its 
       assert.ok(await browser.waitFor('document.getElementById("approval-card").hidden === true', 10_000), 'the answer closes the card')
       assert.ok(await browser.waitFor('document.getElementById("send").hidden === false', 20_000), 'and the turn finishes')
     }
+    /** Where the keyboard is: the composer's field, the page itself, or another element. */
+    const keyboardAt = () =>
+      browser.evaluate(`(() => {
+        const active = document.activeElement
+        if (active === document.querySelector('#prompt textarea')) return 'composer'
+        if (active === null || active === document.body) return 'page'
+        return active.id || active.tagName
+      })()`)
 
     await t.test('keys that are not the card\'s leave the question waiting', async () => {
       await ask('write outside the workspace, first time')
@@ -177,6 +189,7 @@ test('the approval card answers from the keyboard: Escape rejects, Enter on its 
       await press(browser, 'Escape')
       await settledTurn()
       assert.deepEqual(await answers(), ['rejected'], 'one answer, and it is rejected')
+      assert.equal(await keyboardAt(), 'composer', 'the closed card hands the keyboard to the composer, as DSH\'s composer takes it back')
       assert.equal(existsSync(server.outsidePath), false, 'the rejected call wrote nothing')
       assert.ok(await browser.waitFor('document.getElementById("log").innerText.includes("rejected")', 10_000), 'and the transcript says the ask was rejected')
     })
@@ -187,6 +200,7 @@ test('the approval card answers from the keyboard: Escape rejects, Enter on its 
       await press(browser, 'Enter')
       await settledTurn()
       assert.deepEqual(await answers(), ['rejected'], 'the button\'s answer, and no allow from the card')
+      assert.equal(await keyboardAt(), 'composer', 'and the keyboard is back in the composer')
       assert.equal(existsSync(server.outsidePath), false, 'the rejected call wrote nothing')
     })
 
@@ -202,8 +216,35 @@ test('the approval card answers from the keyboard: Escape rejects, Enter on its 
       await press(browser, 'Enter')
       await settledTurn()
       assert.deepEqual(await answers(), ['allowed-once'], 'one answer, and it allows once')
+      assert.equal(await keyboardAt(), 'composer', 'the keyboard is back in the composer')
       assert.equal(existsSync(server.outsidePath), true, 'the allowed retry wrote the file')
       assert.equal(await browser.evaluate('document.getElementById("access-label").textContent'), 'Workspace Write', 'and the session\'s own mode did not move')
+    })
+
+    await t.test('a held Enter that reaches the composer sends nothing, as DSH\'s composer keymap', async () => {
+      /** The keyboard comes back to the composer while Enter may still be held on the card: its repeats must not send the draft. */
+      const draft = 'a draft that a held Enter must not send'
+      await browser.evaluate(`(() => {
+        const field = document.querySelector('#prompt textarea')
+        field.value = ${JSON.stringify(draft)}
+        field.dispatchEvent(new Event('input', { bubbles: true }))
+        field.focus()
+        return true
+      })()`)
+      assert.equal(await keyboardAt(), 'composer', 'the composer has the focus')
+      const { text, unmodifiedText, ...base } = KEYS.Enter
+      for (let repeat = 0; repeat < 3; repeat += 1) await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base, text, unmodifiedText, autoRepeat: true })
+      await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base })
+      await settle(1500)
+      assert.equal(await browser.evaluate('document.querySelector("#prompt textarea").value'), draft, 'the draft is still there')
+      assert.equal(await browser.evaluate('document.getElementById("stop").hidden'), true, 'no turn started')
+      assert.equal(await browser.evaluate(CARD_SHOWN), false, 'and nothing asks for approval')
+      await browser.evaluate(`(() => {
+        const field = document.querySelector('#prompt textarea')
+        field.value = ''
+        field.dispatchEvent(new Event('input', { bubbles: true }))
+        return true
+      })()`)
     })
 
     await t.test('the keyboard reference lists the card\'s keys as "Approval area"', async () => {
