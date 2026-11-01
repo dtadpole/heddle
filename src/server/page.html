@@ -8223,6 +8223,52 @@ function liveRoundsOf(id) {
 }
 
 /**
+ * The stream's events held while nothing is open and this page's own first turn is on its way (#142, developer-ten's
+ * finding on 2349341f), or `null` when the page has no such turn.
+ *
+ * Every session's events reach every page (web.ts pushes them to every `/api/events` reader, and so does the Rust hub),
+ * and the panel used to follow any session's turn while nothing was open. On main a load starts a blank session, so
+ * that state was rare; since #142 it is the first visit's own state, and a fresh tab drew every other session's live
+ * turn into its blank panel: its messages, answers and tool rows, with their usage counted into the dock. DSH's new
+ * session screen draws no other session's transcript. Now, with nothing open, an event is drawn only if it is this
+ * page's own: while a turn this page started with no session is on its way, the events are held, keyed by their
+ * session; when the turn names the session it created (its `session` frame, or the `202`), that session's are drawn in
+ * the order they came and the rest dropped (`adoptLooseEvents`). With no such turn they are not kept at all.
+ */
+let looseTurnEvents = null
+/** At most this many held events, oldest dropped first: a turn names its session with its first frame, so few are held. */
+const LOOSE_EVENTS_LIMIT = 2000
+
+/** A turn with no session is being sent: hold what the stream brings until it names its session. */
+function holdLooseTurn() {
+  if (looseTurnEvents === null) looseTurnEvents = []
+}
+
+/** Keep one event while nothing is open; answers whether it was kept (only while this page's own turn is pending). */
+function holdLooseEvent(payload) {
+  if (looseTurnEvents === null) return false
+  looseTurnEvents.push(payload)
+  if (looseTurnEvents.length > LOOSE_EVENTS_LIMIT) looseTurnEvents.shift()
+  return true
+}
+
+/**
+ * The turn named its session: stop holding, and when the panel shows that session as this page's own (`draw`), draw
+ * its held events in the order they came; every other session's are dropped. A turn whose open is a redraw from the
+ * session's own log (`showSession`) draws none, since its log has them.
+ */
+function adoptLooseEvents(session, draw) {
+  const held = looseTurnEvents ?? []
+  looseTurnEvents = null
+  if (!draw) return
+  for (const payload of held) {
+    if (payload.session !== session) continue
+    if (sessionLoading !== null && payload.session === sessionLoading.id) sessionLoading.events.push(payload)
+    else drawSessionEvent(payload)
+  }
+}
+
+/**
  * The verdicts of this page's detached turns (#128), each the `turn` frame the server pushes when a turn ends.
  *
  * A verdict can be read before the `202` that names its turn — a fast turn ends while the answer is still on its way
@@ -8976,7 +9022,8 @@ events.addEventListener('session', (message) => {
   const event = payload.event
   /**
    * The session the panel shows: the open one, or the one whose history could not be loaded (#56), under whose "Failed
-   * to load history" no other session's live turn may draw. Only with neither does the panel follow any session's turn.
+   * to load history" no other session's live turn may draw. With neither, the panel follows no other session's turn
+   * either: only this page's own first turn, held until it names its session (`looseTurnEvents`, #142).
    */
   const shown = current ?? unavailableSession
   if (event.type === 'message' || event.type === 'assistant/completed' || event.type === 'turn/completed') scheduleTreeRefresh()
@@ -9031,7 +9078,7 @@ events.addEventListener('session', (message) => {
     turnsEnded.delete(payload.session)
     paintRunningMarks()
     scheduleTreeRefresh()
-    if (shown === null || payload.session === shown) {
+    if (shown !== null && payload.session === shown) {
       if (TurnFailure.shows(event)) drawTurnFailure(payload.session, event.message)
       settleChat()
     }
@@ -9070,11 +9117,10 @@ events.addEventListener('session', (message) => {
      * able to tell whose turn it was by how the answer looks.
      */
     /**
-     * The same "is this the panel's session" test the rows below use, including the case where the panel has
-     * adopted nothing yet: a page that has only ever watched a turn — the CLI's, another window's — is showing
-     * that session, and its answer settles here like anyone else's.
+     * The same "is this the panel's session" test the rows below use. A page with nothing open shows no session's turn
+     * (#142): its own first turn settles in runTurn's `done`, as every turn of its own does.
      */
-    if (shown === null || payload.session === shown) {
+    if (shown !== null && payload.session === shown) {
       settleChat()
       markBranchable(event.seq)
       void renderSettledAnswers()
@@ -9085,7 +9131,12 @@ events.addEventListener('session', (message) => {
       void attachEditedFiles()
     }
   }
-  if (shown && payload.session !== shown) return
+  /** Nothing open: only this page's own first turn's events, held until it names its session; any other is dropped. */
+  if (shown === null) {
+    holdLooseEvent(payload)
+    return
+  }
+  if (payload.session !== shown) return
   /** The panel's session is being read from history: its events wait for the read (see `sessionLoading`). */
   if (sessionLoading !== null && payload.session === sessionLoading.id) {
     sessionLoading.events.push(payload)
@@ -10443,6 +10494,11 @@ async function runTurn(text, key, attachments = [], onAccepted) {
   updateStatusBar()
   /** The turn's own events reach this page only through the stream, so a send at load waits for it to open (#128). */
   await events.whenOpen(3000)
+  /**
+   * A turn with no session: with nothing open, the stream's events are held from here until the turn names the session
+   * it creates, and only that session's are drawn (`looseTurnEvents`, #142); a send that fails lets them go.
+   */
+  if (target === null) holdLooseTurn()
   const startedAt = performance.now()
   const response = await sendTurn({
     /**
@@ -10461,8 +10517,12 @@ async function runTurn(text, key, attachments = [], onAccepted) {
     ...selectionForTurn(),
     /** Answer at acceptance; the verdict comes on the stream (#128). A server without it streams, read below. */
     detach: true,
+  }).catch((error) => {
+    if (target === null) adoptLooseEvents(null, false)
+    throw error
   })
   if (!response.ok) {
+    if (target === null) adoptLooseEvents(null, false)
     /**
      * The server's own sentence, not only its status.
      *
@@ -10489,6 +10549,10 @@ async function runTurn(text, key, attachments = [], onAccepted) {
    * measured on TS, 52 full reads in one test's two messages. A turn creates at most one session, so it is adopted once.
    */
   let adopted = null
+  /** A turn with no session that never named one (the server gave none) holds nothing past its end (`looseTurnEvents`). */
+  const releaseLoose = () => {
+    if (target === null && adopted === null) adoptLooseEvents(null, false)
+  }
   /**
    * Whether the server answered at acceptance and says how the turn ended on the event stream (#128). Its verdict then
    * comes on that one ordered stream after the turn's own events, `turn/completed` included, so none of them can be
@@ -10516,12 +10580,17 @@ async function runTurn(text, key, attachments = [], onAccepted) {
          * "Failed to load history" with nothing current (developer-ten's N1a): pointing `current` at the new session
          * left `unavailableSession` set, and the composer stayed "Session unavailable"; `showSession` ends that state.
          */
-        if ((current ?? unavailableSession) !== null && current !== payload.session) void showSession(payload.session)
-        else {
+        if ((current ?? unavailableSession) !== null && current !== payload.session) {
+          /** The open redraws the session from its own log, which has whatever was held of it. */
+          adoptLooseEvents(payload.session, false)
+          void showSession(payload.session)
+        } else {
           current = payload.session
           rememberCurrent()
           chooseWorkspace(null)
           adoptSession(payload.session)
+          /** Its events that came before this, held while nothing was open, are drawn now, in order; no one else's. */
+          adoptLooseEvents(payload.session, true)
         }
         /** The pending send belongs to the session it just created; the row follows it. */
         if (directTurnPending > 0) directPendingKey = payload.session
@@ -10697,6 +10766,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
      */
     if (ended.outcome === 'lost') turnVerdicts.lateTail(turn, (data) => void verdict(data.outcome, data))
     await verdict(ended.outcome, ended)
+    releaseLoose()
     return
   }
   /** A server that predates `detach` streams the turn as before, and its frames are read the old way. */
@@ -10729,6 +10799,7 @@ async function runTurn(text, key, attachments = [], onAccepted) {
       await verdict(name, JSON.parse(data))
     }
   }
+  releaseLoose()
 }
 
 /**
