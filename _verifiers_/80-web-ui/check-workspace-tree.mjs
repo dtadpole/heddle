@@ -2210,20 +2210,22 @@ test('a tree refresh never takes the open workspace\'s session rows or the selec
 
     /**
      * The recorder, and the page's `/api/tree` answers held back `__treeDelay` ms. `draws` counts the tree's list reads
-     * (`/api/workspaces`, one per redraw), `inFlight` the folder reads out now; each gap is a moment the inner workspace's
-     * rows or the selected row were missing, with what was missing and what was selected.
+     * (`/api/workspaces`, one per redraw), `treeReads` its folder reads (two per redraw here: the outer and the inner
+     * workspace), `inFlight` the folder reads out now; each gap is a moment the inner workspace's rows or the selected row
+     * were missing, with what was missing and what was selected.
      */
     await browser.evaluate(`(() => {
       const ids = ${JSON.stringify(innerIds)}
       const open = ${JSON.stringify(open)}
       const real = window.fetch.bind(window)
-      const state = { samples: 0, gaps: [], draws: 0, inFlight: 0, maxInFlight: 0, events: [], expect: [open] }
+      const state = { samples: 0, gaps: [], draws: 0, treeReads: 0, inFlight: 0, maxInFlight: 0, events: [], expect: [open] }
       window.__steady = state
       window.__treeDelay = 700
       window.fetch = (input, init) => {
         const url = new URL(typeof input === 'string' ? input : input.url, location.href)
         if (url.pathname === '/api/workspaces' && (init?.method ?? 'GET') === 'GET') state.draws += 1
         if (url.pathname !== '/api/tree') return real(input, init)
+        state.treeReads += 1
         state.inFlight += 1
         state.maxInFlight = Math.max(state.maxInFlight, state.inFlight)
         return new Promise((done) => setTimeout(done, window.__treeDelay)).then(() => real(input, init)).finally(() => { state.inFlight -= 1 })
@@ -2248,9 +2250,10 @@ test('a tree refresh never takes the open workspace\'s session rows or the selec
       const renamed = await api(server.url, cookie, `/api/sessions/${other}/title`, { method: 'POST', body: JSON.stringify({ title }) })
       assert.equal(renamed.status, 200, `another client renamed the outer workspace's session (${JSON.stringify(renamed.body)})`)
     }
-    const settled = async (draws, what) => {
+    /** A redraw has run to its end: its list reads were counted, its two folder reads asked, and none is out. */
+    const settled = async (draws, reads, what) => {
       try {
-        await browser.waitFor(`window.__steady.draws >= ${draws} && window.__steady.inFlight === 0`, 15_000)
+        await browser.waitFor(`window.__steady.draws >= ${draws} && window.__steady.treeReads >= ${reads} && window.__steady.inFlight === 0`, 15_000)
       } catch (error) {
         assert.fail(`${what}\n${error instanceof Error ? error.message : String(error)}\nrecord: ${await record()}`)
       }
@@ -2259,9 +2262,9 @@ test('a tree refresh never takes the open workspace\'s session rows or the selec
 
     /** Three refreshes pushed by another client's renames, each with its folder reads held back. */
     for (let round = 1; round <= 3; round += 1) {
-      const before = await browser.evaluate('window.__steady.draws')
+      const [draws, reads] = JSON.parse(await browser.evaluate('JSON.stringify([window.__steady.draws, window.__steady.treeReads])'))
       await rename(`steady other ${round}`)
-      await settled(before + 1, `the rename pushed a redraw that read its folders (round ${round})`)
+      await settled(draws + 1, reads + 2, `the rename pushed a redraw that read its folders (round ${round})`)
     }
     const seen = JSON.parse(await record())
     assert.ok(seen.draws >= 3, `three redraws ran (${seen.draws})`)
@@ -2278,7 +2281,7 @@ test('a tree refresh never takes the open workspace\'s session rows or the selec
     )
     assert.ok(centre !== null, 'the target row is drawn')
     await browser.evaluate('(() => { window.__treeDelay = 1500; window.__steady.events = []; window.__steady.gaps = []; return true })()')
-    const before = await browser.evaluate('window.__steady.draws')
+    const [before, readsBefore] = JSON.parse(await browser.evaluate('JSON.stringify([window.__steady.draws, window.__steady.treeReads])'))
     await rename('steady other clicked')
     try {
       await browser.waitFor(`window.__steady.draws > ${before} && window.__steady.inFlight > 0`, 10_000)
@@ -2312,7 +2315,7 @@ test('a tree refresh never takes the open workspace\'s session rows or the selec
       )
     }
     assert.equal(under, target, `the target row was under the pointer while the redraw read its folders\nrecord: ${await record()}`)
-    await settled(before + 1, 'the redraw after the click lands')
+    await settled(before + 1, readsBefore + 2, 'the redraw around the click lands')
     const after = JSON.parse(await record())
     assert.deepEqual(after.gaps, [], `through the click and the redraw around it, the inner workspace's rows stayed and exactly one row was selected\nrecord: ${JSON.stringify(after)}`)
     assert.deepEqual(
