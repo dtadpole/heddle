@@ -12,7 +12,7 @@ import { skipUnless } from '../../_tools_/verify-runner/lib.mjs'
  * DSH installed reference: permission-presets/lib/client.js RiskConfirmation -> primitives Modal, shipped in
  * dsh-web-frontend/dist/assets/index-CN7NIWNw.js (uA -> S_ -> x_ focus hook).
  */
-test('the actual risk card contains native Tab cycles and returns focus without changing permission', async (context) => {
+test('the actual risk card contains native Tab cycles and returns focus without changing permission', { timeout: 60000 }, async (context) => {
   if (!skipUnless(context, browserAvailable(), 'headless browser for risk-dialog focus')) return
   const writes = []
   const source = readFileSync(new URL('../../src/server/page.html', import.meta.url), 'utf8')
@@ -56,7 +56,8 @@ window.__riskFixtureReady = () => { current = 'risk-fixture'; accessMode = 'work
     const focused = () => browser.evaluate('document.activeElement?.id')
     async function key(key, code, modifiers = 0) {
       const virtual = key === 'Tab' ? 9 : key === 'Escape' ? 27 : key === 'Enter' ? 13 : 32
-      await browser.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, modifiers, windowsVirtualKeyCode: virtual, nativeVirtualKeyCode: virtual })
+      const text = key === 'Enter' ? '\r' : key === ' ' ? ' ' : undefined
+      await browser.send('Input.dispatchKeyEvent', { type: text === undefined ? 'rawKeyDown' : 'keyDown', key, code, modifiers, windowsVirtualKeyCode: virtual, nativeVirtualKeyCode: virtual, ...(text === undefined ? {} : { text, unmodifiedText: text }) })
       await browser.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, modifiers, windowsVirtualKeyCode: virtual, nativeVirtualKeyCode: virtual })
     }
     async function open() {
