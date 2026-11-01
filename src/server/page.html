@@ -3545,25 +3545,25 @@
     reminder of every session, filtered and searched, beside the selected task's detail. While it is open it is the
     whole main area (`main[data-page="schedules"]`), as DSH's main slot is; opening a session puts it away.
   -->
-  <section id="schedules-page" aria-label="Automation tasks" data-testid="task-manager-page" hidden>
+  <section id="schedules-page" aria-label="Automation tasks" data-i18n-aria-label="schedule.title" data-testid="task-manager-page" hidden>
     <div class="sched-list-pane">
       <div class="sched-page-content">
         <div class="sched-page-heading">
-          <h1 id="schedules-heading" tabindex="-1">Automation tasks</h1>
+          <h1 id="schedules-heading" tabindex="-1" data-i18n="schedule.title">Automation tasks</h1>
           <button type="button" id="schedules-new" class="sched-btn sched-btn-primary sched-btn-sm">
             <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>
-            <span>New</span>
+            <span data-i18n="schedule.new.action">New</span>
           </button>
         </div>
-        <div class="sched-filters" role="group" aria-label="Task status">
-          <button type="button" class="sched-filter" data-filter="all" aria-pressed="true">All</button>
-          <button type="button" class="sched-filter" data-filter="active" aria-pressed="false">Enabled</button>
-          <button type="button" class="sched-filter" data-filter="inactive" aria-pressed="false">Inactive</button>
+        <div class="sched-filters" role="group" aria-label="Task status" data-i18n-aria-label="schedule.statusFilter.label">
+          <button type="button" class="sched-filter" data-filter="all" aria-pressed="true" data-i18n="schedule.statusFilter.all">All</button>
+          <button type="button" class="sched-filter" data-filter="active" aria-pressed="false" data-i18n="schedule.status.active">Enabled</button>
+          <button type="button" class="sched-filter" data-filter="inactive" aria-pressed="false" data-i18n="schedule.status.inactive">Inactive</button>
         </div>
         <div class="sched-search">
           <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 13.5 13.5"/></svg>
-          <input id="schedules-search" type="search" aria-label="Search tasks" placeholder="Search automation tasks" autocomplete="off" spellcheck="false">
-          <button type="button" id="schedules-search-clear" class="sched-icon-btn" aria-label="Clear search" hidden>
+          <input id="schedules-search" type="search" aria-label="Search tasks" placeholder="Search automation tasks" data-i18n-aria-label="schedule.search.label" data-i18n-placeholder="schedule.search.placeholder" autocomplete="off" spellcheck="false">
+          <button type="button" id="schedules-search-clear" class="sched-icon-btn" aria-label="Clear search" data-i18n-aria-label="schedule.search.clear" hidden>
             <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
           </button>
         </div>
@@ -3577,13 +3577,13 @@
     the task's title as its chip). Heddle has no right sidebar, so the same detail docks over the conversation's right
     edge and closes with its own button or Escape.
   -->
-  <section id="schedule-drawer" aria-label="Task details" hidden>
+  <section id="schedule-drawer" aria-label="Task details" data-i18n-aria-label="schedule.detail.label" hidden>
     <header class="sched-drawer-head">
       <span class="sched-drawer-chip">
         <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.6V8l2.4 1.5"/></svg>
         <span id="schedule-drawer-title">Task details</span>
       </span>
-      <button type="button" id="schedule-drawer-close" class="sched-icon-btn" aria-label="Close details" title="Close details">
+      <button type="button" id="schedule-drawer-close" class="sched-icon-btn" aria-label="Close details" title="Close details" data-i18n-aria-label="schedule.detail.close" data-i18n-title="schedule.detail.close">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
       </button>
     </header>
@@ -4024,14 +4024,14 @@
 <!-- DSH's task deletion confirmation (dsh-client-ui-schedule `TaskDetail`), its texts verbatim, as a native dialog. -->
 <dialog id="schedule-delete" class="ws-dialog" aria-labelledby="schedule-delete-title" aria-describedby="schedule-delete-desc">
   <div class="ws-head">
-    <h2 id="schedule-delete-title">Delete this task?</h2>
-    <button type="button" class="ws-close" data-schedule-delete-close aria-label="Close deletion confirmation">✕</button>
+    <h2 id="schedule-delete-title" data-i18n="schedule.delete.title">Delete this task?</h2>
+    <button type="button" class="ws-close" data-schedule-delete-close aria-label="Close deletion confirmation" data-i18n-aria-label="schedule.delete.close">✕</button>
   </div>
-  <p id="schedule-delete-desc" class="ws-desc">This stops the task from triggering and deletes it together with its saved delivery records. The original session and its messages remain; queued messages are not withdrawn.</p>
+  <p id="schedule-delete-desc" class="ws-desc" data-i18n="schedule.delete.description">This stops the task from triggering and deletes it together with its saved delivery records. The original session and its messages remain; queued messages are not withdrawn.</p>
   <p id="schedule-delete-name" class="sched-confirm-title"></p>
   <div class="ws-actions">
-    <button type="button" data-schedule-delete-close>Cancel</button>
-    <button type="button" id="schedule-delete-confirm" class="ws-danger">Confirm deletion</button>
+    <button type="button" data-schedule-delete-close data-i18n="schedule.delete.cancel">Cancel</button>
+    <button type="button" id="schedule-delete-confirm" class="ws-danger" data-i18n="schedule.delete.confirm">Confirm deletion</button>
   </div>
 </dialog>
 <!-- DSH's app-wide deletion toast ("Task deleted." / "Could not delete the task."). -->
@@ -4163,6 +4163,95 @@ const MESSAGES = Object.freeze({
     'question.open': 'Open question',
     'panel.noContext': 'No context figures yet \u2014 send a message to start measuring.',
     'panel.noStats': 'No statistics yet \u2014 send a message to start measuring.',
+    'schedule.card.deleted': 'Deleted',
+    'schedule.card.open': 'Open',
+    'schedule.delete.action': 'Delete',
+    'schedule.delete.pending': 'Deleting\u2026',
+    'schedule.delivery.collapse': 'Collapse',
+    'schedule.delivery.cursorError': 'Records were updated.',
+    'schedule.delivery.empty': 'No delivery record available',
+    'schedule.delivery.error': 'Could not load delivery records.',
+    'schedule.delivery.expand': 'Expand',
+    'schedule.delivery.loadMore': 'Load more',
+    'schedule.delivery.notFound': 'This task is no longer available.',
+    'schedule.delivery.pruned': 'Earlier delivery records have been cleared',
+    'schedule.delivery.refresh': 'Refresh',
+    'schedule.delivery.retention': 'Retention rules',
+    'schedule.delivery.retry': 'Retry',
+    'schedule.detail.instruction': 'Automation task instruction',
+    'schedule.detail.label': 'Task details',
+    'schedule.detail.missing': 'Task unavailable. It may have been deleted.',
+    'schedule.detail.more': 'Automation task actions',
+    'schedule.detail.name': 'Automation task name',
+    'schedule.detail.records': 'Records',
+    'schedule.detail.rule': 'Rules',
+    'schedule.detail.session': 'Linked session',
+    'schedule.detail.sessionArchived': 'The original session is archived.',
+    'schedule.detail.sessionLoading': 'Loading original session information.',
+    'schedule.detail.sessionUnavailable': 'The original session is unavailable.',
+    'schedule.detail.tabs': 'Task detail views',
+    'schedule.empty.action': 'New automation task',
+    'schedule.list.aria': 'Active reminders',
+    'schedule.list.empty': 'No tasks yet. Tasks created in your sessions appear here.',
+    'schedule.list.emptyInactive': 'No inactive automation tasks',
+    'schedule.list.error': 'Could not load reminders.',
+    'schedule.list.loading': 'Loading reminders\u2026',
+    'schedule.list.nextPrefix': 'Next scheduled time: ',
+    'schedule.list.noMatches': 'No matching tasks',
+    'schedule.list.retry': 'Retry',
+    'schedule.relative.now': 'Due now',
+    'schedule.rule.cancel': 'Cancel',
+    'schedule.rule.cron': 'Custom',
+    'schedule.rule.cronLabel': 'Cron expression',
+    'schedule.rule.daily': 'Every day',
+    'schedule.rule.everyHours': 'Every N hours',
+    'schedule.rule.everyMinutes': 'Every N minutes',
+    'schedule.rule.everySeconds': 'Every N seconds',
+    'schedule.rule.once': 'Once',
+    'schedule.rule.repeat': 'Repeat',
+    'schedule.rule.save': 'Save changes',
+    'schedule.rule.saving': 'Saving\u2026',
+    'schedule.rule.title': 'Run time',
+    'schedule.rule.unsaved': 'Unsaved changes',
+    'schedule.rule.weekdays': 'Monday to Friday',
+    'schedule.rule.weekly': 'Weekly',
+    'schedule.status.inactive': 'Inactive',
+    'schedule.timing.date': 'Date',
+    'schedule.timing.inactive': 'Inactive tasks are read-only. Their timing cannot be edited.',
+    'schedule.timing.interval': 'Repeat every',
+    'schedule.timing.intervalDecrease': 'Decrease interval',
+    'schedule.timing.intervalHint.second': 'At least 60 seconds. The interval counts from task creation or the last rule change and is independent of time zones.',
+    'schedule.timing.intervalIncrease': 'Increase interval',
+    'schedule.timing.invalid': 'Enter a valid date and time, or check the timing fields.',
+    'schedule.timing.notFuture': 'Choose a date and time in the future.',
+    'schedule.timing.subagentSession': 'This session belongs to a sub-agent, which never receives delivered reminders.',
+    'schedule.timing.time': 'Time',
+    'schedule.timing.zone': 'Time zone',
+    'schedule.timing.zoneNoResults': 'No matching time zones',
+    'schedule.timing.zoneSearch': 'Search by UTC offset, IANA ID, or city',
+    'schedule.toast.deleteFailed': 'Could not delete the task.',
+    'schedule.toast.deleted': 'Task deleted.',
+    'schedule.trigger.label': 'Reminders',
+    'schedule.trigger.one': '{count} reminder',
+    'schedule.trigger.other': '{count} reminders',
+    'schedule.catalogError': 'Could not load automation tasks.',
+    'schedule.catalogRefreshError': 'Could not refresh automation tasks.',
+    'schedule.detailLoading': 'Loading task details',
+    'schedule.loading': 'Loading\u2026',
+    'schedule.title': '-4LnlG_title',
+    'schedule.search.label': 'Search tasks',
+    'schedule.search.placeholder': 'Search automation tasks',
+    'schedule.search.clear': 'Clear search',
+    'schedule.detail.close': 'Close details',
+    'schedule.delete.title': 'Delete this task?',
+    'schedule.delete.description': 'This stops the task from triggering and deletes it together with its saved delivery records. The original session and its messages remain; queued messages are not withdrawn.',
+    'schedule.delete.confirm': 'Confirm deletion',
+    'schedule.new.action': 'New',
+    'schedule.statusFilter.label': 'Task status',
+    'schedule.statusFilter.all': 'All',
+    'schedule.status.active': 'Enabled',
+    'schedule.delete.close': 'Close deletion confirmation',
+    'schedule.delete.cancel': 'Cancel',
     'chat.viewChanges': 'View changes to {path}',
     'composer.editQueued': 'Edit queued message',
     'composer.saveQueued': 'Save queued message',
@@ -4412,6 +4501,95 @@ const MESSAGES = Object.freeze({
     'question.open': '打开问题',
     'panel.noContext': '还没有上下文数据——发送一条消息即开始统计。',
     'panel.noStats': '还没有统计数据——发送一条消息即开始统计。',
+    'schedule.card.deleted': '已删除',
+    'schedule.card.open': '打开',
+    'schedule.delete.action': '删除',
+    'schedule.delete.pending': '正在删除…',
+    'schedule.delivery.collapse': '收起',
+    'schedule.delivery.cursorError': '记录已更新',
+    'schedule.delivery.empty': '暂无任务运行记录',
+    'schedule.delivery.error': '无法加载任务运行记录',
+    'schedule.delivery.expand': '展开',
+    'schedule.delivery.loadMore': '加载更多',
+    'schedule.delivery.notFound': '任务已不可用',
+    'schedule.delivery.pruned': '更早的运行记录已清理',
+    'schedule.delivery.refresh': '刷新',
+    'schedule.delivery.retention': '保留规则',
+    'schedule.delivery.retry': '重试',
+    'schedule.detail.instruction': '自动化任务内容',
+    'schedule.detail.label': '任务详情',
+    'schedule.detail.missing': '任务已不可用，可能已被删除',
+    'schedule.detail.more': '自动化任务操作',
+    'schedule.detail.name': '自动化任务名称',
+    'schedule.detail.records': '任务运行记录',
+    'schedule.detail.rule': '规则',
+    'schedule.detail.session': '关联会话',
+    'schedule.detail.sessionArchived': '原会话已归档',
+    'schedule.detail.sessionLoading': '正在加载原会话信息',
+    'schedule.detail.sessionUnavailable': '原会话当前不可用',
+    'schedule.detail.tabs': '任务详情视图',
+    'schedule.empty.action': '新建自动化任务',
+    'schedule.list.aria': '活动提醒',
+    'schedule.list.empty': '还没有自动化任务，在会话中创建的任务会显示在这里',
+    'schedule.list.emptyInactive': '没有已结束的自动化任务',
+    'schedule.list.error': '无法加载提醒。',
+    'schedule.list.loading': '正在加载提醒…',
+    'schedule.list.nextPrefix': '下次计划时间：',
+    'schedule.list.noMatches': '没有匹配的自动化任务',
+    'schedule.list.retry': '重试',
+    'schedule.relative.now': '现在到期',
+    'schedule.rule.cancel': '取消',
+    'schedule.rule.cron': '自定义',
+    'schedule.rule.cronLabel': 'Cron 表达式',
+    'schedule.rule.daily': '每天',
+    'schedule.rule.everyHours': '每 N 小时',
+    'schedule.rule.everyMinutes': '每 N 分钟',
+    'schedule.rule.everySeconds': '每 N 秒',
+    'schedule.rule.once': '仅一次',
+    'schedule.rule.repeat': '重复',
+    'schedule.rule.save': '保存修改',
+    'schedule.rule.saving': '保存中…',
+    'schedule.rule.title': '运行时间',
+    'schedule.rule.unsaved': '有未保存的修改',
+    'schedule.rule.weekdays': '周一至周五',
+    'schedule.rule.weekly': '每周',
+    'schedule.status.inactive': '已结束',
+    'schedule.timing.date': '日期',
+    'schedule.timing.inactive': '已结束的任务为只读，无法修改时间',
+    'schedule.timing.interval': '重复间隔',
+    'schedule.timing.intervalDecrease': '减小间隔',
+    'schedule.timing.intervalHint.second': '至少 60 秒。间隔自任务创建或上次修改规则时起计，不受时区影响',
+    'schedule.timing.intervalIncrease': '增大间隔',
+    'schedule.timing.invalid': '请输入有效的日期和时间，或检查时间字段',
+    'schedule.timing.notFuture': '请选择未来的日期和时间',
+    'schedule.timing.subagentSession': '此会话属于子 agent，永远不会收到投递的提醒',
+    'schedule.timing.time': '时间',
+    'schedule.timing.zone': '时区',
+    'schedule.timing.zoneNoResults': '没有匹配的时区',
+    'schedule.timing.zoneSearch': '搜索 UTC 偏移、IANA 标识或城市',
+    'schedule.toast.deleteFailed': '无法删除任务',
+    'schedule.toast.deleted': '任务已删除',
+    'schedule.trigger.label': '提醒',
+    'schedule.trigger.one': '{count} 个提醒',
+    'schedule.trigger.other': '{count} 个提醒',
+    'schedule.catalogError': '无法加载自动化任务。',
+    'schedule.catalogRefreshError': '无法刷新自动化任务。',
+    'schedule.detailLoading': '正在加载任务详情',
+    'schedule.loading': '加载中…',
+    'schedule.title': '自动化任务',
+    'schedule.search.label': '搜索任务',
+    'schedule.search.placeholder': '搜索自动化任务',
+    'schedule.search.clear': '清空搜索',
+    'schedule.detail.close': '关闭详情',
+    'schedule.delete.title': '删除此任务？',
+    'schedule.delete.description': '任务将停止触发，并连同其已保存的任务运行记录一并删除。原会话及其消息仍然保留；已排队的消息不会被撤回。',
+    'schedule.delete.confirm': '确认删除',
+    'schedule.new.action': '新建',
+    'schedule.statusFilter.label': '任务状态',
+    'schedule.statusFilter.all': '全部',
+    'schedule.status.active': '已开启',
+    'schedule.delete.close': '关闭删除确认',
+    'schedule.delete.cancel': '取消',
     'chat.viewChanges': '查看 {path} 的更改',
     'composer.editQueued': '编辑排队消息',
     'composer.saveQueued': '保存排队消息',
@@ -21423,7 +21601,7 @@ function scheduleAbsolute(scheduledAt) {
 function scheduleRelative(scheduledAt, now = Date.now()) {
   const difference = Date.parse(scheduledAt) - now
   if (Number.isNaN(difference)) return ''
-  if (difference === 0) return 'Due now'
+  if (difference === 0) return t('schedule.relative.now')
   const seconds = Math.abs(difference) / 1000
   const units = scheduleUnits()
   const selected = units.find((candidate) => seconds >= candidate.seconds) ?? units[units.length - 1]
@@ -21622,7 +21800,7 @@ async function deleteScheduleTask(sessionId, id) {
   schedState.deleting = schedState.deleting.filter((value) => value !== id)
   if (list.sessionId === sessionId) list.deleting = list.deleting.filter((value) => value !== id)
   scheduleViewsChanged()
-  showScheduleToast(ok ? 'Task deleted.' : 'Could not delete the task.', ok ? 'neutral' : 'warning')
+  showScheduleToast(ok ? t('schedule.toast.deleted') : t('schedule.toast.deleteFailed'), ok ? 'neutral' : 'warning')
   // Re-read either way: a task that was already gone leaves the views too.
   await Promise.all([refreshScheduleCatalog(), refreshScheduleList()])
   return ok ? 'deleted' : 'failed'
@@ -21721,7 +21899,7 @@ function syncScheduleCard(card, model) {
   const openable = !deleted && card.dataset.sessionId !== ''
   card.dataset.deleted = String(deleted)
   scheduleSetText(card.querySelector('.schedule-card-title'), title)
-  scheduleSetText(card.querySelector('.schedule-card-frequency'), deleted ? 'Deleted' : scheduleFrequency(task))
+  scheduleSetText(card.querySelector('.schedule-card-frequency'), deleted ? t('schedule.card.deleted') : scheduleFrequency(task))
   const row = card.querySelector('.schedule-card-row')
   let cover = card.querySelector(':scope > .schedule-card-open')
   let button = row.querySelector(':scope > .sched-btn')
@@ -21743,7 +21921,7 @@ function syncScheduleCard(card, model) {
     button = document.createElement('button')
     button.type = 'button'
     button.className = 'sched-btn sched-btn-sm schedule-card-button'
-    button.textContent = 'Open'
+    button.textContent = t('schedule.card.open')
     button.addEventListener('click', open)
     row.append(button)
   }
@@ -21866,7 +22044,7 @@ function paintScheduleHeader() {
     seat.append(trigger)
   }
   const known = records.length
-  const label = known === 0 ? 'Reminders' : known === 1 ? '1 reminder' : `${known} reminders`
+  const label = known === 0 ? t('schedule.trigger.label') : known === 1 ? t('schedule.trigger.one', { count: 1 }) : t('schedule.trigger.other', { count: known })
   trigger.setAttribute('aria-label', label)
   trigger.title = label
   if (scheduleSoleReminder() === undefined || schedState.popoverOpen) trigger.setAttribute('aria-expanded', String(schedState.popoverOpen))
@@ -21892,7 +22070,7 @@ function openSchedulePopover() {
   schedState.popoverNow = Date.now()
   const menu = document.createElement('ul')
   menu.id = 'schedule-catalog-menu'
-  menu.setAttribute('aria-label', 'Active reminders')
+  menu.setAttribute('aria-label', t('schedule.list.aria'))
   menu.style.visibility = 'hidden'
   menu.style.left = '0px'
   menu.style.top = '0px'
@@ -21990,7 +22168,7 @@ function syncScheduleCatalogRow(li, record, now) {
   const remove = li.querySelector('.sched-delete')
   if (remove !== null) {
     remove.setAttribute('aria-label', `Delete reminder: ${title}`)
-    remove.title = pending ? 'Deleting…' : 'Delete'
+    remove.title = pending ? t('schedule.delete.pending') : t('schedule.delete.action')
     remove.disabled = pending
   }
 }
@@ -22011,7 +22189,7 @@ function renderSchedulePopover() {
     if (status === null) {
       status = document.createElement('li')
       status.setAttribute('role', 'status')
-      status.textContent = 'Loading reminders…'
+      status.textContent = t('schedule.list.loading')
     }
     wanted.push(status)
   }
@@ -22022,11 +22200,11 @@ function renderSchedulePopover() {
       failure.className = 'sched-error'
       const alert = document.createElement('span')
       alert.setAttribute('role', 'alert')
-      alert.textContent = 'Could not load reminders.'
+      alert.textContent = t('schedule.list.error')
       const retry = document.createElement('button')
       retry.type = 'button'
       retry.className = 'sched-btn sched-btn-sm'
-      retry.textContent = 'Retry'
+      retry.textContent = t('schedule.list.retry')
       retry.addEventListener('click', () => {
         void refreshScheduleList()
       })
@@ -22221,7 +22399,7 @@ function renderScheduleDrawer() {
   const binding = schedState.drawer
   if (binding === null) return
   const task = scheduleTaskFor(binding.sessionId, binding.id)
-  scheduleSetText(document.getElementById('schedule-drawer-title'), task !== undefined ? scheduleTaskTitle(task) : 'Task details')
+  scheduleSetText(document.getElementById('schedule-drawer-title'), task !== undefined ? scheduleTaskTitle(task) : t('schedule.detail.label'))
   renderScheduleDetail()
 }
 
@@ -22309,9 +22487,9 @@ function scheduleCatalogMatches() {
 /** DSH's three empty texts: no task at all, no inactive task, or nothing that matches. */
 function scheduleEmptyText() {
   const { filter, search } = schedState.page
-  if (schedState.catalog.records.length === 0) return 'No tasks yet. Tasks created in your sessions appear here.'
-  if (search.trim() === '' && filter === 'inactive') return 'No inactive automation tasks'
-  return 'No matching tasks'
+  if (schedState.catalog.records.length === 0) return t('schedule.list.empty')
+  if (search.trim() === '' && filter === 'inactive') return t('schedule.list.emptyInactive')
+  return t('schedule.list.noMatches')
 }
 
 /** A centred message, optionally with one action button. */
@@ -22400,7 +22578,7 @@ function scheduleListRow(record, now, selectedKey) {
   if (!active) {
     const badge = document.createElement('span')
     badge.className = 'sched-badge'
-    badge.textContent = 'Inactive'
+    badge.textContent = t('schedule.status.inactive')
     summary.append(badge)
   }
   const frequency = document.createElement('span')
@@ -22410,7 +22588,7 @@ function scheduleListRow(record, now, selectedKey) {
   if (active) {
     const next = document.createElement('span')
     next.className = 'sched-row-next'
-    scheduleNextLine(next, 'Next scheduled time: ', record.scheduledAt, now)
+    scheduleNextLine(next, t('schedule.list.nextPrefix'), record.scheduledAt, now)
     summary.append(next)
   }
   content.append(title, summary)
@@ -22437,13 +22615,13 @@ function renderSchedulesPage() {
   const nodes = []
   if (!catalog.settled) {
     nodes.push(catalog.status === 'error'
-      ? scheduleMessageState('Could not load automation tasks.', 'Retry', () => void refreshScheduleCatalog())
+      ? scheduleMessageState(t('schedule.catalogError'), t('schedule.list.retry'), () => void refreshScheduleCatalog())
       : scheduleLoadingState('Loading automation tasks'))
   } else {
-    if (catalog.status === 'error') nodes.push(scheduleNoticeState('Could not refresh automation tasks.', 'Retry', () => void refreshScheduleCatalog()))
+    if (catalog.status === 'error') nodes.push(scheduleNoticeState(t('schedule.catalogRefreshError'), t('schedule.list.retry'), () => void refreshScheduleCatalog()))
     const records = scheduleCatalogMatches()
     if (records.length === 0) {
-      nodes.push(scheduleMessageState(scheduleEmptyText(), 'New automation task', () => void startNewSession()))
+      nodes.push(scheduleMessageState(scheduleEmptyText(), t('schedule.empty.action'), () => void startNewSession()))
     } else {
       const list = document.createElement('ul')
       list.setAttribute('aria-label', 'Automation tasks')
@@ -22471,14 +22649,14 @@ function tickSchedulesPage() {
 /** DSH's Repeat menu, in its order (UI:4005-4034). */
 function scheduleRepeatChoices() {
   return [
-    { value: 'weekly', label: 'Weekly' },
-    { value: 'weekdays', label: 'Monday to Friday' },
-    { value: 'daily', label: 'Every day' },
-    { value: 'hours', label: 'Every N hours' },
-    { value: 'minutes', label: 'Every N minutes' },
-    { value: 'seconds', label: 'Every N seconds' },
-    { value: 'once', label: 'Once' },
-    { value: 'custom', label: 'Custom' },
+    { value: 'weekly', label: t('schedule.rule.weekly') },
+    { value: 'weekdays', label: t('schedule.rule.weekdays') },
+    { value: 'daily', label: t('schedule.rule.daily') },
+    { value: 'hours', label: t('schedule.rule.everyHours') },
+    { value: 'minutes', label: t('schedule.rule.everyMinutes') },
+    { value: 'seconds', label: t('schedule.rule.everySeconds') },
+    { value: 'once', label: t('schedule.rule.once') },
+    { value: 'custom', label: t('schedule.rule.cron') },
   ]
 }
 
@@ -22617,7 +22795,7 @@ function scheduleDraftProblem(draft) {
   if (title.length < 1 || title.length > 120) return 'Enter a task name of 1 to 120 characters.'
   if (draft.prompt.trim() === '') return 'Enter an instruction for the task.'
   if (scheduleIntervalProblem(draft)) return 'At least 60 seconds.'
-  const timing = 'Enter a valid date and time, or check the timing fields.'
+  const timing = t('schedule.timing.invalid')
   const timeValid = /^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(draft.time)
   switch (draft.repeat) {
     case 'once':
@@ -22641,13 +22819,13 @@ function scheduleUpdateMessage(code) {
     case 'schedule_conflict':
       return 'This task changed while you were editing. Your draft is retained.'
     case 'schedule_ended':
-      return 'Inactive tasks are read-only. Their timing cannot be edited.'
+      return t('schedule.timing.inactive')
     case 'schedule_not_found':
       return 'This task is no longer available. Your draft is retained; cancel to close the editor.'
     case 'subagent_session':
-      return 'This session belongs to a sub-agent, which never receives delivered reminders.'
+      return t('schedule.timing.subagentSession')
     case 'not_future':
-      return 'Choose a date and time in the future.'
+      return t('schedule.timing.notFuture')
     case 'invalid_time_zone':
       return 'Choose a valid time zone.'
     case 'frequency_too_high':
@@ -22784,7 +22962,7 @@ function buildScheduleDetail() {
   if (task === undefined && detail.draft === null) {
     const loading = !schedState.catalog.settled && schedState.catalog.status !== 'error'
     detail.shape = loading ? 'loading' : 'unavailable'
-    body.replaceChildren(loading ? scheduleLoadingState('Loading task details') : scheduleMessageState('Task unavailable. It may have been deleted.'))
+    body.replaceChildren(loading ? scheduleLoadingState(t('schedule.detailLoading')) : scheduleMessageState(t('schedule.detail.missing')))
     return
   }
   if (task !== undefined) scheduleEnsureDraft(detail, task)
@@ -22828,8 +23006,8 @@ function scheduleDetailBar(detail) {
   const tabs = document.createElement('div')
   tabs.className = 'sched-detail-tabs'
   tabs.setAttribute('role', 'tablist')
-  tabs.setAttribute('aria-label', 'Task detail views')
-  for (const [value, label] of [['rules', 'Rules'], ['records', 'Records']]) {
+  tabs.setAttribute('aria-label', t('schedule.detail.tabs'))
+  for (const [value, label] of [['rules', t('schedule.detail.rule')], ['records', t('schedule.detail.records')]]) {
     const tab = document.createElement('button')
     tab.type = 'button'
     tab.className = 'sched-detail-tab'
@@ -22864,7 +23042,7 @@ function scheduleDetailBar(detail) {
   linked.id = 'schedule-detail-linked'
   const linkedLabel = document.createElement('span')
   linkedLabel.className = 'sched-linked-label'
-  linkedLabel.textContent = 'Linked session'
+  linkedLabel.textContent = t('schedule.detail.session')
   const linkedName = document.createElement('span')
   linkedName.className = 'sched-linked-name'
   linked.append(linkedLabel, linkedName)
@@ -22873,8 +23051,8 @@ function scheduleDetailBar(detail) {
   more.type = 'button'
   more.className = 'sched-icon-btn'
   more.id = 'schedule-detail-more'
-  more.setAttribute('aria-label', 'Automation task actions')
-  more.title = 'Automation task actions'
+  more.setAttribute('aria-label', t('schedule.detail.more'))
+  more.title = t('schedule.detail.more')
   more.setAttribute('aria-haspopup', 'menu')
   more.setAttribute('aria-expanded', 'false')
   more.setAttribute('aria-controls', 'schedule-detail-menu')
@@ -22884,7 +23062,7 @@ function scheduleDetailBar(detail) {
   menu.className = 'sched-menu sched-more-menu'
   menu.id = 'schedule-detail-menu'
   menu.setAttribute('role', 'menu')
-  menu.setAttribute('aria-label', 'Automation task actions')
+  menu.setAttribute('aria-label', t('schedule.detail.more'))
   menu.hidden = true
   const item = document.createElement('li')
   item.setAttribute('role', 'none')
@@ -22913,18 +23091,18 @@ function scheduleSaveBar() {
   bar.hidden = true
   const notice = document.createElement('span')
   notice.className = 'sched-save-notice'
-  notice.textContent = 'Unsaved changes'
+  notice.textContent = t('schedule.rule.unsaved')
   const cancel = document.createElement('button')
   cancel.type = 'button'
   cancel.className = 'sched-btn sched-btn-sm'
   cancel.id = 'schedule-cancel'
-  cancel.textContent = 'Cancel'
+  cancel.textContent = t('schedule.rule.cancel')
   cancel.addEventListener('click', () => cancelScheduleDraft())
   const save = document.createElement('button')
   save.type = 'button'
   save.className = 'sched-btn sched-btn-sm sched-btn-primary'
   save.id = 'schedule-save'
-  save.textContent = 'Save changes'
+  save.textContent = t('schedule.rule.save')
   save.addEventListener('click', () => void saveScheduleDetail())
   bar.append(notice, cancel, save)
   return bar
@@ -22981,7 +23159,7 @@ function scheduleRulesContent(detail, task) {
   name.type = 'text'
   name.className = 'sched-name'
   name.id = 'schedule-detail-name'
-  name.setAttribute('aria-label', 'Automation task name')
+  name.setAttribute('aria-label', t('schedule.detail.name'))
   name.autocomplete = 'off'
   name.spellcheck = false
   name.value = draft.title
@@ -23000,7 +23178,7 @@ function scheduleRulesContent(detail, task) {
   const prompt = document.createElement('textarea')
   prompt.className = 'sched-instruction'
   prompt.id = 'schedule-detail-prompt'
-  prompt.setAttribute('aria-label', 'Automation task instruction')
+  prompt.setAttribute('aria-label', t('schedule.detail.instruction'))
   prompt.rows = 4
   prompt.value = draft.prompt
   prompt.readOnly = readOnly
@@ -23013,7 +23191,7 @@ function scheduleRulesContent(detail, task) {
   card.setAttribute('aria-labelledby', 'schedule-run-time')
   const heading = document.createElement('h3')
   heading.id = 'schedule-run-time'
-  heading.textContent = 'Run time'
+  heading.textContent = t('schedule.rule.title')
   const rows = document.createElement('div')
   rows.className = 'sched-rule-rows'
   rows.append(scheduleRepeatRow(detail, readOnly))
@@ -23033,7 +23211,7 @@ function scheduleRulesContent(detail, task) {
       const hint = document.createElement('p')
       hint.className = 'sched-rule-hint'
       hint.id = 'schedule-interval-hint'
-      hint.textContent = 'At least 60 seconds. The interval counts from task creation or the last rule change and is independent of time zones.'
+      hint.textContent = t('schedule.timing.intervalHint.second')
       hints.push(hint)
       break
     }
@@ -23063,7 +23241,7 @@ function scheduleFillNext(node, task) {
     return
   }
   if (task.status !== 'active') {
-    scheduleSetText(node, 'Inactive')
+    scheduleSetText(node, t('schedule.status.inactive'))
     return
   }
   scheduleNextLine(node, 'Next run ', task.scheduledAt, Date.now())
@@ -23123,7 +23301,7 @@ function scheduleRepeatRow(detail, readOnly) {
   menu.className = 'sched-menu sched-repeat-menu'
   menu.id = 'schedule-repeat-menu'
   menu.setAttribute('role', 'menu')
-  menu.setAttribute('aria-label', 'Repeat')
+  menu.setAttribute('aria-label', t('schedule.rule.repeat'))
   menu.hidden = true
   for (const choice of scheduleRepeatChoices()) {
     const item = document.createElement('li')
@@ -23139,7 +23317,7 @@ function scheduleRepeatRow(detail, readOnly) {
     menu.append(item)
   }
   const label = scheduleRepeatChoices().find((choice) => choice.value === draft.repeat)?.label ?? ''
-  return scheduleMenuRow('schedule-repeat', 'Repeat', label, readOnly, menu, 'repeat')
+  return scheduleMenuRow('schedule-repeat', t('schedule.rule.repeat'), label, readOnly, menu, 'repeat')
 }
 
 /** Choose a Repeat option: an interval converts between units when it can, Monday to Friday sets its five days. */
@@ -23232,12 +23410,12 @@ function scheduleIntervalRow(detail, readOnly) {
     })
     return button
   }
-  steppers.append(stepper(1, 'Increase interval', 'M4 10l4-4 4 4'), stepper(-1, 'Decrease interval', 'M4 6l4 4 4-4'))
+  steppers.append(stepper(1, t('schedule.timing.intervalIncrease'), 'M4 10l4-4 4 4'), stepper(-1, t('schedule.timing.intervalDecrease'), 'M4 6l4 4 4-4'))
   const unit = document.createElement('span')
   unit.className = 'sched-interval-unit'
   unit.textContent = draft.repeat
   holder.append(input, steppers, unit)
-  return scheduleRuleRow('Repeat every', holder, 'schedule-interval')
+  return scheduleRuleRow(t('schedule.timing.interval'), holder, 'schedule-interval')
 }
 
 /** One native field row of the card (date, time). */
@@ -23261,7 +23439,7 @@ function scheduleFieldRow(labelText, id, type, value, readOnly, onValue) {
 /** The Date row (a calendar date, `YYYY-MM-DD`). */
 function scheduleDateRow(detail, readOnly) {
   const draft = detail.draft
-  return scheduleFieldRow('Date', 'schedule-date', 'date', draft.date, readOnly, (value) => {
+  return scheduleFieldRow(t('schedule.timing.date'), 'schedule-date', 'date', draft.date, readOnly, (value) => {
     draft.date = value
   })
 }
@@ -23269,7 +23447,7 @@ function scheduleDateRow(detail, readOnly) {
 /** The Time row (`HH:mm:ss`). */
 function scheduleTimeRow(detail, readOnly) {
   const draft = detail.draft
-  return scheduleFieldRow('Time', 'schedule-time', 'time', draft.time, readOnly, (value) => {
+  return scheduleFieldRow(t('schedule.timing.time'), 'schedule-time', 'time', draft.time, readOnly, (value) => {
     draft.time = scheduleInputTime(value)
   })
 }
@@ -23296,7 +23474,7 @@ function scheduleCronRow(detail, readOnly) {
     }
     scheduleDraftEdited()
   })
-  return scheduleRuleRow('Cron expression', input, 'schedule-cron')
+  return scheduleRuleRow(t('schedule.rule.cronLabel'), input, 'schedule-cron')
 }
 
 /** The Time zone row and its searchable list. */
@@ -23306,12 +23484,12 @@ function scheduleZoneRow(detail, readOnly) {
   popup.className = 'sched-menu sched-zone-menu'
   popup.id = 'schedule-zone-menu'
   popup.setAttribute('role', 'dialog')
-  popup.setAttribute('aria-label', 'Time zone')
+  popup.setAttribute('aria-label', t('schedule.timing.zone'))
   popup.hidden = true
   const search = document.createElement('input')
   search.type = 'search'
   search.id = 'schedule-zone-search'
-  search.placeholder = 'Search by UTC offset, IANA ID, or city'
+  search.placeholder = t('schedule.timing.zoneSearch')
   search.setAttribute('aria-label', 'Search time zones')
   search.autocomplete = 'off'
   search.spellcheck = false
@@ -23321,7 +23499,7 @@ function scheduleZoneRow(detail, readOnly) {
   list.setAttribute('role', 'listbox')
   list.setAttribute('aria-label', 'Time zones')
   popup.append(search, list)
-  const row = scheduleMenuRow('schedule-zone', 'Time zone', scheduleZoneLabel(draft.timeZone), readOnly, popup, 'zone')
+  const row = scheduleMenuRow('schedule-zone', t('schedule.timing.zone'), scheduleZoneLabel(draft.timeZone), readOnly, popup, 'zone')
   row.querySelector('#schedule-zone')?.setAttribute('title', draft.timeZone)
   return row
 }
@@ -23417,7 +23595,7 @@ function paintScheduleZoneOptions() {
   if (matches.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'sched-zone-empty'
-    empty.textContent = 'No matching time zones'
+    empty.textContent = t('schedule.timing.zoneNoResults')
     nodes.push(empty)
   }
   list.replaceChildren(...nodes)
@@ -23497,7 +23675,7 @@ function paintScheduleSaveBar() {
   const cancel = document.getElementById('schedule-cancel')
   if (save instanceof HTMLButtonElement) {
     save.disabled = detail.saving || problem !== ''
-    scheduleSetText(save, detail.saving ? 'Saving…' : 'Save changes')
+    scheduleSetText(save, detail.saving ? t('schedule.rule.saving') : t('schedule.rule.save'))
   }
   if (cancel instanceof HTMLButtonElement) cancel.disabled = detail.saving
   const message = detail.failure !== '' ? detail.failure : problem
@@ -23607,10 +23785,10 @@ async function loadScheduleSessions() {
 /** The task's session and why it cannot be opened (DSH's three notices), or `''` when it can. */
 function scheduleLinkedSession(sessionId) {
   const sessions = schedState.sessions
-  if (sessions === null || sessions.byId === null) return { meta: undefined, reason: 'Loading original session information.' }
+  if (sessions === null || sessions.byId === null) return { meta: undefined, reason: t('schedule.detail.sessionLoading') }
   const meta = sessions.byId.get(sessionId)
-  if (meta === undefined) return { meta, reason: sessions.status === 'loading' ? 'Loading original session information.' : 'The original session is unavailable.' }
-  if (meta.archived === true) return { meta, reason: 'The original session is archived.' }
+  if (meta === undefined) return { meta, reason: sessions.status === 'loading' ? t('schedule.detail.sessionLoading') : t('schedule.detail.sessionUnavailable') }
+  if (meta.archived === true) return { meta, reason: t('schedule.detail.sessionArchived') }
   return { meta, reason: '' }
 }
 
@@ -23629,7 +23807,7 @@ function paintScheduleLinked() {
   const task = scheduleTaskFor(detail.sessionId, detail.id)
   const notices = []
   if (reason !== '') notices.push(reason)
-  if (task !== undefined && task.status !== 'active') notices.push('Inactive tasks are read-only. Their timing cannot be edited.')
+  if (task !== undefined && task.status !== 'active') notices.push(t('schedule.timing.inactive'))
   const notice = document.getElementById('schedule-detail-notice')
   if (notice !== null) {
     scheduleSetText(notice, notices.join(' '))
@@ -23743,11 +23921,11 @@ function scheduleOccurrenceLabel(at, task) {
 function scheduleRecordsContent(detail, task) {
   const history = detail.history
   if (history === null || history.status === 'loading') return [scheduleLoadingState('Loading delivery records')]
-  if (history.status === 'error') return [scheduleMessageState('Could not load delivery records.', 'Retry', () => void loadScheduleHistory(false))]
-  if (history.status === 'missing') return [scheduleMessageState('This task is no longer available.')]
+  if (history.status === 'error') return [scheduleMessageState(t('schedule.delivery.error'), t('schedule.delivery.retry'), () => void loadScheduleHistory(false))]
+  if (history.status === 'missing') return [scheduleMessageState(t('schedule.delivery.notFound'))]
   const nodes = []
   if (history.records.length === 0) {
-    if (history.status === 'ready') nodes.push(scheduleMessageState('No delivery record available'))
+    if (history.status === 'ready') nodes.push(scheduleMessageState(t('schedule.delivery.empty')))
   } else {
     const list = document.createElement('div')
     list.className = 'sched-deliveries'
@@ -23757,8 +23935,8 @@ function scheduleRecordsContent(detail, task) {
     for (const record of history.records) list.append(scheduleDeliveryRow(history, task, record))
     nodes.push(list)
   }
-  if (history.status === 'cursor') nodes.push(scheduleNoticeState('Records were updated.', 'Refresh', () => void loadScheduleHistory(false)))
-  if (history.more === 'error') nodes.push(scheduleNoticeState('Could not load delivery records.', 'Retry', () => void loadScheduleHistory(true)))
+  if (history.status === 'cursor') nodes.push(scheduleNoticeState(t('schedule.delivery.cursorError'), t('schedule.delivery.refresh'), () => void loadScheduleHistory(false)))
+  if (history.more === 'error') nodes.push(scheduleNoticeState(t('schedule.delivery.error'), t('schedule.delivery.retry'), () => void loadScheduleHistory(true)))
   if (history.status !== 'ready') return nodes
   if (history.nextBefore !== undefined) {
     const more = document.createElement('button')
@@ -23766,7 +23944,7 @@ function scheduleRecordsContent(detail, task) {
     more.className = 'sched-btn sched-btn-sm sched-load-more'
     more.id = 'schedule-records-more'
     more.disabled = history.more === 'loading'
-    more.textContent = history.more === 'loading' ? 'Loading…' : 'Load more'
+    more.textContent = history.more === 'loading' ? t('schedule.loading') : t('schedule.delivery.loadMore')
     more.addEventListener('click', () => void loadScheduleHistory(true))
     nodes.push(more)
   } else if (history.pruned) {
@@ -23803,7 +23981,7 @@ function scheduleDeliveryRow(history, task, record) {
     const paint = () => {
       const expanded = history.expanded.has(key)
       prompt.toggleAttribute('data-expanded', expanded)
-      toggle.textContent = expanded ? 'Collapse' : 'Expand'
+      toggle.textContent = expanded ? t('schedule.delivery.collapse') : t('schedule.delivery.expand')
       toggle.setAttribute('aria-expanded', String(expanded))
     }
     toggle.addEventListener('click', () => {
@@ -23834,13 +24012,13 @@ function scheduleRetentionNote(history) {
   const line = document.createElement('div')
   line.className = 'sched-retention-line'
   const text = document.createElement('span')
-  text.textContent = 'Earlier delivery records have been cleared'
+  text.textContent = t('schedule.delivery.pruned')
   const info = document.createElement('button')
   info.type = 'button'
   info.className = 'sched-icon-btn'
   info.id = 'schedule-retention-info'
-  info.setAttribute('aria-label', 'Retention rules')
-  info.title = 'Retention rules'
+  info.setAttribute('aria-label', t('schedule.delivery.retention'))
+  info.title = t('schedule.delivery.retention')
   info.setAttribute('aria-controls', 'schedule-retention-rule')
   info.setAttribute('aria-expanded', String(history.retentionOpen))
   info.append(scheduleGlyph('M8 7.25v4M8 5h.01M14.25 8a6.25 6.25 0 1 1-12.5 0 6.25 6.25 0 0 1 12.5 0Z', 14))
