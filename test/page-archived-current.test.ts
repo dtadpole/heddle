@@ -38,7 +38,9 @@ const STATE = `
   const QUEUE_KEY_NONE = ''
   let current = OPEN, composerKey = OPEN, unavailableSession = null, activeFolder = '/work/other', selectedPath = 'session:' + OPEN
   let chosenWorkspace = null, showGeneration = 4, sessionLoading = { id: OPEN, generation: 4, events: [] }
-  let sessionStats = { steps: 3 }, liveRounds = 2, liveUsage = {}, liveTurns = 1, liveGenerationMs = 9, liveDecodeTokens = 9, liveRoundStartedAt = 7
+  let sessionStats = { steps: 3 }, liveRounds = 2, liveUsage = {}, liveGenerationMs = 9, liveDecodeTokens = 9, liveRoundStartedAt = 7
+  /** Turn counts per session (4b2a0552, #116): the open session's one turn so far. */
+  const liveTurns = new Map([[OPEN, 1]])
   const calls = []
   const stored = {}
   const localStorage = { setItem: (key, value) => { stored[key] = value }, getItem: (key) => stored[key] ?? null }
@@ -78,7 +80,7 @@ test('clearMain lets the open session go as DSH\'s does: nothing open, the saved
     ${source('clearMain')}
     ;(() => {
       clearMain()
-      const first = JSON.stringify({ current, composerKey, activeFolder, selectedPath, saved: stored['heddle.sessions.current'] ?? null, log: log.children.length, generation: showGeneration, loading: sessionLoading, live: [liveRounds, liveTurns, liveGenerationMs, liveDecodeTokens, liveRoundStartedAt ?? 0], calls })
+      const first = JSON.stringify({ current, composerKey, activeFolder, selectedPath, saved: stored['heddle.sessions.current'] ?? null, log: log.children.length, generation: showGeneration, loading: sessionLoading, live: [liveRounds, liveTurns.get(OPEN) ?? 0, liveGenerationMs, liveDecodeTokens, liveRoundStartedAt ?? 0], calls })
       calls.length = 0
       clearMain()
       return [first, JSON.stringify(calls)]
@@ -178,5 +180,9 @@ test('the stream\'s blocked turn end for the open session lets it go: the gate o
   assert.ok(!blocked.calls.includes('drawTurnFailure'), 'and draws no failure (#139)')
   assert.ok(!run(T, { type: 'turn/failed', reason: { kind: 'blocked' } }).calls.includes('clearMain'), 'another session\'s blocked end leaves the open one open')
   const failed = run(S, { type: 'turn/failed', message: 'upstream answered 502' })
-  assert.ok(!failed.calls.includes('clearMain') && failed.calls.includes('drawTurnFailure'), 'a real failure is drawn, and the session stays open')
+  assert.ok(!failed.calls.includes('clearMain'), 'a real failure leaves the session open')
+  /** Since the union with 4b2a0552 the failure line is the drawing half's, for the shown session (drawSessionEvent). */
+  const drawAt = page.indexOf('\nfunction drawSessionEvent(payload) {')
+  const draw = page.slice(drawAt, page.indexOf('\n}\n', drawAt))
+  assert.match(draw, /event\.type === 'turn\/failed'\) \{[^]*?if \(shown !== null && payload\.session === shown\) \{\s*if \(TurnFailure\.shows\(event\)\) drawTurnFailure\(payload\.session, event\.message\)/, 'and a real failure is drawn there, for the shown session')
 })
