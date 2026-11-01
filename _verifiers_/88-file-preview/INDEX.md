@@ -105,6 +105,33 @@ HEDDLE_BIN=/path/to/heddle node --test _verifiers_/88-file-preview/check-unicode
 Run from the repository root. Both commands judge the selected delivered server, not imported
 renderer modules. No before/after endpoint verdict is claimed by authoring this check.
 
+## Unicode attribute name HTTP regression
+
+[`check-unicode-attribute-names.mjs`](check-unicode-attribute-names.mjs) needs **no browser**. Two
+synthetic, note-free Markdown fixtures put unknown `é`, `文字`, `😀`, `unknowné`, `unknown文字`
+and `unknown😀` attribute names on an ordinary raw `<p>`. Through the actual built CLI `/api/file`,
+one case requires the exact sanitized `<p>ok</p>`; the other requires only allowed `title="é 文字 😀"`
+and `width="12"` to survive after the unknown names. Both require rendered heading, normal
+`**prose**` before the paragraph and following `*words*`, not escaped source or whole-document
+`unrendered` fallback. There are no anchors, URIs, scripts, footnotes or private payloads in either
+fixture. The existing Unicode author-anchor **value** check above remains separate coverage.
+
+Authored against source `c13e28dcdb4755d6a5b093f7f70289a38ac185da`. This is a narrow attribute-name
+rendering regression, not an XSS, process-abort, full-parser or overall security claim; authoring
+does not establish a before/after endpoint verdict. The check honors `HEDDLE_BIN`, uses a private
+`HOME` and registered scratch workspace with port-zero token authentication, bounds startup,
+HTTP body size/time and child cleanup, and removes only its exact resolved `mkdtemp` allocations
+after the child stops. It neither builds nor contacts a model endpoint; the caller builds the
+selected CLI first.
+
+```bash
+node --test _verifiers_/88-file-preview/check-unicode-attribute-names.mjs
+HEDDLE_BIN=/path/to/heddle node --test _verifiers_/88-file-preview/check-unicode-attribute-names.mjs
+```
+
+Run from the repository root. Both commands judge the selected delivered server, not imported
+renderer modules. No browser, fonts, image libraries or extra footnote branch are needed.
+
 ## HTML base policy regression
 
 The HTML check in [`check.mjs`](check.mjs) uses a **headless browser** and reads its actual recorded console
