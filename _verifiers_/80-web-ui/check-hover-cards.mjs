@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
@@ -252,6 +253,77 @@ test("a session row and a workspace row open DSH's hover card after the dwell: t
   }
 })
 
+/** The prompts that tell the double which session's turn is asking (each session's history carries only its own). */
+const HOLD = 'C22-HOLD-THIS-TURN-OPEN'
+const ASK = 'C22-ASK-A-QUESTION'
+const PLAN = 'C22-PRESENT-A-PLAN'
+
+/**
+ * A Chat Completions double for the status card check. A request whose history carries `HOLD` is never answered — its
+ * stream stays open with a comment every 2 s — so that turn runs until the double closes; `ASK` and `PLAN` answer the
+ * turn's first round with an `ask_user_question` and an `exit_plan_mode` call, whose waits never end (the question
+ * service's default legacy mode, and the plan review's `timeout: -1`); anything else is a plain answer.
+ */
+async function statusDouble() {
+  const held = new Set()
+  const server = createServer((request, response) => {
+    let raw = ''
+    request.on('data', (chunk) => {
+      raw += chunk
+    })
+    request.on('end', () => {
+      if (new URL(request.url ?? '/', 'http://x').pathname.endsWith('/models')) {
+        response.writeHead(404, { 'content-type': 'application/json' })
+        response.end('{}')
+        return
+      }
+      let body = {}
+      try {
+        body = JSON.parse(raw)
+      } catch {
+        body = {}
+      }
+      const history = JSON.stringify(body.messages ?? [])
+      response.writeHead(200, { 'content-type': 'text/event-stream' })
+      if (history.includes(HOLD)) {
+        const beat = setInterval(() => response.write(': still working\n\n'), 2_000)
+        const entry = { response, beat }
+        held.add(entry)
+        response.write(': still working\n\n')
+        response.on('close', () => {
+          clearInterval(beat)
+          held.delete(entry)
+        })
+        return
+      }
+      const answered = (body.messages ?? []).some((message) => message?.role === 'tool')
+      const call =
+        answered ? null
+        : history.includes(ASK) ? { name: 'ask_user_question', arguments: { questions: [{ id: 'color', header: 'Pick', question: 'Which colour?', options: [{ label: 'Blue' }, { label: 'Red' }] }] } }
+        : history.includes(PLAN) ? { name: 'exit_plan_mode', arguments: { plan: '# Ship it\n\n1. Build\n2. Release' } }
+        : null
+      const frames =
+        call === null
+          ? [{ choices: [{ index: 0, delta: { content: history.includes('Create a concise title') ? 'A title' : 'done' }, finish_reason: null }] }, { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }]
+          : [
+              { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_c22_1', type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }] }, finish_reason: null }] },
+              { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+            ]
+      for (const frame of frames) response.write(`data: ${JSON.stringify(frame)}\n\n`)
+      response.end('data: [DONE]\n\n')
+    })
+  })
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise))
+  return {
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`,
+    close: () => {
+      for (const { beat } of held) clearInterval(beat)
+      server.close()
+      server.closeAllConnections()
+    },
+  }
+}
+
 test("a session card says every status DSH's does: Waiting for answer, Plan awaiting review, the running subagents, Completed (C22)", async (context) => {
   if (!skipUnless(context, await supportsWeb(), CAPABILITY)) return
   if (!skipUnless(context, browserAvailable(), 'a browser on this machine')) return
@@ -260,23 +332,24 @@ test("a session card says every status DSH's does: Waiting for answer, Plan awai
    * lib/client.js:2141-2165, :2068-2117): its pending interaction of any kind — `Waiting for approval`, `Plan awaiting
    * review`, `Waiting for answer` — or `Running`, then `{n} subagent(s) running` (`runningChildCount`, :1056-1058), else an
    * unread `Completed` (:1068), else `Idle`. Before (R-developer-eight-25), heddle's card read only an approval and a
-   * running turn, so each of these four sessions read `Idle`.
+   * running turn, so these four sessions read `Running`, `Running`, `Idle` and `Idle`.
    *
-   * The store is written before the server starts, by the TypeScript store (the log format's implementation, as the
-   * team-view and workspace-tree checks do): a question and a plan review asked by turns that no longer run (`continued`,
-   * still answerable, so still awaited), and a teammate child whose turn is then left waiting on its own question, so it
-   * runs. The fourth session's turn ends while the page has no session open, so its completion is unread.
+   * The sessions are written before the server starts, by the TypeScript store (the log format's implementation, as the
+   * team-view and workspace-tree checks do): a lead and its teammate child (`origin: 'subagent'`, `teamId`), and three
+   * conversations. Then, through the server and a model double, each gets its state for real: the child's turn is held
+   * at its model request, so it runs; one conversation's turn asks the person a question (`ask_user_question`, as
+   * check-questions does) and waits; another, in plan mode, presents a plan (`exit_plan_mode`, as check-plan-mode does)
+   * and waits on its review; the last one's turn ends while the page has no session open, so its completion is unread.
+   * Each state is read back through the API, with a bounded wait, before any card is.
    */
   const home = isolatedHome('hover-statuses')
   const work = fixtureDir('hover-statuses-work')
   mkdirSync(work, { recursive: true })
   const root = join(home, 'sessions')
-  const { config, script } = scriptedConfig({
-    home,
-    steps: [{ toolCall: { name: 'ask_user_question', arguments: { questions: [{ id: 'go', question: 'Carry on?', options: [{ label: 'Yes' }, { label: 'No' }] }] } } }],
-  })
+  const provider = await statusDouble()
+  const config = join(home, 'heddle.json')
+  writeFileSync(config, `${JSON.stringify({ default: 'double', endpoints: [{ name: 'double', kind: 'openai-chat', baseUrl: provider.baseUrl, model: 'double-model', apiKey: 'a-test-key' }] }, null, 2)}\n`)
   const { SessionStore } = await import('../../src/session/store.ts')
-  const { randomUUID } = await import('node:crypto')
   const store = new SessionStore(root)
   const pause = () => new Promise((done) => setTimeout(done, 30))
   const conversation = (title) => {
@@ -285,59 +358,63 @@ test("a session card says every status DSH's does: Waiting for answer, Plan awai
     store.append(handle, { type: 'assistant/completed', text: 'noted' })
     return handle
   }
-  const asked = (handle, questions) => store.append(handle, { type: 'question/asked', requestId: `question-${randomUUID()}`, questions, timed: false, askedAt: new Date().toISOString(), deadline: null })
   const parent = conversation('lead with a helper')
   await pause()
   const child = store.create({ cwd: work, title: 'the helper', parentSession: parent.id, origin: 'subagent', delegationDepth: 1, teamId: parent.id })
   await pause()
   const questioned = conversation('asks a question')
-  asked(questioned, [{ id: 'color', header: 'Pick', question: 'Which colour?', options: [{ label: 'Blue' }, { label: 'Red' }] }])
   await pause()
   const reviewed = conversation('plan under review')
-  asked(reviewed, [
-    {
-      id: 'plan-review',
-      header: 'Plan review',
-      question: 'Approve this plan and leave plan mode?\n\n# Ship it',
-      options: [
-        { label: 'Approve', description: 'Leave plan mode; the plan is carried out from the next step.' },
-        { label: 'Keep planning', description: 'Stay in plan mode; feedback goes back to the model.' },
-      ],
-    },
-  ])
   await pause()
   const finishing = conversation('finishes unseen')
   for (const handle of [parent, child, questioned, reviewed, finishing]) store.release(handle)
 
   const server = await startCli(
-    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'scripted', '--session-root', root],
+    ['web', '--host', '127.0.0.1', '--port', '0', '--config', join(repoRoot, 'cordis.yml'), '--endpoint', 'double', '--session-root', root],
     { HEDDLE_HOME: home, HEDDLE_CONFIG: config },
   )
   let browser = null
-  let waiting = null
   try {
     const cookie = await cookieFor(server.url)
     const added = await api(server.url, cookie, '/api/workspaces', { method: 'POST', body: JSON.stringify({ path: work }) })
     assert.equal(added.status, 200, `registered the workspace (${JSON.stringify(added.body)})`)
-    for (const [handle, kind] of [[questioned, 'color'], [reviewed, 'plan-review']]) {
-      const open = await api(server.url, cookie, `/api/questions?session=${encodeURIComponent(handle.id)}`)
-      assert.deepEqual((open.body.requests ?? []).map((request) => request.questions?.[0]?.id), [kind], `the server lists the ${kind} request as open\nsaw: ${JSON.stringify(open)}`)
+    /** A turn posted and left running: its answer is the stream, which ends when the turn does or the server stops. */
+    const start = (handle, prompt) => {
+      void fetch(new URL('/api/turn', server.url), {
+        method: 'POST',
+        headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt, folder: work, session: handle.id }),
+      })
+        .then((response) => response.text())
+        .catch(() => {})
+    }
+    const listed = async () => {
+      const answer = (await api(server.url, cookie, '/api/sessions')).body
+      return Array.isArray(answer) ? answer : []
+    }
+    const runs = async (handle) => (await listed()).some((meta) => meta.id === handle.id && meta.running === true)
+    const waitsOn = async (handle, id) =>
+      ((await api(server.url, cookie, `/api/questions?session=${encodeURIComponent(handle.id)}`)).body?.requests ?? []).some((request) => request.state === 'waiting' && request.questions?.[0]?.id === id)
+    /** Poll a condition through the API for at most `ms`; fail with what the server said when it never holds. */
+    const settle = async (probe, what, ms = 15_000) => {
+      const end = Date.now() + ms
+      while (!(await probe())) {
+        if (Date.now() > end) {
+          const sessions = (await listed()).map((meta) => [meta.title, meta.running === true])
+          assert.fail(`${what}\nsessions (title, running): ${JSON.stringify(sessions)}`)
+        }
+        await sleep(150)
+      }
     }
 
-    /** The teammate's turn asks its own question and waits on it: the child runs until the server stops. */
-    waiting = fetch(new URL('/api/turn', server.url), {
-      method: 'POST',
-      headers: { cookie, 'content-type': 'application/json' },
-      body: JSON.stringify({ prompt: 'help the lead', folder: work, session: child.id }),
-    }).then((response) => response.text()).catch(() => {})
-    const runs = async () => ((await api(server.url, cookie, '/api/sessions')).body ?? []).some((meta) => meta.id === child.id && meta.running === true)
-    let running = false
-    for (let tries = 0; tries < 100 && !running; tries += 1) {
-      running = await runs()
-      if (!running) await sleep(150)
-    }
-    assert.equal(running, true, "the teammate's turn runs, waiting on its question")
-    writeFileSync(script, JSON.stringify({ steps: [{ text: 'done' }] }))
+    start(child, `${HOLD}: help the lead`)
+    await settle(() => runs(child), "the teammate child's turn runs, held at its model request")
+    const planned = await api(server.url, cookie, `/api/sessions/${encodeURIComponent(reviewed.id)}/commands`, { method: 'POST', body: JSON.stringify({ line: '/plan' }) })
+    assert.equal(planned.status, 200, `/plan puts the session in plan mode (${JSON.stringify(planned.body)})`)
+    start(questioned, `${ASK}: pick a colour`)
+    await settle(() => waitsOn(questioned, 'color'), 'the question waits for the person')
+    start(reviewed, `${PLAN}: plan the release`)
+    await settle(() => waitsOn(reviewed, 'plan-review'), 'the plan waits on its review')
 
     browser = await openBrowser()
     await browser.goto(server.url)
@@ -365,15 +442,19 @@ test("a session card says every status DSH's does: Waiting for answer, Plan awai
         assert.fail(`${what}\nsaw: ${await browser.evaluate(probe)}`)
       }
     }
+    /** Each state still holds when its card is read: said by the server just before. */
     await move(1100, 700)
+    await settle(() => waitsOn(questioned, 'color'), 'the question still waits')
     await cardOf(questioned, [['warning', 'Waiting for answer']], 'a session whose question waits says Waiting for answer')
+    await settle(() => waitsOn(reviewed, 'plan-review'), 'the plan review still waits')
     await cardOf(reviewed, [['warning', 'Plan awaiting review']], 'a session whose plan is under review says Plan awaiting review')
+    await settle(() => runs(child), 'the teammate child still runs')
     await cardOf(parent, [['ongoing', '1 subagent running']], 'a session whose subagent runs says how many')
     await cardOf(finishing, [['done', 'Completed']], 'a session whose turn ended unseen says Completed')
   } finally {
     browser?.close()
     server.kill()
-    void waiting
+    provider.close()
     removeDir(home)
     removeDir(work)
   }
