@@ -821,6 +821,8 @@ impl heddle_web_files::host::FilesHost for PageHost {
             Ok(reading) => serde_json::to_value(reading)
                 .and_then(serde_json::from_value)
                 .map_err(|error| FileReadError::NotText(error.to_string())),
+            Err(heddle_workspace::FileReadError::Unreadable) => Err(FileReadError::Unreadable),
+            Err(heddle_workspace::FileReadError::ReadFailed) => Err(FileReadError::ReadFailed),
             Err(error @ heddle_workspace::FileReadError::NotAFile(_)) => {
                 Err(FileReadError::NotAFile(error.to_string()))
             }

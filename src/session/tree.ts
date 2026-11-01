@@ -296,17 +296,46 @@ export interface FileReading {
  * model's behalf still goes through the sandbox and the approval policy.
  */
 export function readFileText(path: string, options: { readonly limit?: number } = {}): FileReading {
+  return readPreviewText(path, options)
+}
+
+/** Scoped preview failures (#45), never exposing host paths or raw Node errors.
+ * Heddle policy, not a DSH HTTP status: its installed reader rethrows permission/I/O errors.
+ */
+export class FilePreviewError extends Error {
+  readonly code: 'workspace-file/unreadable' | 'workspace-file/read-failed'
+  constructor(code: 'workspace-file/unreadable' | 'workspace-file/read-failed') {
+    super(code === 'workspace-file/unreadable' ? 'cannot read file: permission denied' : 'cannot read file: I/O error')
+    this.code = code
+    this.name = 'FilePreviewError'
+  }
+}
+
+/** Classify filesystem failures by code, not by a filename or an OS error's sentence. */
+function fileReadFailure(error: unknown, path: string): Error {
+  const code = (error as NodeJS.ErrnoException | null)?.code
+  if (code === 'EACCES' || code === 'EPERM') return new FilePreviewError('workspace-file/unreadable')
+  if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return new Error(`${path} is not a file`)
+  return new FilePreviewError('workspace-file/read-failed')
+}
+
+function readPreviewText(path: string, options: { readonly limit?: number }): FileReading {
   const canonical = canonicalPath(path)
   const limit = options.limit ?? FILE_LIMIT_BYTES
   let stats
   try {
     stats = statSync(canonical)
-  } catch {
-    throw new Error(`${canonical} is not a file`)
+  } catch (error) {
+    throw fileReadFailure(error, canonical)
   }
   if (!stats.isFile()) throw new Error(`${canonical} is not a file`)
 
-  const whole = readFileSync(canonical)
+  let whole: Buffer
+  try {
+    whole = readFileSync(canonical)
+  } catch (error) {
+    throw fileReadFailure(error, canonical)
+  }
   const slice = whole.subarray(0, limit)
   if (slice.includes(0)) throw new Error(`${canonical} looks like a binary file, so it has no text to show`)
   const truncated = whole.length > slice.length

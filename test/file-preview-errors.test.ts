@@ -44,6 +44,12 @@ test('file preview permission refusal is named, path-free and distinct from nonf
     const handshake = await fetch(server.url, { redirect: 'manual' })
     const cookie = (handshake.headers.get('set-cookie') ?? '').split(';')[0]!
     const call = (path: string, authorized = true) => fetch(new URL(`/api/file?path=${encodeURIComponent(path)}`, server!.url), { headers: authorized ? { cookie } : {} })
+    const loop = join(workspace, 'loop.txt')
+    symlinkSync('loop.txt', loop)
+    assert.throws(() => readFileText(loop), { code: 'workspace-file/read-failed', message: 'cannot read file: I/O error' })
+    const failed = await call(loop)
+    assert.equal(failed.status, 500, 'unexpected filesystem failures are not nonfile or unsupported')
+    assert.deepEqual(await failed.json(), { error: 'cannot read file: I/O error', code: 'workspace-file/read-failed' })
     const refusal = await call(denied)
     assert.equal(refusal.status, 403)
     assert.deepEqual(await refusal.json(), { error: expected.message, code: expected.code })

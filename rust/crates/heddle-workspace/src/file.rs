@@ -35,6 +35,12 @@ pub struct FileReading {
 /// Why a file was refused. The messages are the TypeScript build's, and a verifier matches `not a file`.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FileReadError {
+    /// Scoped Heddle permission refusal (#45), not DSH HTTP status parity; no host path.
+    #[error("cannot read file: permission denied")]
+    Unreadable,
+    /// Unexpected filesystem I/O is not a missing file or unsupported text.
+    #[error("cannot read file: I/O error")]
+    ReadFailed,
     /// `<path> is not a file`
     #[error("{0} is not a file")]
     NotAFile(String),
@@ -52,15 +58,13 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
     let canonical = canonical_path(Path::new(path))
         .to_string_lossy()
         .into_owned();
-    let Ok(metadata) = std::fs::metadata(&canonical) else {
-        return Err(FileReadError::NotAFile(canonical));
-    };
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|error| read_failure(error, &canonical))?;
     if !metadata.is_file() {
         return Err(FileReadError::NotAFile(canonical));
     }
-    let Ok(whole) = std::fs::read(&canonical) else {
-        return Err(FileReadError::NotAFile(canonical));
-    };
+    let whole = std::fs::read(&canonical)
+        .map_err(|error| read_failure(error, &canonical))?;
     let limit = limit.unwrap_or(FILE_LIMIT_BYTES);
     let slice = &whole[..limit.min(whole.len())];
     if slice.contains(&0) {
@@ -91,6 +95,17 @@ pub fn read_file_text(path: &str, limit: Option<usize>) -> Result<FileReading, F
     })
 }
 
+fn read_failure(error: std::io::Error, path: &str) -> FileReadError {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::PermissionDenied => FileReadError::Unreadable,
+        ErrorKind::NotFound | ErrorKind::NotADirectory | ErrorKind::IsADirectory => {
+            FileReadError::NotAFile(path.to_owned())
+        }
+        _ => FileReadError::ReadFailed,
+    }
+}
+
 /// The slice's text, or `None` when its bytes are not UTF-8 (issue #78).
 ///
 /// Decoded **strictly**, so a literal U+FFFD in the file is a character like any other and only bytes that are not
@@ -118,6 +133,14 @@ mod tests {
         let path = dir.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn io_failure_kinds_do_not_depend_on_the_os_error_message() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(read_failure(Error::new(ErrorKind::PermissionDenied, "private host path"), "/private"), FileReadError::Unreadable);
+        assert_eq!(read_failure(Error::new(ErrorKind::Other, "private host path"), "/private"), FileReadError::ReadFailed);
+        assert!(matches!(read_failure(Error::from(ErrorKind::NotFound), "/missing"), FileReadError::NotAFile(_)));
     }
 
     #[cfg(unix)]
