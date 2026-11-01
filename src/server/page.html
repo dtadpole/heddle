@@ -3022,8 +3022,8 @@
   .team-member .team-message { display: inline-flex; gap: .25rem; }
   .team-member .team-message[hidden] { display: none; }
   .team-member .team-message input { font: inherit; font-size: 11px; width: 14rem; }
+  /* Always rendered, empty when there is nothing to say: a live region hidden at the moment its text changes is often not announced. */
   #team-note { color: var(--text-3); }
-  #team-note[hidden] { display: none; }
   .team-task[data-status='completed'] { opacity: .6; }
   .team-task[data-status='deleted'] { opacity: .4; text-decoration: line-through; }
   #team-mail { opacity: .7; }
@@ -3594,7 +3594,7 @@
     <ul id="team-roster" aria-label="Team members"></ul>
     <ul id="team-tasks" aria-label="Shared tasks"></ul>
     <div id="team-mail" aria-live="polite"></div>
-    <div id="team-note" role="status" hidden></div>
+    <div id="team-note" role="status"></div>
   </div>
   <div id="log" data-view="chat" role="tabpanel" aria-labelledby="tab-chat"></div>
   <!--
@@ -25245,6 +25245,8 @@ async function refreshTeam() {
     teamShownFor = null
     return
   }
+  /** A note about one team's member does not follow the panel to another session's team. */
+  if (session !== teamShownFor) teamNote('')
   let body = null
   try {
     const response = await fetch('/api/team?session=' + encodeURIComponent(session))
@@ -25284,6 +25286,13 @@ async function refreshTeam() {
     item.querySelector('.team-label').textContent = member.name + ' \u00b7 ' + member.role + ' \u00b7 ' + member.status
     const stop = item.querySelector('.team-stop')
     if (stop !== null && stop.dataset.busy !== 'true') stop.disabled = member.status !== 'running'
+    /** A follow-up goes only to a member that can take a turn: running (it queues) or inactive. */
+    const open = item.querySelector('.team-open-message')
+    if (open !== null) {
+      const continuable = member.status === 'running' || member.status === 'inactive'
+      open.disabled = !continuable
+      if (!continuable) item.querySelector('.team-message').hidden = true
+    }
   }
   const board = document.getElementById('team-tasks')
   board.replaceChildren()
@@ -25349,7 +25358,6 @@ function teamNote(text) {
   const note = document.getElementById('team-note')
   if (note === null) return
   note.textContent = text
-  note.hidden = text === ''
 }
 
 /** DSH's interruptByParent: cancel the child's running turn; an idle child is a no-op. */
