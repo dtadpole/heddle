@@ -590,6 +590,21 @@ pub async fn run_turn(
     // One turn at a time per session (#28): a turn sent to a busy session waits for the running one, as DSH's
     // follow-up does. `begin_turn` keeps registering at once, for a caller that needs the prompt durable before
     // it polls anything and starts turns only on idle sessions.
+    begin_turn_queued(runtime, options).await?.run().await
+}
+
+/// [`begin_turn`] behind the session's queue: it waits its place after every turn already running or queued on the
+/// session (a goal round's [`run_turn`] among them), then registers the turn and writes its prompt, and hands back
+/// the rest as [`BegunTurn::run`].
+///
+/// For a caller that starts a turn from outside a turn and needs the prompt durable before it goes on: a reminder's
+/// delivery, which reads the message back to record it. `begin_turn` registers at once, so a caller that checked
+/// "idle" first could still race a queued turn into the same moment and run two turns in one session (issue #191);
+/// waiting in the queue cannot.
+pub async fn begin_turn_queued(
+    runtime: &AgentRuntime,
+    options: RunTurnOptions,
+) -> Result<BegunTurn, TurnError> {
     let live = match runtime.turns.as_ref() {
         Some(turns) => Some(
             turns
@@ -598,7 +613,7 @@ pub async fn run_turn(
         ),
         None => None,
     };
-    begin_registered(runtime, options, live)?.run().await
+    begin_registered(runtime, options, live)
 }
 
 /// One turn's body, after [`begin_turn`] wrote the prompt.
