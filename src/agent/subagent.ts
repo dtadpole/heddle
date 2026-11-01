@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 
 import { inheritRecordedMode } from '../session/mode.ts'
+import { interruptedTurnClosers } from '../session/repair.ts'
 import type { SessionEvent, SessionHandle, SessionMeta, SessionStore } from '../session/store.ts'
 import { runTurn } from './loop.ts'
 
@@ -180,14 +181,19 @@ export async function delegateSubagent(
   }
 }
 
-/** How a background child's run ended, in DSH's settlement vocabulary (`dsh-subagent` stop reasons). */
-export type SubagentStopReason = 'completed' | 'aborted' | 'error'
+/**
+ * How a background child's run ended, in DSH's settlement vocabulary (`dsh-subagent` stop reasons), plus
+ * `interrupted`: the process running the child exited mid-turn, and the next server start reports it (#170).
+ */
+export type SubagentStopReason = 'completed' | 'aborted' | 'error' | 'interrupted'
 
 /**
  * The opening line of a settlement notice, DSH's `settlementSummary` word for word.
  *
  * A delegate child is one-shot: it takes no follow-up message (heddle's continuable child is the teammate), so a
- * completed child is worded as DSH words a child that cannot receive more.
+ * completed child is worded as DSH words a child that cannot receive more. `interrupted` is heddle's: DSH sends no
+ * notice for a child its process lost (`_context_/dsh-mechanisms/dsh-jobs.md` section 6.3), so its line follows
+ * DSH's `stopped` and `failed` lines in form.
  */
 export function settlementSummary(childId: string, stopReason: SubagentStopReason): string {
   const subject = `Background subagent ${childId}`
@@ -198,8 +204,23 @@ export function settlementSummary(childId: string, stopReason: SubagentStopReaso
       return `${subject} was stopped before it finished.`
     case 'error':
       return `${subject} failed before it finished.`
+    case 'interrupted':
+      return `${subject} was interrupted before it finished.`
   }
 }
+
+/** The diagnostic an interrupted child's notice carries: the closer's reason, told to the parent. */
+export const INTERRUPTED_DIAGNOSTIC =
+  'The process running it exited before its turn finished, so the turn was closed; a tool call it left open has an unknown outcome.'
+
+/**
+ * How long after its last event a cut child is still reported at a server start: one day.
+ *
+ * The case is a deploy or a crash, where the server is back within minutes. A child cut longer ago is left as it is
+ * (a view already shows its turn closed): its parent has moved on, and the first start of a build with this sweep must
+ * not wake every old parent on the store at once.
+ */
+export const INTERRUPTED_REPORT_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /** A settled child's report to its parent: the user-role message DSH's runtime delivers, and its source. */
 export interface SettlementNotice {
@@ -337,12 +358,75 @@ export class SubagentService {
     }
     if (stopReason === 'completed' && signal?.aborted === true) stopReason = 'aborted'
     const notice = settlementNotice(child.id, stopReason, finalAssistantText(this.deps.store.read(child)), diagnostic)
+    await this.report(parent, notice)
+  }
+
+  /** Hand `parent` its child's notice, and count it once it is answered. */
+  private async report(parent: SessionHandle, notice: SettlementNotice): Promise<void> {
     try {
       await this.deps.deliver(parent, notice)
       this.delivered.set(parent.id, (this.delivered.get(parent.id) ?? 0) + 1)
     } catch {
       /** A delivery that fails must not reject the tracked work: `settle` would turn it into a host failure. */
     }
+  }
+
+  /**
+   * Report to their parents the background children a previous process left mid-turn, and return how many (#170).
+   *
+   * The server calls this once at start, after the goal and team sweeps, with every session whose log reads whole. A
+   * process that exits while a child's turn is open takes the child's settlement with it: the child's log is closed at
+   * the next write-open (`./repair.ts`), but its parent would never hear, and its model would wait for a child that
+   * will not answer. So for each delegate child (`origin: 'subagent'`, not a teammate, which the team sweep owns)
+   * whose last turn is open, whose writer is gone, and whose last event is inside {@link INTERRUPTED_REPORT_WINDOW_MS}:
+   *
+   * 1. its open turn is closed in its own log, by taking its writer lock (DSH's write-open closers, written rather than
+   *    only shown) and letting go again. That is what makes the report happen once: the next start finds the turn
+   *    closed;
+   * 2. its parent gets the `interrupted` settlement notice, with whatever the child had said as its closing message,
+   *    delivered as a finished child's notice is: a new parent turn, or into the parent's running turn.
+   *
+   * A parent that is itself a child cut in the same restart gets the notice written into its log without a turn of
+   * its own: nothing would carry that turn's answer up the chain, and its own `interrupted` notice already goes up.
+   * Every notice is made before any is written, so such a parent's closing message is its own. A child whose parent is
+   * gone is left as it is. Deliveries are not awaited (a turn must not hold the server's start); `settle` waits for them.
+   */
+  reportInterrupted(handles: readonly SessionHandle[], now: number = Date.now()): number {
+    const store = this.deps.store
+    const metas = new Map(store.list().map((meta) => [meta.id, meta]))
+    const cut: { readonly child: string; readonly parent: SessionHandle; readonly notice: SettlementNotice }[] = []
+    for (const handle of handles) {
+      const meta = metas.get(handle.id)
+      if (meta?.origin !== 'subagent' || meta.parentSession === undefined || meta.teamId !== undefined) continue
+      const events = store.read(handle)
+      const last = events.at(-1)
+      // An unreadable time is outside the window, as it is in the Rust build.
+      if (last === undefined || !(now - Date.parse(last.at) <= INTERRUPTED_REPORT_WINDOW_MS)) continue
+      if (interruptedTurnClosers(events).length === 0 || store.writerHeld(handle)) continue
+      const parent = store.open(meta.parentSession)
+      if (parent === null) continue
+      try {
+        store.claim(handle)
+      } catch {
+        // Another process took it between the two looks: that process closes it.
+        continue
+      }
+      store.release(handle)
+      cut.push({ child: handle.id, parent, notice: settlementNotice(handle.id, 'interrupted', finalAssistantText(store.read(handle)), INTERRUPTED_DIAGNOSTIC) })
+    }
+    const cutIds = new Set(cut.map((one) => one.child))
+    for (const { parent, notice } of cut) {
+      if (cutIds.has(parent.id)) {
+        try {
+          store.message(parent, { role: 'user', content: [...notice.content], source: notice.source })
+        } catch {
+          // A write that fails must not stop the server's start; the parent's own notice still goes up.
+        }
+        continue
+      }
+      this.track(parent.id, this.report(parent, notice))
+    }
+    return cut.length
   }
 }
 

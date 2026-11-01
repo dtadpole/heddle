@@ -34,6 +34,41 @@ grounded_in:
   one turn, and one element drawn for it, with the person and the model keeping their own. Its minimap
   freshness check compares the served page marker with the SHA256 prefix of the fixture's built HTML,
   not a historical rail-specific label.
+- [`check-user-secret-mask.mjs`](check-user-secret-mask.mjs) — issue #84's sent human bubble, driven through the
+  delivered TypeScript CLI or `HEDDLE_BIN` Rust CLI with a private fixture home/workspace and a port-zero local
+  provider double. Two deterministic, non-provider-issued `FAKE` credentials use installed literal `sk-` and
+  `ghp_` prefixes, valid numeric suffix minimums and a digit for the `sk-` shape. Actual textarea/Send gestures
+  judge actual asterisks by default, two independent SVG icon toggles, reveal-one-not-the-other, hide, a real
+  session-switch remount and page reload returning masked. A second ordinary UI message makes the minimap
+  reachable; its first-user preview is judged masked when accessible, otherwise explicitly diagnosed as unavailable.
+  The provider's real request must contain the exact original prompt, and the real user Copy handler must give
+  a browser-local `writeText` recorder that same raw original. No OS/global clipboard is read. No newly introduced
+  raw attribute, title or aria value is allowed; the existing user-row raw Copy snapshot is explicitly excluded.
+  Named sessions avoid automatic title calls and a 1,000,000-token window avoids provider compaction calls.
+  Startup, fetch plus body consumption, provider request bodies and browser/CLI/provider cleanup have bounds;
+  `HEDDLE_VERIFY_UI=0` uses the standard labelled skip, not an environment assertion. Author-only product-source
+  pin is `659588`, with identical product source at `422c7d2a` as confirmed by the parent. This entry records no
+  executed result; source-owner-ten exact review and both actual TypeScript/Rust execution gates belong to the
+  parent. Queue/steering buffers, goal/automatic messages and assistant rendering are outside this check, as are
+  real keys and any claim that server logs, storage or provider transport redact secrets.
+- [`check-user-text-surfaces.mjs`](check-user-text-surfaces.mjs) — issue #84 part 2, authored against product source
+  `60c67da5`, not an executed result. Actual `heddleCommand` honours both the TypeScript CLI and `HEDDLE_BIN`;
+  a private home/workspace and port-zero offline provider double hold the first real turn while Enter queues
+  deterministic valid `FAKE` `sk-`/`ghp_` values. The `sk-` key straddles the 200-character display boundary:
+  `#queue .preview` (the actual queue-preview surface) must mask before truncation, and its full `title` must mask
+  both keys, including the second wholly beyond the preview. Preview text is noninteractive with no eye/reveal
+  buttons; existing Edit opens the exact raw value, Cancel retains it, Save restores the masked preview/title,
+  and the actual second provider request receives the exact saved raw text with no cancelled edit.
+  Actual composer input/Enter submits `/goal <FAKE objective>`; the Command input bubble and `.hc-args` must
+  mask both keys, including after history reload, while `GET /api/goal` returns the exact raw objective.
+  **Goal result `.hc-text` and goal bar are intentionally OUT; this is not whole-screen privacy or backend,
+  log or transport redaction.** A private final profile patch removes `goal-driver`, no automatic goal round is
+  planned, `--max-rounds 1` caps explicit turns, and the double refuses calls beyond the two queue turns.
+  Named sessions avoid title calls; the private child environment inherits no provider/proxy/HEDDLE overrides.
+  Startup, hold response, request/body consumption and browser/CLI/provider cleanup are bounded; standard
+  `HEDDLE_VERIFY_UI=0` skips before fixtures. Existing part 1/provider/Copy checks are not duplicated.
+  No real keys, live Settings/auth files or host/private key data are read. Source/menu-owner review and both
+  delivered-build execution gates belong to the parent; this entry records authored intent, not runtime proof.
 - [`check-context-view.mjs`](check-context-view.mjs) — how a session's context was composed: the report
   per session, its provenance, and the span a compaction stands in for.
 - [`check-file-view.mjs`](check-file-view.mjs) — a source file drawn as source with a language from its
@@ -88,9 +123,11 @@ grounded_in:
   nested workspace before its parent's sessions, five sessions newest first with `Show {n} more sessions` / `Show
   less` (the open New session drawn on top of the five), Ungrouped last for a session no registered workspace owns,
   the open session's row selected and its workspace tinted, a workspace's `+` starting a session there, New session
-  starting in the workspace row the person opened rather than the open session's, the `Workspace` grouping
-  drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id and no title in the
-  header, then the row, the header and the window title (`<title> — Heddle`) following its title as it is written;
+  starting in the workspace row the person opened rather than the open session's, and in the open session's own
+  workspace when that session is archived and its row is not drawn, not in the last remembered folder (#119), the
+  `Workspace` grouping drawing sibling sections, and a new session reading DSH's `New Session` in the tree with no id
+  and no title in the header, then the row, the header and the window title (`<title> — Heddle`) following its title
+  as it is written;
   and the Session Intent hero's workspace picker (C36): over a blank session a `Choose workspace` chip naming its
   workspace, a menu with the current one checked and `Add workspace…` last, DSH's menu keys, and a pick that moves the
   new session and its draft so the first prompt runs in the picked workspace; and a first visit (#17) opening a fresh
@@ -108,10 +145,13 @@ grounded_in:
   session started; and *Archived only* with nothing archived, in the tree and in one list, showing DSH's
   placeholder *No archived sessions yet* with its *View other sessions* action (not the no-roots note), the action
   setting *Hide archived* back and drawing the rows again (#107); a session in the nested workspace named after
-  that workspace, not the root above it, in a search hit and in an `In one list` row (#57); and its search matching a
+  that workspace, not the root above it, in a search hit and in an `In one list` row (#57); its search matching a
   title or a workspace name, never a New session placeholder, twenty at most, revealing a chosen hit, and, while
   `/api/sessions` fails, listing the rows the tree holds rather than "No matching sessions", then reading again on the
-  next search (#58). The page opens no session on its own, so a check that reads a seeded session opens it by name
+  next search (#58); and a folder the server may not read (`chmod 000`) opening to DSH's one line *Read failed: cannot
+  list "locked": permission denied* with no rows, never *nothing inside*, a readable sibling still listing its file,
+  and a workspace whose own folder it may not read keeping its session and its *Files* heading over the same line
+  (#106). The page opens no session on its own, so a check that reads a seeded session opens it by name
   (`gotoSession`, [`browser.mjs`](../../_tools_/verify-runner/browser.mjs)).
 - [`check-content-search.mjs`](check-content-search.mjs) — the sidebar's content search (R-developer-eight-19): a
   name match shown at once under DSH's "Searching session history…" status, one host query 250 ms after the last of
@@ -168,6 +208,13 @@ grounded_in:
   DSH's Web chords drive it (S38, S42): Mod+Shift+B shows and hides it, the same tab coming back, and Mod+Alt+T opens
   another tab, from the composer and not behind a dialog; the keyboard reference lists both last; a default server
   takes neither key and lists neither.
+- [`check-reconnect.mjs`](check-reconnect.mjs) — a change that reached the server just before the connection dropped
+  shows once it is back, as DSH's re-acquired baselines show it (#91): a session rename and a nested workspace's
+  *Delete workspace* whose answers arrive only after the browser went offline (DevTools' Offline, through the
+  protocol) are drawn once it is back online — the new title, the workspace gone and its session under its parent —
+  and a rename answered just before the server went away is drawn once the page's stream reconnects to it on the same
+  port. Each time the tree's "could not read the workspaces" note goes, the Deleting… line is not left set, and no
+  unhandled rejection reaches the console.
 - [`check-shortcut-keys.mjs`](check-shortcut-keys.mjs) — the session shortcuts pressed through
   `Input.dispatchKeyEvent` with the `key` values Chrome delivers (on a Mac, ⌥⌘A arrives as `å` and ⌥⌘N as a dead
   key), matched on the physical key with DSH's `Mod`, Command on a Mac and Control elsewhere (R-developer-seven-7):

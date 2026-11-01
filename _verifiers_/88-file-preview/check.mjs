@@ -3,9 +3,10 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { browserAvailable, openBrowser } from '../../_tools_/verify-runner/browser.mjs'
+import { openPage } from '../../_tools_/browser-use/lib.mjs'
 import { mkdirSync, writeFileSync } from 'node:fs'
 
-import { fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
+import { endChild, fixtureDir, heddleCommand, isolatedHome, removeDir, runCli, scriptedConfig, skipUnless } from '../../_tools_/verify-runner/lib.mjs'
 
 /**
  * Verifier — one preview surface.
@@ -344,6 +345,8 @@ test('an html document is previewed as a page, and nothing in it can act', async
     join(work, 'page.html'),
     [
       '<!doctype html><html><head><title>Fixture</title>',
+      '<base href="https://example.invalid/hostile/">',
+      '<link rel="stylesheet" href="theme.css">',
       '<style>h1 { color: rgb(1, 2, 3) }</style></head><body>',
       '<h1>Fixture page</h1>',
       '<img src="mark.svg" alt="beside it" width="40" height="40">',
@@ -355,12 +358,14 @@ test('an html document is previewed as a page, and nothing in it can act', async
     ].join('\n'),
   )
   writeFileSync(join(work, 'mark.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" fill="#E68000"/></svg>')
+  writeFileSync(join(work, 'theme.css'), 'h1 { background-color: rgb(4, 5, 6) }')
 
   const server = await startCli(['web', '--host', '127.0.0.1', '--port', '0', '--session-root', join(home, 'sessions')], {
     HEDDLE_HOME: home,
     HEDDLE_CONFIG: config,
   })
-  const browser = await openBrowser({ width: 1400, height: 900 })
+  // This regression reads Chrome's actual Log.entryAdded console, not a synthetic DOM event.
+  const browser = await openPage({ width: 1400, height: 900, profile: join(home, 'browser-profile') })
   try {
     const cookie = await handshakeCookie(server.url)
     const origin = new URL(server.url).origin
@@ -410,6 +415,10 @@ test('an html document is previewed as a page, and nothing in it can act', async
       15_000,
     )
 
+    await browser.waitFor(`(() => {
+      const heading = document.getElementById('html-view').contentDocument?.querySelector('h1')
+      return heading !== null && heading !== undefined && getComputedStyle(heading).backgroundColor === 'rgb(4, 5, 6)'
+    })()`, 15_000)
     const framed = JSON.parse(
       await browser.evaluate(`(() => {
         const frame = document.getElementById('html-view')
@@ -423,6 +432,9 @@ test('an html document is previewed as a page, and nothing in it can act', async
           iframes: inner.querySelectorAll('iframe').length,
           forms: inner.querySelectorAll('form').length,
           inputs: inner.querySelectorAll('input').length,
+          bases: inner.querySelectorAll('base').length,
+          policyText: inner.querySelector('meta[http-equiv="Content-Security-Policy"]')?.content,
+          headingBackground: inner.querySelector('h1') === null ? null : getComputedStyle(inner.querySelector('h1')).backgroundColor,
           handlers: [...inner.querySelectorAll('*')].filter((e) => [...e.attributes].some((a) => a.name.startsWith('on'))).length,
           policy: inner.querySelector('meta[http-equiv="Content-Security-Policy"]') === null ? 'missing' : 'present',
           heading: (inner.querySelector('h1') || {}).textContent,
@@ -445,12 +457,25 @@ test('an html document is previewed as a page, and nothing in it can act', async
     assert.equal(framed.policy, 'present', 'the document carries the policy the browser enforces')
     assert.equal(framed.heading, 'Fixture page', 'the page rendered as a page rather than as its source')
     assert.equal(framed.headingColour, 'rgb(1, 2, 3)', "with the document's own stylesheet applied")
+    assert.equal(framed.headingBackground, 'rgb(4, 5, 6)', 'relative linked CSS still loads through the raw route')
     assert.ok(framed.imagesLoaded > 0, `and its own image loaded (${framed.imagesLoaded} of ${framed.images})`)
+    assert.equal(framed.bases, 0, 'neither source nor application injects a base')
+    assert.match(framed.policyText, /base-uri 'none'/, 'the restrictive policy is unchanged')
+    // Flush a protocol round trip after the frame loads, then inspect recorded browser console diagnostics.
+    await browser.send('Runtime.evaluate', { expression: '0' })
+    const baseErrors = browser.page.console.filter((entry) => /base-uri|setting the document.s base URI/i.test(entry.text))
+    assert.deepEqual(baseErrors, [], 'HTML preview produces no base-uri browser console violation')
   } finally {
-    browser.close()
-    server.kill()
-    removeDir(home)
-    removeDir(work)
+    try {
+      await browser.close()
+    } finally {
+      const ended = await endChild(server.child, { graceMs: 1000 })
+      server.child.stdout?.destroy()
+      server.child.stderr?.destroy()
+      assert.notEqual(ended, 'stuck', 'preview server exits before its fixtures are removed')
+      removeDir(home)
+      removeDir(work)
+    }
   }
 })
 
