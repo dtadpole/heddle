@@ -17,6 +17,11 @@ const listener = page.slice(listenerStart, page.indexOf('\n})', listenerStart) +
 async function flush() { for (let i = 0; i < 8; i++) await new Promise<void>((resolve) => setImmediate(resolve)) }
 interface Row { className: string; textContent: string; dataset: Record<string, string>; setAttribute(name: string, value: string): void }
 interface Request { resolve(value: unknown): void; reject(error: Error): void }
+interface TurnResponse {
+  ok: boolean; status?: number; headers: { get(name: string): string }
+  json?(): Promise<unknown>
+  body?: { getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }> } }
+}
 function harness(deferredCommands = false) {
   const rows: Row[] = []
   const calls: string[] = []
@@ -52,8 +57,10 @@ function harness(deferredCommands = false) {
     markBranchable: (seq: number) => calls.push(`branch:${seq}`), renderSettledAnswers: async () => { calls.push('answers') },
     attachEditedFiles: async () => { calls.push('files') }, settleReasoning: noop,
     addUsage: (_old: unknown, usage: unknown) => usage, messageContentText: () => 'user', contentAttachments: () => [],
-    sendTurn: async () => ({ ok: true, headers: { get: () => 'text/event-stream' }, body: { getReader: () => ({ read: async () => ({ done: true }) }) } }),
-    newConversationTarget: () => ({ path: 'workspace' }), selectionForTurn: () => ({}),
+    sendTurn: async (_body: Record<string, unknown>): Promise<TurnResponse> => ({ ok: true, headers: { get: () => 'text/event-stream' }, body: { getReader: () => ({ read: async () => ({ done: true }) }) } }),
+    turnVerdicts: { wait: async (_turn: string, _session: string | null) => ({ outcome: 'lost' }), lateTail: noop },
+    stopButton: { disabled: false },
+    newConversationTarget: () => ({ path: 'workspace' }),
     fetchSessionAccess: async () => { calls.push('fetch-access') }, stopTurn: async () => {},
   }
   const api = runInNewContext(`
@@ -63,6 +70,11 @@ function harness(deferredCommands = false) {
     let selectionSeq = 0, chosenEndpoint = null, chosenModel = null, chosenEffort = null;
     const latestSelection = new Map(), serverSeats = new Map(), heldSeats = new Map();
     const recordedSelections = new Set(), pendingSaves = new Set();
+    function selectionForTurn() {
+      return { ...(chosenEndpoint !== null ? { endpoint: chosenEndpoint } : {}),
+        ...(chosenModel !== null ? { model: chosenModel } : {}),
+        ...(chosenEffort !== null ? { reasoningEffort: chosenEffort } : {}) };
+    }
     function applySessionModel(endpoint, model, effort) {
       chosenEndpoint = endpoint; chosenModel = model; chosenEffort = effort;
     }
@@ -207,6 +219,54 @@ for (const unavailable of [false, true]) {
     assert.equal(state.calls.includes('fetch-access'), !unavailable)
   })
 }
+test('detached 202 JSON acceptance cannot adopt or publish a seat over unavailable history', { timeout: 5000 }, async () => {
+  const state = harness()
+  const initial = state.show('A'); const history = await started(state)
+  history.resolve({ ok: true, json: async () => ({ endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', turns: [] }) })
+  assert.equal(await initial, true)
+  let release!: (response: TurnResponse) => void
+  const sends: Record<string, unknown>[] = []
+  state.context.sendTurn = (body) => {
+    sends.push(body)
+    return new Promise((resolve) => { release = resolve })
+  }
+  const turn = state.run('new detached turn', ''); await flush()
+  assert.equal(sends.length, 1, 'actual runTurn reached the acceptance request')
+  assert.deepEqual({ ...sends[0] }, { prompt: 'new detached turn', session: null, folder: 'workspace', new: true,
+    endpoint: 'fixture-A', model: 'model-A', reasoningEffort: 'high', detach: true })
+  const loading = state.show('B'); (await started(state, 2)).reject(new Error('B offline'))
+  assert.equal(await loading, false)
+  const before = { ...state.selection() }
+  assert.deepEqual(before, { endpoint: 'fixture-A', model: 'model-A', effort: 'high' }, 'the seat assertion is non-vacuous')
+  const errorRow = state.rows[0]
+  const calls = [...state.calls]
+  const waits: [string, string | null][] = []
+  const assertUnavailable = () => {
+    assert.deepEqual({ ...state.state() }, { current: null, unavailable: 'B', loading: false, selectedPath: null })
+    assert.deepEqual({ ...state.selection() }, before, 'the accepted A send cannot publish into unavailable B')
+    assert.equal(state.rows.length, 1)
+    assert.equal(state.rows[0], errorRow, 'the exact unavailable-history error row survives acceptance')
+    assert.equal(errorRow?.className, 'turn denied load-error')
+    assert.equal(errorRow?.textContent, 'Failed to load history: B offline')
+    assert.deepEqual(state.calls, calls, 'acceptance cannot adopt, fetch access, remember or redraw another session')
+    assert.equal(state.requests.length, 2, 'acceptance cannot reopen the created session over unavailable history')
+    for (const id of ['B', 'created']) {
+      assert.equal(state.seat(id).recorded, false)
+      assert.equal(state.seat(id).server, undefined)
+      assert.equal(state.seat(id).held, undefined)
+    }
+  }
+  state.context.turnVerdicts.wait = async (id, session) => {
+    waits.push([id, session])
+    assertUnavailable() // Actual JSON session verdict has run; no terminal recovery can hide an adoption.
+    return { outcome: 'lost' }
+  }
+  release({ ok: true, status: 202, headers: { get: () => 'application/json' },
+    json: async () => ({ session: 'created', turn: 'accepted-turn' }) })
+  await turn
+  assert.deepEqual(waits, [['accepted-turn', 'created']], 'actual detached path waits for the accepted turn/session')
+  assertUnavailable()
+})
 test('successful history still replays only post-snapshot drawing without repeating completion lifecycle', { timeout: 5000 }, async () => {
   const state = harness(); const loading = state.show('S'); const request = await started(state)
   state.handle(delta(9, 'already in history')); state.handle(delta(11, 'new tail')); state.prepare('S')
