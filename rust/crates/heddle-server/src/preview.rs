@@ -248,8 +248,13 @@ fn strip_source_base(html: &str) -> String {
                 {
                     cursor += 1;
                 }
-                cursor = (cursor + if bytes[cursor..].starts_with(b"--!>") { 4 } else { 3 })
-                    .min(bytes.len());
+                cursor = (cursor
+                    + if bytes[cursor..].starts_with(b"--!>") {
+                        4
+                    } else {
+                        3
+                    })
+                .min(bytes.len());
             }
             index = cursor;
             continue;
@@ -257,10 +262,10 @@ fn strip_source_base(html: &str) -> String {
         let closing = bytes.get(open + 1) == Some(&b'/');
         let start = open + if closing { 2 } else { 1 };
         if !bytes.get(start).is_some_and(u8::is_ascii_alphabetic) {
-            if raw.is_empty()
-                && (matches!(bytes.get(open + 1), Some(b'!' | b'?')) || closing)
-            {
-                index = html[start..].find('>').map_or(bytes.len(), |at| start + at + 1);
+            if raw.is_empty() && (matches!(bytes.get(open + 1), Some(b'!' | b'?')) || closing) {
+                index = html[start..]
+                    .find('>')
+                    .map_or(bytes.len(), |at| start + at + 1);
             } else {
                 index = open + 1;
             }
@@ -288,8 +293,17 @@ fn strip_source_base(html: &str) -> String {
             out.push_str(&html[kept..open]);
             kept = end;
         } else if !closing
-            && matches!(name.as_str(), "script" | "style" | "title" | "textarea" | "xmp"
-                | "iframe" | "noembed" | "noframes")
+            && matches!(
+                name.as_str(),
+                "script"
+                    | "style"
+                    | "title"
+                    | "textarea"
+                    | "xmp"
+                    | "iframe"
+                    | "noembed"
+                    | "noframes"
+            )
         {
             raw = name;
         } else if !closing && name == "plaintext" {
@@ -307,27 +321,57 @@ fn html_space(byte: u8) -> bool {
 /// Scan attributes so > inside quoted values is not mistaken for a tag boundary.
 fn source_tag_end(bytes: &[u8], start: usize) -> Option<usize> {
     #[derive(Clone, Copy)]
-    enum State { Before, Name, After, Value, Unquoted, Quoted(u8) }
+    enum State {
+        Before,
+        Name,
+        After,
+        Value,
+        Unquoted,
+        Quoted(u8),
+    }
     let mut state = State::Before;
     for (cursor, &byte) in bytes.iter().enumerate().skip(start) {
         if let State::Quoted(quote) = state {
-            if byte == quote { state = State::Before; }
+            if byte == quote {
+                state = State::Before;
+            }
             continue;
         }
-        if byte == b'>' { return Some(cursor + 1); }
+        if byte == b'>' {
+            return Some(cursor + 1);
+        }
         match state {
-            State::Unquoted => { if html_space(byte) { state = State::Before; } }
+            State::Unquoted => {
+                if html_space(byte) {
+                    state = State::Before;
+                }
+            }
             State::Value => {
-                if html_space(byte) { continue; }
-                state = if matches!(byte, b'\"' | b'\'') { State::Quoted(byte) } else { State::Unquoted };
+                if html_space(byte) {
+                    continue;
+                }
+                state = if matches!(byte, b'\"' | b'\'') {
+                    State::Quoted(byte)
+                } else {
+                    State::Unquoted
+                };
             }
             State::Name | State::After => {
-                state = if byte == b'=' { State::Value }
-                    else if html_space(byte) { State::After }
-                    else if byte == b'/' { State::Before }
-                    else { State::Name };
+                state = if byte == b'=' {
+                    State::Value
+                } else if html_space(byte) {
+                    State::After
+                } else if byte == b'/' {
+                    State::Before
+                } else {
+                    State::Name
+                };
             }
-            State::Before => { if !html_space(byte) && byte != b'/' { state = State::Name; } }
+            State::Before => {
+                if !html_space(byte) && byte != b'/' {
+                    state = State::Name;
+                }
+            }
             State::Quoted(_) => unreachable!(),
         }
     }
@@ -562,24 +606,63 @@ mod tests {
             r#"<head><BaSe data-note="quoted > bracket" href="https://example.invalid/hostile/"><base href=//example.invalid/second/></head><body><link rel="stylesheet" href="theme.css"><img src="a.png"></body>"#,
             0,
         );
-        assert_eq!(document.html, r#"<head></head><body><link rel="stylesheet" href="/api/raw?path=%2Fw%2Fdocs%2Ftheme.css"><img src="/api/raw?path=%2Fw%2Fdocs%2Fa.png"></body>"#);
+        assert_eq!(
+            document.html,
+            r#"<head></head><body><link rel="stylesheet" href="/api/raw?path=%2Fw%2Fdocs%2Ftheme.css"><img src="/api/raw?path=%2Fw%2Fdocs%2Fa.png"></body>"#
+        );
         assert_eq!(document.csp, PREVIEW_CSP);
     }
 
     #[test]
     fn source_base_filter_preserves_non_tag_text() {
         let source = r#"<!-- <base target="comment >"> --><pre><code>&lt;base href=example&gt;</code></pre><script>const sample = "<base target=script>";</script><style>p::after { content: "<base target=style>" }</style><textarea><base target=textarea></textarea><title><base target=title></title><div title="<base target=attribute>">base text</div><baseball>unchanged</baseball>"#;
-        assert_eq!(rewrite_resources(&format!("{source}<base href=\"https://example.invalid/\">"), "/w/docs", &serve), source);
-        assert_eq!(rewrite_resources("İ雪<!--><base href=\"https://example.invalid/\"><!-- hidden <base> --!><noscript><base href=\"https://example.invalid/\"></noscript>", "/w/docs", &serve), "İ雪<!--><!-- hidden <base> --!><noscript></noscript>");
-        assert_eq!(rewrite_resources("<div title=\"a > <base>\">ok</div><base title=unquoted\" href=https://example.invalid/>end", "/w/docs", &serve), "<div title=\"a > <base>\">ok</div>end");
-        for tag in ["<BASE>", "<base\nhref = 'https://example.invalid/a>b'>", "<base href=https://example.invalid/>", "<base/href=\"https://example.invalid/\">"] {
-            assert_eq!(rewrite_resources(&format!("before{tag}after"), "/w/docs", &serve), "beforeafter");
+        assert_eq!(
+            rewrite_resources(
+                &format!("{source}<base href=\"https://example.invalid/\">"),
+                "/w/docs",
+                &serve
+            ),
+            source
+        );
+        assert_eq!(
+            rewrite_resources(
+                "İ雪<!--><base href=\"https://example.invalid/\"><!-- hidden <base> --!><noscript><base href=\"https://example.invalid/\"></noscript>",
+                "/w/docs",
+                &serve
+            ),
+            "İ雪<!--><!-- hidden <base> --!><noscript></noscript>"
+        );
+        assert_eq!(
+            rewrite_resources(
+                "<div title=\"a > <base>\">ok</div><base title=unquoted\" href=https://example.invalid/>end",
+                "/w/docs",
+                &serve
+            ),
+            "<div title=\"a > <base>\">ok</div>end"
+        );
+        for tag in [
+            "<BASE>",
+            "<base\nhref = 'https://example.invalid/a>b'>",
+            "<base href=https://example.invalid/>",
+            "<base/href=\"https://example.invalid/\">",
+        ] {
+            assert_eq!(
+                rewrite_resources(&format!("before{tag}after"), "/w/docs", &serve),
+                "beforeafter"
+            );
         }
     }
 
     #[test]
     fn source_base_filter_applies_inside_nested_markup() {
-        assert_eq!(rewrite_resources(r#"<template><base href="https://example.invalid/"><p>template</p></template><svg><base href="https://example.invalid/"></base><text>svg</text></svg>"#, "/w/docs", &serve), "<template><p>template</p></template><svg></base><text>svg</text></svg>");
+        assert_eq!(
+            rewrite_resources(
+                r#"<template><base href="https://example.invalid/"><p>template</p></template><svg><base href="https://example.invalid/"></base><text>svg</text></svg>"#,
+                "/w/docs",
+                &serve
+            ),
+            "<template><p>template</p></template><svg></base><text>svg</text></svg>"
+        );
     }
 
     #[test]
